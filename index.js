@@ -1933,6 +1933,16 @@ function startStatusServer() {
       }
       const snap = kvRow.value;
       const preIds = new Set(snap.preCohortIds || []);
+      // Optional N-tier carryover: each entry is { ids:[...], ratio:{mike,rick} }.
+      // Used when a capital event happens with parlays still open from MULTIPLE
+      // prior regimes — e.g. rev-6 had 3 rev-4-era stragglers + 23 rev-5-era
+      // opens at cutoff, each tier needing its own ratio. Legacy ids are
+      // checked FIRST so they don't double-count into preCohort/postCohort.
+      const legacyCohorts = (snap.legacyCohorts || []).map(c => ({
+        ids: new Set(c.ids || []),
+        ratio: c.ratio,
+        note: c.note || null,
+      }));
 
       // 2. Pull settled parlay_orders since snapshotAt with non-null pnl.
       //    Light projection — only parlay_id + pnl. status filter ensures
@@ -1957,19 +1967,39 @@ function startStatusServer() {
         }
       }
 
-      // 3. Partition
+      // 3. Partition. Each settled row goes into AT MOST one bucket. Legacy
+      //    cohorts are checked first (most specific); if a row matches a
+      //    legacy id, it's removed from the pre/post comparison so we don't
+      //    double-count.
       let prePnl = 0, postPnl = 0;
       let preCount = 0, postCount = 0;
+      const legacyAgg = legacyCohorts.map(() => ({ pnl: 0, count: 0 }));
       for (const r of settled) {
         const pnl = Number(r.pnl);
         if (!Number.isFinite(pnl)) continue;
+        let matchedLegacy = false;
+        for (let i = 0; i < legacyCohorts.length; i++) {
+          if (legacyCohorts[i].ids.has(r.parlay_id)) {
+            legacyAgg[i].pnl += pnl;
+            legacyAgg[i].count++;
+            matchedLegacy = true;
+            break;
+          }
+        }
+        if (matchedLegacy) continue;
         if (preIds.has(r.parlay_id)) { prePnl += pnl; preCount++; }
         else                          { postPnl += pnl; postCount++; }
       }
 
-      // 4. Compute Mike / Rick equity per the dual-cohort formula
-      const mikeBooks = snap.snapshotMike + snap.preRatio.mike * prePnl + snap.postRatio.mike * postPnl;
-      const rickBooks = snap.snapshotRick + snap.preRatio.rick * prePnl + snap.postRatio.rick * postPnl;
+      // 4. Compute Mike / Rick equity. Start with the snapshot baseline,
+      //    add each legacy cohort's P&L at its dedicated ratio, then add
+      //    pre/post at their snapshot-level ratios.
+      let mikeBooks = snap.snapshotMike + snap.preRatio.mike * prePnl + snap.postRatio.mike * postPnl;
+      let rickBooks = snap.snapshotRick + snap.preRatio.rick * prePnl + snap.postRatio.rick * postPnl;
+      for (let i = 0; i < legacyCohorts.length; i++) {
+        mikeBooks += legacyCohorts[i].ratio.mike * legacyAgg[i].pnl;
+        rickBooks += legacyCohorts[i].ratio.rick * legacyAgg[i].pnl;
+      }
       const totalBooks = mikeBooks + rickBooks;
 
       // 5. Live TE for drift check.  liveBankroll + open exposure.
@@ -2022,6 +2052,16 @@ function startStatusServer() {
           realizedPnl: postPnl,
           ratio: snap.postRatio,
         },
+        // Optional carryover tiers from prior regimes. Empty array on legacy
+        // snapshots (version <= 5) that predate the multi-tier scheme.
+        legacyCohorts: legacyCohorts.map((c, i) => ({
+          ids: c.ids.size,
+          settled: legacyAgg[i].count,
+          stillOpen: c.ids.size - legacyAgg[i].count,
+          realizedPnl: legacyAgg[i].pnl,
+          ratio: c.ratio,
+          note: c.note,
+        })),
         mike: mikeBooks,
         rick: rickBooks,
         total: totalBooks,
