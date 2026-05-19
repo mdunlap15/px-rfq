@@ -681,6 +681,13 @@ async function handleRFQ(data) {
     const parlayId = payload.parlay_id || payload.parlayId;
     const legs = payload.market_lines || payload.legs || [];
     const callbackUrl = payload.callback_url || payload.callbackUrl;
+    // creator_id is the ONLY counterparty identifier PX exposes, and only on
+    // RFQ events — matched/settled strip it (per Alec @ PX, 2026-04-20). Capture
+    // here so it can flow through recordQuote → parlay_orders.meta.creatorId,
+    // enabling per-counterparty P&L / sharp-detection analytics. REST
+    // /parlay/sp/orders also returns it, so historical rows can be backfilled
+    // via scripts/_backfill_creator_ids.js.
+    const creatorId = payload.creator_id || payload.creatorId || null;
 
     // Fast dedup: skip if we already saw this exact parlayId in the last 2s.
     // Pusher delivers duplicate events ~2-30ms apart; processing both doubles
@@ -1319,7 +1326,10 @@ async function handleRFQ(data) {
       return;
     }
 
-    // Record the quote
+    // Record the quote. Stash creator_id (PX's only counterparty
+    // identifier — see comment near `const creatorId` above) into the
+    // meta object so it gets persisted on the parlay_orders row.
+    if (creatorId) result.meta.creatorId = creatorId;
     orderTracker.recordQuote(
       parlayId,
       result.meta.legs,

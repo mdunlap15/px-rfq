@@ -1888,6 +1888,154 @@ function startStatusServer() {
   });
 
   // -----------------------------------------------------------------------
+  // /creators/stats — counterparty (creator_id) analytics.
+  //
+  // PX exposes `creator_id` on RFQ events as the only counterparty identifier
+  // (per Alec @ PX). We started capturing it on RFQ payloads on 2026-05-19
+  // and backfilled historical orders from /parlay/sp/orders (PX retains
+  // ~30-45 days). All ingested creator_ids live in parlay_orders.meta.creatorId.
+  //
+  // This endpoint aggregates settled rows by creator_id:
+  //   - fills        : count of confirmed/settled parlays
+  //   - settled      : count where pnl is non-null
+  //   - wins/losses  : SP perspective — wins=settled_won (we kept stake),
+  //                    losses=settled_lost (we paid out)
+  //   - totalStake   : sum of confirmed_stake
+  //   - pnl          : sum of pnl (negative = we made money, positive = sharp won)
+  //   - roi          : pnl / totalStake (our ROI per creator — negative is good
+  //                    FOR THE SP, since we're collecting their stake)
+  //   - bettorRoi    : -pnl / totalStake (bettor's perspective — positive ROI
+  //                    here means this creator is beating us, the headline
+  //                    metric for "regularly winning against me")
+  //
+  // Query params:
+  //   days  (default 30, max 365) — lookback window on confirmed_at
+  //   min   (default 5)            — min fills to surface a creator (filter noise)
+  //
+  // 60s server-side cache. Free-tier-friendly: paginates parlay_orders with
+  // confirmed_at >= cutoff, in chunks of 1000.
+  const _creatorsCache = { key: null, at: 0, data: null };
+  app.get('/creators/stats', async (req, res) => {
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 30));
+      const minFills = Math.max(1, parseInt(req.query.min) || 5);
+      const cacheKey = `c${days}_m${minFills}`;
+      const now = Date.now();
+      const bypass = req.query.refresh === '1';
+      if (!bypass && _creatorsCache.key === cacheKey && (now - _creatorsCache.at) < 60_000) {
+        res.set('X-Cache', 'hit');
+        return res.json(_creatorsCache.data);
+      }
+
+      const sb = db.getClient();
+      if (!sb) return res.status(500).json({ ok: false, error: 'no DB' });
+
+      const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+      const PAGE = 1000;
+      const MAX_PAGES = 100;
+      const rows = [];
+      let offset = 0;
+      let pages = 0;
+      while (pages++ < MAX_PAGES) {
+        const { data, error } = await sb.from('parlay_orders')
+          .select('parlay_id, status, confirmed_stake, pnl, confirmed_at, settled_at, meta, legs')
+          .gte('confirmed_at', cutoff)
+          .in('status', ['confirmed', 'settled_won', 'settled_lost', 'settled_push'])
+          .order('confirmed_at', { ascending: true })
+          .range(offset, offset + PAGE - 1);
+        if (error) {
+          log.warn('Creators', `page ${pages} read failed: ${error.message}`);
+          break;
+        }
+        if (!data || data.length === 0) break;
+        rows.push(...data);
+        if (data.length < PAGE) break;
+        offset += PAGE;
+      }
+
+      // Aggregate by creator_id. Skip rows where meta.creatorId is absent
+      // (pre-2026-05-19 rows outside PX's retention window can't be backfilled).
+      const byCreator = new Map();
+      let untagged = 0;
+      for (const r of rows) {
+        const cid = r.meta && (r.meta.creatorId || r.meta.creator_id);
+        if (!cid) { untagged++; continue; }
+        let agg = byCreator.get(cid);
+        if (!agg) {
+          agg = {
+            creatorId: cid,
+            fills: 0,
+            settled: 0,
+            wins: 0,
+            losses: 0,
+            pushes: 0,
+            totalStake: 0,
+            pnl: 0,
+            firstSeen: r.confirmed_at,
+            lastSeen: r.confirmed_at,
+          };
+          byCreator.set(cid, agg);
+        }
+        agg.fills++;
+        const stake = Number(r.confirmed_stake) || 0;
+        agg.totalStake += stake;
+        if (r.pnl != null) {
+          agg.settled++;
+          agg.pnl += Number(r.pnl) || 0;
+        }
+        if (r.status === 'settled_won')  agg.wins++;       // SP won (bettor's parlay missed)
+        if (r.status === 'settled_lost') agg.losses++;     // SP lost (bettor's parlay hit)
+        if (r.status === 'settled_push') agg.pushes++;
+        if (r.confirmed_at && r.confirmed_at < agg.firstSeen) agg.firstSeen = r.confirmed_at;
+        if (r.confirmed_at && r.confirmed_at > agg.lastSeen)  agg.lastSeen  = r.confirmed_at;
+      }
+
+      // Derive ratios + filter by min fills.
+      const creators = [];
+      for (const agg of byCreator.values()) {
+        if (agg.fills < minFills) continue;
+        const roi = agg.totalStake > 0 ? agg.pnl / agg.totalStake : null;
+        const bettorRoi = roi != null ? -roi : null;
+        const bettorHitRate = (agg.wins + agg.losses) > 0 ? agg.losses / (agg.wins + agg.losses) : null;
+        creators.push({
+          ...agg,
+          roi,                    // SP's ROI on this creator (negative = good for us)
+          bettorRoi,              // Bettor's ROI (positive = sharp)
+          bettorHitRate,          // Fraction of settled parlays the bettor won
+        });
+      }
+      // Sort by bettorRoi descending — sharps at top.
+      creators.sort((a, b) => (b.bettorRoi ?? -Infinity) - (a.bettorRoi ?? -Infinity));
+
+      const totals = {
+        creators: creators.length,
+        totalFills: creators.reduce((s, c) => s + c.fills, 0),
+        totalStake: creators.reduce((s, c) => s + c.totalStake, 0),
+        totalPnl:   creators.reduce((s, c) => s + c.pnl, 0),
+        untagged,
+        windowDays: days,
+      };
+
+      const payload = {
+        ok: true,
+        days,
+        minFills,
+        asOfUtc: new Date().toISOString(),
+        creators,
+        totals,
+      };
+      _creatorsCache.key = cacheKey;
+      _creatorsCache.at = now;
+      _creatorsCache.data = payload;
+      res.set('X-Cache', 'miss');
+      res.json(payload);
+    } catch (err) {
+      log.error('Creators', `/creators/stats error: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // /bankroll — Mike + Rick partnership equity split (dual-cohort).
   //
   // Background: each time capital enters or leaves the partnership account,

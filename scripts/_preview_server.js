@@ -217,8 +217,75 @@ app.get('/network-share-hourly', async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// /creators/stats — inline copy of the prod handler for local UI preview.
+const _creatorsCache = { key: null, at: 0, data: null };
+app.get('/creators/stats', async (req, res) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 30));
+    const minFills = Math.max(1, parseInt(req.query.min) || 5);
+    const cacheKey = `c${days}_m${minFills}`;
+    const now = Date.now();
+    if (req.query.refresh !== '1' && _creatorsCache.key === cacheKey && (now - _creatorsCache.at) < 60_000) {
+      return res.json(_creatorsCache.data);
+    }
+    const sb = db.getClient();
+    if (!sb) return res.status(500).json({ ok: false, error: 'no DB' });
+    const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+    const rows = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await sb.from('parlay_orders')
+        .select('parlay_id, status, confirmed_stake, pnl, confirmed_at, settled_at, meta')
+        .gte('confirmed_at', cutoff)
+        .in('status', ['confirmed','settled_won','settled_lost','settled_push'])
+        .order('confirmed_at', { ascending: true })
+        .range(offset, offset + 999);
+      if (error || !data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < 1000) break;
+      offset += 1000;
+    }
+    const byC = new Map();
+    let untagged = 0;
+    for (const r of rows) {
+      const cid = r.meta && (r.meta.creatorId || r.meta.creator_id);
+      if (!cid) { untagged++; continue; }
+      let a = byC.get(cid);
+      if (!a) { a = { creatorId: cid, fills: 0, settled: 0, wins: 0, losses: 0, pushes: 0, totalStake: 0, pnl: 0, firstSeen: r.confirmed_at, lastSeen: r.confirmed_at }; byC.set(cid, a); }
+      a.fills++;
+      a.totalStake += Number(r.confirmed_stake) || 0;
+      if (r.pnl != null) { a.settled++; a.pnl += Number(r.pnl) || 0; }
+      if (r.status === 'settled_won') a.wins++;
+      if (r.status === 'settled_lost') a.losses++;
+      if (r.status === 'settled_push') a.pushes++;
+      if (r.confirmed_at && r.confirmed_at < a.firstSeen) a.firstSeen = r.confirmed_at;
+      if (r.confirmed_at && r.confirmed_at > a.lastSeen)  a.lastSeen  = r.confirmed_at;
+    }
+    const creators = [];
+    for (const a of byC.values()) {
+      if (a.fills < minFills) continue;
+      const roi = a.totalStake > 0 ? a.pnl / a.totalStake : null;
+      const bettorRoi = roi != null ? -roi : null;
+      const bettorHitRate = (a.wins + a.losses) > 0 ? a.losses / (a.wins + a.losses) : null;
+      creators.push({ ...a, roi, bettorRoi, bettorHitRate });
+    }
+    creators.sort((x, y) => (y.bettorRoi ?? -Infinity) - (x.bettorRoi ?? -Infinity));
+    const totals = {
+      creators: creators.length,
+      totalFills: creators.reduce((s, c) => s + c.fills, 0),
+      totalStake: creators.reduce((s, c) => s + c.totalStake, 0),
+      totalPnl:   creators.reduce((s, c) => s + c.pnl, 0),
+      untagged,
+      windowDays: days,
+    };
+    const payload = { ok: true, days, minFills, asOfUtc: new Date().toISOString(), creators, totals };
+    _creatorsCache.key = cacheKey; _creatorsCache.at = now; _creatorsCache.data = payload;
+    res.json(payload);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // Wildcard fallback — mounted LAST so all specific routes (especially
-// /network-share-daily and /network-share-hourly) take precedence.
+// /network-share-daily, /network-share-hourly, /creators/stats) take precedence.
 app.get(/^\/[a-z0-9_/-]+$/i, (_, res) => res.json(stubResponse));
 
 const PORT = 4099;

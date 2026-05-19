@@ -929,6 +929,38 @@
           </div>
         </div>
 
+        <!-- Counterparty Performance — analytics on creator_id (PX's only
+             counterparty identifier). Lets the operator isolate sharps
+             consistently beating the SP. Forward-captured on every RFQ
+             since 2026-05-19; historical rows backfilled from PX REST. -->
+        <div class="card">
+          <div class="card-header" onclick="const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed'); if(!b.classList.contains('collapsed')) loadCreatorStats();">
+            <span><span class="toggle-icon collapsed">&#9660;</span>Counterparty Performance</span>
+            <span id="creators-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
+          </div>
+          <div class="card-body collapsed" id="creators-card">
+            <div style="padding:0 4px 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:12px;">
+              <span style="color:var(--text2); font-weight:600;">Window:</span>
+              <span id="creators-range-buttons" style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                <button type="button" class="creators-rng" data-days="7"   onclick="setCreatorsRange(7)"   style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">7d</button>
+                <button type="button" class="creators-rng" data-days="30"  onclick="setCreatorsRange(30)"  style="background:var(--accent); color:var(--text); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">30d</button>
+                <button type="button" class="creators-rng" data-days="90"  onclick="setCreatorsRange(90)"  style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">90d</button>
+                <button type="button" class="creators-rng" data-days="365" onclick="setCreatorsRange(365)" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">all</button>
+              </span>
+              <span style="margin-left:12px;">Min fills:</span>
+              <input id="creators-min-fills" type="number" min="1" value="5" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; width:48px; font-size:11px;" onchange="loadCreatorStats(true)">
+              <button onclick="loadCreatorStats(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 10px; border-radius:4px; font-size:11px; cursor:pointer; margin-left:6px;" title="Refresh (bypass 60s cache)">Refresh</button>
+              <span id="creators-asof" style="margin-left:auto; color:var(--text3);"></span>
+            </div>
+            <div id="creators-headline" style="margin-bottom:10px;"></div>
+            <div id="creators-table"><div class="empty-state"><div class="icon">-</div><div>Expand to load counterparty data</div></div></div>
+            <div style="font-size:10px; color:var(--text3); margin-top:10px; line-height:1.5;">
+              <b>creator_id</b> is the only counterparty identifier PX exposes (per Alec). Forward-captured on every RFQ since 2026-05-19 (live deploy); backfilled for ~30-45 days of historical rows from PX REST. Older parlay_orders predate PX's retention window and can't be tagged retroactively — they appear as "untagged" in the summary.
+              <br><b>SP P&amp;L</b> = our profit (positive) or loss (negative). <b>Bettor ROI</b> = -P&amp;L / stake from the bettor's perspective; positive means this counterparty is beating us. <b>Bettor hit rate</b> = fraction of their settled parlays the bettor won. Rows sorted by bettor ROI descending — sharps at the top. Cached 60s server-side.
+            </div>
+          </div>
+        </div>
+
         <!-- Parlay Pricing vs. Books — collapsed -->
         <div class="card">
           <div class="card-header" onclick="const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');">
@@ -11232,6 +11264,121 @@
     html += '</tbody></table></div>';
 
     el.innerHTML = html;
+  }
+
+  // -----------------------------------------------------------------------
+  // COUNTERPARTY PERFORMANCE — Analytics tab.
+  // Surfaces per-creator_id fills, P&L, ROI, bettor hit rate. Goal:
+  // identify sharps that consistently win against the SP so the operator
+  // can widen vig, decline selectively, or just monitor.
+  // -----------------------------------------------------------------------
+  if (!window._creatorsState) {
+    window._creatorsState = { days: 30, loading: false, data: null };
+  }
+  async function loadCreatorStats(force) {
+    const s = window._creatorsState;
+    if (s.loading) return;
+    s.loading = true;
+    const tblEl = document.getElementById('creators-table');
+    if (!force && tblEl) tblEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><div>Loading...</div></div>';
+    try {
+      const minFills = Math.max(1, parseInt(document.getElementById('creators-min-fills')?.value) || 5);
+      const url = '/creators/stats?days=' + s.days + '&min=' + minFills + (force ? '&refresh=1' : '');
+      const r = await fetch(url, { credentials: 'include' });
+      const data = await r.json();
+      if (!data || !data.ok) throw new Error(data && data.error || ('HTTP ' + r.status));
+      s.data = data;
+      renderCreatorStats(data);
+    } catch (err) {
+      if (tblEl) tblEl.innerHTML = '<div class="empty-state"><div class="icon">!</div><div>Failed to load: ' + escapeHtml(err.message || String(err)) + '</div></div>';
+    } finally {
+      s.loading = false;
+    }
+  }
+  window.loadCreatorStats = loadCreatorStats;
+  window.setCreatorsRange = function(d) {
+    const days = parseInt(d) || 30;
+    window._creatorsState.days = days;
+    document.querySelectorAll('.creators-rng').forEach(btn => {
+      const active = parseInt(btn.getAttribute('data-days')) === days;
+      btn.style.background = active ? 'var(--accent)' : 'transparent';
+      btn.style.color = active ? 'var(--text)' : 'var(--text3)';
+    });
+    loadCreatorStats(true);
+  };
+
+  function renderCreatorStats(data) {
+    const headEl = document.getElementById('creators-headline');
+    const sumEl  = document.getElementById('creators-summary');
+    const asofEl = document.getElementById('creators-asof');
+    const tblEl  = document.getElementById('creators-table');
+    if (asofEl && data.asOfUtc) {
+      const t = new Date(data.asOfUtc);
+      asofEl.textContent = 'as of ' + t.toLocaleString([], { month:'numeric', day:'numeric', hour:'numeric', minute:'2-digit' });
+    }
+    const t = data.totals || {};
+    if (sumEl) {
+      sumEl.textContent = (t.creators || 0) + ' creators · '
+        + (t.totalFills || 0).toLocaleString() + ' fills · '
+        + (t.untagged ? (t.untagged.toLocaleString() + ' untagged (pre-2026-05-19)') : 'all tagged');
+    }
+    if (headEl) {
+      const chip = (label, val, color, tooltip) => '<div style="background:var(--surface3); border:1px solid var(--border); border-radius:6px; padding:10px 14px; min-width:140px;"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : '') + '>'
+        + '<div style="font-size:10px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px;">' + label + '</div>'
+        + '<div style="font-size:18px; font-weight:600; color:' + (color || 'var(--text)') + '; margin-top:2px;">' + val + '</div>'
+        + '</div>';
+      const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(0);
+      headEl.innerHTML = '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
+        + chip('Creators tracked',  (t.creators || 0).toLocaleString())
+        + chip('Total fills',       (t.totalFills || 0).toLocaleString())
+        + chip('Total stake',       fmtMoney(t.totalStake))
+        + chip('Net SP P&L',        fmtMoney(t.totalPnl), (t.totalPnl || 0) >= 0 ? 'var(--green)' : 'var(--red)')
+        + chip('Untagged fills',    (t.untagged || 0).toLocaleString(), 'var(--text3)', 'Pre-2026-05-19 rows that could not be backfilled — PX retains only ~30-45 days of orders.')
+        + '</div>';
+    }
+
+    const creators = data.creators || [];
+    if (!creators.length) {
+      tblEl.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No creators meet the min-fills threshold in this window. Try lowering it.</div></div>';
+      return;
+    }
+
+    const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
+    const fmtPct   = v => (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(2) + '%';
+    let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">';
+    html += '<thead><tr style="border-bottom:1px solid var(--border); color:var(--text3); font-size:11px;">'
+      + '<th style="text-align:left; padding:6px 8px;">Creator ID</th>'
+      + '<th style="text-align:right; padding:6px 8px;">Fills</th>'
+      + '<th style="text-align:right; padding:6px 8px;">Settled</th>'
+      + '<th style="text-align:right; padding:6px 8px;">SP W/L</th>'
+      + '<th style="text-align:right; padding:6px 8px;">Bettor Hit %</th>'
+      + '<th style="text-align:right; padding:6px 8px;">Stake</th>'
+      + '<th style="text-align:right; padding:6px 8px;">SP P&L</th>'
+      + '<th style="text-align:right; padding:6px 8px;">Bettor ROI</th>'
+      + '<th style="text-align:left;  padding:6px 8px;">First / Last seen</th>'
+      + '</tr></thead><tbody>';
+    for (const c of creators) {
+      const idShort = (c.creatorId || '').slice(0, 8) + '…';
+      const pnlColor = c.pnl > 0 ? 'var(--green)' : (c.pnl < 0 ? 'var(--red)' : 'var(--text)');
+      // Bettor ROI: positive = sharp winning. Red emphasis when > 1%.
+      const broiColor = c.bettorRoi == null ? 'var(--text3)' : (c.bettorRoi > 0.01 ? 'var(--red)' : (c.bettorRoi < -0.01 ? 'var(--green)' : 'var(--text)'));
+      const hitColor  = c.bettorHitRate == null ? 'var(--text3)' : (c.bettorHitRate > 0.55 ? 'var(--red)' : 'var(--text)');
+      const firstSeen = c.firstSeen ? c.firstSeen.slice(0, 10) : '';
+      const lastSeen  = c.lastSeen ? c.lastSeen.slice(0, 10)   : '';
+      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">';
+      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '">' + idShort + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right;">' + c.fills + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right;">' + c.settled + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right;">' + c.wins + '/' + c.losses + (c.pushes ? '·' + c.pushes : '') + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right; color:' + hitColor + '; font-weight:600;">' + fmtPct(c.bettorHitRate) + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right;">' + fmtMoney(c.totalStake) + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(c.pnl) + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right; color:' + broiColor + '; font-weight:600;">' + fmtPct(c.bettorRoi) + '</td>';
+      html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    tblEl.innerHTML = html;
   }
 
   // -----------------------------------------------------------------------
