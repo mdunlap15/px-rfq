@@ -859,8 +859,8 @@
             <span id="netshare-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
           </div>
           <div class="card-body collapsed" id="netshare-card">
-            <div style="padding:0 4px 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:12px;">
-              <span>Window:</span>
+            <div style="padding:0 4px 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:12px;" title="Controls the Daily Quotes, Daily Confirmed Parlays, Daily Trend, and Per-Day Breakdown sections below. The Hourly Trend section has its own independent window selector.">
+              <span style="color:var(--text2); font-weight:600;">Daily charts window:</span>
               <span id="netshare-range-buttons" style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:4px; overflow:hidden;">
                 <button type="button" class="netshare-rng" data-days="7"  onclick="setNetshareRange(7)"  style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">7d</button>
                 <button type="button" class="netshare-rng" data-days="14" onclick="setNetshareRange(14)" style="background:var(--accent); color:var(--text); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">14d</button>
@@ -868,7 +868,8 @@
                 <button type="button" class="netshare-rng" data-days="60" onclick="setNetshareRange(60)" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">60d</button>
                 <button type="button" class="netshare-rng" data-days="90" onclick="setNetshareRange(90)" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">90d</button>
               </span>
-              <button onclick="loadNetworkShareDaily(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 10px; border-radius:4px; font-size:11px; cursor:pointer; margin-left:6px;" title="Refresh (bypass 60s cache)">Refresh</button>
+              <button onclick="loadNetworkShareDaily(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 10px; border-radius:4px; font-size:11px; cursor:pointer; margin-left:6px;" title="Refresh daily data (bypass 60s server cache)">Refresh daily</button>
+              <span style="color:var(--text3); font-size:10px;">applies to daily sections below; Hourly Trend has its own window</span>
               <span id="netshare-asof" style="margin-left:auto; color:var(--text3);"></span>
             </div>
 
@@ -880,18 +881,19 @@
             <div style="border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin:0 0 14px 0; background:var(--surface3);">
               <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:11px; flex-wrap:wrap;">
                 <span style="font-weight:600; color:var(--text2);">Hourly Trend</span>
-                <span style="color:var(--text3);">— live view to spot adjustments needed</span>
+                <span style="color:var(--text3);">— live view to spot adjustments needed (this section only)</span>
                 <select id="netshare-hourly-sport" onchange="setNetshareHourlySport(this.value)"
                         style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:11px; margin-left:8px;">
                   <option value="">All sports</option>
                 </select>
-                <span id="netshare-hourly-range-buttons" style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:4px; overflow:hidden; margin-left:auto;">
+                <span style="color:var(--text3); margin-left:auto;">Hourly window:</span>
+                <span id="netshare-hourly-range-buttons" style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:4px; overflow:hidden;">
                   <button type="button" class="netshare-hr" data-hours="6"  onclick="setNetshareHourlyRange(6)"  style="background:transparent; color:var(--text3); border:0; padding:3px 8px; font-size:11px; cursor:pointer;">6h</button>
                   <button type="button" class="netshare-hr" data-hours="12" onclick="setNetshareHourlyRange(12)" style="background:transparent; color:var(--text3); border:0; padding:3px 8px; font-size:11px; cursor:pointer;">12h</button>
                   <button type="button" class="netshare-hr" data-hours="24" onclick="setNetshareHourlyRange(24)" style="background:var(--accent); color:var(--text); border:0; padding:3px 8px; font-size:11px; cursor:pointer;">24h</button>
                   <button type="button" class="netshare-hr" data-hours="48" onclick="setNetshareHourlyRange(48)" style="background:transparent; color:var(--text3); border:0; padding:3px 8px; font-size:11px; cursor:pointer;">48h</button>
                 </span>
-                <button onclick="loadNetworkShareHourly(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer;" title="Refresh (bypass 30s cache)">↻</button>
+                <button onclick="loadNetworkShareHourly(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer;" title="Refresh hourly data (bypass 30s server cache)">Refresh hourly</button>
               </div>
               <!-- Compact 1h / 6h / window chips (single-line each) -->
               <div id="netshare-hourly-headline" style="margin-bottom:10px;"></div>
@@ -900,7 +902,7 @@
               <!-- Trend lines: share (amber, L axis) + bidwin (blue, R axis), rolling-avg only -->
               <div id="chart-netshare-hourly-trend" style="margin-top:4px;"></div>
               <div style="font-size:10px; color:var(--text3); margin-top:6px;">
-                Each bar = 1 hour ending at the top of the current hour (ET). Green segment inside each gray bar shows what fraction we won.
+                Each pair of bars = 1 hour ending at the top of the current hour (ET). Gray bar = network matched (left axis, full scale); green bar = my fills (right axis, zoomed to its own range so small fill counts stay legible). Hover any bar for the share %.
                 Trend lines = trailing <span id="netshare-hourly-rolling-label">6h</span> rolling weighted average; share on left axis, bid-win on right (auto-scaled). Sport filter re-aggregates from per-bucket sport data.
               </div>
             </div>
@@ -10338,7 +10340,7 @@
     if (s.loading) return;
     s.loading = true;
     try {
-      const url = '/network-share-hourly?hours=' + s.hours + '&rolling=' + s.rolling + (force ? '&_=' + Date.now() : '');
+      const url = '/network-share-hourly?hours=' + s.hours + '&rolling=' + s.rolling + (force ? '&refresh=1' : '');
       const r = await fetch(url, { credentials: 'include' });
       const j = await r.json();
       if (j && j.ok) {
@@ -10490,60 +10492,78 @@
     _netshareRenderHourlyTrend(view.buckets);
   }
 
-  // Hourly volume — SINGLE-AXIS stacked: gray bar = network matched,
-  // green segment at the bottom = my fills. Since fills ⊂ matched, the
-  // visual ratio is the operator's share at a glance.
+  // Hourly volume — DUAL-AXIS paired bars. Network matched (gray) on
+  // the LEFT axis at full network scale; My fills (green) on the RIGHT
+  // axis at its own zoomed scale. Each bar gets readable height even
+  // though magnitudes differ by ~30-100×. Replaces the previous stacked
+  // design where the green segment was a tiny invisible sliver inside
+  // the gray bar (My Fills / Network Matched typically ~1-3%).
+  //
+  // The axis labels are color-matched to each series so the operator can
+  // read magnitudes off the correct side without guessing. Hover tooltips
+  // surface the share % so the relationship between the two series stays
+  // legible.
   function _netshareRenderHourlyVolume(buckets) {
     const el = document.getElementById('chart-netshare-hourly-vol');
     if (!el) return;
     if (!buckets.length) { el.innerHTML = ''; return; }
 
-    const W = 860, H = 200, pad = { l: 50, r: 16, t: 14, b: 38 };
+    const W = 860, H = 220, pad = { l: 56, r: 56, t: 14, b: 40 };
     const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
     const colW = chartW / buckets.length;
-    const barW = Math.max(2, colW * 0.78);
+    // Two thinner bars side-by-side per bucket. Account for 2px inter-bar gap.
+    const groupW = Math.min(36, colW * 0.78);
+    const barW = Math.max(2, (groupW - 2) / 2);
 
-    const maxN = Math.max(1, ...buckets.map(b => b.networkMatched || 0));
     const niceCeil = (v) => { const m = Math.pow(10, Math.floor(Math.log10(v))); const n = v / m; const c = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10; return c * m; };
-    const yNice = niceCeil(maxN);
-    const scaleY = v => pad.t + chartH - (v / yNice) * chartH;
 
-    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; max-height:220px;">';
-    // Gridlines + single-axis labels
+    const netMax  = niceCeil(Math.max(1, ...buckets.map(b => b.networkMatched || 0)));
+    const fillMax = niceCeil(Math.max(1, ...buckets.map(b => b.myFills        || 0)));
+
+    const scaleYnet  = v => pad.t + chartH - (v / netMax)  * chartH;
+    const scaleYfill = v => pad.t + chartH - (v / fillMax) * chartH;
+
+    const netColor  = '#5b6470';
+    const fillColor = '#22c55e';
+
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; max-height:240px;">';
+
+    // Gridlines + dual axis labels (left = network, right = my fills)
     for (let t = 0; t <= 4; t++) {
-      const v = yNice * t / 4;
-      const y = scaleY(v);
+      const nv = netMax  * t / 4;
+      const fv = fillMax * t / 4;
+      const y  = scaleYnet(nv);
       svg += svgLine(pad.l, y, W - pad.r, y, 'var(--border)', t === 0 ? 0.8 : 0.3);
-      svg += svgText(pad.l - 6, y + 3, _netshareFmtN(Math.round(v)), { anchor: 'end', size: 9, fill: 'var(--text3)' });
+      svg += svgText(pad.l - 6, y + 3, _netshareFmtN(Math.round(nv)), { anchor: 'end',   size: 9, fill: netColor });
+      svg += svgText(W - pad.r + 6, y + 3, _netshareFmtN(Math.round(fv)), { anchor: 'start', size: 9, fill: fillColor });
     }
 
+    // Bars
     for (let i = 0; i < buckets.length; i++) {
       const b = buckets[i];
       const cx = pad.l + (i + 0.5) * colW;
-      const x = cx - barW / 2;
+      const groupLeft = cx - groupW / 2;
+      const yBase = pad.t + chartH;
+
+      // Network matched bar (left axis, gray)
       if (b.networkMatched > 0) {
-        const yTop  = scaleY(b.networkMatched);
-        const yBase = pad.t + chartH;
-        const totalH = yBase - yTop;
-        // Background gray for the "lost" portion (matched minus our fills)
-        svg += '<rect x="' + x + '" y="' + yTop + '" width="' + barW + '" height="' + totalH + '" fill="#5b6470" fill-opacity="0.45" rx="1">'
-            + '<title>' + b.etLabel + ' · Network matched: ' + b.networkMatched
-            + (b.myFills ? ' · My fills: ' + b.myFills + ' (' + ((b.myFills/b.networkMatched)*100).toFixed(1) + '%)' : '')
-            + '</title></rect>';
-        // Green portion at the bottom = my fills (drawn on top, anchored at base)
-        if (b.myFills > 0) {
-          const fillRatio = Math.min(1, b.myFills / b.networkMatched);
-          const greenH = totalH * fillRatio;
-          const greenY = yBase - greenH;
-          svg += '<rect x="' + x + '" y="' + greenY + '" width="' + barW + '" height="' + greenH + '" fill="#22c55e" rx="1">'
-              + '<title>' + b.etLabel + ' · My fills: ' + b.myFills + ' of ' + b.networkMatched + ' (' + (fillRatio*100).toFixed(1) + '%)</title></rect>';
-        }
-      } else if (b.myFills > 0) {
-        // Edge case: fills logged but matched count for this sport is 0 in this bucket
-        // (cross-table timestamp slop). Draw a thin green sliver at the floor.
-        const yBase = pad.t + chartH;
-        svg += '<rect x="' + x + '" y="' + (yBase - 2) + '" width="' + barW + '" height="2" fill="#22c55e">'
-            + '<title>' + b.etLabel + ' · My fills: ' + b.myFills + ' (matched count 0 — timestamp slop)</title></rect>';
+        const y = scaleYnet(b.networkMatched);
+        const h = yBase - y;
+        const sharePct = b.myFills && b.networkMatched ? ((b.myFills / b.networkMatched) * 100).toFixed(1) + '%' : '0%';
+        svg += '<rect x="' + groupLeft.toFixed(2) + '" y="' + y.toFixed(2)
+          + '" width="' + barW.toFixed(2) + '" height="' + h.toFixed(2)
+          + '" fill="' + netColor + '" fill-opacity="0.7" rx="1">'
+          + '<title>' + b.etLabel + ' · Network matched: ' + b.networkMatched + ' · Share: ' + sharePct + '</title></rect>';
+      }
+      // My fills bar (right axis, green, zoomed scale)
+      if (b.myFills > 0) {
+        const y = scaleYfill(b.myFills);
+        const h = yBase - y;
+        const sharePct = b.networkMatched ? ((b.myFills / b.networkMatched) * 100).toFixed(1) + '%' : '—';
+        svg += '<rect x="' + (groupLeft + barW + 2).toFixed(2) + '" y="' + y.toFixed(2)
+          + '" width="' + barW.toFixed(2) + '" height="' + h.toFixed(2)
+          + '" fill="' + fillColor + '" rx="1">'
+          + '<title>' + b.etLabel + ' · My fills: ' + b.myFills + ' of ' + b.networkMatched + ' (' + sharePct + ' share)</title></rect>';
       }
     }
 
@@ -10554,11 +10574,14 @@
       const label = (buckets[i].etLabel || '').split(',').pop().trim();
       svg += svgText(cx, H - pad.b + 14, label + 'h', { size: 9, fill: 'var(--text3)' });
     }
-    // Inline legend
-    svg += '<rect x="' + (pad.l + 4) + '" y="' + (H - 8) + '" width="10" height="6" fill="#5b6470" fill-opacity="0.45" />';
-    svg += svgText(pad.l + 18, H - 3, 'Network matched (parlays/hr)', { anchor: 'start', size: 9, fill: 'var(--text2)' });
-    svg += '<rect x="' + (pad.l + 200) + '" y="' + (H - 8) + '" width="10" height="6" fill="#22c55e" />';
-    svg += svgText(pad.l + 214, H - 3, 'My fills (same axis)', { anchor: 'start', size: 9, fill: 'var(--text2)' });
+
+    // Axis titles + legend with explicit axis-side annotations
+    svg += svgText(pad.l - 6, pad.t - 4, 'NETWORK', { anchor: 'end',   size: 9, fill: netColor });
+    svg += svgText(W - pad.r + 6, pad.t - 4, 'MY FILLS', { anchor: 'start', size: 9, fill: fillColor });
+    svg += '<rect x="' + (pad.l + 4) + '" y="' + (H - 10) + '" width="10" height="6" fill="' + netColor + '" fill-opacity="0.7" />';
+    svg += svgText(pad.l + 18, H - 3, 'Network matched (L axis · parlays/hr)', { anchor: 'start', size: 9, fill: 'var(--text2)' });
+    svg += '<rect x="' + (pad.l + 250) + '" y="' + (H - 10) + '" width="10" height="6" fill="' + fillColor + '" />';
+    svg += svgText(pad.l + 264, H - 3, 'My fills (R axis · own zoomed scale)', { anchor: 'start', size: 9, fill: 'var(--text2)' });
     svg += '</svg>';
     el.innerHTML = svg;
   }
@@ -10675,7 +10698,7 @@
     const tblEl     = document.getElementById('netshare-table');
     if (!force && quotesEl) quotesEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><div>Loading...</div></div>';
     try {
-      const url = '/network-share-daily?days=' + days + (force ? '&_=' + Date.now() : '');
+      const url = '/network-share-daily?days=' + days + (force ? '&refresh=1' : '');
       const r = await fetch(url, { credentials: 'include' });
       const data = await r.json();
       if (!data || !data.ok) throw new Error(data && data.error || ('HTTP ' + r.status));
@@ -10765,23 +10788,105 @@
         + '</div>';
     }
 
-    // Dual-Y-axis volume charts. Each series declares which axis it lives on
-    // (left = network-scale values, right = my-volume values) so the bars
-    // render at comparable visual heights even though absolute magnitudes
-    // differ by ~10-30×. Without dual-axis, the small bars vanish.
+    // Daily Quotes: SINGLE-axis paired bars so the operator can see the
+    // honest magnitude relationship (My Quotes ⊂ Network Demand, by
+    // definition). The previous dual-axis version had each series scaled
+    // independently, so the My Quotes bar could visually appear TALLER
+    // than the Network Demand bar even though Network Demand = My Quotes
+    // + Declined — confusing and easy to misread as "I quoted more than
+    // PX broadcast", which is mathematically impossible.
     _netshareRenderPaired(byDay, 'chart-netshare-quotes',
       [
         { key: 'networkDemand', label: 'Network demand (RFQs broadcast)', color: '#5b6470', axis: 'left' },
-        { key: 'myQuotes',      label: 'My quotes (offers submitted)',    color: '#3b82f6', axis: 'right' },
+        { key: 'myQuotes',      label: 'My quotes (offers submitted)',    color: '#3b82f6', axis: 'left' },
       ]);
-    _netshareRenderPaired(byDay, 'chart-netshare-matched',
-      [
-        { key: 'networkMatched', label: 'Network matched (any SP)', color: '#5b6470', axis: 'left' },
-        { key: 'networkWeBidOn', label: 'Auctions I entered',       color: '#a78bfa', axis: 'right' },
-        { key: 'myFills',        label: 'My fills (I won)',         color: '#22c55e', axis: 'right' },
-      ]);
-    _netshareRenderTrend(byDay, reliableFrom);
+    // Daily Confirmed Parlays: line chart with three series. Start at the
+    // first day we have reliable bid-win data (2026-05-12) so the chart's
+    // X domain matches the Daily Trend chart's reliable range.
+    const byDayReliable = byDay.filter(d => !reliableFrom || d.date >= reliableFrom);
+    _netshareRenderConfirmedLines(byDayReliable);
+    _netshareRenderTrend(byDayReliable, reliableFrom);
     _netshareRenderTable(byDay, tot, reliableFrom);
+  }
+
+  // ----- Daily Confirmed Parlays — line chart, three series.
+  // Each line: Network matched (gray), Auctions I entered (purple),
+  // My fills (green). Lines aren't stacked — they're plotted on a shared
+  // y-axis so the relative gaps between the three series are visible.
+  // Lines work better than bars here because the three series are
+  // proportional subsets (fills ⊂ entered ⊂ matched) and the operator
+  // wants to see HOW THEY DRIFT relative to each other over time.
+  function _netshareRenderConfirmedLines(byDay) {
+    const el = document.getElementById('chart-netshare-matched');
+    if (!el) return;
+    if (!byDay.length) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No data in reliable window</div></div>';
+      return;
+    }
+
+    const W = 860, H = 280, pad = { l: 60, r: 24, t: 22, b: 70 };
+    const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
+
+    const series = [
+      { key: 'networkMatched', label: 'Network matched (any SP)', color: '#9ca3af' },
+      { key: 'networkWeBidOn', label: 'Auctions I entered',       color: '#a78bfa' },
+      { key: 'myFills',        label: 'My fills (I won)',         color: '#22c55e' },
+    ];
+
+    let yMax = 1;
+    for (const d of byDay) for (const s of series) yMax = Math.max(yMax, d[s.key] || 0);
+    const niceCeil = (v) => { const m = Math.pow(10, Math.floor(Math.log10(v))); const n = v / m; const c = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10; return c * m; };
+    yMax = niceCeil(yMax * 1.1);
+
+    const scaleX = i => pad.l + (byDay.length <= 1 ? chartW / 2 : (i / (byDay.length - 1)) * chartW);
+    const scaleY = v => pad.t + chartH - (v / yMax) * chartH;
+
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; max-height:320px;">';
+
+    // Y gridlines + labels
+    for (let t = 0; t <= 5; t++) {
+      const v = yMax * t / 5;
+      const y = scaleY(v);
+      svg += svgLine(pad.l, y, W - pad.r, y, 'var(--border)', t === 0 ? 0.8 : 0.3);
+      svg += svgText(pad.l - 6, y + 3, _netshareFmtN(Math.round(v)), { anchor: 'end', size: 9, fill: 'var(--text3)' });
+    }
+
+    // X-axis labels — ~8 ticks max
+    const labelStride = Math.max(1, Math.ceil(byDay.length / 8));
+    for (let i = 0; i < byDay.length; i++) {
+      if (i % labelStride !== 0 && i !== byDay.length - 1) continue;
+      const x = scaleX(i);
+      const dayLabel = _netshareEtDateLabel(byDay[i].date);
+      svg += '<text x="' + x + '" y="' + (H - pad.b + 16) + '" font-size="10" fill="var(--text2)" text-anchor="end" transform="rotate(-40 ' + x + ' ' + (H - pad.b + 16) + ')">' + dayLabel + '</text>';
+    }
+
+    // Draw each series as a polyline with dot markers
+    for (const s of series) {
+      let pathStr = '';
+      for (let i = 0; i < byDay.length; i++) {
+        const v = byDay[i][s.key] || 0;
+        const x = scaleX(i), y = scaleY(v);
+        pathStr += (i === 0 ? 'M' : ' L') + x.toFixed(2) + ',' + y.toFixed(2);
+      }
+      svg += '<path d="' + pathStr + '" fill="none" stroke="' + s.color + '" stroke-width="2.2" />';
+      // Dots
+      for (let i = 0; i < byDay.length; i++) {
+        const v = byDay[i][s.key] || 0;
+        svg += '<circle cx="' + scaleX(i).toFixed(2) + '" cy="' + scaleY(v).toFixed(2) + '" r="2.5" fill="' + s.color + '">'
+          + '<title>' + byDay[i].date + ' · ' + s.label + ': ' + _netshareFmtN(v) + '</title></circle>';
+      }
+    }
+
+    // Legend
+    let lx = pad.l + 4, ly = H - 8;
+    for (const s of series) {
+      svg += '<rect x="' + lx + '" y="' + (ly - 6) + '" width="14" height="3" fill="' + s.color + '" />';
+      svg += '<text x="' + (lx + 20) + '" y="' + ly + '" font-size="10" fill="var(--text2)">' + s.label + '</text>';
+      lx += 20 + (s.label.length * 6.2) + 18;
+    }
+
+    svg += '</svg>';
+    el.innerHTML = svg;
   }
 
   // ----- Paired-bar chart with DUAL Y-AXIS.

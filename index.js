@@ -1215,7 +1215,12 @@ function startStatusServer() {
       const days = Math.max(1, Math.min(90, parseInt(req.query.days) || 30));
       const cacheKey = `d${days}`;
       const now = Date.now();
-      if (_netShareCache.key === cacheKey && (now - _netShareCache.at) < 60_000) {
+      // Refresh button explicit bypass. Without this, the dashboard's
+      // Refresh control hits the server cache and silently no-ops because
+      // the cache key is `d${days}` (any extra query params ignored). The
+      // operator clicked Refresh expecting fresh data; honor that.
+      const bypass = req.query.refresh === '1';
+      if (!bypass && _netShareCache.key === cacheKey && (now - _netShareCache.at) < 60_000) {
         res.set('X-Cache', 'hit');
         return res.json(_netShareCache.data);
       }
@@ -1573,7 +1578,8 @@ function startStatusServer() {
       const rolling = Math.max(2, Math.min(12, parseInt(req.query.rolling) || 6));
       const cacheKey = `h${hours}_r${rolling}`;
       const now = Date.now();
-      if (_netShareHourlyCache.key === cacheKey && (now - _netShareHourlyCache.at) < 30_000) {
+      const bypass = req.query.refresh === '1';
+      if (!bypass && _netShareHourlyCache.key === cacheKey && (now - _netShareHourlyCache.at) < 30_000) {
         res.set('X-Cache', 'hit');
         return res.json(_netShareHourlyCache.data);
       }
