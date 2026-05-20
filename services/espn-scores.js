@@ -385,11 +385,25 @@ function getEspnGameResult(sportKey, homeTeam, awayTeam, startTime) {
     }
   }
   if (!bestMatch) return null;
-  // Refuse to use a far-off match when a startTime was provided. If the
-  // closest match is more than 24h away from the leg's startTime, we're
-  // almost certainly looking at the wrong day's game — return null and
-  // let the caller fall through to TOA, which has its own time match.
-  if (targetMs && bestDiffMs > 24 * 60 * 60 * 1000) return null;
+  // Refuse to use a far-off match when a startTime was provided. Tightened
+  // 2026-05-20 from 24h → 12h: MLB / NHL / NBA team pairs play back-to-back
+  // on consecutive days routinely. With the prior 24h gate, yesterday's
+  // completed game (~24h away, just under threshold) leaked into a leg
+  // for today's game whenever ESPN hadn't posted today's matchup yet,
+  // causing the LIVE column to show YESTERDAY's final score for a parlay
+  // on tonight's game. 12h is past any single-game span (longest MLB game
+  // is ~6h with extras + delays) and well short of the 24h back-to-back gap.
+  if (targetMs && bestDiffMs >= 12 * 60 * 60 * 1000) return null;
+
+  // Additional guard: if the leg's startTime is in the FUTURE (game hasn't
+  // started) but the closest match is COMPLETED, this is almost certainly
+  // yesterday's back-to-back showing through — the leg's game isn't on
+  // ESPN's scoreboard yet. Don't return live data for a game that hasn't
+  // happened. The caller will treat the leg as "pre-game" (no LIVE chip).
+  if (targetMs && bestMatch.completed) {
+    const nowMs = Date.now();
+    if (targetMs > nowMs) return null;
+  }
   let winner = null;
   if (bestMatch.completed && bestMatch.homeScore != null && bestMatch.awayScore != null) {
     if (bestMatch.homeScore > bestMatch.awayScore) winner = bestFlipped ? 'away' : 'home';

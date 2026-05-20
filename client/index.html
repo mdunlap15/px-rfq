@@ -13423,6 +13423,34 @@
         }
       }
 
+      // Team sports — MLB / NBA / NHL / NCAAB / WNBA / soccer — for any leg
+      // where the selection is one of the two competing teams (moneyline,
+      // spread, team_total, etc.), append the opponent with home/away
+      // orientation (`@ Opponent` if our pick is away, `vs Opponent` if
+      // home). Bare Over/Under legs already get "ARI @ TOR" upstream and
+      // are skipped via the bareOU short-circuit. Golf/tennis/mma/boxing
+      // are handled in their own branches above.
+      else if (l.homeTeam && l.awayTeam
+               && !bareOU
+               && rawTeam
+               && (rawTeam === l.homeTeam || rawTeam === l.awayTeam
+                   || (l.homeTeam && rawTeam.includes(l.homeTeam))
+                   || (l.awayTeam && rawTeam.includes(l.awayTeam))
+                   || (l.homeTeam && l.homeTeam.includes(rawTeam))
+                   || (l.awayTeam && l.awayTeam.includes(rawTeam)))) {
+        // Determine if the selection is the home or the away side, then
+        // append the opponent with the matching preposition. Use team
+        // abbreviations to keep the cell compact like the bareOU path.
+        const matchesHome = rawTeam === l.homeTeam
+          || (l.homeTeam && (rawTeam.includes(l.homeTeam) || l.homeTeam.includes(rawTeam)));
+        const opponentName = matchesHome ? l.awayTeam : l.homeTeam;
+        const prep = matchesHome ? 'vs ' : '@ ';
+        const oppAbbr = (typeof teamAbbr === 'function' && teamAbbr(opponentName)) || opponentName;
+        if (oppAbbr) {
+          teamLabel += ' <span style="color:var(--text3); font-size:10px;">· ' + prep + escapeHtml(oppAbbr) + '</span>';
+        }
+      }
+
       // DNB badge for soccer 2-way moneyline legs so operators can tell
       // apart DNB vs 3-way at a glance. Pin/FD/DK odds columns
       // on this row are DNB-equivalent (renormalized to exclude the draw)
