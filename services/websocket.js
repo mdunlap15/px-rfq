@@ -710,6 +710,28 @@ async function handleRFQ(data) {
     // was broadcast to us, regardless of whether we decline/error/quote.
     recordRfqReceipt(parlayId, legs.length, isPausedNow);
 
+    // Creator-ID blocklist check. The operator can block specific counterparties
+    // identified as sharps (consistent +bettor-ROI across N≥20 fills). Decline
+    // BEFORE pricing so we don't waste latency on quotes we wouldn't accept.
+    // PX-side optics are identical to any other decline reason — they can't
+    // tell us-declining-on-creator apart from us-declining-on-correlation.
+    if (creatorId) {
+      const blocklist = require('./creator-blocklist');
+      if (blocklist.isBlocked(creatorId)) {
+        const entry = blocklist.getEntry(creatorId);
+        const reason = entry && entry.reason ? entry.reason : '<no reason>';
+        log.info('RFQ', `Declining: blocked creator ${creatorId} (reason: ${reason}) — parlay=${parlayId}`);
+        orderTracker.recordDecline('blocked creator', {
+          parlayId,
+          knownLegs: [],
+          declineDetail: 'creator_id ' + creatorId + (entry && entry.reason ? ' — ' + entry.reason : ''),
+        });
+        rfqStages.declined++;
+        updateRfqOutcome(parlayId, 'blocked_creator', creatorId);
+        return;
+      }
+    }
+
     // Downgraded to debug — high-volume log that can backpressure stdout
     // under load. "Offered" log below preserves the audit trail for successful
     // submissions; paused/declined outcomes are already tracked separately.
@@ -1459,6 +1481,28 @@ async function handleConfirm(data) {
       }
       return;
     }
+
+    // Belt-and-suspenders blocklist check at confirm time. handleRFQ
+    // already declines blocked creators before pricing, but a creator
+    // could have been added to the blocklist BETWEEN the quote landing
+    // and the confirm arriving (race window of a few seconds to ~minutes
+    // for slow PX confirms). Re-check using meta.creatorId from the
+    // original quote; if now-blocked, reject the confirm.
+    try {
+      const blockedCid = originalOrder.meta && (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
+      if (blockedCid) {
+        const blocklist = require('./creator-blocklist');
+        if (blocklist.isBlocked(blockedCid)) {
+          log.info('Confirm', `Rejecting: creator ${blockedCid} was blocked after quote — parlay=${parlayId}`);
+          orderTracker.recordRejection(parlayId, 'blocked creator (added post-quote)');
+          if (callbackUrl) {
+            try { await px.confirmOrder(callbackUrl, orderUuid, 'reject'); }
+            catch (e) { log.warn('Confirm', `Block-reject POST failed for ${parlayId}: ${e.message}`); }
+          }
+          return;
+        }
+      }
+    } catch (_) { /* blocklist module not loaded yet — allow through */ }
 
     // Check stake/risk limits before accepting.
     // VERIFIED from live PX payload: PX sends stake = our SP risk = bettor's

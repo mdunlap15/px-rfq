@@ -267,7 +267,15 @@ app.get('/creators/stats', async (req, res) => {
       const roi = a.totalStake > 0 ? a.pnl / a.totalStake : null;
       const bettorRoi = roi != null ? -roi : null;
       const bettorHitRate = (a.wins + a.losses) > 0 ? a.losses / (a.wins + a.losses) : null;
-      creators.push({ ...a, roi, bettorRoi, bettorHitRate });
+      // Surface blocked state from preview's in-memory blocklist so the
+      // Block/Unblock button reflects current state on re-render.
+      const blockedEntry = (typeof _previewBlocklist !== 'undefined' && _previewBlocklist.get(a.creatorId)) || null;
+      creators.push({
+        ...a, roi, bettorRoi, bettorHitRate,
+        blocked: !!blockedEntry,
+        blockedReason: blockedEntry ? blockedEntry.reason : null,
+        blockedAt: blockedEntry ? blockedEntry.addedAt : null,
+      });
     }
     creators.sort((x, y) => (y.bettorRoi ?? -Infinity) - (x.bettorRoi ?? -Infinity));
     const totals = {
@@ -284,8 +292,32 @@ app.get('/creators/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// /admin/creators/* — stubs for the Block button UI in the preview.
+// Mirror the prod handler shape; persist to an in-memory map (per-process
+// only — preview server restarts wipe).
+app.use(express.json());
+const _previewBlocklist = new Map();
+app.get('/admin/creators/blocked', (req, res) => {
+  res.json({ ok: true, entries: Array.from(_previewBlocklist.values()).sort((a,b) => (b.addedAt||'').localeCompare(a.addedAt||'')) });
+});
+app.post('/admin/creators/block', (req, res) => {
+  const cid = String((req.body && (req.body.creatorId || req.body.creator_id)) || '').trim();
+  if (!cid) return res.status(400).json({ ok: false, error: 'creatorId required' });
+  const reason = (req.body && req.body.reason) || '';
+  const added = !_previewBlocklist.has(cid);
+  _previewBlocklist.set(cid, { creatorId: cid, reason, addedAt: new Date().toISOString() });
+  res.json({ ok: true, added, updated: !added, entries: Array.from(_previewBlocklist.values()) });
+});
+app.post('/admin/creators/unblock', (req, res) => {
+  const cid = String((req.body && (req.body.creatorId || req.body.creator_id)) || '').trim();
+  if (!cid) return res.status(400).json({ ok: false, error: 'creatorId required' });
+  const removed = _previewBlocklist.delete(cid);
+  res.json({ ok: true, removed, entries: Array.from(_previewBlocklist.values()) });
+});
+
 // Wildcard fallback — mounted LAST so all specific routes (especially
-// /network-share-daily, /network-share-hourly, /creators/stats) take precedence.
+// /network-share-daily, /network-share-hourly, /creators/stats, /admin/*)
+// take precedence.
 app.get(/^\/[a-z0-9_/-]+$/i, (_, res) => res.json(stubResponse));
 
 const PORT = 4099;

@@ -587,6 +587,18 @@ async function startup() {
     } catch (err) {
       log.warn('BetOnlineScraper', `Initial Zurich prime failed: ${err.message}`);
     }
+
+    // Creator-ID blocklist hydration. Pulls the persisted blocked-creator
+    // list from Supabase kv_store so handleRFQ's check has a populated Set
+    // from the very first RFQ. Also starts the 30s refresh interval so
+    // out-of-band kv mutations (e.g. someone using psql directly) propagate
+    // without a restart.
+    try {
+      const creatorBlocklist = require('./services/creator-blocklist');
+      await creatorBlocklist.restoreFromPersistence();
+    } catch (err) {
+      log.warn('CreatorBlocklist', `Hydrate failed (non-fatal, starting empty): ${err.message}`);
+    }
   })();
   setInterval(async () => {
     await Promise.all(['nba', 'nhl'].map(sport =>
@@ -1990,6 +2002,10 @@ function startStatusServer() {
         if (r.confirmed_at && r.confirmed_at > agg.lastSeen)  agg.lastSeen  = r.confirmed_at;
       }
 
+      // Look up current blocklist state once (avoid a per-creator require).
+      let blocklist = null;
+      try { blocklist = require('./services/creator-blocklist'); } catch (_) {}
+
       // Derive ratios + filter by min fills.
       const creators = [];
       for (const agg of byCreator.values()) {
@@ -1997,11 +2013,15 @@ function startStatusServer() {
         const roi = agg.totalStake > 0 ? agg.pnl / agg.totalStake : null;
         const bettorRoi = roi != null ? -roi : null;
         const bettorHitRate = (agg.wins + agg.losses) > 0 ? agg.losses / (agg.wins + agg.losses) : null;
+        const blockedEntry = blocklist ? blocklist.getEntry(agg.creatorId) : null;
         creators.push({
           ...agg,
           roi,                    // SP's ROI on this creator (negative = good for us)
           bettorRoi,              // Bettor's ROI (positive = sharp)
           bettorHitRate,          // Fraction of settled parlays the bettor won
+          blocked: !!blockedEntry,
+          blockedReason: blockedEntry ? blockedEntry.reason : null,
+          blockedAt: blockedEntry ? blockedEntry.addedAt : null,
         });
       }
       // Sort by bettorRoi descending — sharps at top.
@@ -2031,6 +2051,62 @@ function startStatusServer() {
       res.json(payload);
     } catch (err) {
       log.error('Creators', `/creators/stats error: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Creator-ID blocklist admin endpoints.
+  //
+  // Adverse-selection defense: operator-managed list of creator_ids that
+  // get auto-declined at RFQ time (services/creator-blocklist.js). Backed
+  // by Supabase kv_store['creator_blocklist'] for restart persistence and
+  // 30s-refreshed in-memory for fast lookups on the hot RFQ path.
+  //
+  //   GET  /admin/creators/blocked          — list current entries
+  //   POST /admin/creators/block            — body: { creatorId, reason? }
+  //   POST /admin/creators/unblock          — body: { creatorId }
+  //
+  // After a successful POST, the response also returns the up-to-date list
+  // so the dashboard can re-render without a follow-up GET.
+  app.get('/admin/creators/blocked', (req, res) => {
+    try {
+      const creatorBlocklist = require('./services/creator-blocklist');
+      res.json({ ok: true, entries: creatorBlocklist.list() });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/admin/creators/block', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const creatorId = String(body.creatorId || body.creator_id || '').trim();
+      const reason = (body.reason || '').toString().trim().slice(0, 200);
+      if (!creatorId) return res.status(400).json({ ok: false, error: 'creatorId required' });
+      const creatorBlocklist = require('./services/creator-blocklist');
+      const result = await creatorBlocklist.add(creatorId, reason);
+      // Invalidate /creators/stats cache so the next dashboard refresh
+      // surfaces the new blocked state without waiting 60s.
+      _creatorsCache.key = null;
+      res.json({ ok: true, ...result, entries: creatorBlocklist.list() });
+    } catch (err) {
+      log.error('CreatorBlocklist', `/admin/creators/block error: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/admin/creators/unblock', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const creatorId = String(body.creatorId || body.creator_id || '').trim();
+      if (!creatorId) return res.status(400).json({ ok: false, error: 'creatorId required' });
+      const creatorBlocklist = require('./services/creator-blocklist');
+      const result = await creatorBlocklist.remove(creatorId);
+      _creatorsCache.key = null;
+      res.json({ ok: true, ...result, entries: creatorBlocklist.list() });
+    } catch (err) {
+      log.error('CreatorBlocklist', `/admin/creators/unblock error: ${err.message}`);
       res.status(500).json({ ok: false, error: err.message });
     }
   });

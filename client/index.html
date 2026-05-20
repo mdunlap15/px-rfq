@@ -11356,6 +11356,7 @@
       + '<th style="text-align:right; padding:6px 8px;">SP P&L</th>'
       + '<th style="text-align:right; padding:6px 8px;">Bettor ROI</th>'
       + '<th style="text-align:left;  padding:6px 8px;">First / Last seen</th>'
+      + '<th style="text-align:center; padding:6px 8px;">Block</th>'
       + '</tr></thead><tbody>';
     for (const c of creators) {
       const idShort = (c.creatorId || '').slice(0, 8) + '…';
@@ -11365,8 +11366,20 @@
       const hitColor  = c.bettorHitRate == null ? 'var(--text3)' : (c.bettorHitRate > 0.55 ? 'var(--red)' : 'var(--text)');
       const firstSeen = c.firstSeen ? c.firstSeen.slice(0, 10) : '';
       const lastSeen  = c.lastSeen ? c.lastSeen.slice(0, 10)   : '';
-      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">';
-      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '">' + idShort + '</td>';
+      // Blocked rows get a faint red tint so they're scannable even with
+      // the row collapsed beyond the action column.
+      const rowBg = c.blocked ? 'background: rgba(239, 68, 68, 0.08);' : '';
+      const blockedBadge = c.blocked
+        ? '<span title="' + escapeHtml(c.blockedReason || '') + ' (blocked ' + (c.blockedAt || '').slice(0, 10) + ')" style="color:var(--red); font-size:9px; padding:1px 4px; border:1px solid var(--red); border-radius:3px; margin-left:4px;">BLOCKED</span>'
+        : '';
+      // Button: Block (red) when not currently blocked, Unblock (gray) when
+      // already blocked. Calls window.toggleCreatorBlock which posts to the
+      // admin endpoint and re-renders.
+      const btn = c.blocked
+        ? '<button onclick="toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', false)" style="background:transparent; border:1px solid var(--text3); color:var(--text2); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Allow RFQs from this creator again">Unblock</button>'
+        : '<button onclick="toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', true)" style="background:transparent; border:1px solid var(--red); color:var(--red); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Auto-decline all future RFQs from this creator">Block</button>';
+      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); ' + rowBg + '">';
+      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '">' + idShort + blockedBadge + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.fills + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.settled + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.wins + '/' + c.losses + (c.pushes ? '·' + c.pushes : '') + '</td>';
@@ -11375,11 +11388,45 @@
       html += '<td style="padding:5px 8px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(c.pnl) + '</td>';
       html += '<td style="padding:5px 8px; text-align:right; color:' + broiColor + '; font-weight:600;">' + fmtPct(c.bettorRoi) + '</td>';
       html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
+      html += '<td style="padding:5px 8px; text-align:center;">' + btn + '</td>';
       html += '</tr>';
     }
     html += '</tbody></table></div>';
     tblEl.innerHTML = html;
   }
+
+  // Block / Unblock a creator. Calls the admin endpoint, then refetches
+  // /creators/stats with refresh=1 so the row's blocked state updates
+  // immediately. On block, prompts for a one-line reason so the audit
+  // trail in kv_store carries WHY (e.g. "+5% bettor ROI on 30 fills").
+  window.toggleCreatorBlock = async function(creatorId, doBlock) {
+    if (!creatorId) return;
+    let reason = '';
+    if (doBlock) {
+      reason = prompt('Reason for blocking creator ' + creatorId.slice(0, 8) + '…?\n(optional, e.g. "+5% bettor ROI on 30 fills")');
+      if (reason === null) return; // user clicked Cancel
+      reason = (reason || '').trim();
+    } else {
+      if (!confirm('Unblock creator ' + creatorId.slice(0, 8) + '…?\nRFQs from this counterparty will be accepted again.')) return;
+    }
+    try {
+      const path = doBlock ? '/admin/creators/block' : '/admin/creators/unblock';
+      const body = doBlock ? { creatorId, reason } : { creatorId };
+      const r = await fetch(path, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      // Force-refresh stats so the blocked column updates without waiting
+      // for the 60s server cache to expire.
+      await loadCreatorStats(true);
+    } catch (err) {
+      alert('Failed to ' + (doBlock ? 'block' : 'unblock') + ': ' + (err.message || err));
+    }
+  };
 
   // -----------------------------------------------------------------------
   // LOST AUCTION BID SCATTER — Analytics tab (existing). Shows the gap
