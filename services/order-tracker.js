@@ -3701,6 +3701,7 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
   // 0 disables. When set, the parlay must also pass:
   //   confirmed raw + pending raw × discount + new payout × discount ≤ cap
   let rawHardCap = 0;
+  let rawOverridesByKey = {};
   try {
     const { config } = require('../config');
     const d = config?.pricing?.pendingReservationDiscount;
@@ -3715,6 +3716,11 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
     for (const [name, cap] of Object.entries(ovs)) {
       const k = normalizeExposureKey(name);
       if (k && Number.isFinite(cap) && cap > 0) overridesByKey[k] = cap;
+    }
+    const rOvs = config?.pricing?.rawExposureOverridesPerTeam || {};
+    for (const [name, cap] of Object.entries(rOvs)) {
+      const k = normalizeExposureKey(name);
+      if (k && Number.isFinite(cap) && cap > 0) rawOverridesByKey[k] = cap;
     }
   } catch { /* ignore */ }
 
@@ -3808,10 +3814,17 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
     // Eliminates the Map lookup + multiplication on the common case
     // (most teams have 0 confirmed raw exposure when an RFQ arrives),
     // which was contributing ~0.2-0.5ms per multi-leg RFQ to p50.
-    if (rawHardCap > 0) {
+    // Resolve effective raw cap: per-team override wins over global default.
+    // Override activates the gate even if the global rawHardCap is disabled (0).
+    const rawOverride = rawOverridesByKey[teamKey];
+    const effectiveRawCap = (Number.isFinite(rawOverride) && rawOverride > 0)
+      ? rawOverride
+      : rawHardCap;
+    const rawOverrideApplied = Number.isFinite(rawOverride) && rawOverride > 0;
+    if (effectiveRawCap > 0) {
       const newRiskRawAbs = payout;
       const currentRaw = exposure[key]?.rawRisk || 0;
-      const fastPathHeadroom = rawHardCap * 0.5;
+      const fastPathHeadroom = effectiveRawCap * 0.5;
       if (currentRaw + newRiskRawAbs < fastPathHeadroom) {
         // Safe — headroom large enough that pending stacking can't
         // realistically violate. Skip pending lookup + math.
@@ -3820,7 +3833,10 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
         const pendingRawAbs = getPendingTeamRawRisk(key);
         const pendingRawEff = pendingRawAbs * discount;
         const afterAddRaw = currentRaw + pendingRawEff + newRiskRawEff;
-        if (afterAddRaw > rawHardCap) {
+        if (afterAddRaw > effectiveRawCap) {
+          if (rawOverrideApplied) {
+            log.info('Exposure', `Per-team RAW override BLOCKED ${name}: would-be $${Math.round(afterAddRaw*100)/100} > override $${effectiveRawCap} (global $${rawHardCap})`);
+          }
           violations.push({
             team: name,
             currentExposure: Math.round(currentRaw * 100) / 100,
@@ -3829,9 +3845,9 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
             newRisk: Math.round(newRiskRawAbs * 100) / 100,
             newRiskEffective: Math.round(newRiskRawEff * 100) / 100,
             wouldBe: Math.round(afterAddRaw * 100) / 100,
-            limit: rawHardCap,
+            limit: effectiveRawCap,
             globalLimit: rawHardCap,
-            overrideApplied: false,
+            overrideApplied: rawOverrideApplied,
             reservationDiscount: discount,
             capType: 'raw_hard',
           });

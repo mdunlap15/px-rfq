@@ -563,6 +563,28 @@ const config = {
         return {};
       }
     })(),
+    // Per-team RAW HARD-CAP overrides. Same shape as exposureOverridesPerTeam
+    // but consulted by the independent raw hard-cap gate (MAX_RAW_EXPOSURE_PER_TEAM).
+    // Lets you tighten the gross-exposure cap on a single team without lowering
+    // the global default. Example:
+    //   RAW_EXPOSURE_OVERRIDES_PER_TEAM={"New York Knicks":3000}
+    rawExposureOverridesPerTeam: (() => {
+      const raw = process.env.RAW_EXPOSURE_OVERRIDES_PER_TEAM;
+      if (!raw || !raw.trim()) return {};
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return {};
+        const out = {};
+        for (const [name, cap] of Object.entries(parsed)) {
+          const num = parseFloat(cap);
+          if (Number.isFinite(num) && num > 0) out[name] = num;
+        }
+        return out;
+      } catch (e) {
+        console.warn(`[config] RAW_EXPOSURE_OVERRIDES_PER_TEAM is not valid JSON: ${e.message}`);
+        return {};
+      }
+    })(),
     // Phase 2 prop quoting caps — applies to ANY parlay containing one
     // or more player_prop legs (NBA points/rebounds/assists/threes,
     // NHL shots_on_goal, MLB pitcher_strikeouts, etc.). Game-line-only
