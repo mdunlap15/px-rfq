@@ -146,6 +146,13 @@ async function fetchDgMatchups(tour, market) {
  * Parse a single 2-way matchup into our cache event format.
  * Returns { homeTeam, awayTeam, eventName, roundNum, markets: { h2h: {home, away, books} } }
  * or null if not enough book data.
+ *
+ * Per-side `byBook` map carries each book's raw American odds — the
+ * pricer reads this to quote AT a specific book's posted line
+ * (BetOnline preferred, Bovada fallback) instead of de-vigged consensus.
+ * Operator decision 2026-05-19: golf matchup spreads off de-vigged
+ * consensus end up narrower than any tradeable book; quote at the
+ * book's raw posted price to widen the offered spread.
  */
 function parseMatchup(entry, eventName, roundNum) {
   const p1Name = normalizeDgPlayerName(entry.p1_player_name);
@@ -155,6 +162,10 @@ function parseMatchup(entry, eventName, roundNum) {
   // Collect book pairs (excluding datagolf's own model)
   const p1Probs = [], p2Probs = [];
   const p1Raw = [], p2Raw = [];
+  // Per-book raw American odds, indexed by book name. Preserved
+  // alongside the de-vigged consensus so the pricer can quote at a
+  // specific book's posted line on demand.
+  const p1ByBook = {}, p2ByBook = {};
   for (const [book, odds] of Object.entries(entry.odds || {})) {
     if (!CONSENSUS_BOOKS.includes(book)) continue;
     const p1Prob = americanToImpliedProb(odds.p1);
@@ -166,6 +177,8 @@ function parseMatchup(entry, eventName, roundNum) {
     p2Probs.push(fp2);
     p1Raw.push(Number(odds.p1));
     p2Raw.push(Number(odds.p2));
+    p1ByBook[book] = Number(odds.p1);
+    p2ByBook[book] = Number(odds.p2);
   }
   if (p1Probs.length === 0) return null; // no tradeable book data
 
@@ -189,12 +202,14 @@ function parseMatchup(entry, eventName, roundNum) {
           impliedProb: avg(p2Raw.map(americanToImpliedProb)),
           fairProb: dvP2,
           displayFairProb: dvP2,
+          byBook: p2ByBook, // p2 → home
         },
         away: {
           rawOdds: p1Raw[0] || null,
           impliedProb: avg(p1Raw.map(americanToImpliedProb)),
           fairProb: dvP1,
           displayFairProb: dvP1,
+          byBook: p1ByBook, // p1 → away
         },
         books: p1Probs.length,
       },

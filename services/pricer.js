@@ -375,22 +375,57 @@ function getGolfMatchupFairProb(lineInfo) {
         }
         return boHit.fairProb;
       }
-    } catch (_) { /* scraper unavailable — fall through to strict-mode gate */ }
+    } catch (_) { /* scraper unavailable — fall through to DataGolf book lookup */ }
   }
 
-  // STRICT MODE: golf matchups quote ONLY off operator-validated manual
-  // uploads. Verified 2026-05-02 Cadillac R4: PX was publishing 16 R4
-  // matchup markets that the system was happily quoting from DataGolf's
-  // /preds/in-play model probabilities — without operator review.
-  // Operator's intent for this market class is "I upload what I'm willing
-  // to trade; nothing else gets quoted." Returning null here causes
-  // priceParlay to decline with "no fair quote" rather than fall through
-  // to DataGolf or DK scraper.
-  //
-  // Pre-fix priorities 2 + 3 (DataGolf via getGolfMatchupEvent, DK
-  // scraper via lookupGolfMatchupFairProb) are intentionally removed
-  // for golf matchups. If we ever want to re-enable a per-round opt-in
-  // (DataGolf OK for R3 if R3 was uploaded), gate it on a config flag.
+  // PRIORITY 2 + 3: BetOnline → Bovada raw posted odds from the DataGolf
+  // feed. Operator preference 2026-05-19: golf matchup spreads off de-
+  // vigged consensus end up narrower than any tradeable book (we strip
+  // each book's edge before re-applying our own vig); quote at the
+  // BOOK's raw posted line instead. BetOnline first (operator's preferred
+  // book), Bovada second when BetOnline isn't in DataGolf's response for
+  // a given matchup. fairProb is still the de-vigged consensus across
+  // all books — used only for downstream sanity checks (decline-if-stale,
+  // fair-value validation); the quoted price is bookPriceOverride.
+  try {
+    const oddsFeed = require('./odds-feed');
+    const event = oddsFeed.getGolfMatchupEvent(lineInfo.homeTeam, lineInfo.awayTeam, roundNum);
+    const h2h = event && event.markets && event.markets.h2h;
+    if (h2h) {
+      // Pick the side this lineInfo represents. teamName is the player
+      // we're betting on; match against the event's homeTeam/awayTeam.
+      // Fall back to oddsApiSelection / selection when teamName doesn't
+      // resolve uniquely (rare but possible after name normalization).
+      let side = null;
+      const tn = teamName.toLowerCase();
+      if (tn && event.homeTeam && tn === event.homeTeam.toLowerCase()) side = h2h.home;
+      else if (tn && event.awayTeam && tn === event.awayTeam.toLowerCase()) side = h2h.away;
+      else if (lineInfo.oddsApiSelection === 'home' || lineInfo.selection === 'home') side = h2h.home;
+      else if (lineInfo.oddsApiSelection === 'away' || lineInfo.selection === 'away') side = h2h.away;
+      if (side && side.fairProb != null && side.fairProb > 0 && side.fairProb < 1) {
+        const byBook = side.byBook || {};
+        // Priority order — first book with an odds entry wins. Add more
+        // books here (e.g. 'betmgm', 'caesars') if operator preference
+        // changes. Each value is American odds; convert to implied prob.
+        const priority = ['betonline', 'bovada'];
+        for (const book of priority) {
+          const am = byBook[book];
+          if (!Number.isFinite(am)) continue;
+          const rawImplied = am >= 0 ? 100 / (am + 100) : -am / (-am + 100);
+          if (rawImplied > 0 && rawImplied < 1) {
+            return { fairProb: side.fairProb, bookPriceOverride: rawImplied };
+          }
+        }
+      }
+    }
+  } catch (_) { /* odds-feed unavailable — fall through to strict-mode null */ }
+
+  // STRICT MODE: when no Bookmaker manual upload AND no BetOnline /
+  // Bovada line in the DataGolf feed, decline. Falling through to the
+  // de-vigged consensus produces ~50/50 lines that are tighter than any
+  // tradeable book, which the operator explicitly rejected 2026-05-19.
+  // priceParlay's golf-matchup branch checks for null and triggers the
+  // standard "no fair quote" decline path.
   return null;
 }
 
@@ -510,6 +545,15 @@ function computeSingleLegVig(fairProb, sport, marketType) {
   }
   if (marketType === 'series_winner' && seriesMinVig > 0) vig = Math.max(vig, seriesMinVig);
   if (sport === 'mma_mixed_martial_arts' && mmaMinVig > 0) vig = Math.max(vig, mmaMinVig);
+  // Golf-matchup floor — mirror the priceParlay-internal getEffectiveVig
+  // floor so /lines/detail's MY ODDS column matches what RFQ pricing
+  // would actually offer. Only relevant when the leg falls through to
+  // de-vig+vig (i.e. no Bookmaker manual / BetOnline / Bovada raw price
+  // available); when bookPriceOverride is set, vig is bypassed entirely
+  // and this floor doesn't fire. Without this, Lines tab displayed
+  // ~1.5% pair vig on golf while RFQs would have offered ~2.5% pair.
+  const golfMatchupMinVig = config.pricing.vigGolfMatchupMin || 0;
+  if (sport === 'golf_matchups' && golfMatchupMinVig > 0) vig = Math.max(vig, golfMatchupMinVig);
   return vig;
 }
 
@@ -845,11 +889,12 @@ function priceParlay(legs, opts = {}) {
     }
     const mmaFair = getMmaFairProb(s.lineInfo);
     if (mmaFair != null) { fairProbs[i] = mmaFair; continue; }
+    const isGolfMatchupLeg = (s.lineInfo?.sport || s.lineInfo?.oddsApiSport || '').toLowerCase().includes('golf');
     const golfFair = getGolfMatchupFairProb(s.lineInfo);
     if (golfFair != null) {
-      // Handle object-form return (carries bookPriceOverride when
-      // fair came from BetOnline manual upload). See NBA series
-      // pattern above for the same object-vs-number convention.
+      // Handle object-form return (carries bookPriceOverride when fair
+      // came from Bookmaker manual upload, BetOnline raw, or Bovada raw —
+      // see getGolfMatchupFairProb for the precedence ladder).
       if (typeof golfFair === 'object') {
         s.bookPriceOverride = golfFair.bookPriceOverride;
         fairProbs[i] = golfFair.fairProb;
@@ -858,11 +903,20 @@ function priceParlay(legs, opts = {}) {
       }
       continue;
     }
-    // No manual upload — fall through to oddsFeed.getFairProb (DataGolf
-    // path). Operator preference (2026-05-14): keep DataGolf as a
-    // legitimate fallback BUT apply a wider vig floor than the default
-    // 1.3% to compensate for the looser model fair. Floor enforced
-    // sport-specifically in getEffectiveVig via VIG_GOLF_MATCHUP_MIN.
+    // STRICT MODE for golf matchups (2026-05-19): when none of
+    // Bookmaker manual / BetOnline raw / Bovada raw is available, do NOT
+    // fall through to the de-vigged consensus path — leave fairProbs[i]
+    // undefined so the standard 'no fair value' decline fires below.
+    // Operator explicitly chose strict mode: tighter-than-book consensus
+    // pricing on golf was producing -EV fills.
+    if (isGolfMatchupLeg) {
+      priceParlay._lastFailure = priceParlay._lastFailure || {
+        reason: 'no fair value',
+        detail: 'golf matchup: no Bookmaker manual / BetOnline / Bovada price available',
+        blockerLeg: s.lineInfo ? { team: s.lineInfo.teamName, market: s.lineInfo.marketType, line: s.lineInfo.line } : null,
+      };
+      continue;
+    }
     if (s.lineInfo.isDNB) {
       fairProbs[i] = oddsFeed.getDNBFairProb(
         s.lineInfo.oddsApiSport, s.lineInfo.homeTeam, s.lineInfo.awayTeam,
