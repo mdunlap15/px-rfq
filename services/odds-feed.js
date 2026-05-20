@@ -1845,8 +1845,14 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
   }
   log.info('OddsFeed', `Found ${activeTournaments.length} active ${sport} tournaments: ${activeTournaments.map(t => t.key).join(', ')}`);
 
-  // Step 2: fetch odds for each active tournament
+  // Step 2: fetch odds for each active tournament. Track each event's
+  // sourceTournament so we can debug "which tournament was this event
+  // from?" later — invaluable when an event registers under one cache key
+  // but the resolve path tries another. Also enables per-tournament
+  // cache slots (oddsCache['tennis_atp_french_open']) that the line-
+  // manager can fall back to when the generic sport-level lookup fails.
   const allEvents = [];
+  const eventsByTournament = new Map(); // tourKey -> [event, ...]
   for (const tournament of activeTournaments) {
     const url = `https://api.the-odds-api.com/v4/sports/${tournament.key}/odds`
       + `?apiKey=${apiKey}`
@@ -1864,7 +1870,10 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
       const remaining = resp.headers.get('x-requests-remaining');
       if (remaining != null) log.debug('OddsFeed', `The Odds API: ${remaining} requests remaining`);
       const events = await safeJsonFetch(resp);
+      // Tag each event with its source tournament for traceability.
+      for (const ev of events) ev._sourceTournament = tournament.key;
       allEvents.push(...events);
+      eventsByTournament.set(tournament.key, events);
       log.info('OddsFeed', `Got ${events.length} events from ${tournament.key}`);
     } catch (err) {
       log.warn('OddsFeed', `Failed to fetch ${tournament.key}: ${err.message}`);
@@ -1875,6 +1884,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
 
   // Step 3: parse into cache format (same as regular fetchFromTheOddsApi)
   const parsed = {};
+  const parsedByTournament = new Map(); // tourKey -> { key: entry }
   for (const event of allEvents) {
     const key = normalizeEventKey(event.home_team, event.away_team);
     const allBooks = event.bookmakers || [];
@@ -1940,20 +1950,57 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
     }
 
     if (Object.keys(markets).length > 0) {
-      parsed[key] = {
+      const entry = {
         homeTeam: event.home_team,
         awayTeam: event.away_team,
         commenceTime: event.commence_time,
         markets,
+        // Tournament traceability — line-manager / debug endpoints can
+        // see which sport_<tournament> bucket this came from.
+        sourceTournament: event._sourceTournament || null,
       };
+      parsed[key] = entry;
+      // Per-tournament parallel cache. Same event content, but indexed
+      // under the explicit TOA sport key (e.g. tennis_atp_french_open)
+      // so a line-manager fallback can scan tennis_* keys when the
+      // generic 'tennis' lookup misses.
+      const tk = event._sourceTournament;
+      if (tk) {
+        if (!parsedByTournament.has(tk)) parsedByTournament.set(tk, {});
+        parsedByTournament.get(tk)[key] = entry;
+      }
     }
   }
 
-  // Store in cache under the generic sport key
+  // Store in cache under the generic sport key (existing behaviour)
   oddsCache[sport] = {
     events: parsed,
     fetchedAt: Date.now(),
+    perTournamentCounts: Object.fromEntries(
+      [...parsedByTournament.entries()].map(([tk, evs]) => [tk, Object.keys(evs).length])
+    ),
   };
+
+  // Also write per-tournament cache entries. Same events as the generic
+  // bucket but indexed by their TOA sport key. line-manager's resolve
+  // path scans these when the generic key doesn't have an event.
+  for (const [tourKey, tourEvents] of parsedByTournament.entries()) {
+    oddsCache[tourKey] = {
+      events: tourEvents,
+      fetchedAt: Date.now(),
+      sourceTournament: tourKey,
+      parentSport: sport,
+    };
+  }
+
+  // Refresh-time diagnostic: log per-tournament event counts so the
+  // operator can see in Railway logs which tournaments are populated.
+  if (parsedByTournament.size > 0) {
+    const summary = [...parsedByTournament.entries()]
+      .map(([tk, evs]) => `${tk}=${Object.keys(evs).length}`)
+      .join(', ');
+    log.info('OddsFeed', `${sport} per-tournament cache populated: ${summary}`);
+  }
 
   // Duplicate-event audit: log WARN if two cache entries represent the
   // same game under different team-name strings. This is the signature
@@ -7108,6 +7155,17 @@ function getAllCachedEvents() {
   return all;
 }
 
+// Return the list of cached sport keys whose name starts with `prefix`.
+// Used by line-manager's tennis fallback to scan tennis_atp_*, tennis_wta_*
+// cache slots written by fetchDynamicSports. Generic-sport lookups (e.g.
+// 'tennis') sometimes miss events that DO exist in a per-tournament slot,
+// either because the dynamic merge wrote stale data to the generic bucket
+// or because TOA returned a name variant that only matched in one slot.
+function getCachedSportKeysWithPrefix(prefix) {
+  if (!prefix) return [];
+  return Object.keys(oddsCache).filter(k => k.startsWith(prefix));
+}
+
 // ---------------------------------------------------------------------------
 // HELPERS
 // ---------------------------------------------------------------------------
@@ -8458,6 +8516,7 @@ module.exports = {
   getCacheStatus,
   getToaStaleServeStats,
   getAllCachedEvents,
+  getCachedSportKeysWithPrefix,
   __debugGetCache,
   captureClosingLines,
   getClosingLineSnapshot,

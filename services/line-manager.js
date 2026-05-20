@@ -1961,6 +1961,38 @@ async function resolveUnknownLine(rfqLeg) {
     }
   }
 
+  // Tennis tournament-aware fallback. The generic 'tennis' bucket merges
+  // all tournaments; on rare occasions an event lands in a per-tournament
+  // cache slot (tennis_atp_french_open, tennis_wta_strasbourg, etc.) but
+  // not in the generic bucket — or the team name matches differently in
+  // one bucket than another. Scan all 'tennis_*' cache keys before giving
+  // up. fetchDynamicSports writes per-tournament slots since 2026-05-20.
+  if ((!matchedHome || !matchedAway) && possibleSportKeys.includes('tennis')) {
+    const tennisTourKeys = oddsFeed.getCachedSportKeysWithPrefix
+      ? oddsFeed.getCachedSportKeysWithPrefix('tennis_')
+      : [];
+    for (const tourKey of tennisTourKeys) {
+      const uniqueTeams = [...new Set(oddsApiEvents.filter(e => e.sport === tourKey).flatMap(e => [e.homeTeam, e.awayTeam]))];
+      if (uniqueTeams.length === 0) continue;
+      const tryHome = matchTeamName(homeComp.name, uniqueTeams);
+      const tryAway = matchTeamName(awayComp.name, uniqueTeams);
+      if (!tryHome || !tryAway) continue;
+      const pxTime = event.scheduled || null;
+      const oddsEvt = oddsFeed.getEventMarkets(tourKey, tryHome, tryAway, pxTime)
+        || oddsFeed.getEventMarkets(tourKey, tryAway, tryHome, pxTime);
+      if (oddsEvt) {
+        matchedHome = tryHome;
+        matchedAway = tryAway;
+        // Keep sportKey as 'tennis' so downstream code paths (vig
+        // calibration, line-cache, etc.) stay sport-keyed correctly.
+        // We're just borrowing the per-tournament cache for the lookup.
+        sportKey = 'tennis';
+        log.debug('Lines', `Resolved ${lineId} via per-tournament tennis cache: ${tourKey} (${tryHome} vs ${tryAway})`);
+        break;
+      }
+    }
+  }
+
   // Second pass: try SharpAPI /events index (broader team name coverage)
   // Mirrors the seed-time fallback for events with non-standard team names.
   if (!matchedHome || !matchedAway) {
