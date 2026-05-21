@@ -1973,6 +1973,31 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // FIXED PP FLOOR ON DISTANCE FROM FAIR
+  //
+  // The multiplicative vig stack (per-leg vig, longshot ramp, chalk
+  // stack, leg-count multiplier) is RELATIVE — it produces a percentage
+  // change. At very low parlay fair probs (~0-5%), even a 5% relative
+  // vig only nets +0.1-0.25pp of absolute distance, which leaves the
+  // longshot zone of the Parlay Pricing vs Books chart nearly flat
+  // against fair while the books (Pin/FD/DK) carry +1.3 to +2.4pp
+  // average margin. This floor ensures we never offer closer than
+  // VIG_MIN_PP percentage points above fair regardless of where the
+  // multiplicative stack landed.
+  //
+  // 0 disables (default). Operator can tune on Railway without a code
+  // push. Start small (0.3-0.5pp) and watch the longshot band on the
+  // chart lift while monitoring fill rate.
+  // -------------------------------------------------------------------
+  const minVigPp = config.pricing.vigMinPp || 0;
+  if (minVigPp > 0 && fairParlayProb > 0) {
+    const ppFloor = fairParlayProb + minVigPp / 100;
+    if (ppFloor > offeredImpliedProb) {
+      offeredImpliedProb = Math.min(0.99, ppFloor);
+    }
+  }
+
+  // -------------------------------------------------------------------
   // PRICING SAFETY NET: cross-check fair against Pinnacle raw compound.
   //
   // Sign-flip bugs on alt spreads have historically been the most dangerous

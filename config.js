@@ -125,6 +125,16 @@ const config = {
     // disable. Tunable via VIG_LONGSHOT_THRESHOLD and VIG_LONGSHOT_MAX_ADD.
     vigLongshotThreshold: parseFloat(process.env.VIG_LONGSHOT_THRESHOLD) || 0.25,
     vigLongshotMaxAdd: parseFloat(process.env.VIG_LONGSHOT_MAX_ADD) || 0.010,
+    // Fixed pp floor on distance from fair (parlay-level). MAX-gates the
+    // final offered_implied_prob against (fair_parlay_prob + VIG_MIN_PP/100).
+    // Closes the longshot gap where multiplicative vig collapses to ~0pp
+    // at low fair probs (e.g., parlayFair=2% × 5% relative vig = 0.1pp
+    // distance — books carry +1-2pp+ in same zone). 0 disables (default).
+    vigMinPp: (() => {
+      const v = parseFloat(process.env.VIG_MIN_PP);
+      if (!Number.isFinite(v) || v < 0) return 0;
+      return v;
+    })(),
     // Fair-prob multiplier markup. Mirrors how Pinnacle / DK / FD price
     // parlays — the pp distance from fair grows linearly with fair_prob
     // because their markup is applied as a fraction of fair_prob rather
