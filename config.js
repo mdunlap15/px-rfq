@@ -585,6 +585,20 @@ const config = {
         return {};
       }
     })(),
+    // Max number of currently-open parlays from the SAME creator that may
+    // share a single leg. Defends against one bettor laddering many
+    // 2-leg parlays with a constant anchor leg + rotating second leg
+    // (the SIGNATURE cooldown rotates with the second leg, so without
+    // this gate one creator can accumulate concentrated exposure on
+    // a single outcome — see 2026-05-20 Knicks ML stack: 5 parlays from
+    // one creator, $15.1K gross risk, -$303 EV from line moves). 0
+    // disables; default 2 (one initial bet + one follow-up allowed,
+    // 3rd+ sharing the same leg is declined).
+    maxParlaysPerCreatorLeg: (() => {
+      const v = parseInt(process.env.MAX_PARLAYS_PER_CREATOR_LEG, 10);
+      if (!Number.isFinite(v) || v < 0) return 2;
+      return v;
+    })(),
     // Phase 2 prop quoting caps — applies to ANY parlay containing one
     // or more player_prop legs (NBA points/rebounds/assists/threes,
     // NHL shots_on_goal, MLB pitcher_strikeouts, etc.). Game-line-only

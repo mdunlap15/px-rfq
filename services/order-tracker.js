@@ -2564,6 +2564,44 @@ function findByParlayId(parlayId) {
   return orders[parlayId] || null;
 }
 
+// Terminal statuses — parlays here no longer carry forward risk and don't
+// count toward stacking. Anything not in this set is treated as "open"
+// for stacking-gate purposes.
+const TERMINAL_PARLAY_STATUSES = new Set(['settled', 'rejected', 'voided', 'cancelled']);
+
+/**
+ * Count currently-open parlays from a given creator that share a specific
+ * leg (line_id + selection). "Open" = not in a terminal status.
+ *
+ * Used by the per-creator leg stacking gate in websocket.handleRFQ to
+ * decline new RFQs from a creator who's already laddered N parlays sharing
+ * one anchor leg. See config.pricing.maxParlaysPerCreatorLeg.
+ *
+ * legKey format: `${lineId}:${selection}` — must match the format the
+ * caller builds from the new RFQ's legs.
+ */
+function getCreatorLegStackCount(creatorId, legKey) {
+  if (!creatorId || !legKey) return 0;
+  let count = 0;
+  for (const parlayId in orders) {
+    const o = orders[parlayId];
+    if (!o) continue;
+    const cid = o.meta && (o.meta.creatorId || o.meta.creator_id);
+    if (cid !== creatorId) continue;
+    if (TERMINAL_PARLAY_STATUSES.has(o.status)) continue;
+    const legs = o.legs || (o.meta && o.meta.legs) || [];
+    for (const l of legs) {
+      const lid = l.lineId || l.line_id;
+      const sel = l.selection || '';
+      if (lid && (lid + ':' + sel) === legKey) {
+        count++;
+        break; // one parlay = one count regardless of leg repetition
+      }
+    }
+  }
+  return count;
+}
+
 /**
  * Manually override a single leg's inferredResult on a confirmed order.
  * Use case: a leg's inferredResult was set wrong by a buggy lookup and
@@ -6363,6 +6401,7 @@ module.exports = {
   deleteUnknownSettledOrders,
   deleteOrdersByParlayIds,
   findByParlayId,
+  getCreatorLegStackCount,
   findByOrderUuid,
   overrideLegResult,
   getTotalPortfolioRisk,

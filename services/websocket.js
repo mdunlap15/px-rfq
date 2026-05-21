@@ -732,6 +732,35 @@ async function handleRFQ(data) {
       }
     }
 
+    // Per-creator leg stacking gate. Caps how many currently-open parlays
+    // a single creator can have sharing any one leg. Defends against the
+    // "rotate the second leg, keep the anchor constant" pattern where
+    // one bettor accumulates concentrated exposure on a single outcome
+    // (e.g. 5 Knicks-ML parlays each with a different prop). Runs only
+    // when creator_id is known — skips legacy/anonymous RFQs.
+    const stackLimit = config.pricing.maxParlaysPerCreatorLeg;
+    if (creatorId && stackLimit > 0 && Array.isArray(legs) && legs.length > 0) {
+      for (const leg of legs) {
+        const lid = leg.lineId || leg.line_id;
+        if (!lid) continue;
+        const sel = leg.selection || '';
+        const legKey = lid + ':' + sel;
+        const openCount = orderTracker.getCreatorLegStackCount(creatorId, legKey);
+        if (openCount >= stackLimit) {
+          const legLabel = (leg.team || leg.market || lid) + (sel ? ' (' + sel + ')' : '');
+          log.info('RFQ', `Declining: creator ${creatorId.slice(0, 8)} already has ${openCount} open parlays sharing leg ${legLabel} (max ${stackLimit}) — parlay=${parlayId}`);
+          orderTracker.recordDecline('creator leg stacking', {
+            parlayId,
+            knownLegs: [],
+            declineDetail: 'creator ' + creatorId.slice(0, 8) + ' has ' + openCount + ' open parlays sharing ' + legLabel + ' (max ' + stackLimit + ')',
+          });
+          rfqStages.declined++;
+          updateRfqOutcome(parlayId, 'creator_leg_stack', creatorId);
+          return;
+        }
+      }
+    }
+
     // Downgraded to debug — high-volume log that can backpressure stdout
     // under load. "Offered" log below preserves the audit trail for successful
     // submissions; paused/declined outcomes are already tracked separately.
