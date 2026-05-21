@@ -747,10 +747,19 @@ const PLAYER_PROP_CONFIGS = {
     leaguePath: 'baseball/mlb',
     sportLabel: 'MLB',
     propPatterns: [
+      // Standard o/u markets that already work.
       { propType: 'hitter_hits',         regex: /^hits\s*(?:o\/u)?$/i },
       { propType: 'hitter_hr',           regex: /^home\s+runs\s*(?:o\/u)?$/i },
       { propType: 'hitter_total_bases',  regex: /^total\s+bases\s*(?:o\/u)?$/i },
       { propType: 'hitter_rbi_runs',     regex: /^rbis?\s*(?:o\/u)?$/i },
+      // Milestone ladder markets (1+/2+/3+ Yes-only). One-sided emission
+      // captures these; pair-mode drops them. Use distinct regexes so the
+      // pair-mode propType is unchanged and the milestone propType is
+      // recognizable downstream.
+      { propType: 'hitter_hr',           regex: /^home\s+runs?\s+milestones?$/i },
+      { propType: 'hitter_hits',         regex: /^hits?\s+milestones?$/i },
+      { propType: 'hitter_total_bases',  regex: /^total\s+bases\s+milestones?$/i },
+      { propType: 'hitter_rbi_runs',     regex: /^rbis?\s+milestones?$/i },
     ],
     subCategoryUrls: [
       'https://sportsbook.draftkings.com/leagues/baseball/mlb?category=batter-props',
@@ -828,8 +837,22 @@ async function fetchDkPlayerProps(sport, { force = false } = {}) {
             const american = sel.displayOdds?.american
               ? parseInt(String(sel.displayOdds.american).replace(/[−–—]/g, '-').replace(/[^\-0-9]/g, ''), 10)
               : null;
-            const lineVal = sel.points ?? (typeof sel.label === 'string' ? parseFloat((sel.label.match(/[\d.]+/) || [''])[0]) : null);
-            const side = /\bover\b/i.test(sel.label || '') ? 'over' : /\bunder\b/i.test(sel.label || '') ? 'under' : null;
+            // Standard parse for over/under markets. For milestone ladder
+            // markets (DK posts "1+", "2+", "3+" as YES-only selections),
+            // map the threshold to an over-side selection at line = N-0.5
+            // so PX's binary YES line=0.5 matches DK's "1+" entry, line=1.5
+            // matches "2+", etc. PX has no 2nd side for these; emitted into
+            // propsOneSided below.
+            const label = sel.label || '';
+            let side = /\bover\b/i.test(label) ? 'over' : /\bunder\b/i.test(label) ? 'under' : null;
+            let lineVal = sel.points ?? (typeof label === 'string' ? parseFloat((label.match(/[\d.]+/) || [''])[0]) : null);
+            if (side == null) {
+              const m = label.match(/^(\d+)\+/);
+              if (m) {
+                side = 'over';
+                if (sel.points == null) lineVal = parseInt(m[1], 10) - 0.5;
+              }
+            }
             // playerName comes from sel.outcomeType or sel.player or first line of sel.label before "Over/Under"
             const playerName = sel.participant || sel.player || sel.outcomeType
               || (sel.label || '').replace(/\s*(over|under)\s+[\d.]+.*/i, '').trim() || null;
@@ -861,8 +884,16 @@ async function fetchDkPlayerProps(sport, { force = false } = {}) {
         }
       }
 
-      // Build flat props list — pair Over+Under selections from each market
+      // Build flat props list — pair Over+Under selections from each market.
+      // Also capture ONE-SIDED entries (DK Milestones ladders post only the
+      // YES side at 1+/2+/3+; no opposing under). The one-sided list is
+      // consumed by lookupDkPlayerPropOneSidedFairProb as a tertiary
+      // fallback for binary hitter props (line=0.5) and ladder positions
+      // (line=1.5/2.5) that TOA's batter_* coverage misses entirely.
+      // No de-vig is possible — caller treats DK's posted price as the
+      // reference and applies a sweetener on top.
       const props = [];
+      const propsOneSided = [];
       for (const market of Object.values(marketRawById)) {
         // Group selections by (playerName, line) — DK markets can carry
         // multiple players on a single market_id (e.g. all NBA points
@@ -875,32 +906,52 @@ async function fetchDkPlayerProps(sport, { force = false } = {}) {
           byKey[k][sel.side] = sel;
         }
         for (const pair of Object.values(byKey)) {
-          if (!pair.over || !pair.under) continue;
-          const sumImplied = (pair.over.impliedProb || 0) + (pair.under.impliedProb || 0);
-          if (sumImplied <= 0) continue;
           const ev = eventsById[market.eventId] || {};
-          props.push({
-            sport,
-            propType: market.propType,
-            playerName: pair.playerName,
-            line: pair.line,
-            eventId: market.eventId,
-            eventName: ev.eventName || null,
-            startTime: ev.startTime || null,
-            over: { ...pair.over, fairProb: (pair.over.impliedProb || 0) / sumImplied },
-            under: { ...pair.under, fairProb: (pair.under.impliedProb || 0) / sumImplied },
-            vig: round(sumImplied - 1, 5),
-          });
+          if (pair.over && pair.under) {
+            const sumImplied = (pair.over.impliedProb || 0) + (pair.under.impliedProb || 0);
+            if (sumImplied <= 0) continue;
+            props.push({
+              sport,
+              propType: market.propType,
+              playerName: pair.playerName,
+              line: pair.line,
+              eventId: market.eventId,
+              eventName: ev.eventName || null,
+              startTime: ev.startTime || null,
+              over: { ...pair.over, fairProb: (pair.over.impliedProb || 0) / sumImplied },
+              under: { ...pair.under, fairProb: (pair.under.impliedProb || 0) / sumImplied },
+              vig: round(sumImplied - 1, 5),
+            });
+          } else if (pair.over || pair.under) {
+            const side = pair.over ? pair.over : pair.under;
+            if (!side.impliedProb || !Number.isFinite(side.americanOdds)) continue;
+            propsOneSided.push({
+              sport,
+              propType: market.propType,
+              playerName: pair.playerName,
+              line: pair.line,
+              side: pair.over ? 'over' : 'under',
+              eventId: market.eventId,
+              eventName: ev.eventName || null,
+              startTime: ev.startTime || null,
+              americanOdds: side.americanOdds,
+              decimalOdds: side.decimalOdds,
+              impliedProb: side.impliedProb,
+            });
+          }
         }
       }
 
-      const payload = { fetchedAt: new Date().toISOString(), props };
+      const payload = { fetchedAt: new Date().toISOString(), props, propsOneSided };
       cacheBySport[cacheKey] = { at: Date.now(), data: payload };
       // Counts per propType for log visibility
       const byType = {};
       for (const p of props) byType[p.propType] = (byType[p.propType] || 0) + 1;
+      const byTypeOne = {};
+      for (const p of propsOneSided) byTypeOne[p.propType] = (byTypeOne[p.propType] || 0) + 1;
       const summary = Object.entries(byType).map(([k, n]) => `${k}=${n}`).join(', ') || '(none)';
-      log.info('DkScraper', `${cfg.sportLabel} player props: ${props.length} captured (${Date.now() - startedAt}ms) [${summary}]`);
+      const summaryOne = Object.entries(byTypeOne).map(([k, n]) => `${k}=${n}`).join(', ') || '(none)';
+      log.info('DkScraper', `${cfg.sportLabel} player props: ${props.length} paired + ${propsOneSided.length} one-sided (${Date.now() - startedAt}ms) [paired: ${summary}] [one-sided: ${summaryOne}]`);
       return payload;
     } finally {
       await browser.close();
@@ -1442,6 +1493,50 @@ function lookupDkPlayerPropFairProb(sport, propType, playerName, line) {
       resolvedEventId: p.eventId,
       fetchedAt: cache.data.fetchedAt,
       source: 'dk-scraper',
+    };
+  }
+  return null;
+}
+
+/**
+ * One-sided DK player prop lookup. Returns the YES-side American odds +
+ * implied prob for milestone-ladder markets that have no opposing under
+ * side (DK posts 1+/2+/3+ HR as YES-only; PX represents the same outcome
+ * as "Total Home Runs Over 0.5/1.5/2.5"). Used as a tertiary fallback in
+ * the line-manager prop seed pass when TOA and the standard DK pair
+ * lookup both fail. No de-vig possible — the caller treats DK's raw
+ * implied prob as the reference and applies a sweetener on top.
+ *
+ * Match strategy mirrors lookupDkPlayerPropFairProb: case-insensitive
+ * player-name with last-name fallback for diacritics; exact line value
+ * required (no fuzzing across ladder positions).
+ */
+function lookupDkPlayerPropOneSidedFairProb(sport, propType, playerName, line) {
+  const cacheKey = `playerProps_${sport}`;
+  const cache = cacheBySport[cacheKey];
+  if (!cache || !cache.data || !Array.isArray(cache.data.propsOneSided)) return null;
+  const targetPlayer = normalizeTeamName(playerName);
+  if (!targetPlayer) return null;
+  const targetLast = targetPlayer.split(' ').pop();
+  for (const p of cache.data.propsOneSided) {
+    if (p.propType !== propType) continue;
+    if (line != null && Math.abs((p.line ?? -1e9) - line) > 0.01) continue;
+    const cand = normalizeTeamName(p.playerName || '');
+    const candLast = cand.split(' ').pop();
+    const playerOk = cand === targetPlayer
+      || cand.includes(targetPlayer)
+      || targetPlayer.includes(cand)
+      || (candLast && targetLast && candLast === targetLast && candLast.length >= 4);
+    if (!playerOk) continue;
+    return {
+      side: p.side,
+      americanOdds: p.americanOdds,
+      decimalOdds: p.decimalOdds,
+      impliedProb: p.impliedProb,
+      books: ['draftkings'],
+      resolvedEventId: p.eventId,
+      fetchedAt: cache.data.fetchedAt,
+      source: 'dk-scraper-one-sided',
     };
   }
   return null;
@@ -2786,6 +2881,7 @@ module.exports = {
   fetchMlbF5Odds,
   fetchDkPlayerProps,
   lookupDkPlayerPropFairProb,
+  lookupDkPlayerPropOneSidedFairProb,
   fetchDkGameLines,
   lookupDkGameLines,
   debugMmaScraperState,

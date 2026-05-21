@@ -1476,6 +1476,70 @@ async function seedAllLines() {
                 log.debug('Lines', `DK player-prop fallback error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
               }
             }
+            // Tertiary fallback: one-sided DK lookup for MLB hitter binary
+            // props (line=0.5 or ladder positions 1.5/2.5). TOA and pair-DK
+            // can't produce a 2-sided fair when DK posts only the YES-side
+            // milestone ladder; this path uses DK's raw implied prob with
+            // a sweetener applied at pricing time (bypasses parlay-vig
+            // for this leg via bookPriceOverride, same mechanism as the
+            // golf-matchup manual upload). Hitter-binary only — over/under
+            // props (NBA points, NHL shots, MLB strikeouts) still require
+            // a true 2-sided pair.
+            const oneSidedEligible = sportKey === 'baseball_mlb'
+              && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType);
+            let oneSidedHit = null;
+            if (oneSidedEligible && (!lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null)) {
+              try {
+                const dk = require('./dk-scraper');
+                if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
+                  oneSidedHit = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+                }
+              } catch (err) {
+                log.debug('Lines', `DK one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
+              }
+            }
+
+            if (oneSidedHit) {
+              // DK posted the YES side only. Synthesize the 2-sided fair
+              // by treating DK's raw implied prob as the fair (no de-vig
+              // possible). Pricer applies standard parlay vig on top —
+              // same path as any other player_prop. Operator chose this
+              // over a custom sweetener (2026-05-21) for consistency.
+              const dkOver = oneSidedHit.side === 'over' ? oneSidedHit.impliedProb : (1 - oneSidedHit.impliedProb);
+              const dkUnder = 1 - dkOver;
+              for (const sel of sels) {
+                const fairProb = sel.selection === 'over' ? dkOver : dkUnder;
+                _setSeedLine(sel.lineId, {
+                  sport: sportKey,
+                  pxEventId: event.event_id,
+                  pxEventName: event.name,
+                  marketType: 'player_' + propType,
+                  marketName: market.name,
+                  selection: sel.selection,
+                  teamName: playerName,
+                  line: sel.line,
+                  homeTeam: matchedHome,
+                  awayTeam: matchedAway,
+                  oddsApiSport: sportKey,
+                  oddsApiMarket: toaMarketKey,
+                  oddsApiSelection: sel.selection,
+                  startTime: event.scheduled || null,
+                  playerName,
+                  propType,
+                  fairProb,
+                  fairProbOver: dkOver,
+                  fairProbUnder: dkUnder,
+                  booksWithBothSides: 0,
+                  propBooks: ['draftkings'],
+                  propSource: 'dk-scraper-one-sided',
+                  propFetchedAt: oneSidedHit.fetchedAt || Date.now(),
+                });
+                totalLines++;
+                matchedLines++;
+              }
+              continue; // skip the standard two-sided registration path below
+            }
+
             if (!lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null) continue;
             const both = lookup.booksWithBothSides || 0;
             const trustedAlone = both === 1 && (lookup.books || []).some(b => trustedSet.includes(String(b).toLowerCase()));
