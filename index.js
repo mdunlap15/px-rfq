@@ -966,29 +966,20 @@ function startStatusServer() {
         maxPerPlayerDefault: config.pricing.maxExposurePerPlayerDefault,
       },
       portfolio: (() => {
-        // Account-based P&L is the SOURCE OF TRUTH for the dashboard.
-        // PX's /balance endpoint returns the TOTAL account balance —
-        // matched_wager_balance and unmatched_wager_balance both return
-        // 0 in the /balance payload, confirming PX lumps matched stakes
-        // into the top-level `balance` field rather than reporting them
-        // as a separate locked bucket. So:
-        //   accountValue  == liveBalance   (NOT liveBalance + currentRisk)
-        //   accountPnL    == liveBalance - startingBankroll
-        // The previous formula added currentRisk back on top, which
-        // double-counted the matched stakes and produced a misleading
-        // P&L (operator reported +$17,067 when real P&L was ~+$2,731).
+        // Account-based P&L = TotalEquity − StartingBankroll. This is the
+        // operator's mental model: how much capital has grown vs the initial
+        // deposit, accounting for both cash AND open exposure (since open
+        // stakes have been debited from PX cash but aren't yet realized).
+        //
+        // Historical note: an earlier formula (`accountValue − starting`)
+        // assumed PX's /balance includes locked stakes, which is FALSE in
+        // production (cash $19.7K + open $22.9K ≠ balance $19.7K; they sum
+        // to total equity $42.6K). Using bare cash as the basis produced
+        // a misleadingly negative P&L. The fix: use totalEquity.
         const liveBal = config.pricing.liveBankroll;
         const currentRisk = orderTracker.getTotalPortfolioRisk();
         const startingBankroll = config.pricing.startingBankroll;
         const accountValue = (liveBal && liveBal > 0) ? liveBal : null;
-        // Only compute account-based P&L when startingBankroll was
-        // explicitly set (env var present). Otherwise leave null so
-        // the dashboard falls back to the tracker's runningPnL —
-        // avoids the sandbox-era $20K default silently anchoring
-        // production P&L to the wrong baseline.
-        const accountPnL = (accountValue != null && startingBankroll != null)
-          ? (accountValue - startingBankroll)
-          : null;
         // Total Equity = Cash Available + Deployed.
         //
         // The "deployed" addend should be the SAME number the main dashboard
@@ -1005,6 +996,14 @@ function startStatusServer() {
         const pxOpenExposure = pxLedger.getCachedOpenExposure();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : currentRisk;
         const totalEquity = (accountValue != null) ? (accountValue + effectiveRisk) : null;
+        // Only compute account-based P&L when startingBankroll was
+        // explicitly set (STARTING_BANKROLL env var present). Otherwise
+        // leave null so the dashboard falls back appropriately —
+        // avoids a sandbox-era default silently anchoring production
+        // P&L to the wrong baseline.
+        const accountPnL = (totalEquity != null && startingBankroll != null)
+          ? (totalEquity - startingBankroll)
+          : null;
         return {
           bankroll: getBankroll(),
           balance: liveBal || getBankroll(),
