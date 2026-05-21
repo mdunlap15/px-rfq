@@ -4140,6 +4140,7 @@
         <th ${pSortClick('stake', 'right')}>My Risk${pSortArrow('stake')}</th>
         <th ${pSortClick('towin', 'right')}>To Win${pSortArrow('towin')}</th>
         <th ${pSortClick('edge', 'right')} title="Theoretical edge per $ wagered = 1 - (fair / bettor_implied)">Theo Edge${pSortArrow('edge')}</th>
+        <th ${pSortClick('ev', 'right')} title="Theoretical expected value in dollars from SP perspective = (1 - fairProb) × toWin - fairProb × risk">EV $${pSortArrow('ev')}</th>
         <th ${pSortClick('winprob', 'right')} title="Probability you win (at least one bettor leg fails)">Win Prob${pSortArrow('winprob')}</th>
         <th ${pSortClick('status')} title="Game status">Status${pSortArrow('status')}</th>
       </tr>`;
@@ -4271,11 +4272,12 @@
         <td style="text-align:right">${myRisk}</td>
         <td style="text-align:right; font-weight:600; color:var(--green);">${toWin}</td>
         <td style="text-align:right" class="${posEdgeCls}">${posEdgeStr}</td>
+        <td style="text-align:right" class="${posEdgeCls}">${posEvStr}</td>
         <td style="text-align:right">${posWpLabel}</td>
         <td title="${gameStatus.title}"><span style="color:${gameStatus.color}; font-weight:600; font-size:11px;">${gameStatus.label}</span></td>
       </tr>
       <tr id="${rowKey}" style="display:${expanded ? 'table-row' : 'none'}; background: var(--surface3);">
-        <td colspan="12" style="padding: 12px 16px;">
+        <td colspan="13" style="padding: 12px 16px;">
           <div style="font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 8px;">PARLAY LEGS</div>
           ${buildLegTable(legs, { vig: order.meta?.vig || order.vig || 0 })}
           <div style="margin-top: 8px; font-size: 11px; color: var(--text3);">
@@ -4516,6 +4518,7 @@
     html += '<th style="text-align:right; color:var(--green);">DK</th>';
     html += '<th ' + sSortClick('stake', 'right') + '>My Risk' + sSortArrow('stake') + '</th>';
     html += '<th ' + sSortClick('edge', 'right') + ' title="Theoretical edge per $ wagered = 1 - (fair / bettor_implied)">Theo Edge' + sSortArrow('edge') + '</th>';
+    html += '<th ' + sSortClick('ev', 'right') + ' title="Theoretical expected value in dollars from SP perspective at quote time = (1 - fairProb) × toWin - fairProb × risk">EV $' + sSortArrow('ev') + '</th>';
     html += '<th ' + sSortClick('result') + ' title="Settlement outcome from our (SP) perspective">SP Result' + sSortArrow('result') + '</th>';
     html += '<th ' + sSortClick('pnl', 'right') + '>P&L' + sSortArrow('pnl') + '</th>';
     html += '<th style="text-align:right">Cumul.</th>';
@@ -4579,12 +4582,13 @@
       html += '<td style="text-align:right; color:var(--green);">' + sDkFmt + '</td>';
       html += '<td style="text-align:right">' + stake + '</td>';
       html += '<td style="text-align:right" class="' + stlEdgeCls + '">' + stlEdgeStr + '</td>';
+      html += '<td style="text-align:right" class="' + stlEdgeCls + '">' + stlEvStr + '</td>';
       html += '<td title="' + resultTitle + '"><span class="' + resultCls + '">' + resultText + '</span></td>';
       html += '<td style="text-align:right">' + pnlHtml + '</td>';
       html += '<td style="text-align:right">' + cumulHtml + '</td>';
       html += '</tr>';
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
-      html += '<td colspan="12" style="padding:12px 16px;">';
+      html += '<td colspan="13" style="padding:12px 16px;">';
       html += buildLegTable(sLegs.length > 0 ? sLegs : legs, { pad: '2px 6px', vig: order.meta?.vig || order.vig || 0 });
       html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '</div>';
       html += '</td></tr>';
@@ -7243,13 +7247,16 @@
     ].filter(Boolean);
     if (els.length === 0) return;
 
-    // Prefer PX-native P&L from /px-pnl when available (authoritative —
-    // pulled directly from PX's settlement_status + profit fields; the
-    // in-memory tracker misses silent losses). Fall back to tracker
-    // values only if the PX fetch hasn't populated yet.
+    // Realized P&L = account-based delta (totalEquity − startingBankroll)
+    // when STARTING_BANKROLL is configured. This is the canonical headline
+    // metric that reconciles directly to the operator's PX balance + open
+    // exposure vs the initial deposit. Falls back to PX-summed realizedPnL
+    // (lifetime sum of per-order profit) when account-based isn't set —
+    // useful at boot before /status loads or in test environments without
+    // a starting bankroll. Last-resort fallback: in-memory tracker.
     const pxPnL = window._pxPnL;
-    const pnl = pxPnL?.realizedPnL != null ? pxPnL.realizedPnL
-              : (portfolio?.accountPnL != null ? portfolio.accountPnL : (orderStats.runningPnL || 0));
+    const pnl = portfolio?.accountPnL != null ? portfolio.accountPnL
+              : (pxPnL?.realizedPnL != null ? pxPnL.realizedPnL : (orderStats.runningPnL || 0));
     const wins = pxPnL?.counts?.wins ?? (orderStats.totalWins || 0);
     const losses = pxPnL?.counts?.losses ?? (orderStats.totalLosses || 0);
     const settled = wins + losses;
@@ -7342,10 +7349,12 @@
     const netImpactCls = pxPnL?.netBalanceImpact != null
       ? (pxPnL.netBalanceImpact >= 0 ? 'positive' : 'negative') : 'neutral';
 
-    const pnlLabel = pxPnL ? 'Realized P&L' : 'P&L';
-    const pnlTitle = pxPnL
-      ? 'Sum of PX profit field across all settled orders (authoritative)'
-      : 'Tracker-derived P&L (may be inflated by unsettled losses)';
+    const pnlLabel = (portfolio?.accountPnL != null || pxPnL) ? 'Realized P&L' : 'P&L';
+    const pnlTitle = portfolio?.accountPnL != null
+      ? 'Account-based: Total Equity (Cash Available + Deployed) minus Starting Bankroll'
+      : pxPnL
+        ? 'Sum of PX profit field across all settled orders (capped at last 5,000 orders)'
+        : 'Tracker-derived P&L (may be inflated by unsettled losses)';
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
