@@ -1477,25 +1477,39 @@ async function seedAllLines() {
               }
             }
             // Tertiary fallback: one-sided DK lookup for MLB hitter binary
-            // props (line=0.5 or ladder positions 1.5/2.5). TOA and pair-DK
-            // can't produce a 2-sided fair when DK posts only the YES-side
-            // milestone ladder; this path uses DK's raw implied prob with
-            // a sweetener applied at pricing time (bypasses parlay-vig
-            // for this leg via bookPriceOverride, same mechanism as the
-            // golf-matchup manual upload). Hitter-binary only — over/under
-            // props (NBA points, NHL shots, MLB strikeouts) still require
-            // a true 2-sided pair.
+            // props (line=0.5 or ladder positions 1.5/2.5).
+            //
+            // Triggers in TWO cases:
+            //  (i)  2-sided lookup failed entirely (TOA + pair-DK both empty
+            //       — original use case for DK milestone ladders that have
+            //       no opposing under).
+            //  (ii) 2-sided lookup succeeded but DK is NOT in the paired
+            //       consensus. Operator directive 2026-05-21: non-DK
+            //       paired books (BetMGM, BetOnline, BetRivers) frequently
+            //       drift 5-7pp implied prob from DK on hitter binary
+            //       props. When DK isn't paired, we were quoting a stale
+            //       average that undercut DK's posted price by 5-7pp —
+            //       giving bettors free EV. Prefer DK's milestones (one-
+            //       sided) over non-DK paired consensus in this case.
+            //
+            // Hitter-binary only — over/under props (NBA points, NHL shots,
+            // MLB strikeouts) still require a true 2-sided pair.
             const oneSidedEligible = sportKey === 'baseball_mlb'
               && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType);
             let oneSidedHit = null;
-            if (oneSidedEligible && (!lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null)) {
-              try {
-                const dk = require('./dk-scraper');
-                if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
-                  oneSidedHit = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+            if (oneSidedEligible) {
+              const lookupHasDk = lookup && Array.isArray(lookup.books)
+                && lookup.books.some(b => String(b).toLowerCase() === 'draftkings');
+              const lookupMissing = !lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null;
+              if (lookupMissing || !lookupHasDk) {
+                try {
+                  const dk = require('./dk-scraper');
+                  if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
+                    oneSidedHit = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+                  }
+                } catch (err) {
+                  log.debug('Lines', `DK one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
                 }
-              } catch (err) {
-                log.debug('Lines', `DK one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
               }
             }
 
