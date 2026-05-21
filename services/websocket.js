@@ -962,18 +962,41 @@ async function handleRFQ(data) {
                 // as team_total and alt_spread.
                 category = 'player_prop';
                 detail = `line ${lineNum} (likely player prop)`;
+              } else if (eventSport.includes('baseball') && absLine === 0.5) {
+                // PX encodes binary hitter props (Total Hits/HRs/RBIs/Bases/Runs
+                // Over/Under 0.5) as type='total' with line=0.5. The bulk of
+                // the prior "alt_spread" tagging was actually these binary
+                // props — diagnosed 2026-05-21 (87% of MLB low-line declines
+                // were binary props, not real run-line spreads).
+                category = 'hitter_binary_prop';
+                detail = `line 0.5 (binary YES/NO hitter prop)`;
+              } else if (eventSport.includes('baseball') && (absLine === 1.5 || absLine === 2.5 || absLine === 3.5)) {
+                // Ambiguous at line=1.5/2.5: real alt run-line OR ladder
+                // hitter prop (Total Hits 2+, Total Bases 2+, etc.). Without
+                // marketName populated by resolveUnknownLine we can't tell —
+                // tag as ambiguous so the next analysis distinguishes them.
+                category = 'baseball_low_line_ambiguous';
+                detail = `line ${lineNum} (alt run-line OR hitter ladder)`;
               } else if (eventSport.includes('baseball') && absLine >= 5 && absLine <= 15) {
                 category = 'alt_total';
                 detail = `line ${lineNum}`;
               } else if (eventSport.includes('baseball') && absLine < 5) {
                 category = 'alt_spread';
                 detail = `line ${lineNum}`;
+              } else if (eventSport.includes('hockey') && absLine === 0.5) {
+                // Same pattern as baseball: line=0.5 in NHL = binary player
+                // prop (To Score a Goal, To Record a Point, Anytime Goalscorer).
+                category = 'player_binary_prop';
+                detail = `line 0.5 (binary YES/NO player prop)`;
               } else if (eventSport.includes('hockey') && absLine >= 4 && absLine <= 10) {
                 category = 'alt_total';
                 detail = `line ${lineNum}`;
               } else if (eventSport.includes('hockey') && absLine < 4) {
                 category = 'alt_spread';
                 detail = `line ${lineNum}`;
+              } else if (eventSport.includes('basketball') && absLine === 0.5) {
+                category = 'player_binary_prop';
+                detail = `line 0.5 (binary YES/NO player prop)`;
               } else if (eventSport.includes('soccer') && absLine <= 5) {
                 category = absLine <= 2 ? 'alt_spread' : 'alt_total';
                 detail = `line ${lineNum}`;
