@@ -1015,17 +1015,32 @@
           </div>
         </div>
 
-        <!-- Rolling 500-SETTLED-parlay window: total EV, total realized P&L,
-             stake-weighted edge. Settled-only so the rolling pnl sum is over
-             a constant 500 finished outcomes — not a partially-settled subset
-             that drifts upward as backlog clears. -->
+        <!-- Rolling 500-SETTLED-parlay window: total realized P&L,
+             stake-weighted edge, cumulative stake. Settled-only so the
+             rolling pnl sum is over a constant 500 finished outcomes —
+             not a partially-settled subset that drifts upward as backlog
+             clears. (EV was split into its own chart below 2026-05-21.) -->
         <div class="card">
           <div class="card-header" onclick="const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');">
-            <span><span class="toggle-icon collapsed">&#9660;</span>Rolling 500 Settled: Total EV vs P&L vs Avg Edge</span>
+            <span><span class="toggle-icon collapsed">&#9660;</span>Rolling 500 Settled: P&L vs Avg Edge</span>
             <span id="rolling500-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
           </div>
           <div class="card-body collapsed" id="chart-rolling500">
             <div class="empty-state"><div class="icon">-</div><div>Need 500+ settled parlays to chart rolling window</div></div>
+          </div>
+        </div>
+
+        <!-- Daily EV ($): bar per day of settled-parlay EV totals plus a
+             rolling 7-day average line. Lets the operator see whether
+             theoretical edge is converting to dollars consistently or
+             clustering on a few outlier days. -->
+        <div class="card">
+          <div class="card-header" onclick="const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');">
+            <span><span class="toggle-icon collapsed">&#9660;</span>Daily EV ($)</span>
+            <span id="ev-daily-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
+          </div>
+          <div class="card-body collapsed" id="chart-ev-daily">
+            <div class="empty-state"><div class="icon">-</div><div>Need 2+ days of settled parlays to chart daily EV</div></div>
           </div>
         </div>
 
@@ -8507,6 +8522,7 @@
     renderChartCumulPnlRoi(settled);
     renderChartCumulPnlByType(settled);
     renderChartRolling500(ownOrders);
+    renderChartEvDaily(settled);
     renderChartPnlSport(settled);
     renderChartPnlLegs(settled);
     renderChartCalibration(settled);
@@ -11861,13 +11877,18 @@
     const pnlLo = rawMinPnl - pnlPad;
     const pnlHi = rawMaxPnl + pnlPad;
 
-    // ROI axis: fixed -10% / +10% range. Cumulative ROI on a $400k+
-    // book settles into a narrow band (typically ±5%); a fixed window
-    // keeps the late-stage signal readable and lets the warmup period's
-    // wild swings clip via the chart-area clipPath rather than dictating
-    // the axis range.
-    const roiLo = -10;
-    const roiHi = 10;
+    // ROI axis — anchored so the 0% gridline sits at exactly the same
+    // pixel Y as the P&L $0 line on the left axis. This lets the operator
+    // read the two series against a shared zero baseline. Span sized to
+    // comfortably contain the ROI data (min 15pp) so cumulative-ROI
+    // late-stage signal stays readable while the early warmup clips via
+    // the chart-area clipPath.
+    const pnlZeroFraction = (pnlHi - pnlLo) > 0 ? (0 - pnlLo) / (pnlHi - pnlLo) : 0.5;
+    const roiVals = points.map(p => p.roi).filter(v => Number.isFinite(v));
+    const maxAbsRoi = roiVals.length ? Math.max(1, ...roiVals.map(Math.abs)) : 5;
+    const roiSpan = Math.max(maxAbsRoi * 2.5, 15);
+    const roiLo = -pnlZeroFraction * roiSpan;
+    const roiHi = (1 - pnlZeroFraction) * roiSpan;
 
     const tMin = points[0].t;
     const tMax = points[points.length - 1].t;
@@ -12237,11 +12258,9 @@
       return '$' + n.toFixed(0);
     }
     if (sumEl) {
-      const evCls = last.ev >= 0 ? 'positive' : 'negative';
       const pnlCls = (last.pnl ?? 0) >= 0 ? 'positive' : 'negative';
       const edgeCls = (last.edgePct ?? 0) >= 0 ? 'positive' : 'negative';
       sumEl.innerHTML = ' &middot; last ' + WINDOW + ': '
-        + 'EV <span class="' + evCls + '">' + (last.ev >= 0 ? '+$' : '-$') + Math.abs(last.ev).toFixed(0) + '</span> · '
         + 'P&amp;L <span class="' + pnlCls + '">' + ((last.pnl == null) ? '—' : ((last.pnl >= 0 ? '+$' : '-$') + Math.abs(last.pnl).toFixed(0))) + '</span> · '
         + 'Edge <span class="' + edgeCls + '">' + ((last.edgePct == null) ? '—' : ((last.edgePct >= 0 ? '+' : '') + last.edgePct.toFixed(2) + '%')) + '</span> · '
         + 'Stake <span style="color:var(--text2);">' + fmtKShort(last.stake) + '</span>';
@@ -12254,12 +12273,12 @@
     const W = 760, H = 320, pad = { l: 70, r: 110, t: 28, b: 44 };
     const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
 
-    // Left axis: $ amounts (EV + P&L share scale so they're directly comparable).
+    // Left axis: $ amounts (P&L only — EV moved to its own chart 2026-05-21).
     // Snap lo/hi to dStep boundaries so the topmost/bottommost gridline always
     // brackets the data — otherwise a +$7k P&L peak with $5k-step gridlines
     // shows the line shooting past the "+$5000" label with nothing labeled
     // above it, looking like the chart is clipping.
-    const dollarVals = points.flatMap(p => [p.ev, p.pnl].filter(v => v != null));
+    const dollarVals = points.map(p => p.pnl).filter(v => v != null);
     const rawMin$ = Math.min(0, ...dollarVals);
     const rawMax$ = Math.max(0, ...dollarVals);
     const dRange = Math.max(rawMax$ - rawMin$, 1);
@@ -12354,14 +12373,9 @@
       return d.trim();
     };
 
-    const evColor = 'var(--green)';
     const pnlColor = 'var(--amber)';
     const edgeColor = 'var(--blue)';
     const stakeColor = 'var(--purple)';
-
-    // EV line (solid, left axis)
-    const evPath = buildPath(points.map(p => p.ev), scaleYd);
-    if (evPath) svg += '<path d="' + evPath + '" fill="none" stroke="' + evColor + '" stroke-width="2"/>';
 
     // P&L line (solid, left axis)
     const pnlPath = buildPath(points.map(p => p.pnl), scaleYd);
@@ -12376,10 +12390,6 @@
     if (stakePath) svg += '<path d="' + stakePath + '" fill="none" stroke="' + stakeColor + '" stroke-width="2" stroke-dasharray="2,3"/>';
 
     // Endpoint labels
-    const lastIdx = points.length - 1;
-    if (last.ev != null) svg += svgText(scaleX(last.idx) - 4, scaleYd(last.ev) - 4,
-      (last.ev >= 0 ? '+$' : '-$') + Math.abs(last.ev).toFixed(0) + ' EV',
-      { anchor: 'end', size: 10, fill: evColor });
     if (last.pnl != null) svg += svgText(scaleX(last.idx) - 4, scaleYd(last.pnl) + 12,
       (last.pnl >= 0 ? '+$' : '-$') + Math.abs(last.pnl).toFixed(0) + ' P&L',
       { anchor: 'end', size: 10, fill: pnlColor });
@@ -12392,19 +12402,161 @@
 
     // Legend
     svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
-    svg += '<line x1="0" y1="0" x2="18" y2="0" stroke="' + evColor + '" stroke-width="2.2"/>';
-    svg += svgText(24, 4, 'Total EV ($, left)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    svg += '<line x1="125" y1="0" x2="143" y2="0" stroke="' + pnlColor + '" stroke-width="2.2"/>';
-    svg += svgText(149, 4, 'Realized P&L ($, left)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    svg += '<line x1="265" y1="0" x2="283" y2="0" stroke="' + edgeColor + '" stroke-width="2" stroke-dasharray="5,3"/>';
-    svg += svgText(289, 4, 'Avg Edge (%, R inner)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    svg += '<line x1="420" y1="0" x2="438" y2="0" stroke="' + stakeColor + '" stroke-width="2" stroke-dasharray="2,3"/>';
-    svg += svgText(444, 4, 'Total Stake ($, R outer)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="0" y1="0" x2="18" y2="0" stroke="' + pnlColor + '" stroke-width="2.2"/>';
+    svg += svgText(24, 4, 'Realized P&L ($, left)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="140" y1="0" x2="158" y2="0" stroke="' + edgeColor + '" stroke-width="2" stroke-dasharray="5,3"/>';
+    svg += svgText(164, 4, 'Avg Edge (%, R inner)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="295" y1="0" x2="313" y2="0" stroke="' + stakeColor + '" stroke-width="2" stroke-dasharray="2,3"/>';
+    svg += svgText(319, 4, 'Total Stake ($, R outer)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '</g>';
 
     svg += '</svg>';
     svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:4px;">'
       + 'showing last ' + points.length + ' of ' + totalAccepted + ' total settled parlays &middot; each point = trailing-' + WINDOW + ' stat ending at that parlay # (leftmost point includes the prior ' + (WINDOW - 1) + ' parlays)</div>';
+    el.innerHTML = svg;
+  }
+
+  // Daily EV: bar per day of summed settled-parlay EV plus a 7-day
+  // rolling average line. Settled-only so each bar represents finalized
+  // EV that day; EV per parlay = computeParlayEdge.evDollar (same number
+  // shown in the Open/Settled Positions EV $ column).
+  function renderChartEvDaily(settled) {
+    const el = document.getElementById('chart-ev-daily');
+    const sumEl = document.getElementById('ev-daily-summary');
+    if (!el) return;
+
+    // Group by local-day (YYYY-MM-DD) using settledAt timestamps.
+    const byDay = new Map();
+    for (const o of (settled || [])) {
+      if (!o.settledAt) continue;
+      const t = new Date(o.settledAt);
+      if (isNaN(t)) continue;
+      // sv-SE locale → ISO YYYY-MM-DD in local time, sortable as string.
+      const day = t.toLocaleDateString('sv-SE');
+      const { evDollar } = computeParlayEdge(o);
+      if (!Number.isFinite(evDollar)) continue;
+      if (!byDay.has(day)) byDay.set(day, { day, ev: 0, n: 0 });
+      const b = byDay.get(day);
+      b.ev += evDollar;
+      b.n++;
+    }
+    const days = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+    if (days.length < 2) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Need 2+ days of settled parlays to chart daily EV</div></div>';
+      if (sumEl) sumEl.textContent = '';
+      return;
+    }
+
+    // 7-day trailing rolling avg of daily EV.
+    const ROLL = 7;
+    for (let i = 0; i < days.length; i++) {
+      let sum = 0, cnt = 0;
+      for (let j = Math.max(0, i - ROLL + 1); j <= i; j++) { sum += days[j].ev; cnt++; }
+      days[i].rollingAvg = cnt > 0 ? sum / cnt : 0;
+    }
+
+    const totalEv = days.reduce((s, d) => s + d.ev, 0);
+    const totalN = days.reduce((s, d) => s + d.n, 0);
+    const lastDay = days[days.length - 1];
+    if (sumEl) {
+      const totalCls = totalEv >= 0 ? 'positive' : 'negative';
+      const rollCls = lastDay.rollingAvg >= 0 ? 'positive' : 'negative';
+      sumEl.innerHTML = ' &middot; '
+        + days.length + ' days · '
+        + totalN + ' parlays · '
+        + 'total EV <span class="' + totalCls + '">' + (totalEv >= 0 ? '+$' : '-$') + Math.abs(totalEv).toFixed(0) + '</span> · '
+        + '7d avg <span class="' + rollCls + '">' + (lastDay.rollingAvg >= 0 ? '+$' : '-$') + Math.abs(lastDay.rollingAvg).toFixed(0) + '/day</span>';
+    }
+
+    // SVG layout — match the other Portfolio charts for visual consistency.
+    const W = 760, H = 320, pad = { l: 70, r: 30, t: 28, b: 56 };
+    const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
+
+    // Y axis — include both bar values and rolling-avg line in the range
+    // so the highest rolling-avg point doesn't clip off the top.
+    const allY = days.flatMap(d => [d.ev, d.rollingAvg]);
+    const rawMin = Math.min(0, ...allY);
+    const rawMax = Math.max(0, ...allY);
+    const range = Math.max(rawMax - rawMin, 1);
+    const step = niceStep(range / 5);
+    const yLo = Math.floor((rawMin - step * 0.1) / step) * step;
+    const yHi = Math.ceil((rawMax + step * 0.1) / step) * step;
+
+    const scaleX = (i) => pad.l + ((days.length <= 1 ? 0.5 : i / (days.length - 1)) * chartW);
+    const scaleY = (v) => pad.t + chartH - ((v - yLo) / (yHi - yLo)) * chartH;
+
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; max-height:380px;">';
+
+    // Y gridlines + labels
+    for (let v = yLo; v <= yHi + 1e-6; v += step) {
+      const y = scaleY(v);
+      svg += svgLine(pad.l, y, W - pad.r, y, 'var(--border)', 0.3);
+      const label = v >= 0 ? '+$' + v.toFixed(0) : '-$' + Math.abs(v).toFixed(0);
+      svg += svgText(pad.l - 8, y + 3, label, { anchor: 'end', size: 9, fill: 'var(--text3)' });
+    }
+    // Zero line emphasized
+    const yZero = scaleY(0);
+    svg += svgLine(pad.l, yZero, W - pad.r, yZero, 'var(--text3)', 0.8);
+
+    // Bars — width sized to fit between adjacent days with a small gap.
+    const slotWidth = days.length > 1 ? chartW / (days.length - 1) : chartW;
+    const barWidth = Math.max(2, Math.min(28, slotWidth * 0.7));
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i];
+      const cx = scaleX(i);
+      const yTop = d.ev >= 0 ? scaleY(d.ev) : yZero;
+      const yBot = d.ev >= 0 ? yZero : scaleY(d.ev);
+      const height = Math.max(1, yBot - yTop);
+      const fill = d.ev >= 0 ? 'var(--green)' : 'var(--red)';
+      svg += '<rect x="' + (cx - barWidth / 2).toFixed(1) + '" y="' + yTop.toFixed(1)
+        + '" width="' + barWidth.toFixed(1) + '" height="' + height.toFixed(1)
+        + '" fill="' + fill + '" opacity="0.75"><title>' + d.day + ': '
+        + (d.ev >= 0 ? '+$' : '-$') + Math.abs(d.ev).toFixed(2) + ' (' + d.n + ' parlays)</title></rect>';
+    }
+
+    // 7-day rolling average line (overlay)
+    let rollPath = '';
+    for (let i = 0; i < days.length; i++) {
+      rollPath += (i === 0 ? 'M' : ' L') + scaleX(i).toFixed(1) + ',' + scaleY(days[i].rollingAvg).toFixed(1);
+    }
+    svg += '<path d="' + rollPath + '" fill="none" stroke="var(--blue)" stroke-width="2.2"/>';
+
+    // X-axis date ticks — at most ~10 visible, evenly spaced.
+    const labelStride = Math.max(1, Math.ceil(days.length / 10));
+    for (let i = 0; i < days.length; i += labelStride) {
+      const x = scaleX(i);
+      svg += svgLine(x, pad.t + chartH, x, pad.t + chartH + 4, 'var(--text3)', 0.6);
+      // mm/dd format for compactness
+      const mm = days[i].day.slice(5, 7), dd = days[i].day.slice(8, 10);
+      svg += svgText(x, pad.t + chartH + 16, mm + '/' + dd, { anchor: 'middle', size: 9, fill: 'var(--text3)' });
+    }
+    // Always label the last day if missed
+    if ((days.length - 1) % labelStride !== 0) {
+      const i = days.length - 1;
+      const x = scaleX(i);
+      const mm = days[i].day.slice(5, 7), dd = days[i].day.slice(8, 10);
+      svg += svgText(x, pad.t + chartH + 16, mm + '/' + dd, { anchor: 'middle', size: 9, fill: 'var(--text3)' });
+    }
+    svg += svgText(pad.l + chartW / 2, H - 4, 'settled date', { anchor: 'middle', size: 10, fill: 'var(--text3)' });
+
+    // Endpoint label for rolling-avg line
+    if (Number.isFinite(lastDay.rollingAvg)) {
+      svg += svgText(scaleX(days.length - 1) - 4, scaleY(lastDay.rollingAvg) - 6,
+        (lastDay.rollingAvg >= 0 ? '+$' : '-$') + Math.abs(lastDay.rollingAvg).toFixed(0) + ' 7d avg',
+        { anchor: 'end', size: 10, fill: 'var(--blue)' });
+    }
+
+    // Legend
+    svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
+    svg += '<rect x="0" y="-5" width="14" height="10" fill="var(--green)" opacity="0.75"/>';
+    svg += svgText(20, 4, 'Daily EV ($, bars)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="135" y1="0" x2="153" y2="0" stroke="var(--blue)" stroke-width="2.2"/>';
+    svg += svgText(159, 4, '7-day rolling avg (line)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '</g>';
+
+    svg += '</svg>';
+    svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:4px;">'
+      + days.length + ' days plotted &middot; ' + totalN + ' settled parlays &middot; bars green/red by sign, line is trailing 7-day average</div>';
     el.innerHTML = svg;
   }
 
