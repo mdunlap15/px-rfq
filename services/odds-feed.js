@@ -8338,6 +8338,82 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   };
 }
 
+/**
+ * TOA one-sided player-prop lookup. Same event/player matching as
+ * lookupTheOddsApiPlayerProp, but when books only post the OVER side
+ * (typical for HR/RBI binary props where the under is heavy chalk at
+ * -1000+ and books don't bother quoting it), this returns a fair_prob
+ * estimate based on the multi-book over-side average MINUS an assumed
+ * per-side overround haircut.
+ *
+ * Use case: MLB hitter_hr + hitter_rbi_runs at line=0.5. TOA's
+ * `batter_home_runs` and `batter_rbis` markets are 100% one-sided
+ * (verified 2026-05-22) — the 2-sided pipeline drops them. This
+ * fallback uses the over-side data multi-book (BetOnline + William
+ * Hill, plus Pinnacle when present) to estimate fair instead of
+ * scraping DK.
+ *
+ * Returns same shape as the 2-sided function:
+ *   { fairProbOver, fairProbUnder, books, booksWithBothSides: 0,
+ *     oneSidedSource: 'toa-one-sided', resolvedEventId, stages }
+ * Or { error, stages, ... } on failure.
+ */
+async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo, playerName, line) {
+  // Reuse the standard lookup to get the matched rows + per-book over
+  // prices, then bypass the de-vig step and apply an assumed-overround
+  // haircut instead.
+  const std = await lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerName, line);
+  // If standard lookup already produced a fair (paired data available),
+  // we still prefer that — return the result unchanged. Callers should
+  // try one-sided only when standard returned null fair.
+  if (std && std.fairProbOver != null && std.fairProbUnder != null) {
+    return std;
+  }
+  // If the standard lookup hard-errored (no event match, alt line too
+  // far, etc.) propagate the error — one-sided can't recover those.
+  if (std && std.error) {
+    return std;
+  }
+  if (!std || !Array.isArray(std.matchedRows) || std.matchedRows.length === 0) {
+    return { error: 'no_one_sided_data', stages: (std && std.stages) || [] };
+  }
+  // Collect over-side implied probs per book.
+  const overByBook = {};
+  for (const m of std.matchedRows) {
+    if (/over/i.test(m.side) && overByBook[m.book] == null) {
+      const p = americanToImpliedProb(m.price);
+      if (p != null && p > 0 && p < 1) overByBook[m.book] = p;
+    }
+  }
+  const overImps = Object.values(overByBook);
+  if (overImps.length === 0) {
+    return { error: 'no_one_sided_over_data', stages: std.stages || [] };
+  }
+  const cfg = require('../config').config;
+  const assumedVig = (cfg && cfg.pricing && cfg.pricing.toaOneSidedPropOverround) || 0.08;
+  // Average implied across books, then divide by (1 + assumedVig) to
+  // back out the assumed overround. Conservative estimate: under-shoot
+  // vig (smaller haircut) → smaller fair → tighter offer.
+  const avgImp = overImps.reduce((a, b) => a + b, 0) / overImps.length;
+  const fairProbOver = Math.max(0.005, Math.min(0.95, avgImp / (1 + assumedVig)));
+  const fairProbUnder = 1 - fairProbOver;
+  const books = Object.keys(overByBook);
+  return {
+    matchedRows: std.matchedRows,
+    books,
+    fairProbOver,
+    fairProbUnder,
+    booksWithBothSides: 0,
+    oneSidedSource: 'toa-one-sided',
+    oneSidedBookCount: books.length,
+    oneSidedRawAvgImplied: avgImp,
+    oneSidedAssumedVig: assumedVig,
+    resolvedEventId: std.resolvedEventId,
+    fetchedAt: std.fetchedAt || null,
+    stages: (std.stages || []).concat(['one_sided_over_only:' + overImps.length + 'books']),
+  };
+}
+
 // TOA equivalent of lookupPlayerStrikeoutProp. Returns the same shape
 // so the websocket caller can swap them transparently. Async because
 // TOA requires HTTP calls (cached, but not pre-warmed).
@@ -8539,6 +8615,7 @@ module.exports = {
   lookupPlayerStrikeoutProp,
   lookupPlayerStrikeoutPropFromTheOddsApi,
   lookupTheOddsApiPlayerProp,
+  lookupTheOddsApiPlayerPropOneSided,
   lookupPlayerPointsProp,
   getPropRowsCacheStatus,
 };

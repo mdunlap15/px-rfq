@@ -696,6 +696,19 @@ const config = {
     // PROP_TRUSTED_SINGLE_BOOKS (comma-separated, lowercase book keys).
     propTrustedSingleBooks: (process.env.PROP_TRUSTED_SINGLE_BOOKS || 'pinnacle,fanduel,draftkings,betmgm,betrivers')
       .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    // Assumed per-side book overround used by the TOA one-sided prop
+    // fallback (HR, RBIs at line=0.5 — markets where books only post the
+    // over because the under is heavy chalk at -1000+). The fair_prob
+    // estimate = avg-of-book-over-implied ÷ (1 + overround). Smaller
+    // values are conservative (smaller haircut → smaller fair → tighter
+    // offer, less competitive). Larger values lower fair more (more
+    // bettor-favorable offer, more risk if estimate too high). Default
+    // 0.08 (~typical BetOnline/William Hill overround on HR markets).
+    toaOneSidedPropOverround: (() => {
+      const v = parseFloat(process.env.TOA_ONE_SIDED_PROP_OVERROUND);
+      if (!Number.isFinite(v) || v < 0) return 0.08;
+      return v;
+    })(),
     // (Removed 2026-05-13) MAX_GROSS_PORTFOLIO_RISK — operator confirmed
     // the per-team / per-game / per-player concentration caps cover the
     // intended risk control, and a portfolio-wide gross-stake ceiling was

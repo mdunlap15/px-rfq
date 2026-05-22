@@ -1476,53 +1476,87 @@ async function seedAllLines() {
                 log.debug('Lines', `DK player-prop fallback error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
               }
             }
-            // Tertiary fallback: one-sided DK lookup for MLB hitter binary
+            // Tertiary fallback: one-sided lookup for MLB hitter binary
             // props (line=0.5 or ladder positions 1.5/2.5).
             //
             // Triggers in TWO cases:
-            //  (i)  2-sided lookup failed entirely (TOA + pair-DK both empty
-            //       — original use case for DK milestone ladders that have
-            //       no opposing under).
+            //  (i)  2-sided lookup failed entirely (TOA + pair-DK both empty).
             //  (ii) 2-sided lookup succeeded but DK is NOT in the paired
-            //       consensus. Operator directive 2026-05-21: non-DK
-            //       paired books (BetMGM, BetOnline, BetRivers) frequently
-            //       drift 5-7pp implied prob from DK on hitter binary
-            //       props. When DK isn't paired, we were quoting a stale
-            //       average that undercut DK's posted price by 5-7pp —
-            //       giving bettors free EV. Prefer DK's milestones (one-
-            //       sided) over non-DK paired consensus in this case.
+            //       consensus — non-DK paired books (BetMGM, BetOnline,
+            //       BetRivers) frequently drift 5-7pp implied prob from DK
+            //       on hitter binary props. Prefer DK's one-sided ladder
+            //       price in this case.
+            //
+            // Two sources, tried in order:
+            //  1. TOA one-sided (`batter_home_runs`, `batter_rbis`, etc.
+            //     when books only post the over). Multi-book consensus
+            //     across whoever TOA returns (BetOnline + William Hill on
+            //     typical Hobby tier; +Pinnacle/etc. on paid). Operator
+            //     directive 2026-05-22 after audit confirmed TOA HR market
+            //     is 100% one-sided on 2 books — no DK scraping needed.
+            //  2. DK scraper milestone ladder (fallback when TOA empty).
+            //     Single-book DK. Requires DK scraper to capture the
+            //     "Home Runs Milestones" market.
             //
             // Hitter-binary only — over/under props (NBA points, NHL shots,
             // MLB strikeouts) still require a true 2-sided pair.
             const oneSidedEligible = sportKey === 'baseball_mlb'
               && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType);
-            let oneSidedHit = null;
+            let oneSidedHit = null;       // { source, impliedOver, books[], fetchedAt }
             if (oneSidedEligible) {
               const lookupHasDk = lookup && Array.isArray(lookup.books)
                 && lookup.books.some(b => String(b).toLowerCase() === 'draftkings');
               const lookupMissing = !lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null;
               if (lookupMissing || !lookupHasDk) {
+                // Try TOA one-sided first (multi-book).
                 try {
-                  const dk = require('./dk-scraper');
-                  if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
-                    oneSidedHit = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+                  const toaOs = await oddsFeed.lookupTheOddsApiPlayerPropOneSided(
+                    sportKey, toaMarketKey,
+                    { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
+                    playerName, thisLine,
+                  );
+                  if (toaOs && toaOs.fairProbOver != null && toaOs.oneSidedSource === 'toa-one-sided') {
+                    oneSidedHit = {
+                      source: 'toa-one-sided',
+                      impliedOver: toaOs.fairProbOver,  // already overround-adjusted
+                      books: toaOs.books || [],
+                      fetchedAt: toaOs.fetchedAt || Date.now(),
+                    };
                   }
                 } catch (err) {
-                  log.debug('Lines', `DK one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
+                  log.debug('Lines', `TOA one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
+                }
+                // Fall back to DK scraper if TOA one-sided didn't return.
+                if (!oneSidedHit) {
+                  try {
+                    const dk = require('./dk-scraper');
+                    if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
+                      const dkOs = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+                      if (dkOs) {
+                        const dkOver = dkOs.side === 'over' ? dkOs.impliedProb : (1 - dkOs.impliedProb);
+                        oneSidedHit = {
+                          source: 'dk-scraper-one-sided',
+                          impliedOver: dkOver,  // raw DK implied — no overround adjustment
+                          books: ['draftkings'],
+                          fetchedAt: dkOs.fetchedAt || Date.now(),
+                        };
+                      }
+                    }
+                  } catch (err) {
+                    log.debug('Lines', `DK one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
+                  }
                 }
               }
             }
 
             if (oneSidedHit) {
-              // DK posted the YES side only. Synthesize the 2-sided fair
-              // by treating DK's raw implied prob as the fair (no de-vig
-              // possible). Pricer applies standard parlay vig on top —
-              // same path as any other player_prop. Operator chose this
-              // over a custom sweetener (2026-05-21) for consistency.
-              const dkOver = oneSidedHit.side === 'over' ? oneSidedHit.impliedProb : (1 - oneSidedHit.impliedProb);
-              const dkUnder = 1 - dkOver;
+              // Synthesize the 2-sided fair from the over-side estimate.
+              // Pricer applies standard parlay vig on top — same path as
+              // any other player_prop.
+              const fairOver = oneSidedHit.impliedOver;
+              const fairUnder = 1 - fairOver;
               for (const sel of sels) {
-                const fairProb = sel.selection === 'over' ? dkOver : dkUnder;
+                const fairProb = sel.selection === 'over' ? fairOver : fairUnder;
                 _setSeedLine(sel.lineId, {
                   sport: sportKey,
                   pxEventId: event.event_id,
@@ -1541,11 +1575,11 @@ async function seedAllLines() {
                   playerName,
                   propType,
                   fairProb,
-                  fairProbOver: dkOver,
-                  fairProbUnder: dkUnder,
+                  fairProbOver: fairOver,
+                  fairProbUnder: fairUnder,
                   booksWithBothSides: 0,
-                  propBooks: ['draftkings'],
-                  propSource: 'dk-scraper-one-sided',
+                  propBooks: oneSidedHit.books,
+                  propSource: oneSidedHit.source,
                   propFetchedAt: oneSidedHit.fetchedAt || Date.now(),
                 });
                 totalLines++;
