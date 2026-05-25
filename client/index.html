@@ -13567,16 +13567,26 @@
         teamLabel = formatSelection(_rawTeamForLabel, mkt, l.line, l.selection);
       }
       // For bare Over/Under selections (including first-half / first-5
-      // variants), append the game context so "Under 4.5" becomes
-      // "Over 4.5 · ARI @ TOR". Without this, a multi-leg near-miss
-      // row lists Over/Under with no indication of which game.
+      // variants), rebuild the leg's display name so it self-describes
+      // without needing the operator to cross-reference Market/Line
+      // columns. Format: "AWAY @ HOME [F5|H1] Over 4". Was previously
+      // appended as a faded "· AWAY @ HOME" suffix on a bare "Under"
+      // label — F5 totals in particular gave the operator no game or
+      // period context at the name level.
       const rawTeam = (l.team || l.teamName || l.selection || '').toString().trim();
       const bareOU = /^(over|under)\b/i.test(rawTeam) && !/\(/.test(rawTeam);
       if (bareOU && (l.homeTeam || l.awayTeam)) {
         const away = teamAbbr(l.awayTeam || '') || (l.awayTeam || '');
         const home = teamAbbr(l.homeTeam || '') || (l.homeTeam || '');
         const ctx = (away && home) ? (away + ' @ ' + home) : (away || home);
-        if (ctx) teamLabel += ' <span style="color:var(--text3); font-size:10px;">· ' + ctx + '</span>';
+        const isF5 = /first_5|first_five|_f5\b/i.test(mkt);
+        const isH1 = /first_half|1st_half|_h1\b/i.test(mkt);
+        const periodTag = isF5 ? 'F5 ' : isH1 ? 'H1 ' : '';
+        const side = rawTeam.charAt(0).toUpperCase() + rawTeam.slice(1).toLowerCase();
+        const lineStr = l.line != null ? ' ' + l.line : '';
+        if (ctx) {
+          teamLabel = ctx + ' ' + periodTag + side + lineStr;
+        }
       }
 
       // Golf matchups: append opponent + event + round context so the
