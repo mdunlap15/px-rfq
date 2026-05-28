@@ -968,24 +968,24 @@
       <span id="live-odds-status">Live odds refresh idle &mdash; will run every 60s while this tab is open</span>
     </div>
 
-    <!-- Team Exposure -->
+    <!-- Team Exposure (collapsed by default on mobile to keep the tab compact) -->
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
-        <span><span class="toggle-icon">&#9660;</span>Team Exposure</span>
+        <span><span class="toggle-icon collapsed">&#9660;</span>Team Exposure</span>
         <span id="exposure-limit" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
       </div>
-      <div class="card-body" style="padding: 0;">
+      <div class="card-body collapsed" style="padding: 0;">
         <div id="exposure-table"><div class="empty-state"><div class="icon">-</div><div>No active exposure</div></div></div>
       </div>
     </div>
 
-    <!-- Game Exposure -->
+    <!-- Game Exposure (collapsed by default on mobile to keep the tab compact) -->
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
-        <span><span class="toggle-icon">&#9660;</span>Game Exposure</span>
+        <span><span class="toggle-icon collapsed">&#9660;</span>Game Exposure</span>
         <span id="game-exposure-limit" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
       </div>
-      <div class="card-body" style="padding: 0;">
+      <div class="card-body collapsed" style="padding: 0;">
         <div id="game-exposure-table"><div class="empty-state"><div class="icon">-</div><div>No active game exposure</div></div></div>
       </div>
     </div>
@@ -4865,6 +4865,7 @@
         case 'parlays': va = a.parlayCount || 0; vb = b.parlayCount || 0; break;
         case 'gross': va = a.grossRisk || 0; vb = b.grossRisk || 0; break;
         case 'stakes': va = a.totalStakes || 0; vb = b.totalStakes || 0; break;
+        case 'pct': va = maxPerGame > 0 ? (a.netExposure || 0) / maxPerGame : 0; vb = maxPerGame > 0 ? (b.netExposure || 0) / maxPerGame : 0; break;
         case 'netExposure':
         default: va = a.netExposure || 0; vb = b.netExposure || 0;
       }
@@ -4911,7 +4912,7 @@
     html += '<th ' + gSortClick('gross', 'right') + ' title="Sum of each parlay\'s payout weighted by the probability its OTHER legs hit. Not the same as summing My Risk values in the detail drop-down (that would be Max Payout).">Weighted Risk' + gSortArrow('gross') + '</th>';
     html += '<th ' + gSortClick('stakes', 'right') + '>Stakes Held' + gSortArrow('stakes') + '</th>';
     html += '<th ' + gSortClick('netExposure', 'right') + '>Net Exposure' + gSortArrow('netExposure') + '</th>';
-    if (maxPerGame > 0) html += '<th style="text-align:right">% of Limit</th>';
+    if (maxPerGame > 0) html += '<th ' + gSortClick('pct', 'right') + '>% of Limit' + gSortArrow('pct') + '</th>';
     html += '<th style="width:100px;"></th></tr>';
 
     const isFiltering = gameExpState.search || gameExpState.sportFilter || gameExpState.started;
