@@ -389,7 +389,18 @@ function lookupZurichMatchupFairProb(teamName, roundNum, opponentName) {
     if (oppTarget && oppPresent) return built;
     if (!fallbackHit) fallbackHit = built;
   }
-  return fallbackHit;
+  // When an opponent IS specified but no matchup containing BOTH this
+  // player and that opponent was found, do NOT fall back to a team-only
+  // match. The team-only fallback risks cross-tournament / cross-matchup
+  // contamination — e.g. a stale CJ Cup "Hojgaard vs Wyndham Clark" prob
+  // bleeding into a Charles Schwab "Hojgaard vs Novak" quote (caught
+  // 2026-05-28: both sides of a matchup resolved to different sources and
+  // the fair probs summed to ~106%, pricing both players as favorites).
+  // Returning null lets the pricer fall through to DataGolf, which holds
+  // the correct current-tournament pair. The team-only fallback stays
+  // valid only for legacy single-matchup events (Zurich Classic) where
+  // opponentName isn't passed.
+  return oppTarget ? null : fallbackHit;
 }
 
 // ---------------------------------------------------------------------------
