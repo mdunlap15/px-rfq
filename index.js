@@ -1925,11 +1925,16 @@ function startStatusServer() {
   //
   // 60s server-side cache. Free-tier-friendly: paginates parlay_orders with
   // confirmed_at >= cutoff, in chunks of 1000.
-  const _creatorsCache = { key: null, at: 0, data: null };
+  //
+  // `detailByCreator` holds the per-creator parlay drill-down (legs, stake,
+  // odds, outcome) that /creators/parlays serves on row-expand. It's kept on
+  // the cache object (NOT in the /creators/stats response) so the aggregate
+  // payload stays small; it shares the same 60s key/TTL as the aggregate.
+  const _creatorsCache = { key: null, at: 0, data: null, detailByCreator: null };
   app.get('/creators/stats', async (req, res) => {
     try {
       const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 30));
-      const minFills = Math.max(1, parseInt(req.query.min) || 5);
+      const minFills = Math.max(1, parseInt(req.query.min) || 3);
       const cacheKey = `c${days}_m${minFills}`;
       const now = Date.now();
       const bypass = req.query.refresh === '1';
@@ -1949,7 +1954,7 @@ function startStatusServer() {
       let pages = 0;
       while (pages++ < MAX_PAGES) {
         const { data, error } = await sb.from('parlay_orders')
-          .select('parlay_id, status, confirmed_stake, pnl, confirmed_at, settled_at, meta, legs')
+          .select('parlay_id, status, confirmed_stake, pnl, confirmed_at, settled_at, quoted_at, offered_odds, fair_parlay_prob, meta, legs')
           .gte('confirmed_at', cutoff)
           .in('status', ['confirmed', 'settled_won', 'settled_lost', 'settled_push'])
           .order('confirmed_at', { ascending: true })
@@ -1964,13 +1969,49 @@ function startStatusServer() {
         offset += PAGE;
       }
 
+      // Per-leg fields kept for the drill-down. Legs arrays can be large, so
+      // we strip to just what the operator needs to spot betting patterns.
+      const slimLeg = (l) => {
+        if (!l || typeof l !== 'object') return null;
+        return {
+          sport: l.sport || l.oddsApiSport || null,
+          market: l.market || l.marketType || null,
+          team: l.teamName || l.team || l.selection || null,
+          selection: l.selection || null,
+          line: (l.line != null ? l.line : (l.point != null ? l.point : null)),
+        };
+      };
+      const MAX_PARLAYS_PER_CREATOR = 500; // cap detail payload per creator
+      const MAX_LEGS_PER_PARLAY = 12;       // cap legs per parlay row
+
       // Aggregate by creator_id. Skip rows where meta.creatorId is absent
       // (pre-2026-05-19 rows outside PX's retention window can't be backfilled).
       const byCreator = new Map();
+      const detailByCreator = new Map(); // creatorId -> [ {parlayId, ...} ]
       let untagged = 0;
       for (const r of rows) {
         const cid = r.meta && (r.meta.creatorId || r.meta.creator_id);
         if (!cid) { untagged++; continue; }
+        // Collect drill-down detail for this row (capped per creator).
+        let detail = detailByCreator.get(cid);
+        if (!detail) { detail = []; detailByCreator.set(cid, detail); }
+        if (detail.length < MAX_PARLAYS_PER_CREATOR) {
+          const rawLegs = Array.isArray(r.legs) ? r.legs : [];
+          const legs = rawLegs.slice(0, MAX_LEGS_PER_PARLAY).map(slimLeg).filter(Boolean);
+          detail.push({
+            parlayId: r.parlay_id,
+            confirmedAt: r.confirmed_at || null,
+            quotedAt: r.quoted_at || null,
+            settledAt: r.settled_at || null,
+            stake: Number(r.confirmed_stake) || 0,
+            offeredOdds: r.offered_odds != null ? Number(r.offered_odds) : null,
+            fairParlayProb: r.fair_parlay_prob != null ? Number(r.fair_parlay_prob) : null,
+            status: r.status,
+            pnl: r.pnl != null ? Number(r.pnl) : null,
+            legCount: rawLegs.length,
+            legs,
+          });
+        }
         let agg = byCreator.get(cid);
         if (!agg) {
           agg = {
@@ -2046,10 +2087,35 @@ function startStatusServer() {
       _creatorsCache.key = cacheKey;
       _creatorsCache.at = now;
       _creatorsCache.data = payload;
+      _creatorsCache.detailByCreator = detailByCreator;
       res.set('X-Cache', 'miss');
       res.json(payload);
     } catch (err) {
       log.error('Creators', `/creators/stats error: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // Per-creator parlay drill-down for the Counterparty Performance expand.
+  // Serves from the same in-memory cache that /creators/stats populates — the
+  // frontend always loads /creators/stats before a row can be expanded, so the
+  // cache is warm. We intentionally do NOT re-scan parlay_orders here: the
+  // meta.creatorId column has no index, so a filtered scan would time out.
+  app.get('/creators/parlays', (req, res) => {
+    try {
+      const creatorId = (req.query.creatorId || '').trim();
+      if (!creatorId) return res.status(400).json({ ok: false, error: 'creatorId required' });
+      const now = Date.now();
+      const fresh = _creatorsCache.detailByCreator
+        && (now - _creatorsCache.at) < 60_000;
+      if (!fresh) return res.json({ ok: false, error: 'stats not loaded' });
+      const parlays = _creatorsCache.detailByCreator.get(creatorId) || [];
+      // Newest first so the operator sees recent betting behaviour up top.
+      const sorted = parlays.slice().sort((a, b) =>
+        String(b.confirmedAt || b.quotedAt || '').localeCompare(String(a.confirmedAt || a.quotedAt || '')));
+      res.json({ ok: true, creatorId, count: sorted.length, parlays: sorted });
+    } catch (err) {
+      log.error('Creators', `/creators/parlays error: ${err.message}`);
       res.status(500).json({ ok: false, error: err.message });
     }
   });

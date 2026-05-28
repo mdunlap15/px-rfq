@@ -948,8 +948,9 @@
                 <button type="button" class="creators-rng" data-days="365" onclick="setCreatorsRange(365)" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:11px; cursor:pointer;">all</button>
               </span>
               <span style="margin-left:12px;">Min fills:</span>
-              <input id="creators-min-fills" type="number" min="1" value="5" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; width:48px; font-size:11px;" onchange="loadCreatorStats(true)">
+              <input id="creators-min-fills" type="number" min="1" value="3" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; width:48px; font-size:11px;" onchange="loadCreatorStats(true)">
               <button onclick="loadCreatorStats(true)" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 10px; border-radius:4px; font-size:11px; cursor:pointer; margin-left:6px;" title="Refresh (bypass 60s cache)">Refresh</button>
+              <button onclick="exportCreatorsCSV()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:3px 10px; border-radius:4px; font-size:11px; cursor:pointer;" title="Export the currently filtered + sorted rows to CSV">Export CSV</button>
               <span id="creators-asof" style="margin-left:auto; color:var(--text3);"></span>
             </div>
             <div id="creators-headline" style="margin-bottom:10px;"></div>
@@ -11298,8 +11299,25 @@
   // can widen vig, decline selectively, or just monitor.
   // -----------------------------------------------------------------------
   if (!window._creatorsState) {
-    window._creatorsState = { days: 30, loading: false, data: null };
+    window._creatorsState = {
+      days: 30, loading: false, data: null,
+      // Sort: default bettorRoi desc (sharps at top), matching the backend.
+      sortCol: 'bettorRoi', sortDir: -1,
+      // Client-side filters. search = creator-id prefix; the rest are numeric
+      // min/max range filters reusing rangeFilterHtml/passesRangeFilter.
+      search: '',
+      fillsMin: '', fillsMax: '',
+      stakeMin: '', stakeMax: '',
+      pnlMin: '', pnlMax: '',
+      broiMin: '', broiMax: '',   // bettor ROI entered as PERCENT (e.g. 1 = 1%)
+      hitMin: '', hitMax: '',     // bettor hit rate entered as PERCENT
+      // Per-creator parlay detail fetched on row-expand, cached so re-expand
+      // doesn't refetch. Keyed by creatorId.
+      detailCache: {},
+    };
   }
+  window.creatorsState = window._creatorsState; // alias for inline filter handlers
+  window.creatorsRerender = () => { if (window._creatorsState.data) renderCreatorStats(window._creatorsState.data); };
   async function loadCreatorStats(force) {
     const s = window._creatorsState;
     if (s.loading) return;
@@ -11307,12 +11325,14 @@
     const tblEl = document.getElementById('creators-table');
     if (!force && tblEl) tblEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><div>Loading...</div></div>';
     try {
-      const minFills = Math.max(1, parseInt(document.getElementById('creators-min-fills')?.value) || 5);
+      const minFills = Math.max(1, parseInt(document.getElementById('creators-min-fills')?.value) || 3);
       const url = '/creators/stats?days=' + s.days + '&min=' + minFills + (force ? '&refresh=1' : '');
       const r = await fetch(url, { credentials: 'include' });
       const data = await r.json();
       if (!data || !data.ok) throw new Error(data && data.error || ('HTTP ' + r.status));
       s.data = data;
+      // Fresh aggregate ⇒ stale parlay detail (window/min may have changed).
+      s.detailCache = {};
       renderCreatorStats(data);
     } catch (err) {
       if (tblEl) tblEl.innerHTML = '<div class="empty-state"><div class="icon">!</div><div>Failed to load: ' + escapeHtml(err.message || String(err)) + '</div></div>';
@@ -11362,25 +11382,88 @@
         + '</div>';
     }
 
-    const creators = data.creators || [];
-    if (!creators.length) {
+    const allCreators = data.creators || [];
+    if (!allCreators.length) {
       tblEl.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No creators meet the min-fills threshold in this window. Try lowering it.</div></div>';
       return;
     }
 
+    const st = window._creatorsState;
     const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
     const fmtPct   = v => (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(2) + '%';
-    let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">';
+
+    // ---- Client-side FILTER ----------------------------------------------
+    // search: creator-id prefix (case-insensitive). Numeric ranges reuse
+    // passesRangeFilter. bettorRoi + hitRate are stored as fractions but the
+    // operator types percents, so scale the filter value /100.
+    const broiMin = st.broiMin === '' ? '' : Number(st.broiMin) / 100;
+    const broiMax = st.broiMax === '' ? '' : Number(st.broiMax) / 100;
+    const hitMin  = st.hitMin === '' ? '' : Number(st.hitMin) / 100;
+    const hitMax  = st.hitMax === '' ? '' : Number(st.hitMax) / 100;
+    const q = (st.search || '').toLowerCase().trim();
+    const creators = allCreators.filter(c => {
+      if (q && !(c.creatorId || '').toLowerCase().startsWith(q)) return false;
+      if (!passesRangeFilter(c.fills, st.fillsMin, st.fillsMax)) return false;
+      if (!passesRangeFilter(c.totalStake, st.stakeMin, st.stakeMax)) return false;
+      if (!passesRangeFilter(c.pnl, st.pnlMin, st.pnlMax)) return false;
+      if (!passesRangeFilter(c.bettorRoi, broiMin, broiMax)) return false;
+      if (!passesRangeFilter(c.bettorHitRate, hitMin, hitMax)) return false;
+      return true;
+    });
+
+    // ---- Client-side SORT ------------------------------------------------
+    const dir = st.sortDir;
+    const num = v => (v == null || !Number.isFinite(Number(v))) ? -Infinity : Number(v);
+    creators.sort((a, b) => {
+      switch (st.sortCol) {
+        case 'creatorId': return dir * String(a.creatorId || '').localeCompare(String(b.creatorId || ''));
+        case 'fills':     return dir * (num(a.fills) - num(b.fills));
+        case 'settled':   return dir * (num(a.settled) - num(b.settled));
+        // SP W/L sorts by SP win-rate (wins / settled-decisive).
+        case 'spwl': {
+          const wr = c => { const d = (c.wins || 0) + (c.losses || 0); return d > 0 ? c.wins / d : -Infinity; };
+          return dir * (wr(a) - wr(b));
+        }
+        case 'bettorHitRate': return dir * (num(a.bettorHitRate) - num(b.bettorHitRate));
+        case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
+        case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
+        case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+        case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
+        default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+      }
+    });
+
+    // Sortable-header helpers (mirror gSortClick/gSortArrow on Game Exposure).
+    const sArrow = (col) => st.sortCol === col ? (st.sortDir > 0 ? ' &#9650;' : ' &#9660;') : '';
+    const thBase = 'padding:6px 8px; cursor:pointer; user-select:none;';
+
+    // ---- FILTER ROW ------------------------------------------------------
+    const fSel = 'background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;';
+    let filt = '<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:10px; font-size:11px; color:var(--text3);">';
+    filt += '<input type="text" id="creators-filter-search" placeholder="Creator ID…" value="' + escapeHtml(st.search) + '" oninput="creatorsState.search=this.value; rerenderWithFocus(()=>creatorsRerender())" style="' + fSel + ' width:140px; font-family:monospace;" title="Creator ID prefix">';
+    filt += '<span>Fills</span>' + rangeFilterHtml('creatorsState', 'fillsMin', 'fillsMax', st, 'creatorsRerender()', fSel, { title: 'Fills', width: '52px', step: '1' });
+    filt += '<span>Stake $</span>' + rangeFilterHtml('creatorsState', 'stakeMin', 'stakeMax', st, 'creatorsRerender()', fSel, { title: 'Total stake', width: '64px' });
+    filt += '<span>SP P&L $</span>' + rangeFilterHtml('creatorsState', 'pnlMin', 'pnlMax', st, 'creatorsRerender()', fSel, { title: 'SP P&L', width: '64px' });
+    filt += '<span>Bettor ROI %</span>' + rangeFilterHtml('creatorsState', 'broiMin', 'broiMax', st, 'creatorsRerender()', fSel, { title: 'Bettor ROI %', width: '52px' });
+    filt += '<span>Hit %</span>' + rangeFilterHtml('creatorsState', 'hitMin', 'hitMax', st, 'creatorsRerender()', fSel, { title: 'Bettor hit %', width: '52px' });
+    const anyFilter = q || st.fillsMin || st.fillsMax || st.stakeMin || st.stakeMax || st.pnlMin || st.pnlMax || st.broiMin || st.broiMax || st.hitMin || st.hitMax;
+    if (anyFilter) {
+      filt += '<button onclick="creatorsClearFilters()" style="' + fSel + ' cursor:pointer; color:var(--text2);" title="Clear all filters">Clear</button>';
+      filt += '<span style="color:var(--text3);">' + creators.length + ' of ' + allCreators.length + '</span>';
+    }
+    filt += '</div>';
+
+    let html = filt + '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">';
     html += '<thead><tr style="border-bottom:1px solid var(--border); color:var(--text3); font-size:11px;">'
-      + '<th style="text-align:left; padding:6px 8px;">Creator ID</th>'
-      + '<th style="text-align:right; padding:6px 8px;">Fills</th>'
-      + '<th style="text-align:right; padding:6px 8px;">Settled</th>'
-      + '<th style="text-align:right; padding:6px 8px;">SP W/L</th>'
-      + '<th style="text-align:right; padding:6px 8px;">Bettor Hit %</th>'
-      + '<th style="text-align:right; padding:6px 8px;">Stake</th>'
-      + '<th style="text-align:right; padding:6px 8px;">SP P&L</th>'
-      + '<th style="text-align:right; padding:6px 8px;">Bettor ROI</th>'
-      + '<th style="text-align:left;  padding:6px 8px;">First / Last seen</th>'
+      + '<th style="text-align:left; '   + thBase + '" onclick="creatorsSort(\'creatorId\')" title="Sort by creator ID">Creator ID' + sArrow('creatorId') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'fills\')" title="Sort by fills">Fills' + sArrow('fills') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'settled\')" title="Sort by settled count">Settled' + sArrow('settled') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'spwl\')" title="Sort by SP win rate">SP W/L' + sArrow('spwl') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorHitRate\')" title="Sort by bettor hit %">Bettor Hit %' + sArrow('bettorHitRate') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'totalStake\')" title="Sort by stake">Stake' + sArrow('totalStake') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'pnl\')" title="Sort by SP P&L">SP P&L' + sArrow('pnl') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorRoi\')" title="Sort by bettor ROI">Bettor ROI' + sArrow('bettorRoi') + '</th>'
+      + '<th style="text-align:left;  '  + thBase + '" onclick="creatorsSort(\'lastSeen\')" title="Sort by last seen">First / Last seen' + sArrow('lastSeen') + '</th>'
       + '<th style="text-align:center; padding:6px 8px;">Block</th>'
       + '</tr></thead><tbody>';
     for (const c of creators) {
@@ -11398,13 +11481,20 @@
         ? '<span title="' + escapeHtml(c.blockedReason || '') + ' (blocked ' + (c.blockedAt || '').slice(0, 10) + ')" style="color:var(--red); font-size:9px; padding:1px 4px; border:1px solid var(--red); border-radius:3px; margin-left:4px;">BLOCKED</span>'
         : '';
       // Button: Block (red) when not currently blocked, Unblock (gray) when
-      // already blocked. Calls window.toggleCreatorBlock which posts to the
-      // admin endpoint and re-renders.
+      // already blocked. event.stopPropagation prevents the Block click from
+      // also toggling the row's expand.
       const btn = c.blocked
-        ? '<button onclick="toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', false)" style="background:transparent; border:1px solid var(--text3); color:var(--text2); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Allow RFQs from this creator again">Unblock</button>'
-        : '<button onclick="toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', true)" style="background:transparent; border:1px solid var(--red); color:var(--red); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Auto-decline all future RFQs from this creator">Block</button>';
-      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); ' + rowBg + '">';
-      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '">' + idShort + blockedBadge + '</td>';
+        ? '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', false)" style="background:transparent; border:1px solid var(--text3); color:var(--text2); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Allow RFQs from this creator again">Unblock</button>'
+        : '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', true)" style="background:transparent; border:1px solid var(--red); color:var(--red); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Auto-decline all future RFQs from this creator">Block</button>';
+      // Expandable row: click anywhere (except Block) to drill into this
+      // creator's parlays. Reuses expandedRows so open state survives
+      // re-render (sort/filter). rowKey namespaced by creatorId.
+      const safeId = (c.creatorId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+      const rowKey = 'cre-' + safeId;
+      const expanded = expandedRows.has(rowKey);
+      const caret = expanded ? '&#9662;' : '&#9656;';
+      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); cursor:pointer; ' + rowBg + '" onclick="toggleCreatorParlays(\'' + escapeHtml(c.creatorId) + '\', \'' + rowKey + '\')" title="Click to view this creator\'s parlays">';
+      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '"><span style="color:var(--text3); margin-right:4px;">' + caret + '</span>' + idShort + blockedBadge + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.fills + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.settled + '</td>';
       html += '<td style="padding:5px 8px; text-align:right;">' + c.wins + '/' + c.losses + (c.pushes ? '·' + c.pushes : '') + '</td>';
@@ -11415,10 +11505,227 @@
       html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
       html += '<td style="padding:5px 8px; text-align:center;">' + btn + '</td>';
       html += '</tr>';
+      // Hidden detail sub-row, lazily populated by toggleCreatorParlays.
+      html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface);">';
+      html += '<td colspan="10" id="' + rowKey + '-body" style="padding:8px 14px;">';
+      html += expanded ? renderCreatorParlaysBody(c.creatorId) : '';
+      html += '</td></tr>';
     }
     html += '</tbody></table></div>';
     tblEl.innerHTML = html;
+
+    // Rehydrate any expanded rows whose detail cache was dropped (e.g. after a
+    // block/unblock force-refresh cleared detailCache). Re-fetch so the open
+    // drill-down repopulates instead of stalling on "Loading…".
+    for (const c of creators) {
+      const safeId = (c.creatorId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+      const rowKey = 'cre-' + safeId;
+      if (expandedRows.has(rowKey) && !st.detailCache[c.creatorId]) {
+        // Mark open in DOM then fetch (toggleCreatorParlays expects display:none
+        // to mean "opening"; here it's already table-row, so fetch directly).
+        const bodyEl = document.getElementById(rowKey + '-body');
+        if (bodyEl) {
+          bodyEl.innerHTML = '<div style="color:var(--text3); font-size:11px; padding:4px;">Loading parlays…</div>';
+          (function(creatorId, rk) {
+            fetch('/creators/parlays?creatorId=' + encodeURIComponent(creatorId), { credentials: 'include' })
+              .then(r => r.json())
+              .then(j => {
+                if (!j.ok) return;
+                st.detailCache[creatorId] = j.parlays || [];
+                const b = document.getElementById(rk + '-body');
+                if (b) b.innerHTML = renderCreatorParlaysBody(creatorId);
+              })
+              .catch(() => {});
+          })(c.creatorId, rowKey);
+        }
+      }
+    }
   }
+
+  // Header click: toggle direction if same column, else select new col desc.
+  window.creatorsSort = function(col) {
+    const st = window._creatorsState;
+    if (st.sortCol === col) st.sortDir *= -1;
+    else { st.sortCol = col; st.sortDir = -1; }
+    creatorsRerender();
+  };
+  window.creatorsClearFilters = function() {
+    const st = window._creatorsState;
+    st.search = ''; st.fillsMin = ''; st.fillsMax = ''; st.stakeMin = ''; st.stakeMax = '';
+    st.pnlMin = ''; st.pnlMax = ''; st.broiMin = ''; st.broiMax = ''; st.hitMin = ''; st.hitMax = '';
+    creatorsRerender();
+  };
+
+  // Toggle a creator's parlay drill-down. Fetches /creators/parlays on first
+  // open (cache is warm since /creators/stats ran first), caches the response
+  // on state so re-expand doesn't refetch, then renders into the sub-row.
+  window.toggleCreatorParlays = async function(creatorId, rowKey) {
+    const el = document.getElementById(rowKey);
+    if (!el) return;
+    const opening = el.style.display === 'none';
+    el.style.display = opening ? 'table-row' : 'none';
+    if (opening) expandedRows.add(rowKey); else expandedRows.delete(rowKey);
+    // Flip the caret on the parent row without a full re-render.
+    const caretCell = el.previousElementSibling && el.previousElementSibling.querySelector('td span');
+    if (caretCell) caretCell.innerHTML = opening ? '&#9662;' : '&#9656;';
+    if (!opening) return;
+    const bodyEl = document.getElementById(rowKey + '-body');
+    if (!bodyEl) return;
+    const st = window._creatorsState;
+    if (st.detailCache[creatorId]) {
+      bodyEl.innerHTML = renderCreatorParlaysBody(creatorId);
+      return;
+    }
+    bodyEl.innerHTML = '<div style="color:var(--text3); font-size:11px; padding:4px;">Loading parlays…</div>';
+    try {
+      const r = await fetch('/creators/parlays?creatorId=' + encodeURIComponent(creatorId), { credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) {
+        // Cache miss usually means the 60s stats cache expired. Re-pull stats
+        // (which repopulates the server detail map), then retry once.
+        if ((j.error || '') === 'stats not loaded') {
+          await loadCreatorStats(true);
+          const r2 = await fetch('/creators/parlays?creatorId=' + encodeURIComponent(creatorId), { credentials: 'include' });
+          const j2 = await r2.json();
+          if (!j2.ok) throw new Error(j2.error || 'stats not loaded');
+          st.detailCache[creatorId] = j2.parlays || [];
+        } else {
+          throw new Error(j.error || ('HTTP ' + r.status));
+        }
+      } else {
+        st.detailCache[creatorId] = j.parlays || [];
+      }
+      // The row may have been re-rendered (and re-hidden) by loadCreatorStats;
+      // only paint if it's still the open detail row.
+      const body2 = document.getElementById(rowKey + '-body');
+      if (body2) body2.innerHTML = renderCreatorParlaysBody(creatorId);
+    } catch (err) {
+      bodyEl.innerHTML = '<div style="color:var(--red); font-size:11px; padding:4px;">Failed to load parlays: ' + escapeHtml(err.message || String(err)) + '</div>';
+    }
+  };
+
+  // Build the sub-table HTML for one creator's parlays from the state cache.
+  function renderCreatorParlaysBody(creatorId) {
+    const st = window._creatorsState;
+    const parlays = st.detailCache[creatorId];
+    if (!parlays) return '<div style="color:var(--text3); font-size:11px; padding:4px;">Loading…</div>';
+    if (!parlays.length) return '<div style="color:var(--text3); font-size:11px; padding:4px;">No parlay detail available for this creator.</div>';
+    const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
+    // SP-perspective status mapping (settled_won = SP kept stake = SP WON).
+    const statusLabel = (s) => s === 'settled_won' ? 'SP WON'
+      : s === 'settled_lost' ? 'SP LOST'
+      : s === 'settled_push' ? 'PUSH'
+      : 'PENDING';
+    const statusColor = (s) => s === 'settled_won' ? 'var(--green)'
+      : s === 'settled_lost' ? 'var(--red)'
+      : s === 'settled_push' ? 'var(--amber)'
+      : 'var(--text3)';
+    const fmtOdds = (o) => (o == null || !Number.isFinite(o)) ? '—' : (o > 0 ? '+' + o : '' + o);
+    const legLine = (l) => {
+      const sport = l.sport ? ' [' + escapeHtml(sportLabel(l.sport)) + ']' : '';
+      const who = escapeHtml(l.team || l.selection || '?');
+      const mkt = l.market ? ' ' + escapeHtml(l.market) : '';
+      const line = (l.line != null && l.line !== '') ? ' ' + escapeHtml(String(l.line)) : '';
+      return who + mkt + line + sport;
+    };
+    let h = '<div style="font-size:11px; font-weight:600; color:var(--text2); margin-bottom:6px;">PARLAYS — ' + parlays.length + (parlays.length >= 500 ? '+ (capped)' : '') + '</div>';
+    h += '<div style="overflow-x:auto;"><table style="width:100%; font-size:11px; border-collapse:collapse;">';
+    h += '<tr style="color:var(--text3); border-bottom:1px solid var(--border);">'
+      + '<th style="text-align:left; padding:3px 6px;">Date</th>'
+      + '<th style="text-align:right; padding:3px 6px;">Stake</th>'
+      + '<th style="text-align:right; padding:3px 6px;">Offered Odds</th>'
+      + '<th style="text-align:center; padding:3px 6px;">Status</th>'
+      + '<th style="text-align:right; padding:3px 6px;">P&L</th>'
+      + '<th style="text-align:left; padding:3px 6px;">Legs</th>'
+      + '</tr>';
+    for (const p of parlays) {
+      const dt = (p.confirmedAt || p.quotedAt || '').slice(0, 10);
+      const pnlColor = p.pnl == null ? 'var(--text3)' : (p.pnl > 0 ? 'var(--green)' : (p.pnl < 0 ? 'var(--red)' : 'var(--text)'));
+      const legs = (p.legs || []).map(legLine).join('<br>');
+      const moreLegs = (p.legCount && p.legCount > (p.legs || []).length)
+        ? '<div style="color:var(--text3);">+' + (p.legCount - p.legs.length) + ' more leg(s)</div>' : '';
+      h += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); vertical-align:top;">';
+      h += '<td style="padding:3px 6px; white-space:nowrap; color:var(--text3);" title="' + escapeHtml(p.parlayId || '') + '">' + dt + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right;">' + fmtMoney(p.stake) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; font-family:monospace;">' + fmtOdds(p.offeredOdds) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:center; color:' + statusColor(p.status) + '; font-weight:600;">' + statusLabel(p.status) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(p.pnl) + '</td>';
+      h += '<td style="padding:3px 6px; color:var(--text2); line-height:1.5;">' + (legs || '—') + moreLegs + '</td>';
+      h += '</tr>';
+    }
+    h += '</table></div>';
+    return h;
+  }
+
+  // Export the CURRENTLY filtered + sorted creator rows (aggregate columns
+  // only — not the parlay drill-down) to CSV. Reuses csvEscape + the blob
+  // download pattern from the Positions export.
+  window.exportCreatorsCSV = function() {
+    const st = window._creatorsState;
+    const data = st.data;
+    if (!data || !(data.creators || []).length) return;
+    // Re-apply the same filter + sort the table uses so the CSV matches what
+    // the operator sees. (Kept in sync with renderCreatorStats.)
+    const broiMin = st.broiMin === '' ? '' : Number(st.broiMin) / 100;
+    const broiMax = st.broiMax === '' ? '' : Number(st.broiMax) / 100;
+    const hitMin  = st.hitMin === '' ? '' : Number(st.hitMin) / 100;
+    const hitMax  = st.hitMax === '' ? '' : Number(st.hitMax) / 100;
+    const q = (st.search || '').toLowerCase().trim();
+    let rows = (data.creators || []).filter(c => {
+      if (q && !(c.creatorId || '').toLowerCase().startsWith(q)) return false;
+      if (!passesRangeFilter(c.fills, st.fillsMin, st.fillsMax)) return false;
+      if (!passesRangeFilter(c.totalStake, st.stakeMin, st.stakeMax)) return false;
+      if (!passesRangeFilter(c.pnl, st.pnlMin, st.pnlMax)) return false;
+      if (!passesRangeFilter(c.bettorRoi, broiMin, broiMax)) return false;
+      if (!passesRangeFilter(c.bettorHitRate, hitMin, hitMax)) return false;
+      return true;
+    });
+    const dir = st.sortDir;
+    const num = v => (v == null || !Number.isFinite(Number(v))) ? -Infinity : Number(v);
+    rows = rows.slice().sort((a, b) => {
+      switch (st.sortCol) {
+        case 'creatorId': return dir * String(a.creatorId || '').localeCompare(String(b.creatorId || ''));
+        case 'fills':     return dir * (num(a.fills) - num(b.fills));
+        case 'settled':   return dir * (num(a.settled) - num(b.settled));
+        case 'spwl': { const wr = c => { const d = (c.wins || 0) + (c.losses || 0); return d > 0 ? c.wins / d : -Infinity; }; return dir * (wr(a) - wr(b)); }
+        case 'bettorHitRate': return dir * (num(a.bettorHitRate) - num(b.bettorHitRate));
+        case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
+        case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
+        case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+        case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
+        default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+      }
+    });
+    const headers = ['Creator ID', 'Fills', 'Settled', 'SP Wins', 'SP Losses', 'Pushes',
+      'Bettor Hit %', 'Total Stake', 'SP P&L', 'SP ROI %', 'Bettor ROI %',
+      'First Seen', 'Last Seen', 'Blocked', 'Blocked Reason'];
+    const csvRows = [headers.join(',')];
+    const pct = v => (v == null || !Number.isFinite(v)) ? '' : (v * 100).toFixed(2);
+    for (const c of rows) {
+      csvRows.push([
+        csvEscape(c.creatorId || ''),
+        c.fills, c.settled, c.wins, c.losses, c.pushes || 0,
+        pct(c.bettorHitRate),
+        (c.totalStake != null ? Number(c.totalStake).toFixed(2) : ''),
+        (c.pnl != null ? Number(c.pnl).toFixed(2) : ''),
+        pct(c.roi), pct(c.bettorRoi),
+        csvEscape((c.firstSeen || '').slice(0, 10)),
+        csvEscape((c.lastSeen || '').slice(0, 10)),
+        c.blocked ? 'yes' : 'no',
+        csvEscape(c.blockedReason || ''),
+      ].join(','));
+    }
+    const days = (data.days || st.days || 30);
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'counterparty-performance-' + days + 'd-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   // Block / Unblock a creator. Calls the admin endpoint, then refetches
   // /creators/stats with refresh=1 so the row's blocked state updates
