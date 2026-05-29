@@ -166,8 +166,20 @@ const config = {
     //
     // Why exists: payout-vig markup on chalky legs is microscopic
     // because payout is small (-400 fav has payout 0.25, so 5% vig
-    // = 1.25pp shift). Books apply markup as fraction of fair_prob
-    // instead, which scales properly. Default 0 = disabled.
+    // = 1.25pp shift). Worse, the payout-vig pp-distance is geometrically
+    // FLAT — distance ≈ p·(1-p)·v peaks at a coinflip and shrinks toward
+    // both ends, so the favorite-slope ramp can't bend the curve upward.
+    // Books apply markup as a fraction of fair_prob (offered = p·(1+m)),
+    // giving distance = p·m — linear and RISING with p, matching the
+    // Single-Leg chart's book curves. This knob reproduces that shape.
+    //
+    // Tuning: distance ≈ fair_prob × markup once above threshold. To match
+    // Pinnacle (~+1.7pp at a median ~0.65 favorite) set markup ≈ 0.027 and
+    // LOWER the threshold to ~0.50 so it covers the whole favorite range
+    // (not just chalk) — that is the fix for the flat tennis curve.
+    // Note: also marks up high-prob player-prop legs; dial back via a
+    // prop exclusion if favorite-heavy prop parlays stop filling.
+    // Default 0 = disabled (Railway env is the live lever).
     vigHeavyFavFairMarkup: parseFloat(process.env.VIG_HEAVY_FAV_FAIR_MARKUP) || 0,
     vigHeavyFavThreshold: parseFloat(process.env.VIG_HEAVY_FAV_THRESHOLD) || 0.70,
     // Chalk-stack parlay surcharge. Parlay-level fair-shaped widening

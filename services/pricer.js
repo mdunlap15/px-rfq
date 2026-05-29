@@ -2425,6 +2425,30 @@ function priceParlay(legs, opts = {}) {
         if (l.lineInfo.marketType === 'total' && l.lineInfo.homeTeam && l.lineInfo.awayTeam) {
           team = `${team} (${l.lineInfo.awayTeam} @ ${l.lineInfo.homeTeam})`;
         }
+        // TRUE per-leg offered implied prob — stored so the Single-Leg
+        // Pricing chart can plot our ACTUAL curve. The chart used to
+        // reconstruct "My Offer" from legVig via the payout-vig formula
+        // alone (offered = p/(1-(1-p)·v)), whose pp-distance is
+        // geometrically flat/decreasing (≈ p·(1-p)·v, a parabola peaking
+        // at p=0.5). That hid the books-shaped favorite markup entirely,
+        // so any VIG_HEAVY_FAV_FAIR_MARKUP / VIG_FAIR_MULTIPLIER widening
+        // was invisible on the chart even when it was firing on the price.
+        // Mirror the same MAX gates priceParlay applies per-leg
+        // (payout-vig MAX fair×(1+fairMult) MAX fair×(1+heavyFavMarkup))
+        // so the stored value equals our real per-leg contribution.
+        // Parlay-level ramps (longshot, leg-count) have no per-leg
+        // attribution and are intentionally excluded.
+        let legOfferedProb = null;
+        if (l.bookPriceOverride != null) {
+          legOfferedProb = l.bookPriceOverride;
+        } else if (l.fairProb > 0 && l.fairProb < 1) {
+          const _fp = l.fairProb;
+          const _v = getEffectiveVig(_fp, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0);
+          let _off = 1 / (1 + (1 / _fp - 1) * (1 - _v)); // payout-vig
+          if (fairMult > 0) { const m = _fp * (1 + fairMult); if (m > _off && m < 0.99) _off = m; }
+          if (heavyFavMarkup > 0 && _fp > heavyFavThreshold) { const m = _fp * (1 + heavyFavMarkup); if (m > _off && m < 0.99) _off = m; }
+          legOfferedProb = Math.min(0.99, _off);
+        }
         return {
           lineId: l.lineId,
           team,
@@ -2435,6 +2459,9 @@ function priceParlay(legs, opts = {}) {
           line: l.lineInfo.line,
           fairProb: Math.round(l.fairProb * 10000) / 10000,
           legVig: l.bookPriceOverride != null ? 0 : Math.round(getEffectiveVig(l.fairProb, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0) * 10000) / 10000,
+          // True per-leg offered implied (payout-vig + favorite markup, MAX-gated).
+          // The Single-Leg chart prefers this over reconstructing from legVig.
+          legOfferedProb: legOfferedProb != null ? Math.round(legOfferedProb * 100000) / 100000 : null,
           bookPriceOverride: l.bookPriceOverride != null ? Math.round(l.bookPriceOverride * 10000) / 10000 : null,
           displayFairProb: l.displayFairProb ? Math.round(l.displayFairProb * 10000) / 10000 : null,
           pinnacleOdds: l.pinnacleOdds || null,

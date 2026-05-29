@@ -9476,13 +9476,21 @@
         for (const l of legs) {
           const fp = l.fairProb;
           if (fp == null || fp <= 0 || fp >= 1) continue;
-          // Reconstruct our per-leg offered implied prob from the stored
-          // legVig (payout-space formula, same as pricer).
-          const vig = l.legVig != null ? l.legVig : 0.001;
-          const fairDec = 1 / fp;
-          const payout = fairDec - 1;
-          const viggedDec = 1 + payout * (1 - vig);
-          const myProb = 1 / viggedDec;
+          // Prefer the TRUE per-leg offered prob stored at quote time
+          // (legOfferedProb = payout-vig + favorite markup, MAX-gated).
+          // Fall back to reconstructing from legVig for older quotes that
+          // predate the field — that payout-space reconstruction is
+          // geometrically flat in pp and hides the favorite markup.
+          let myProb;
+          if (l.legOfferedProb != null && l.legOfferedProb > 0 && l.legOfferedProb < 1) {
+            myProb = l.legOfferedProb;
+          } else {
+            const vig = l.legVig != null ? l.legVig : 0.001;
+            const fairDec = 1 / fp;
+            const payout = fairDec - 1;
+            const viggedDec = 1 + payout * (1 - vig);
+            myProb = 1 / viggedDec;
+          }
           const bookProb = (am) => {
             if (am == null) return null;
             if (am > 0) return 100 / (am + 100);
