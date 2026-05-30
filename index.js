@@ -2189,17 +2189,32 @@ function startStatusServer() {
       }
 
       // 4) Average (matched_implied − parlay_fair_implied) in pp.
-      let sum = 0, n = 0;
+      //    avg       = LEG-WEIGHTED (total_pp / total_legs) — comparable to
+      //                MY OFFER / PINNACLE / DK / FD on the Single-Leg chart,
+      //                which are per-leg averages. Without this conversion a
+      //                parlay-level +1.78pp would visually appear next to
+      //                per-leg +0.79pp and falsely suggest under-pricing.
+      //    avgParlay = parlay-level (avg over parlays) for completeness.
+      let sumGap = 0, nParlays = 0, sumLegs = 0;
       for (const r of filtered) {
         const fp = fairById.get(r.parlay_id);
         if (fp == null || !isFinite(fp) || fp <= 0) continue;
         const a = Number(r.matched_odds);
         if (!isFinite(a)) continue;
+        const legCount = Array.isArray(r.legs) ? r.legs.length : 0;
+        if (legCount < 1) continue;
         const matchedImpl = a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
-        sum += (matchedImpl - fp) * 100;
-        n++;
+        sumGap += (matchedImpl - fp) * 100;
+        sumLegs += legCount;
+        nParlays++;
       }
-      res.json({ ok: true, avg: n ? sum / n : null, n });
+      res.json({
+        ok: true,
+        avg: sumLegs ? sumGap / sumLegs : null, // per-leg-attributed (chart-comparable)
+        avgParlay: nParlays ? sumGap / nParlays : null,
+        n: nParlays,
+        nLegs: sumLegs,
+      });
     } catch (err) {
       log.error('MatchedPriceAvg', err.message);
       res.status(500).json({ ok: false, error: err.message });

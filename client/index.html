@@ -10394,7 +10394,7 @@
       const sportKey = window._legVsBooksSport || 'all';
       const cacheKey = sinceIso + '|' + sportKey;
       window._matchedAvgCache = window._matchedAvgCache || {};
-      const fillSlot = (avg, n) => {
+      const fillSlot = (avg, n, nLegs) => {
         const slot = document.getElementById('leg-chart-pxmatched-slot');
         if (!slot) return;
         if (avg == null || !n) {
@@ -10402,20 +10402,26 @@
             + '<div style="font-size:17px; font-weight:700; color:var(--text3);">—</div>';
           return;
         }
-        const val = (avg >= 0 ? '+' : '') + avg.toFixed(2) + 'pp · n=' + n;
-        slot.innerHTML = '<div style="font-size:11px; color:var(--text3); text-transform:uppercase;" title="Avg distance from fair at which matches actually clear on PX (the competitive winning price)">PX matched avg</div>'
+        // Backend returns leg-weighted avg (total_pp / total_legs) so the
+        // number is directly comparable to MY OFFER / PINNACLE / DK / FD
+        // averages in this row (those are per-leg averages too).
+        const val = (avg >= 0 ? '+' : '') + avg.toFixed(2) + 'pp · n=' + (nLegs || n);
+        const tip = 'Leg-weighted avg distance from fair at which matches actually clear on PX (the competitive winning price). '
+          + 'Computed from ' + n + ' matched parlays we quoted on (' + (nLegs || '?') + ' legs). '
+          + 'Apples-to-apples with the other averages in this row — comparing to retail books overstates competitive margin.';
+        slot.innerHTML = '<div style="font-size:11px; color:var(--text3); text-transform:uppercase;" title="' + tip + '">PX matched avg</div>'
           + '<div style="font-size:17px; font-weight:700; color:#f59e0b;">' + val + '</div>';
       };
       const cached = window._matchedAvgCache[cacheKey];
       if (cached) {
-        fillSlot(cached.avg, cached.n);
+        fillSlot(cached.avg, cached.n, cached.nLegs);
       } else {
         fetch('/matched-price-avg?since=' + encodeURIComponent(sinceIso) + '&sport=' + encodeURIComponent(sportKey), { credentials: 'include' })
           .then(r => r.json())
           .then(j => {
             if (!j || j.ok !== true) return;
-            window._matchedAvgCache[cacheKey] = { avg: j.avg, n: j.n };
-            fillSlot(j.avg, j.n);
+            window._matchedAvgCache[cacheKey] = { avg: j.avg, n: j.n, nLegs: j.nLegs };
+            fillSlot(j.avg, j.n, j.nLegs);
           })
           .catch(() => { /* silent — keeps chart usable if endpoint fails */ });
       }
