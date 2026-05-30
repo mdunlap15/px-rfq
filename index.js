@@ -2121,6 +2121,88 @@ function startStatusServer() {
   });
 
   // -----------------------------------------------------------------------
+  // /matched-price-avg — competitive benchmark for the Single-Leg chart.
+  //
+  // Returns the average parlay-level distance from FAIR at which the
+  // market actually MATCHES (the winning SP's price), so the chart can
+  // show "where the auction clears" alongside the retail-book curves.
+  // Retail books (Pinnacle / DK / FD) charge brand-premium margins that
+  // aren't competitive on PX's P2P SP auction — the matched price is the
+  // honest comparator for how aggressively the operator should price.
+  //
+  // Computed only over parlays where we_quoted=true (we need OUR
+  // fair_parlay_prob to compute gap-from-fair, which lives on
+  // parlay_orders). Result reflects the competitive price on the subset
+  // of matches we offered on.
+  //
+  // Filters:
+  //   ?since=<ISO>  (required; cutoff matched_at)
+  //   ?sport=<key>  (optional; post-filter: any leg sport equals key; 'all' = no filter)
+  // -----------------------------------------------------------------------
+  app.get('/matched-price-avg', async (req, res) => {
+    try {
+      const since = (req.query.since || '').trim();
+      const sport = (req.query.sport || 'all').trim();
+      if (!since) return res.status(400).json({ ok: false, error: 'since required (ISO)' });
+      if (!sb) return res.status(503).json({ ok: false, error: 'supabase not configured' });
+
+      // 1) Pull matched_parlays where we_quoted=true since cutoff (paged).
+      const matched = [];
+      let off = 0;
+      const MAX_PAGES = 20; // 20k rows max — generous for any session/window
+      let pages = 0;
+      while (pages++ < MAX_PAGES) {
+        const { data, error } = await sb.from('matched_parlays')
+          .select('parlay_id, matched_odds, legs')
+          .eq('we_quoted', true)
+          .gte('matched_at', since)
+          .range(off, off + 999);
+        if (error) { log.warn('MatchedPriceAvg', `page ${pages} err: ${error.message}`); break; }
+        if (!data || !data.length) break;
+        matched.push(...data);
+        if (data.length < 1000) break;
+        off += 1000;
+      }
+
+      // 2) Sport filter — any leg matches.
+      const filtered = (sport === 'all')
+        ? matched
+        : matched.filter(r => Array.isArray(r.legs) && r.legs.some(l => l && l.sport === sport));
+      if (!filtered.length) return res.json({ ok: true, avg: null, n: 0 });
+
+      // 3) Batch-fetch parlay_orders.fair_parlay_prob keyed by parlay_id.
+      const ids = Array.from(new Set(filtered.map(r => r.parlay_id).filter(Boolean)));
+      const fairById = new Map();
+      for (let i = 0; i < ids.length; i += 500) {
+        const chunk = ids.slice(i, i + 500);
+        const { data, error } = await sb.from('parlay_orders')
+          .select('parlay_id, fair_parlay_prob')
+          .in('parlay_id', chunk);
+        if (error) { log.warn('MatchedPriceAvg', `lookup err: ${error.message}`); continue; }
+        for (const x of (data || [])) {
+          if (x.fair_parlay_prob != null) fairById.set(x.parlay_id, Number(x.fair_parlay_prob));
+        }
+      }
+
+      // 4) Average (matched_implied − parlay_fair_implied) in pp.
+      let sum = 0, n = 0;
+      for (const r of filtered) {
+        const fp = fairById.get(r.parlay_id);
+        if (fp == null || !isFinite(fp) || fp <= 0) continue;
+        const a = Number(r.matched_odds);
+        if (!isFinite(a)) continue;
+        const matchedImpl = a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
+        sum += (matchedImpl - fp) * 100;
+        n++;
+      }
+      res.json({ ok: true, avg: n ? sum / n : null, n });
+    } catch (err) {
+      log.error('MatchedPriceAvg', err.message);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // Creator-ID blocklist admin endpoints.
   //
   // Adverse-selection defense: operator-managed list of creator_ids that

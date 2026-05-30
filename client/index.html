@@ -10341,6 +10341,11 @@
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       html += box(s.label + ' avg', (avg >= 0 ? '+' : '') + avg.toFixed(2) + 'pp · n=' + vals.length, s.color);
     }
+    // PX-matched-price benchmark — async-filled below from /matched-price-avg.
+    // Retail books (Pin/DK/FD) charge brand-premium margins not competitive
+    // on PX's P2P auction; this column shows where the auction actually
+    // clears, the honest benchmark for how aggressively to price.
+    html += '<div id="leg-chart-pxmatched-slot" style="min-width:130px;"></div>';
     html += '</div>';
 
     // Bucketed avg — key insight: where is our pricing vs books by fav level
@@ -10370,6 +10375,51 @@
     html += '</table></div>';
 
     el.innerHTML = html;
+
+    // ---- Async-fill PX-matched-price benchmark in the AVG row.
+    // Re-compute cutoff for the current range here (the one used during
+    // data load is block-scoped above). Cache by (since, sport) so toggling
+    // series/filters doesn't re-fetch.
+    try {
+      const rangeOpt2 = RANGE_OPTIONS.find(r => r.key === window._legVsBooksRange) || RANGE_OPTIONS[3];
+      let sinceIso = null;
+      if (rangeOpt2.key === 'session' && window._lastIntel && window._lastIntel.sessionStartedAt) {
+        sinceIso = window._lastIntel.sessionStartedAt;
+      } else if (rangeOpt2.ms && rangeOpt2.ms > 0) {
+        sinceIso = new Date(Date.now() - rangeOpt2.ms).toISOString();
+      } else {
+        // 'all' or unknown — pick a far-past anchor so the endpoint returns everything.
+        sinceIso = '2024-01-01T00:00:00Z';
+      }
+      const sportKey = window._legVsBooksSport || 'all';
+      const cacheKey = sinceIso + '|' + sportKey;
+      window._matchedAvgCache = window._matchedAvgCache || {};
+      const fillSlot = (avg, n) => {
+        const slot = document.getElementById('leg-chart-pxmatched-slot');
+        if (!slot) return;
+        if (avg == null || !n) {
+          slot.innerHTML = '<div style="font-size:11px; color:var(--text3); text-transform:uppercase;" title="No matched parlays in window">PX matched avg</div>'
+            + '<div style="font-size:17px; font-weight:700; color:var(--text3);">—</div>';
+          return;
+        }
+        const val = (avg >= 0 ? '+' : '') + avg.toFixed(2) + 'pp · n=' + n;
+        slot.innerHTML = '<div style="font-size:11px; color:var(--text3); text-transform:uppercase;" title="Avg distance from fair at which matches actually clear on PX (the competitive winning price)">PX matched avg</div>'
+          + '<div style="font-size:17px; font-weight:700; color:#f59e0b;">' + val + '</div>';
+      };
+      const cached = window._matchedAvgCache[cacheKey];
+      if (cached) {
+        fillSlot(cached.avg, cached.n);
+      } else {
+        fetch('/matched-price-avg?since=' + encodeURIComponent(sinceIso) + '&sport=' + encodeURIComponent(sportKey), { credentials: 'include' })
+          .then(r => r.json())
+          .then(j => {
+            if (!j || j.ok !== true) return;
+            window._matchedAvgCache[cacheKey] = { avg: j.avg, n: j.n };
+            fillSlot(j.avg, j.n);
+          })
+          .catch(() => { /* silent — keeps chart usable if endpoint fails */ });
+      }
+    } catch (_) { /* defensive — chart still renders */ }
   }
 
   // =====================================================================
