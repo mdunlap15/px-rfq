@@ -7271,7 +7271,27 @@
     // useful at boot before /status loads or in test environments without
     // a starting bankroll. Last-resort fallback: in-memory tracker.
     const pxPnL = window._pxPnL;
-    const pnl = portfolio?.accountPnL != null ? portfolio.accountPnL
+    // Account-based fallback. If the backend's portfolio.accountPnL is null
+    // (PX balance fetch glitched — config.pricing.liveBankroll never
+    // populated; observed 2026-05-30 after restart), compute it locally
+    // from the frontend's working PX balance + open exposure − starting
+    // bankroll. Keeps Realized P&L AND ROI on the canonical account-based
+    // basis instead of silently falling back to pxPnL.realizedPnL (the
+    // partial mirror sum that can undercount settled flow by thousands).
+    let effectiveAccountPnL = portfolio?.accountPnL;
+    if (effectiveAccountPnL == null && portfolio?.startingBankroll != null && window._pxBalance != null) {
+      let bn = null;
+      if (typeof window._pxBalance === 'number') bn = window._pxBalance;
+      else if (typeof window._pxBalance === 'object') {
+        bn = window._pxBalance.balance != null ? Number(window._pxBalance.balance)
+           : window._pxBalance.available != null ? Number(window._pxBalance.available) : null;
+      }
+      if (bn != null && !isNaN(bn)) {
+        const pr = (pxPnL && pxPnL.openExposure != null) ? pxPnL.openExposure : (portfolio?.currentRisk || 0);
+        effectiveAccountPnL = (bn + pr) - portfolio.startingBankroll;
+      }
+    }
+    const pnl = effectiveAccountPnL != null ? effectiveAccountPnL
               : (pxPnL?.realizedPnL != null ? pxPnL.realizedPnL : (orderStats.runningPnL || 0));
     const wins = pxPnL?.counts?.wins ?? (orderStats.totalWins || 0);
     const losses = pxPnL?.counts?.losses ?? (orderStats.totalLosses || 0);
@@ -7291,12 +7311,18 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: prefer PX-native (realized profit / total settled stake).
-    // Fallback to tracker-computed only when PX data not yet loaded.
+    // ROI: realized profit / total settled stake.
+    // Numerator MUST match the displayed Realized P&L, otherwise the
+    // ratio is computed from different sources of truth and reads
+    // misleadingly low. Observed 2026-05-30: pxPnL.realizedPnL ($6,233,
+    // partial mirror) / totalSettled ($830,378) = 0.75%, while the
+    // canonical accountPnL ($13,998) over the same denom = 1.69%.
+    // Prefer effectiveAccountPnL (account-based, matches the headline).
     let roi;
     if (pxPnL) {
       const denom = pxPnL.stakes?.totalSettled || 0;
-      roi = denom > 0 ? (pxPnL.realizedPnL / denom) * 100 : null;
+      const num = effectiveAccountPnL != null ? effectiveAccountPnL : pxPnL.realizedPnL;
+      roi = denom > 0 ? (num / denom) * 100 : null;
     } else {
       let settledPnl = 0;
       let settledRiskTotal = 0;
@@ -7365,9 +7391,10 @@
     const netImpactCls = pxPnL?.netBalanceImpact != null
       ? (pxPnL.netBalanceImpact >= 0 ? 'positive' : 'negative') : 'neutral';
 
-    const pnlLabel = (portfolio?.accountPnL != null || pxPnL) ? 'Realized P&L' : 'P&L';
-    const pnlTitle = portfolio?.accountPnL != null
-      ? 'Account-based: Total Equity (Cash Available + Deployed) minus Starting Bankroll'
+    const pnlLabel = (effectiveAccountPnL != null || pxPnL) ? 'Realized P&L' : 'P&L';
+    const pnlTitle = effectiveAccountPnL != null
+      ? ('Account-based: Total Equity (Cash Available + Deployed) minus Starting Bankroll'
+         + (portfolio?.accountPnL == null ? ' [computed client-side — backend balance fetch glitched]' : ''))
       : pxPnL
         ? 'Sum of PX profit field across all settled orders (capped at last 5,000 orders)'
         : 'Tracker-derived P&L (may be inflated by unsettled losses)';
