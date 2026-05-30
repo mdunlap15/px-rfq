@@ -2144,6 +2144,10 @@ function startStatusServer() {
       const since = (req.query.since || '').trim();
       const sport = (req.query.sport || 'all').trim();
       if (!since) return res.status(400).json({ ok: false, error: 'since required (ISO)' });
+      // sb is declared per-endpoint in this file (see /creators paths etc.) —
+      // it's NOT a top-level variable. Without this line the handler crashed
+      // with "sb is not defined" at runtime (caught in initial deploy verify).
+      const sb = db.getClient();
       if (!sb) return res.status(503).json({ ok: false, error: 'supabase not configured' });
 
       // 1) Pull matched_parlays where we_quoted=true since cutoff (paged).
