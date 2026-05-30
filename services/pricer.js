@@ -2720,6 +2720,36 @@ function shouldDecline(legs, parlayId) {
     };
   }
 
+  // Novelty / sub-game market guard. Some PX events are micro-markets like
+  // "To Win the Tip Off", "First Basket", "Race to 7 Runs", "Winning Margin",
+  // "Method of Victory", "Coin Toss", "First Touchdown", etc. These have
+  // fair probabilities completely different from the parent game's
+  // moneyline, but our line-manager / pricing pipeline can mistakenly map
+  // them to the parent game's ML fair (caught 2026-05-30: a Spurs ML +
+  // Spurs Tip-Off ML parlay confirmed @ +447 / 18.28% offered vs ~21%
+  // true joint — modeled +2.81% edge but actual -14.9% edge). Asymmetric-
+  // risk-correct call: decline rather than risk mis-pricing.
+  //
+  // Pattern is conservative — explicitly catches confirmed novelty market
+  // tokens, avoids broad words like "first inning" (legit MLB sub-game)
+  // or "first goal" (could be legit soccer 1st-half) that overlap real
+  // markets we already price. Expand cautiously if other patterns surface.
+  const NOVELTY_PATTERN = /\b(?:tip\s*off|tipoff|first\s+(?:basket|field\s+goal|fg|touchdown|to\s+score)|race\s+to\s+\d+|winning\s+margin|method\s+of\s+(?:victory|finish|win)|exact\s+(?:score|result)|coin\s+toss|opening\s+(?:kickoff|drive|possession)|first\s+possession)\b/i;
+  for (const leg of legs) {
+    const lineId = leg.line_id || leg.lineId || leg;
+    const lineInfo = lineManager.lookupLine(lineId);
+    if (!lineInfo) continue; // main loop handles unknown legs
+    const ev = String(lineInfo.pxEventName || '');
+    const mn = String(lineInfo.marketName || '');
+    if (NOVELTY_PATTERN.test(ev) || NOVELTY_PATTERN.test(mn)) {
+      return {
+        declined: true,
+        reason: 'novelty_market',
+        detail: `unsupported sub-game market — pxEventName "${ev}", marketName "${mn}" — would mis-price using parent game's fair (e.g. tip-off ~50% vs full-game ML ~42%)`,
+      };
+    }
+  }
+
   // Pre-pass for STRUCTURAL prop-correlation rules that should outrank
   // per-leg quality reasons (no_fair_value, low_confidence, stale). A
   // parlay containing two K-prop legs on the same pitcher is correlated
