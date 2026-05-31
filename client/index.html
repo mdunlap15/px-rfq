@@ -604,6 +604,9 @@
       <a class="nav-item" onclick="switchSection('config', this)">
         <span class="nav-icon">&#9881;</span> Config
       </a>
+      <a class="nav-item" onclick="switchSection('golfSingleLeg', this)" id="nav-golfSingleLeg">
+        <span class="nav-icon">&#9971;</span> Golf Single-Leg
+      </a>
     </nav>
     <div class="sidebar-footer">
       <button class="btn" id="pause-btn" onclick="togglePause()">Pause</button>
@@ -1374,6 +1377,55 @@
                 <span class="log-msg">Dashboard loaded. Connecting...</span>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================================================================
+           GOLF SINGLE-LEG SECTION
+           Manages bulk-posted limit offers on PX golf matchup markets from
+           the second PX account. Backend lives behind GOLF_SINGLE_LEG_ENABLED.
+           =================================================================== -->
+      <div id="section-golfSingleLeg" class="section" style="display:none;">
+        <div class="card">
+          <div class="card-header">
+            <span>Status</span>
+            <span style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn" onclick="gslSync(this)" title="Fetch latest PX golf matchups and upsert new sides into config (enabled=false by default)">Sync from PX</button>
+              <button class="btn" onclick="gslSaveDirty(this)" title="Save all edited risk amounts / enabled toggles">Save Edits</button>
+              <button class="btn" onclick="gslPostAll(this)" title="Place offers for every enabled+risk-set side">Post All</button>
+              <button class="btn" onclick="gslRepost(this)" title="Drift-check then re-post (cancels stale offers and replaces with current odds)">Repost</button>
+              <button class="btn" onclick="gslCancelAll(this)" style="border-color:var(--red); color:var(--red);" title="Cancel every active wager on the single-leg account">Cancel All</button>
+              <button class="btn" onclick="gslLoad(true)" title="Refresh dashboard from /single-leg/golf/state">Refresh</button>
+            </span>
+          </div>
+          <div class="card-body" id="gsl-status" style="padding:10px 14px; font-size:12px; color:var(--text2);">
+            <div class="empty-state"><div class="icon">...</div>Click Refresh to load state, or Sync from PX to discover matchups.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><span>Matchups</span>
+            <span style="font-size:11px; color:var(--text3); display:flex; gap:8px; align-items:center;">
+              Filter:
+              <select id="gsl-filter-tournament" onchange="gslRender()" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;"><option value="">all tournaments</option></select>
+              <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gsl-filter-enabled-only" onchange="gslRender()"> enabled only</label>
+              <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gsl-filter-active-only" onchange="gslRender()"> with active wager</label>
+            </span>
+          </div>
+          <div class="card-body" id="gsl-table" style="padding:0;">
+            <div class="empty-state" style="padding:30px;"><div class="icon">-</div>No data loaded</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header" onclick="toggleCard(this)"><span><span class="toggle-icon collapsed">&#9660;</span>How this works</span></div>
+          <div class="card-body collapsed" style="padding:12px; font-size:12px; line-height:1.6; color:var(--text2);">
+            <p><b>Purpose:</b> bulk-post limit offers for both (or one) side of PX golf matchup markets from your <i>single-leg</i> PX account, using the same fair-prob and vig pipeline the parlay SP uses for RFQs.</p>
+            <p><b>Per-side asymmetry:</b> each row is one side of one matchup. Set risk + enable independently per side.</p>
+            <p><b>Lifecycle (auto every <code>GOLF_SINGLE_LEG_REFRESH_MINUTES</code>):</b> discover new PX matchups → upsert config (default enabled=false, risk=null) → cancel wagers for matchups that disappeared or are within <code>GOLF_SINGLE_LEG_CANCEL_BEFORE_TEEOFF_MINUTES</code> of tee → for each active wager, recompute fair and cancel+repost if drift &ge; <code>GOLF_SINGLE_LEG_DRIFT_PP</code>pp implied → post offers for any enabled+risk-set side that doesn't have an active wager.</p>
+            <p><b>Account isolation:</b> uses <code>PX_SINGLE_ACCESS_KEY</code>/<code>PX_SINGLE_SECRET_KEY</code> via <code>services/px-single.js</code>; never touches the parlay SP's PX session.</p>
+            <p><b>Manual buttons:</b> Sync = discover only. Post All = post enabled rows. Repost = drift-check + post. Cancel All = cancel every active wager (use carefully).</p>
           </div>
         </div>
       </div>
@@ -14150,7 +14202,7 @@
   }
 
   // Tab switching
-  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config' };
+  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config', golfSingleLeg: 'Golf Single-Leg' };
   let activeSection = 'portfolio';
   function switchPnlBreakdown(tab) {
     const sportEl = document.getElementById('chart-pnl-sport');
@@ -14270,7 +14322,227 @@
     if (section === 'lines' && !linesState.loaded) loadLines();
     // Auto-load Lost Analysis on first activation.
     if (section === 'lost' && !window._lostAnalysisLoaded) loadLostAnalysis();
+    // Auto-load Golf Single-Leg on first activation.
+    if (section === 'golfSingleLeg' && !window._gslLoaded) gslLoad(false);
   }
+
+  // =====================================================================
+  // GOLF SINGLE-LEG TAB — UI for the second-account golf-matchup bot
+  // =====================================================================
+  // Tracks dirty edits per line_id (Map<line_id, {risk_amount?, enabled?}>)
+  // so Save Edits sends a single batched POST /single-leg/golf/config.
+  window._gslDirty = new Map();
+  window._gslState = null;
+  window._gslLoaded = false;
+
+  async function gslLoad(force) {
+    const statusEl = document.getElementById('gsl-status');
+    const tableEl  = document.getElementById('gsl-table');
+    if (statusEl) statusEl.innerHTML = '<div class="empty-state"><div class="icon">...</div>Loading state...</div>';
+    try {
+      const r = await fetch('/single-leg/golf/state', { credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) {
+        const tip = r.status === 503 ? ' (set GOLF_SINGLE_LEG_ENABLED=true in Railway env to activate)' : '';
+        statusEl.innerHTML = '<div style="color:var(--red);">' + (j.error || ('HTTP ' + r.status)) + tip + '</div>';
+        tableEl.innerHTML  = '';
+        return;
+      }
+      window._gslState = j;
+      window._gslLoaded = true;
+      // Repopulate tournament filter
+      const sel = document.getElementById('gsl-filter-tournament');
+      if (sel) {
+        const tournaments = Array.from(new Set((j.config || []).map(r => r.tournament_name || '(none)'))).sort();
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">all tournaments</option>' + tournaments.map(t => '<option value="' + escHtml(t) + '"' + (t === cur ? ' selected' : '') + '>' + escHtml(t) + '</option>').join('');
+      }
+      gslRender();
+    } catch (e) {
+      statusEl.innerHTML = '<div style="color:var(--red);">load failed: ' + escHtml(e.message) + '</div>';
+    }
+  }
+
+  function gslRender() {
+    const s = window._gslState;
+    const statusEl = document.getElementById('gsl-status');
+    const tableEl  = document.getElementById('gsl-table');
+    if (!s || !Array.isArray(s.config)) { statusEl.innerHTML = '<div class="empty-state"><div class="icon">-</div>No state.</div>'; return; }
+
+    const cfg = s.config;
+    const enabled = cfg.filter(r => r.enabled);
+    const enabledWithRisk = enabled.filter(r => Number(r.risk_amount) > 0);
+    const enabledWithoutRisk = enabled.filter(r => !(Number(r.risk_amount) > 0));
+    const withActive = cfg.filter(r => (r.active_wagers || []).length > 0);
+    const tournaments = new Set(cfg.map(r => r.tournament_name || '(none)'));
+
+    statusEl.innerHTML =
+      '<div style="display:flex; gap:24px; flex-wrap:wrap;">'
+      + '<div><span style="color:var(--text3);">Sides:</span> <b>' + cfg.length + '</b></div>'
+      + '<div><span style="color:var(--text3);">Tournaments:</span> <b>' + tournaments.size + '</b></div>'
+      + '<div><span style="color:var(--text3);">Enabled:</span> <b>' + enabled.length + '</b>'
+      + (enabledWithoutRisk.length ? ' <span style="color:var(--amber); margin-left:4px;" title="enabled but no risk_amount set — will not post">⚠ ' + enabledWithoutRisk.length + ' without risk</span>' : '') + '</div>'
+      + '<div><span style="color:var(--text3);">Active wagers:</span> <b>' + (s.totalActive || 0) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Dirty edits:</span> <b id="gsl-dirty-count">' + window._gslDirty.size + '</b></div>'
+      + '</div>';
+
+    // Filter
+    const filterT = document.getElementById('gsl-filter-tournament')?.value || '';
+    const onlyEnabled = !!document.getElementById('gsl-filter-enabled-only')?.checked;
+    const onlyActive = !!document.getElementById('gsl-filter-active-only')?.checked;
+    let rows = cfg.slice();
+    if (filterT) rows = rows.filter(r => (r.tournament_name || '(none)') === filterT);
+    if (onlyEnabled) rows = rows.filter(r => r.enabled);
+    if (onlyActive) rows = rows.filter(r => (r.active_wagers || []).length > 0);
+
+    // Group by tournament -> matchup
+    rows.sort((a, b) => {
+      const at = String(a.tournament_name || ''); const bt = String(b.tournament_name || '');
+      if (at !== bt) return at.localeCompare(bt);
+      const am = String(a.matchup_name || ''); const bm = String(b.matchup_name || '');
+      if (am !== bm) return am.localeCompare(bm);
+      return String(a.side_name || '').localeCompare(String(b.side_name || ''));
+    });
+
+    if (!rows.length) { tableEl.innerHTML = '<div class="empty-state" style="padding:30px;"><div class="icon">-</div>No matchups match filter.</div>'; return; }
+
+    let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">'
+      + '<thead><tr style="background:var(--surface2); color:var(--text3); text-align:left;">'
+      + '<th style="padding:6px 10px;">Tournament / Matchup</th>'
+      + '<th style="padding:6px 10px;">Side</th>'
+      + '<th style="padding:6px 10px;">Round</th>'
+      + '<th style="padding:6px 10px; text-align:right;">Fair %</th>'
+      + '<th style="padding:6px 10px; text-align:right;">Our Offered</th>'
+      + '<th style="padding:6px 10px;">Active Wager</th>'
+      + '<th style="padding:6px 10px;">Risk $</th>'
+      + '<th style="padding:6px 10px;">Enabled</th>'
+      + '<th style="padding:6px 10px;">Status</th>'
+      + '</tr></thead><tbody>';
+
+    let lastTournament = null;
+    let lastMatchup = null;
+    for (const r of rows) {
+      const tName = r.tournament_name || '(none)';
+      const mName = r.matchup_name || '(unnamed)';
+      const tournHeader = tName !== lastTournament;
+      if (tournHeader) {
+        html += '<tr><td colspan="9" style="padding:8px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(tName) + '</td></tr>';
+        lastTournament = tName; lastMatchup = null;
+      }
+      const matchupHeader = mName !== lastMatchup;
+      if (matchupHeader) lastMatchup = mName;
+      const dirty = window._gslDirty.get(r.line_id) || {};
+      const riskShown = dirty.risk_amount !== undefined ? dirty.risk_amount : (r.risk_amount != null ? r.risk_amount : '');
+      const enabledShown = dirty.enabled !== undefined ? dirty.enabled : !!r.enabled;
+      const isDirty = window._gslDirty.has(r.line_id);
+      const fairPct = r.current_fair_prob != null ? (r.current_fair_prob * 100).toFixed(1) + '%' : '<span style="color:var(--text3);" title="' + escHtml(r.fair_unavailable_reason || '') + '">—</span>';
+      const offeredPct = r.current_offered_prob != null ? (r.current_offered_prob * 100).toFixed(1) + '%' : '—';
+      const american = r.current_american != null ? (r.current_american >= 0 ? '+' : '') + r.current_american : '';
+      const activeStr = (r.active_wagers || []).length
+        ? '<span style="color:var(--green);">' + (r.active_wagers[0].posted_odds >= 0 ? '+' : '') + r.active_wagers[0].posted_odds
+            + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
+            + ' <span style="color:var(--text3); font-size:10px;">' + escHtml(r.active_wagers[0].status || '') + '</span>'
+        : '<span style="color:var(--text3);">—</span>';
+      html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
+        + '<td style="padding:4px 10px;' + (matchupHeader ? '' : ' color:var(--text3);') + '">' + (matchupHeader ? escHtml(mName) : '<span style="color:var(--text3); font-size:10px;">↳</span>') + '</td>'
+        + '<td style="padding:4px 10px;">' + escHtml(r.side_name || '?') + ' <span style="color:var(--text3); font-size:10px;">vs ' + escHtml(r.side_opponent || '?') + '</span></td>'
+        + '<td style="padding:4px 10px; color:var(--text3);">' + (r.round_num != null ? 'R' + r.round_num : '') + '</td>'
+        + '<td style="padding:4px 10px; text-align:right;">' + fairPct + '</td>'
+        + '<td style="padding:4px 10px; text-align:right;">' + offeredPct + ' <span style="color:var(--text3); font-size:10px;">' + american + '</span></td>'
+        + '<td style="padding:4px 10px;">' + activeStr + '</td>'
+        + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gslSetRisk(\'' + r.line_id + '\', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
+        + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + ' onchange="gslSetEnabled(\'' + r.line_id + '\', this.checked)"></td>'
+        + '<td style="padding:4px 10px; font-size:10px; color:var(--text3);">' + escHtml(r.fair_unavailable_reason || '') + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table></div>';
+    tableEl.innerHTML = html;
+  }
+
+  function gslSetRisk(lineId, val) {
+    const num = val === '' || val == null ? null : Number(val);
+    const d = window._gslDirty.get(lineId) || {};
+    d.risk_amount = isNaN(num) ? null : num;
+    window._gslDirty.set(lineId, d);
+    const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
+  }
+  function gslSetEnabled(lineId, val) {
+    const d = window._gslDirty.get(lineId) || {};
+    d.enabled = !!val;
+    window._gslDirty.set(lineId, d);
+    const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
+  }
+
+  async function gslSaveDirty(btn) {
+    if (window._gslDirty.size === 0) { alert('No edits to save.'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+    try {
+      const updates = Array.from(window._gslDirty.entries()).map(([line_id, patch]) => ({ line_id, ...patch }));
+      const r = await fetch('/single-leg/golf/config', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }) });
+      const j = await r.json();
+      if (!j.ok) { alert('Save failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      window._gslDirty.clear();
+      await gslLoad(true);
+      alert('Saved ' + (j.updated || 0) + ' edit(s).' + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+    } catch (e) { alert('Save error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save Edits'; } }
+  }
+
+  async function gslSync(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing...'; }
+    try {
+      const r = await fetch('/single-leg/golf/sync', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      await gslLoad(true);
+      alert('Sync complete. ' + (j.matchups || 0) + ' matchup(s) seen, ' + (j.upserted || 0) + ' side(s) upserted.');
+    } catch (e) { alert('Sync error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync from PX'; } }
+  }
+
+  async function gslPostAll(btn) {
+    if (window._gslDirty.size > 0 && !confirm('You have unsaved edits. Post All ignores them. Continue?')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Posting...'; }
+    try {
+      const r = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Post failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      const errLines = (j.errors || []).slice(0, 5).join('\n');
+      const skipLines = (j.skippedDetail || []).slice(0, 5).map(s => s.line_id.slice(0, 12) + ': ' + s.reason).join('\n');
+      alert('Posted: ' + (j.posted || 0) + '\nSkipped: ' + (j.skipped || 0)
+        + (errLines ? '\n\nErrors:\n' + errLines : '')
+        + (skipLines ? '\n\nSkipped detail:\n' + skipLines : ''));
+      await gslLoad(true);
+    } catch (e) { alert('Post error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Post All'; } }
+  }
+
+  async function gslCancelAll(btn) {
+    if (!confirm('Cancel EVERY active wager on the single-leg account? This is irreversible.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Cancelling...'; }
+    try {
+      const r = await fetch('/single-leg/golf/cancel-all', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      alert('Cancelled: ' + (j.cancelled || 0) + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+      await gslLoad(true);
+    } catch (e) { alert('Cancel error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Cancel All'; } }
+  }
+
+  async function gslRepost(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Reposting...'; }
+    try {
+      const r = await fetch('/single-leg/golf/repost', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Repost failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      alert('Drift-cancelled: ' + (j.drift?.drifted || 0) + '\nPosted: ' + (j.post?.posted || 0));
+      await gslLoad(true);
+    } catch (e) { alert('Repost error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Repost'; } }
+  }
+
+  function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   // Backwards compat alias
   function switchTab(tab, btn) { switchSection(tab, btn); }
 
