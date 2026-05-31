@@ -639,6 +639,15 @@ async function startup() {
 
   serviceReady = true;
   log.info('Startup', `=== Service ready! Refreshing every ${config.refreshIntervalMinutes}min ===`);
+
+  // Start Golf Single-Leg lifecycle worker (second PX account). No-op when
+  // GOLF_SINGLE_LEG_ENABLED is unset/false; safe to call regardless.
+  try {
+    const gsl = require('./services/golf-single-leg');
+    gsl.startWorker();
+  } catch (e) {
+    log.warn('Startup', 'GolfSL worker did not start: ' + e.message);
+  }
   console.log('');
 }
 
@@ -5680,6 +5689,66 @@ function startStatusServer() {
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
+  });
+
+  // -----------------------------------------------------------------------
+  // Golf Single-Leg (second PX account — bulk-post offers on golf matchups).
+  // All endpoints no-op with 503 unless GOLF_SINGLE_LEG_ENABLED=true. Module
+  // is required lazily so missing env vars don't crash main app boot.
+  // -----------------------------------------------------------------------
+  let golfSingleLeg = null;
+  function _gsl() {
+    if (golfSingleLeg) return golfSingleLeg;
+    try { golfSingleLeg = require('./services/golf-single-leg'); return golfSingleLeg; }
+    catch (e) { log.error('GolfSL', 'module load failed: ' + e.message); return null; }
+  }
+  function _gslEnabledGuard(res) {
+    const m = _gsl();
+    if (!m) { res.status(500).json({ ok: false, error: 'golf-single-leg module unavailable' }); return null; }
+    if (!m.isEnabled()) { res.status(503).json({ ok: false, error: 'GOLF_SINGLE_LEG_ENABLED is not true' }); return null; }
+    return m;
+  }
+  // State: full UI dump (config rows enriched with current fair / offered / active wagers)
+  app.get('/single-leg/golf/state', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.loadState()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Sync: refresh PX matchups + upsert config rows for newly-seen lines
+  app.post('/single-leg/golf/sync', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try {
+      const matchups = await m.discoverGolfMatchups();
+      const sync = await m.syncConfig(matchups);
+      res.json({ ok: true, matchups: matchups.length, ...sync });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Config bulk update: body { updates: [{line_id, risk_amount?, enabled?, notes?}, ...] }
+  app.post('/single-leg/golf/config', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.updateConfig((req.body && req.body.updates) || [])) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Post: place offers for every enabled+risk-set line
+  app.post('/single-leg/golf/post-all', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.postEnabled()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Cancel ALL active wagers (idempotent)
+  app.post('/single-leg/golf/cancel-all', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.cancelAll()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Repost: drift-check (cancel where stale) + post-enabled (place new offers)
+  app.post('/single-leg/golf/repost', async (req, res) => {
+    const m = _gslEnabledGuard(res); if (!m) return;
+    try {
+      const drift = await m.refreshDrift();
+      const post = await m.postEnabled();
+      res.json({ ok: true, drift, post });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
   // Coverage audit: for each PX event in the next N hours, compare PX-published
