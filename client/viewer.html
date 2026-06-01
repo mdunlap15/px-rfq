@@ -8151,7 +8151,7 @@
   // _dvCfg.tappedDay: ETday string of the bar currently shown in the detail
   //   card above the chart. Tap a bar → set + show. Tap same bar / close → clear.
   // =====================================================================
-  if (!window._dvCfg) window._dvCfg = { range: '14d', agg: 'auto', tappedDay: null };
+  if (!window._dvCfg) window._dvCfg = { range: '30d', agg: 'auto', tappedDay: null };
 
   const DV_RANGE_DAYS = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
   function _dvApplyRange() {
@@ -10542,7 +10542,7 @@
     window._dvToMs = null;
     _resetDateInputs('dv-date-from', 'dv-date-to');
     // "Reset" in the custom panel returns to the default chip (14d).
-    if (window._dvCfg) window._dvCfg.range = '14d';
+    if (window._dvCfg) window._dvCfg.range = '30d';
     const customEl = document.getElementById('chart-dv-custom');
     if (customEl) customEl.style.display = 'none';
     _rerenderDvChart();
