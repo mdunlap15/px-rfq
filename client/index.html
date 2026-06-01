@@ -832,21 +832,27 @@
             <span><span class="toggle-icon">&#9660;</span>Daily Volume & P&L</span>
           </div>
           <div class="card-body">
-            <!-- Date range filter — narrows both the chart and the per-day
-                 table to wagers confirmed within the selected dates. Empty
-                 date = unbounded on that side. Re-renders on change. -->
-            <div id="chart-dv-filter" style="padding:0 4px 8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
+            <!-- Range chips (primary) + Daily/Weekly toggle. Bar selection
+                 summary moves to the right side. Custom date inputs live in
+                 the secondary row below, shown only when "Custom" chip is on. -->
+            <div id="chart-dv-filter" style="padding:0 4px 8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
+              <span id="dv-range-chips" style="display:flex; gap:4px; flex-wrap:wrap;"></span>
+              <span style="flex:1;"></span>
+              <span id="dv-agg-chips" style="display:flex; gap:4px;"></span>
+              <span id="dv-bar-selection-summary" style="margin-left:12px; color:var(--text3); display:none; align-items:center; gap:8px;">
+                <span id="dv-bar-selection-count"></span>
+                <button onclick="_dvClearSelection()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">Clear bar selection</button>
+              </span>
+            </div>
+            <div id="chart-dv-custom" style="display:none; padding:0 4px 8px; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
               <span>Confirmed between:</span>
               <input type="date" id="dv-date-from" onchange="setDvDateFrom(this.value)" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:2px 6px; border-radius:4px; font-size:11px; font-family:monospace;">
               <span>to</span>
               <input type="date" id="dv-date-to" onchange="setDvDateTo(this.value)" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:2px 6px; border-radius:4px; font-size:11px; font-family:monospace;">
               <button onclick="clearDvDateRange()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">Reset</button>
               <span id="dv-filter-summary" style="margin-left:4px; color:var(--text3);"></span>
-              <span id="dv-bar-selection-summary" style="margin-left:auto; color:var(--text3); display:none; align-items:center; gap:8px;">
-                <span id="dv-bar-selection-count"></span>
-                <button onclick="_dvClearSelection()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">Clear bar selection</button>
-              </span>
             </div>
+            <div id="chart-dv-detail" style="display:none;"></div>
             <div id="chart-daily-volume">
               <div class="empty-state"><div class="icon">-</div><div>Need confirmed orders to show daily activity</div></div>
             </div>
@@ -8764,6 +8770,116 @@
     return sign + '$' + (abs / 1000).toFixed(1) + 'K';
   }
 
+  // =====================================================================
+  // DAILY VOLUME — RANGE + AGGREGATION + DETAIL CARD STATE
+  // Mirrored from viewer.html — see commit c0ebd87 for the rationale.
+  // =====================================================================
+  if (!window._dvCfg) window._dvCfg = { range: '14d', agg: 'auto', tappedDay: null };
+
+  const DV_RANGE_DAYS = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
+  function _dvApplyRange() {
+    const r = window._dvCfg.range;
+    if (r === 'custom') return;
+    if (r === 'all') { window._dvFromMs = null; window._dvToMs = null; return; }
+    const days = DV_RANGE_DAYS[r];
+    if (!days) return;
+    window._dvFromMs = Date.now() - days * 86400 * 1000;
+    window._dvToMs = null;
+  }
+  window.setDvRange = function(r) {
+    window._dvCfg.range = r;
+    const custom = document.getElementById('chart-dv-custom');
+    if (custom) custom.style.display = (r === 'custom') ? 'flex' : 'none';
+    _dvApplyRange();
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+  window.setDvAgg = function(a) {
+    window._dvCfg.agg = a;
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+
+  function _renderDvChips() {
+    const rangeEl = document.getElementById('dv-range-chips');
+    const aggEl = document.getElementById('dv-agg-chips');
+    if (!rangeEl || !aggEl) return;
+    const cur = window._dvCfg.range;
+    const ranges = [['7d','7d'],['14d','14d'],['30d','30d'],['90d','90d'],['all','All'],['custom','Custom']];
+    rangeEl.innerHTML = ranges.map(([k,lbl]) => {
+      const active = (k === cur);
+      return '<button onclick="setDvRange(\'' + k + '\')" style="background:' + (active ? 'var(--accent)' : 'transparent')
+        + '; color:' + (active ? 'var(--bg)' : 'var(--text2)')
+        + '; border:1px solid ' + (active ? 'var(--accent)' : 'var(--border)')
+        + '; padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">' + lbl + '</button>';
+    }).join('');
+    const curAgg = window._dvCfg.agg;
+    const aggs = [['auto','Auto'],['daily','Daily'],['weekly','Weekly']];
+    aggEl.innerHTML = '<span style="margin-right:4px; color:var(--text3); font-size:10px;">Bars:</span>' + aggs.map(([k,lbl]) => {
+      const active = (k === curAgg);
+      return '<button onclick="setDvAgg(\'' + k + '\')" style="background:' + (active ? 'var(--accent)' : 'transparent')
+        + '; color:' + (active ? 'var(--bg)' : 'var(--text2)')
+        + '; border:1px solid ' + (active ? 'var(--accent)' : 'var(--border)')
+        + '; padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">' + lbl + '</button>';
+    }).join('');
+  }
+
+  function _dvAggregateWeekly(byDay) {
+    const byWeek = {};
+    for (const day of Object.keys(byDay).sort()) {
+      const [y,m,d] = day.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m-1, d, 12, 0, 0));
+      const dow = dt.getUTCDay();
+      const offsetToMon = (dow === 0) ? -6 : (1 - dow);
+      const mon = new Date(dt.getTime() + offsetToMon * 86400 * 1000);
+      const key = mon.toISOString().slice(0, 10);
+      if (!byWeek[key]) byWeek[key] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [], _dayKeys: [] };
+      const src = byDay[day];
+      byWeek[key].count += src.count;
+      byWeek[key].risk += src.risk;
+      byWeek[key].toWin += src.toWin;
+      byWeek[key].pnl += src.pnl;
+      byWeek[key].settled += src.settled;
+      byWeek[key].orders.push(...(src.orders || []));
+      byWeek[key]._dayKeys.push(day);
+    }
+    return byWeek;
+  }
+
+  function _dvShowLabelAt(i, n) {
+    if (n <= 14) return true;
+    if (n <= 30) return i % 2 === 0;
+    return false;
+  }
+
+  function _renderDvDetail(byBucket, cumulMap) {
+    const el = document.getElementById('chart-dv-detail');
+    if (!el) return;
+    const k = window._dvCfg.tappedDay;
+    if (!k || !byBucket[k]) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    const b = byBucket[k];
+    const cum = cumulMap[k];
+    const pnlCls = b.pnl > 0 ? 'positive' : b.pnl < 0 ? 'negative' : '';
+    const isWeek = (window._dvCfg.agg === 'weekly' || (window._dvCfg.agg === 'auto' && Object.keys(byBucket).length > 60));
+    el.style.display = 'block';
+    el.style.cssText = 'display:block; margin-bottom:8px; padding:8px 10px; background:var(--surface2); border:1px solid var(--accent); border-radius:6px;';
+    el.innerHTML =
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">'
+      + '<div><span style="font-weight:600; color:var(--accent);">' + (isWeek ? 'Week of ' : '') + k + '</span>'
+      + '<span style="margin-left:10px; color:var(--text3); font-size:11px;">' + b.count + ' fills · ' + b.settled + ' settled</span></div>'
+      + '<button onclick="window._dvCfg.tappedDay=null; renderChartDailyVolume(window._dvLastOrders);" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">close</button>'
+      + '</div>'
+      + '<div style="display:flex; gap:14px; margin-top:6px; flex-wrap:wrap; font-size:12px;">'
+      + '<div><span style="color:var(--text3);">My Risk:</span> <b>' + fmtDollar(b.risk) + '</b></div>'
+      + '<div><span style="color:var(--text3);">To Win:</span> <b style="color:var(--green);">' + fmtDollar(b.toWin) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Daily P&L:</span> <b class="' + pnlCls + '">' + fmtPnl(b.pnl) + '</b></div>'
+      + (cum != null ? '<div><span style="color:var(--text3);">Cumulative:</span> <b>' + fmtPnl(cum) + '</b></div>' : '')
+      + '</div>';
+  }
+
+  window.tapDvBar = function(k) {
+    window._dvCfg.tappedDay = (window._dvCfg.tappedDay === k) ? null : k;
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+
   // Daily Volume & P&L — grouped bar chart by day
   function renderChartDailyVolume(allOrders) {
     const el = document.getElementById('chart-daily-volume');
@@ -8772,6 +8888,9 @@
     // refetching from the server.
     window._dvLastOrders = allOrders;
     if (!window._dvSort) window._dvSort = {}; // dayId -> {col, dir}
+    // Apply active range chip BEFORE filtering, then re-render chip UI.
+    _dvApplyRange();
+    _renderDvChips();
 
     // Group REAL fills by day.
     //  - settled_* orders are real by definition (phantoms never settle)
@@ -8837,11 +8956,18 @@
       }
     }
 
-    const days = Object.keys(byDay).sort();
-    if (days.length === 0) {
+    const allDayKeys = Object.keys(byDay).sort();
+    if (allDayKeys.length === 0) {
       el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No daily data</div></div>';
       return;
     }
+    // Daily vs Weekly aggregation (auto-switches to weekly above 60 day bars)
+    const aggMode = (window._dvCfg.agg === 'auto')
+      ? (allDayKeys.length > 60 ? 'weekly' : 'daily')
+      : window._dvCfg.agg;
+    const byBucket = (aggMode === 'weekly') ? _dvAggregateWeekly(byDay) : byDay;
+    const days = Object.keys(byBucket).sort();
+    const isWeekly = (aggMode === 'weekly');
 
     // Wider canvas + bottom padding gives rotated x-axis labels room.
     // The x-axis is now stacked: date (slanted) + fills count (centered
@@ -8853,19 +8979,20 @@
     // Overlaid bars: wider risk bar in back, narrower P&L bar centered in front
     const riskBarW = barGroupW * 0.85;
     const pnlBarW = barGroupW * 0.45;
-    // Show value labels on every bar — Mike wants no missing amounts.
-    // Compact K-format keeps them readable at any density.
-    const showXTickAt = (_i) => true;
+    // Smart label density: <=14 all, 15-30 alternate, >30 hover-only.
+    const showXTickAt = (i) => _dvShowLabelAt(i, days.length);
 
-    // Compute cumulative P&L running total across days
+    // Compute cumulative P&L running total across buckets
     const cumul = [];
     let running = 0;
-    for (const day of days) { running += byDay[day].pnl; cumul.push(running); }
+    for (const day of days) { running += byBucket[day].pnl; cumul.push(running); }
+    const cumulMap = {};
+    for (let i = 0; i < days.length; i++) cumulMap[days[i]] = cumul[i];
 
     // Y axis must accommodate positive (risk, +P&L, +cumul) and negative (-P&L, -cumul)
-    const maxRisk = Math.max(0, ...days.map(d => byDay[d].risk));
-    const maxPnlPos = Math.max(0, ...days.map(d => byDay[d].pnl));
-    const minPnlNeg = Math.min(0, ...days.map(d => byDay[d].pnl));
+    const maxRisk = Math.max(0, ...days.map(d => byBucket[d].risk));
+    const maxPnlPos = Math.max(0, ...days.map(d => byBucket[d].pnl));
+    const minPnlNeg = Math.min(0, ...days.map(d => byBucket[d].pnl));
     const maxCumul = Math.max(0, ...cumul);
     const minCumul = Math.min(0, ...cumul);
     const yMax = Math.max(1, maxRisk, maxPnlPos, maxCumul);
@@ -8905,18 +9032,22 @@
     const selectedDays = window._dvSelectedDays;
     const anySelected = selectedDays.size > 0;
     for (let i = 0; i < days.length; i++) {
-      const d = byDay[days[i]];
+      const d = byBucket[days[i]];
       const cx = pad.l + (i + 0.5) * colW;
       const isSelected = selectedDays.has(days[i]);
+      const isTapped = (window._dvCfg.tappedDay === days[i]);
       const dimOpacity = (anySelected && !isSelected) ? 0.3 : 1.0;
-      const tipBase = `${days[i]} — ${d.count} fills · risk ${fmtDollar(d.risk)} · P&L ${fmtPnl(d.pnl)} · cumul ${fmtPnl(cumul[i])}`;
-      const tip = tipBase + (isSelected ? '  [selected — click to remove]' : '  [click to add to table filter]');
+      const tipBase = `${days[i]}${isWeekly ? ' (week)' : ''} — ${d.count} fills · risk ${fmtDollar(d.risk)} · P&L ${fmtPnl(d.pnl)} · cumul ${fmtPnl(cumul[i])}`;
+      const tip = tipBase + (isSelected ? '  [in table filter]' : '');
 
-      svg += `<g style="cursor:pointer;" onclick="window._dvToggleDay('${days[i]}')" opacity="${dimOpacity}">`;
+      // Outer group: tap pops the detail card above the chart AND toggles
+      // the day in/out of the table filter (existing behavior preserved).
+      svg += `<g style="cursor:pointer;" onclick="tapDvBar('${days[i]}'); window._dvToggleDay('${days[i]}')" opacity="${dimOpacity}">`;
       svg += `<title>${escapeHtml(tip)}</title>`;
-      // Selection outline behind the bars (full column highlight) — only for
-      // selected days. Drawn first so bars/labels render on top.
-      if (isSelected) {
+      // Tapped bar gets a blue ring; selected bars get the existing yellow.
+      if (isTapped) {
+        svg += `<rect x="${cx - colW / 2 + 1}" y="${pad.t}" width="${colW - 2}" height="${chartH}" fill="rgba(99, 179, 237, 0.18)" stroke="var(--accent)" stroke-width="2" rx="3"/>`;
+      } else if (isSelected) {
         svg += `<rect x="${cx - colW / 2 + 1}" y="${pad.t}" width="${colW - 2}" height="${chartH}" fill="#f5b942" fill-opacity="0.10" stroke="#f5b942" stroke-width="1.5" rx="3"/>`;
       }
       // Invisible hover/click hit area covering the full column
@@ -8951,13 +9082,12 @@
       svg += '</g>';
     }
 
-    // X-axis labels: rotated date only. Fill counts removed (Mike wanted
-    // them gone — they were ambiguous and noisy). Per-bar tooltip still
-    // carries the fill count for anyone who wants it.
+    // X-axis labels with smart density (same rule as value labels — at
+    // long ranges labels would collide and shred readability).
     for (let i = 0; i < days.length; i++) {
+      if (!showXTickAt(i)) continue;
       const cx = pad.l + (i + 0.5) * colW;
       const dayLabel = days[i].substring(5); // MM-DD
-      // Rotate -40° so longer date strings don't collide horizontally.
       svg += `<text x="${cx}" y="${H - pad.b + 16}" font-size="10" fill="var(--text2)" text-anchor="end" transform="rotate(-40 ${cx} ${H - pad.b + 16})">${dayLabel}</text>`;
     }
 
@@ -9170,6 +9300,8 @@
     svg += '</table></div>';
 
     el.innerHTML = svg;
+    // Detail card above the chart — reads window._dvCfg.tappedDay
+    _renderDvDetail(byBucket, cumulMap);
   }
 
   // ===================== ORDERS TAB: DAILY VOLUME & P&L (by month) =====================
@@ -13128,11 +13260,15 @@
   function setDvDateFrom(isoDate) {
     window._dvFromIso = isoDate || null;
     window._dvFromMs = isoDate ? new Date(isoDate + 'T00:00:00').getTime() : null;
+    // Editing a date input implies custom mode — otherwise the active
+    // range chip would overwrite _dvFromMs on the next render.
+    if (window._dvCfg) window._dvCfg.range = 'custom';
     _rerenderDvChart();
   }
   function setDvDateTo(isoDate) {
     window._dvToIso = isoDate || null;
     window._dvToMs = isoDate ? new Date(isoDate + 'T23:59:59.999').getTime() : null;
+    if (window._dvCfg) window._dvCfg.range = 'custom';
     _rerenderDvChart();
   }
   function clearDvDateRange() {
@@ -13141,6 +13277,10 @@
     window._dvFromMs = null;
     window._dvToMs = null;
     _resetDateInputs('dv-date-from', 'dv-date-to');
+    // Reset = back to default chip (14d), hide the custom row.
+    if (window._dvCfg) window._dvCfg.range = '14d';
+    const customEl = document.getElementById('chart-dv-custom');
+    if (customEl) customEl.style.display = 'none';
     _rerenderDvChart();
   }
 
