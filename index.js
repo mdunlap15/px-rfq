@@ -323,7 +323,32 @@ async function startup() {
     log.info('Startup', '    ✓ WebSocket connected');
   } catch (err) {
     log.error('Startup', `    ✗ WebSocket connection failed: ${err.message}`);
-    log.warn('Startup', '    Service will run without WebSocket — use /status to check state');
+    log.warn('Startup', '    Scheduling boot-retry loop (clears session cooldown each attempt)');
+    // Common cause: PX session_num_exceed because the prior container's
+    // session hasn't been evicted yet (observed twice on 2026-06-01).
+    // The runtime watchdog can't catch this because it gates on
+    // lastHealthCheck being set at least once — and on boot it's null.
+    // Retry every 30s for up to 10 attempts (~5 min). Each attempt
+    // mirrors the /reconnect endpoint: clear cooldown → disconnect →
+    // connect.
+    (function scheduleBootRetry(attemptsLeft, delayMs) {
+      if (attemptsLeft <= 0) {
+        log.error('Startup', 'WebSocket boot-retry exhausted — manual /reconnect required');
+        return;
+      }
+      setTimeout(async () => {
+        try {
+          log.info('Startup', `WS boot-retry: ${attemptsLeft} attempts left, busting cooldown`);
+          try { px.clearCooldown && px.clearCooldown(); } catch (_) {}
+          try { websocket.disconnect(); } catch (_) {}
+          await websocket.connect();
+          log.info('Startup', '    ✓ WebSocket connected via boot-retry');
+        } catch (e) {
+          log.warn('Startup', `WS boot-retry failed: ${e.message}`);
+          scheduleBootRetry(attemptsLeft - 1, delayMs);
+        }
+      }, delayMs);
+    })(10, 30_000);
   }
 
   // Start the periodic alt-line warm loop (every 60s). Keeps the cache fresh
