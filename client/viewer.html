@@ -924,8 +924,14 @@
         <span><span class="toggle-icon">&#9660;</span>Daily Volume &amp; P&amp;L</span>
       </div>
       <div class="card-body">
-        <!-- Date range filter -->
-        <div id="chart-dv-filter" style="padding:0 4px 8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
+        <!-- Range chips (primary) + Daily/Weekly toggle + Custom date inputs -->
+        <div id="chart-dv-filter" style="padding:0 4px 8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
+          <span id="dv-range-chips" style="display:flex; gap:4px; flex-wrap:wrap;"></span>
+          <span style="flex:1;"></span>
+          <span id="dv-agg-chips" style="display:flex; gap:4px;"></span>
+        </div>
+        <!-- Custom date range — visible only when range chip = "Custom" -->
+        <div id="chart-dv-custom" style="display:none; padding:0 4px 8px; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:var(--text3); border-bottom:1px solid var(--border); margin-bottom:10px;">
           <span>Confirmed between:</span>
           <input type="date" id="dv-date-from" onchange="setDvDateFrom(this.value)" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:2px 6px; border-radius:4px; font-size:11px; font-family:monospace;">
           <span>to</span>
@@ -933,6 +939,8 @@
           <button onclick="clearDvDateRange()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">Reset</button>
           <span id="dv-filter-summary" style="margin-left:4px; color:var(--text3);"></span>
         </div>
+        <!-- Detail card for tapped bar (mobile-friendly; populated by renderDvDetailCard) -->
+        <div id="chart-dv-detail" style="display:none;"></div>
         <div id="chart-daily-volume">
           <div class="empty-state"><div class="icon">-</div><div>Need confirmed orders to show daily activity</div></div>
         </div>
@@ -8132,10 +8140,143 @@
     return sign + '$' + (abs / 1000).toFixed(1) + 'K';
   }
 
+  // =====================================================================
+  // DAILY VOLUME — RANGE + AGGREGATION + DETAIL CARD STATE
+  // ---------------------------------------------------------------------
+  // _dvCfg.range:   '7d' | '14d' (default) | '30d' | '90d' | 'all' | 'custom'
+  //   - non-custom values overwrite _dvFromMs / _dvToMs on every render
+  //   - 'custom' falls through to the existing date inputs (legacy)
+  // _dvCfg.agg:     'auto' (default) | 'daily' | 'weekly'
+  //   - 'auto' → weekly when day count > 60, daily otherwise
+  // _dvCfg.tappedDay: ETday string of the bar currently shown in the detail
+  //   card above the chart. Tap a bar → set + show. Tap same bar / close → clear.
+  // =====================================================================
+  if (!window._dvCfg) window._dvCfg = { range: '14d', agg: 'auto', tappedDay: null };
+
+  const DV_RANGE_DAYS = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
+  function _dvApplyRange() {
+    const r = window._dvCfg.range;
+    if (r === 'custom') return; // legacy date-input mode owns _dvFromMs/_dvToMs
+    if (r === 'all') {
+      window._dvFromMs = null; window._dvToMs = null;
+      return;
+    }
+    const days = DV_RANGE_DAYS[r];
+    if (!days) return;
+    // Anchor to "now" in ET — match the etDayKey grouping by using a UTC
+    // cutoff `days` ago. Bars get filtered by confirmedAt >= cutoff.
+    window._dvFromMs = Date.now() - days * 86400 * 1000;
+    window._dvToMs = null;
+  }
+  window.setDvRange = function(r) {
+    window._dvCfg.range = r;
+    const custom = document.getElementById('chart-dv-custom');
+    if (custom) custom.style.display = (r === 'custom') ? 'flex' : 'none';
+    _dvApplyRange();
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+  window.setDvAgg = function(a) {
+    window._dvCfg.agg = a;
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+
+  function _renderDvChips() {
+    const rangeEl = document.getElementById('dv-range-chips');
+    const aggEl = document.getElementById('dv-agg-chips');
+    if (!rangeEl || !aggEl) return;
+    const cur = window._dvCfg.range;
+    const ranges = [['7d','7d'],['14d','14d'],['30d','30d'],['90d','90d'],['all','All'],['custom','Custom']];
+    rangeEl.innerHTML = ranges.map(([k,lbl]) => {
+      const active = (k === cur);
+      return '<button onclick="setDvRange(\'' + k + '\')" style="background:' + (active ? 'var(--accent)' : 'transparent')
+        + '; color:' + (active ? 'var(--bg)' : 'var(--text2)')
+        + '; border:1px solid ' + (active ? 'var(--accent)' : 'var(--border)')
+        + '; padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">' + lbl + '</button>';
+    }).join('');
+    const curAgg = window._dvCfg.agg;
+    const aggs = [['auto','Auto'],['daily','Daily'],['weekly','Weekly']];
+    aggEl.innerHTML = '<span style="margin-right:4px; color:var(--text3); font-size:10px;">Bars:</span>' + aggs.map(([k,lbl]) => {
+      const active = (k === curAgg);
+      return '<button onclick="setDvAgg(\'' + k + '\')" style="background:' + (active ? 'var(--accent)' : 'transparent')
+        + '; color:' + (active ? 'var(--bg)' : 'var(--text2)')
+        + '; border:1px solid ' + (active ? 'var(--accent)' : 'var(--border)')
+        + '; padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">' + lbl + '</button>';
+    }).join('');
+  }
+
+  // Aggregate byDay → byWeek (ET week starting Monday). Weekly bar = sum
+  // of its days for risk/pnl/count, cumulative line gets week-end values.
+  function _dvAggregateWeekly(byDay) {
+    const byWeek = {};
+    for (const day of Object.keys(byDay).sort()) {
+      // Parse YYYY-MM-DD as UTC noon (avoid TZ drift), find Monday
+      const [y,m,d] = day.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m-1, d, 12, 0, 0));
+      const dow = dt.getUTCDay(); // 0=Sun..6=Sat
+      const offsetToMon = (dow === 0) ? -6 : (1 - dow);
+      const mon = new Date(dt.getTime() + offsetToMon * 86400 * 1000);
+      const key = mon.toISOString().slice(0, 10); // YYYY-MM-DD of that Monday
+      if (!byWeek[key]) byWeek[key] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [], _dayKeys: [] };
+      const src = byDay[day];
+      byWeek[key].count += src.count;
+      byWeek[key].risk += src.risk;
+      byWeek[key].toWin += src.toWin;
+      byWeek[key].pnl += src.pnl;
+      byWeek[key].settled += src.settled;
+      byWeek[key].orders.push(...(src.orders || []));
+      byWeek[key]._dayKeys.push(day);
+    }
+    return byWeek;
+  }
+
+  // Smart label-density: at < 15 bars, show every label; 15-30 every other;
+  // > 30 hide entirely (hover only).
+  function _dvShowLabelAt(i, n) {
+    if (n <= 14) return true;
+    if (n <= 30) return i % 2 === 0;
+    return false;
+  }
+
+  // Detail card above the chart (tap-a-bar response). Populated with the
+  // tapped day/week's stats. Visible only when _dvCfg.tappedDay is set.
+  function _renderDvDetail(byBucket, cumulMap) {
+    const el = document.getElementById('chart-dv-detail');
+    if (!el) return;
+    const k = window._dvCfg.tappedDay;
+    if (!k || !byBucket[k]) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    const b = byBucket[k];
+    const cum = cumulMap[k];
+    const pnlCls = b.pnl > 0 ? 'positive' : b.pnl < 0 ? 'negative' : '';
+    const isWeek = (window._dvCfg.agg === 'weekly' || (window._dvCfg.agg === 'auto' && Object.keys(byBucket).length > 60));
+    el.style.display = 'block';
+    el.style.cssText = 'display:block; margin-bottom:8px; padding:8px 10px; background:var(--surface2); border:1px solid var(--accent); border-radius:6px;';
+    el.innerHTML =
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">'
+      + '<div><span style="font-weight:600; color:var(--accent);">' + (isWeek ? 'Week of ' : '') + k + '</span>'
+      + '<span style="margin-left:10px; color:var(--text3); font-size:11px;">' + b.count + ' fills · ' + b.settled + ' settled</span></div>'
+      + '<button onclick="window._dvCfg.tappedDay=null; renderChartDailyVolume(window._dvLastOrders);" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">close</button>'
+      + '</div>'
+      + '<div style="display:flex; gap:14px; margin-top:6px; flex-wrap:wrap; font-size:12px;">'
+      + '<div><span style="color:var(--text3);">My Risk:</span> <b>' + fmtDollar(b.risk) + '</b></div>'
+      + '<div><span style="color:var(--text3);">To Win:</span> <b style="color:var(--green);">' + fmtDollar(b.toWin) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Daily P&L:</span> <b class="' + pnlCls + '">' + fmtPnl(b.pnl) + '</b></div>'
+      + (cum != null ? '<div><span style="color:var(--text3);">Cumulative:</span> <b>' + fmtPnl(cum) + '</b></div>' : '')
+      + '</div>';
+  }
+
+  // Public: tap handler used by chart bars.
+  window.tapDvBar = function(k) {
+    window._dvCfg.tappedDay = (window._dvCfg.tappedDay === k) ? null : k;
+    if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+
   // Daily Volume & P&L — grouped bar chart by day
   function renderChartDailyVolume(allOrders) {
     const el = document.getElementById('chart-daily-volume');
     if (!el) return;
+    // Apply the active range chip BEFORE filtering, then re-render chip UI.
+    _dvApplyRange();
+    _renderDvChips();
     // Cache latest data so per-day sort header clicks can re-render without
     // refetching from the server.
     window._dvLastOrders = allOrders;
@@ -8205,11 +8346,19 @@
       }
     }
 
-    const days = Object.keys(byDay).sort();
-    if (days.length === 0) {
+    const allDayKeys = Object.keys(byDay).sort();
+    if (allDayKeys.length === 0) {
       el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No daily data</div></div>';
       return;
     }
+    // Daily vs Weekly aggregation. 'auto' switches to weekly above 60 day
+    // bars (long-range view); user can force either mode via chip.
+    const aggMode = (window._dvCfg.agg === 'auto')
+      ? (allDayKeys.length > 60 ? 'weekly' : 'daily')
+      : window._dvCfg.agg;
+    const byBucket = (aggMode === 'weekly') ? _dvAggregateWeekly(byDay) : byDay;
+    const days = Object.keys(byBucket).sort();
+    const isWeekly = (aggMode === 'weekly');
 
     // Wider canvas + bottom padding gives rotated x-axis labels room.
     // The x-axis is now stacked: date (slanted) + fills count (centered
@@ -8221,14 +8370,18 @@
     // Overlaid bars: wider risk bar in back, narrower P&L bar centered in front
     const riskBarW = barGroupW * 0.85;
     const pnlBarW = barGroupW * 0.45;
-    // Show value labels on every bar — Mike wants no missing amounts.
-    // Compact K-format keeps them readable at any density.
-    const showXTickAt = (_i) => true;
+    // Smart label density (the readability fix). At <=14 bars every label
+    // shows; 15-30 alternates; >30 hides labels (hover/tap surfaces them
+    // via the detail card).
+    const showXTickAt = (i) => _dvShowLabelAt(i, days.length);
 
-    // Compute cumulative P&L running total across days
+    // Compute cumulative P&L running total across buckets
     const cumul = [];
     let running = 0;
-    for (const day of days) { running += byDay[day].pnl; cumul.push(running); }
+    for (const day of days) { running += byBucket[day].pnl; cumul.push(running); }
+    // Cumulative lookup keyed by bucket key — used by the detail card.
+    const cumulMap = {};
+    for (let i = 0; i < days.length; i++) cumulMap[days[i]] = cumul[i];
 
     // Y axis must accommodate positive (risk, +P&L, +cumul) and negative (-P&L, -cumul)
     const maxRisk = Math.max(0, ...days.map(d => byDay[d].risk));
@@ -8262,25 +8415,31 @@
       svg += svgText(pad.l - 6, y + 3, fmtDollarK(Math.round(v)), { anchor: 'end', size: 9 });
     }
 
-    // Bars — overlaid at same x position. Wrap each day in a clickable
-    // group: tap toggles the day's inclusion in window._dvSelectedDays,
-    // which filters the table below to show only the selected days.
-    // Selected bars get a yellow tinted background spanning the chart
-    // height so the user can see what's filtered at a glance.
+    // Bars — overlaid at same x position. Each bar is double-purpose:
+    //   tap → pops a detail card above the chart (mobile-friendly)
+    //   the existing table-filter behavior still fires too (via
+    //   _dvSelectedDays). The two are independent: the detail card shows
+    //   what you just tapped; the table-filter persists until you clear it.
     if (!window._dvSelectedDays) window._dvSelectedDays = new Set();
     const selectedDays = window._dvSelectedDays;
     for (let i = 0; i < days.length; i++) {
-      const d = byDay[days[i]];
+      const d = byBucket[days[i]];
       const day = days[i];
       const isSelected = selectedDays.has(day);
+      const isTapped = (window._dvCfg.tappedDay === day);
       const cx = pad.l + (i + 0.5) * colW;
-      const tip = `${day} — ${d.count} fills · risk ${fmtDollar(d.risk)} · P&L ${fmtPnl(d.pnl)} · cumul ${fmtPnl(cumul[i])}` + (isSelected ? ' · SELECTED' : ' · tap to filter');
+      const tip = `${day}${isWeekly ? ' (week)' : ''} — ${d.count} fills · risk ${fmtDollar(d.risk)} · P&L ${fmtPnl(d.pnl)} · cumul ${fmtPnl(cumul[i])}` + (isSelected ? ' · IN FILTER' : '');
 
-      svg += `<g onclick="toggleDvDayFilter('${day}')" style="cursor:pointer;"><title>${escapeHtml(tip)}</title>`;
-      // Selection highlight (or invisible hover hit area).
-      const hitFill = isSelected ? 'rgba(245, 185, 66, 0.18)' : 'transparent';
-      const hitStroke = isSelected ? 'rgba(245, 185, 66, 0.7)' : 'none';
-      svg += `<rect x="${cx - colW / 2 + 1}" y="${pad.t}" width="${colW - 2}" height="${chartH}" fill="${hitFill}" stroke="${hitStroke}" stroke-width="1" rx="2"/>`;
+      // Outer group taps → detail card. Inner click also fires the
+      // table-filter toggle so existing UX is preserved. (event.stopPropagation
+      // not needed — both can fire on the same tap.)
+      svg += `<g onclick="tapDvBar('${day}'); toggleDvDayFilter('${day}');" style="cursor:pointer;"><title>${escapeHtml(tip)}</title>`;
+      // Highlight rules: tapped bar gets a brighter ring + slight tint;
+      // selected (in table filter) gets the existing yellow tint.
+      let hitFill = 'transparent', hitStroke = 'none', hitW = 1;
+      if (isTapped) { hitFill = 'rgba(99, 179, 237, 0.22)'; hitStroke = 'var(--accent)'; hitW = 2; }
+      else if (isSelected) { hitFill = 'rgba(245, 185, 66, 0.18)'; hitStroke = 'rgba(245, 185, 66, 0.7)'; }
+      svg += `<rect x="${cx - colW / 2 + 1}" y="${pad.t}" width="${colW - 2}" height="${chartH}" fill="${hitFill}" stroke="${hitStroke}" stroke-width="${hitW}" rx="2"/>`;
 
       // Risk bar (blue, semi-transparent, always above zero)
       if (d.risk > 0) {
@@ -8311,13 +8470,14 @@
       svg += '</g>';
     }
 
-    // X-axis labels: rotated date only. Fill counts removed (Mike wanted
-    // them gone — they were ambiguous and noisy). Per-bar tooltip still
-    // carries the fill count for anyone who wants it.
+    // X-axis labels with smart density. At long ranges we'd collide and
+    // shred readability; skip labels using the same _dvShowLabelAt rule
+    // that drives the value-on-bar labels. Per-bar tooltip carries the
+    // date for any bar without a visible x-axis label.
     for (let i = 0; i < days.length; i++) {
+      if (!showXTickAt(i)) continue;
       const cx = pad.l + (i + 0.5) * colW;
       const dayLabel = days[i].substring(5); // MM-DD
-      // Rotate -40° so longer date strings don't collide horizontally.
       svg += `<text x="${cx}" y="${H - pad.b + 16}" font-size="10" fill="var(--text2)" text-anchor="end" transform="rotate(-40 ${cx} ${H - pad.b + 16})">${dayLabel}</text>`;
     }
 
@@ -8516,6 +8676,8 @@
     svg += '</table></div>';
 
     el.innerHTML = svg;
+    // Detail card above the chart — reads window._dvCfg.tappedDay
+    _renderDvDetail(byBucket, cumulMap);
   }
 
   // ===================== ORDERS TAB: DAILY VOLUME & P&L (by month) =====================
@@ -10362,11 +10524,15 @@
   function setDvDateFrom(isoDate) {
     window._dvFromIso = isoDate || null;
     window._dvFromMs = isoDate ? new Date(isoDate + 'T00:00:00').getTime() : null;
+    // Editing a date input implies custom mode — otherwise the active
+    // range chip (e.g. "14d") would overwrite _dvFromMs on the next render.
+    if (window._dvCfg) window._dvCfg.range = 'custom';
     _rerenderDvChart();
   }
   function setDvDateTo(isoDate) {
     window._dvToIso = isoDate || null;
     window._dvToMs = isoDate ? new Date(isoDate + 'T23:59:59.999').getTime() : null;
+    if (window._dvCfg) window._dvCfg.range = 'custom';
     _rerenderDvChart();
   }
   function clearDvDateRange() {
@@ -10375,6 +10541,10 @@
     window._dvFromMs = null;
     window._dvToMs = null;
     _resetDateInputs('dv-date-from', 'dv-date-to');
+    // "Reset" in the custom panel returns to the default chip (14d).
+    if (window._dvCfg) window._dvCfg.range = '14d';
+    const customEl = document.getElementById('chart-dv-custom');
+    if (customEl) customEl.style.display = 'none';
     _rerenderDvChart();
   }
   // Bar-click multi-select filter — clicking a bar in the Daily Volume
