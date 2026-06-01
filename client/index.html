@@ -1419,6 +1419,23 @@
               <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gsl-filter-active-only" onchange="gslRender()"> with active wager</label>
             </span>
           </div>
+          <!-- Bulk-apply bar: set the same risk amount across every row matching
+               the active filter. Most common workflow per Mike: same $ on all
+               golfers in a tournament. Stages as dirty edits — Save Edits to
+               persist. Respects the filter selectors above. -->
+          <div id="gsl-bulk-bar" style="padding:8px 14px; border-bottom:1px solid var(--border); display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:11px;">
+            <span style="color:var(--text3);">Bulk apply to <b id="gsl-visible-count" style="color:var(--text);">0</b> visible row(s):</span>
+            <span style="display:flex; gap:4px; align-items:center;">
+              <span style="color:var(--text3);">Risk $</span>
+              <input type="number" id="gsl-bulk-risk" min="0" step="1" placeholder="50" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gslBulkApplyRisk();}">
+              <button class="btn" onclick="gslBulkApplyRisk()" title="Set this risk amount on every visible row (stages as dirty edits)">Set risk on visible</button>
+            </span>
+            <span style="color:var(--text3);">·</span>
+            <button class="btn" onclick="gslBulkSetEnabled(true)" title="Toggle enabled=true on every visible row">Enable all visible</button>
+            <button class="btn" onclick="gslBulkSetEnabled(false)" title="Toggle enabled=false on every visible row">Disable all visible</button>
+            <span style="flex:1;"></span>
+            <span style="color:var(--text3);">Stages dirty — click <b>Save Edits</b> in Status to persist.</span>
+          </div>
           <div class="card-body" id="gsl-table" style="padding:0;">
             <div class="empty-state" style="padding:30px;"><div class="icon">-</div>No data loaded</div>
           </div>
@@ -14526,14 +14543,12 @@
       + '<div><span style="color:var(--text3);">Dirty edits:</span> <b id="gsl-dirty-count">' + window._gslDirty.size + '</b></div>'
       + '</div>';
 
-    // Filter
-    const filterT = document.getElementById('gsl-filter-tournament')?.value || '';
-    const onlyEnabled = !!document.getElementById('gsl-filter-enabled-only')?.checked;
-    const onlyActive = !!document.getElementById('gsl-filter-active-only')?.checked;
-    let rows = cfg.slice();
-    if (filterT) rows = rows.filter(r => (r.tournament_name || '(none)') === filterT);
-    if (onlyEnabled) rows = rows.filter(r => r.enabled);
-    if (onlyActive) rows = rows.filter(r => (r.active_wagers || []).length > 0);
+    // Filter (extracted into _gslFilteredRows so the bulk-apply controls
+    // can use the same set without duplicating filter logic).
+    const rows = _gslFilteredRows(cfg);
+    // Update the "N visible rows" counter for the bulk-apply bar.
+    const visEl = document.getElementById('gsl-visible-count');
+    if (visEl) visEl.textContent = String(rows.length);
 
     // Group by tournament -> matchup
     rows.sort((a, b) => {
@@ -14611,6 +14626,54 @@
     d.enabled = !!val;
     window._gslDirty.set(lineId, d);
     const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
+  }
+
+  // ---- Filter helper (shared by gslRender + bulk-apply controls) ----
+  function _gslFilteredRows(cfg) {
+    const filterT = document.getElementById('gsl-filter-tournament')?.value || '';
+    const onlyEnabled = !!document.getElementById('gsl-filter-enabled-only')?.checked;
+    const onlyActive = !!document.getElementById('gsl-filter-active-only')?.checked;
+    let rows = (cfg || []).slice();
+    if (filterT) rows = rows.filter(r => (r.tournament_name || '(none)') === filterT);
+    if (onlyEnabled) rows = rows.filter(r => r.enabled);
+    if (onlyActive) rows = rows.filter(r => (r.active_wagers || []).length > 0);
+    return rows;
+  }
+
+  // ---- Bulk apply: set the same risk on every visible row ----
+  // Mike's primary use case: same $ on all golfers in a tournament. Click
+  // "Set risk on visible" → stages a dirty edit on each filtered row →
+  // existing "Save Edits" persists via /single-leg/golf/config.
+  function gslBulkApplyRisk() {
+    const inp = document.getElementById('gsl-bulk-risk');
+    const valRaw = inp ? inp.value : '';
+    const num = valRaw === '' || valRaw == null ? null : Number(valRaw);
+    if (num === null || isNaN(num) || num < 0) { alert('Enter a non-negative risk amount.'); return; }
+    const s = window._gslState; if (!s || !Array.isArray(s.config)) { alert('No data loaded — Sync from PX first.'); return; }
+    const rows = _gslFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows to apply to. Check your filter.'); return; }
+    if (!confirm('Set Risk $' + num + ' on ' + rows.length + ' visible row(s)? (Stages as dirty edits — click Save Edits to persist.)')) return;
+    for (const r of rows) {
+      const d = window._gslDirty.get(r.line_id) || {};
+      d.risk_amount = num;
+      window._gslDirty.set(r.line_id, d);
+    }
+    gslRender();
+  }
+
+  // ---- Bulk apply: toggle enabled on every visible row ----
+  function gslBulkSetEnabled(enabled) {
+    const s = window._gslState; if (!s || !Array.isArray(s.config)) { alert('No data loaded — Sync from PX first.'); return; }
+    const rows = _gslFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows to apply to. Check your filter.'); return; }
+    const lbl = enabled ? 'Enable' : 'Disable';
+    if (!confirm(lbl + ' ' + rows.length + ' visible row(s)? (Stages as dirty edits — click Save Edits to persist.)')) return;
+    for (const r of rows) {
+      const d = window._gslDirty.get(r.line_id) || {};
+      d.enabled = !!enabled;
+      window._gslDirty.set(r.line_id, d);
+    }
+    gslRender();
   }
 
   async function gslSaveDirty(btn) {
