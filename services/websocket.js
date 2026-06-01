@@ -411,6 +411,14 @@ async function connect() {
   pusherClient = new Pusher(wsConfig.key, {
     cluster: wsConfig.cluster,
     forceTLS: true,
+    // Tightened from pusher-js defaults (120s/30s) so a half-open TCP path
+    // is detected faster. Caught 2026-06-01 03:39am ET: socket silently
+    // died, pusher-js never declared it dead, reconnectAttempts stayed 0,
+    // and we missed 7.5h of RFQs. The new watchdog below catches the
+    // *pong-without-data* failure mode that even these can miss, but
+    // these timeouts shorten detection for the pure half-open TCP case.
+    activityTimeout: 60_000,  // 1 min idle → send ping
+    pongTimeout: 15_000,      // 15s to pong → declare dead, reconnect
     // Custom authorizer — uses auth tokens from PX registration response
     authorizer: (channel, options) => ({
       authorize: (socketId, callback) => {
@@ -462,6 +470,10 @@ async function connect() {
       clearTimeout(timeout);
       connectionState = 'connected';
       reconnectAttempts = 0;
+      // Seed lastHealthCheck so the watchdog doesn't fire on a fresh
+      // reconnect just because the first health event hasn't arrived yet
+      // (pusher-js can take up to activityTimeout to send the first ping).
+      lastHealthCheck = Date.now();
       const socketId = pusherClient.connection.socket_id;
       log.info('WS', `Connected! socket_id=${socketId}`);
 
@@ -2042,18 +2054,66 @@ function handleHealthCheck(data) {
 }
 
 // ---------------------------------------------------------------------------
-// HEALTH CHECK MONITOR
+// HEALTH CHECK MONITOR + ZOMBIE-CONNECTION WATCHDOG
 // ---------------------------------------------------------------------------
+// History: prior to 2026-06-01 this only LOGGED a warning when the health
+// check stopped, on the assumption that pusher-js would handle reconnection
+// automatically. It doesn't always — caught 2026-06-01 03:39am ET when the
+// socket entered "pong-without-data" state (control plane alive but event
+// delivery dead). reconnectAttempts stayed 0 for 7.5 hours. 423 quotes →
+// 0 quotes for ~7h before Mike noticed via the dashboard.
+//
+// Fix: this monitor now actively force-reconnects when the health-event
+// stream has been silent past WS_WATCHDOG_STALE_MINUTES (default 3). Same
+// disconnect+connect path the manual /reconnect endpoint uses. Push
+// notification fires on auto-reconnect. Disable with WS_WATCHDOG_DISABLED=true.
+
+const _watchdogEnabled = !/^true$/i.test(process.env.WS_WATCHDOG_DISABLED || '');
+const _watchdogStaleMs = (Number(process.env.WS_WATCHDOG_STALE_MINUTES) || 3) * 60 * 1000;
+let _watchdogReconnecting = false;
+let _watchdogLastFireAt = 0;
+
+async function _watchdogReconnect(reason) {
+  if (_watchdogReconnecting) return;
+  // Cooldown — don't fire more than once per 2 min, even if reconnect
+  // fails repeatedly. Prevents reconnect storm if PX is itself down.
+  if (Date.now() - _watchdogLastFireAt < 120_000) return;
+  _watchdogReconnecting = true;
+  _watchdogLastFireAt = Date.now();
+  log.warn('WS-Watchdog', `Forcing reconnect: ${reason}`);
+  // Seed lastHealthCheck so we don't immediately re-fire during the
+  // handshake (the cooldown above is belt; this is suspenders).
+  lastHealthCheck = Date.now();
+  try {
+    try { require('./push').notifyConnectionState('zombie', `Watchdog auto-reconnect: ${reason}`); } catch (_) {}
+    try { px.clearCooldown && px.clearCooldown(); } catch (_) {}
+    disconnect();
+    await connect();
+    log.info('WS-Watchdog', 'Auto-reconnect complete');
+  } catch (err) {
+    log.error('WS-Watchdog', `Auto-reconnect failed: ${err.message}`);
+  } finally {
+    _watchdogReconnecting = false;
+  }
+}
 
 function startHealthCheckMonitor() {
   if (healthCheckTimer) clearInterval(healthCheckTimer);
 
   healthCheckTimer = setInterval(() => {
-    if (lastHealthCheck && (Date.now() - lastHealthCheck) > 60000) {
-      log.warn('WS', 'No health check received in 60s — connection may be stale');
-      // Pusher-js handles reconnection automatically, but log the warning
+    if (!lastHealthCheck) return; // never seen a health event yet
+    const ageMs = Date.now() - lastHealthCheck;
+    if (ageMs > 60_000) {
+      log.warn('WS', `No health check received in ${Math.round(ageMs / 1000)}s — connection may be stale`);
     }
-  }, 30000);
+    if (_watchdogEnabled && ageMs > _watchdogStaleMs) {
+      _watchdogReconnect(`lastHealthCheck stale ${Math.round(ageMs / 1000)}s (threshold ${Math.round(_watchdogStaleMs / 1000)}s)`)
+        .catch(() => { /* logged inside */ });
+    }
+  }, 60_000);
+  log.info('WS-Watchdog', _watchdogEnabled
+    ? `armed — auto-reconnect when lastHealthCheck stale > ${Math.round(_watchdogStaleMs / 1000)}s`
+    : 'disabled via WS_WATCHDOG_DISABLED');
 }
 
 // ---------------------------------------------------------------------------
