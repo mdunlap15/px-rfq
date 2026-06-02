@@ -386,10 +386,54 @@ let lastHealthCheck = null;
 let healthCheckTimer = null;
 let reconnectAttempts = 0;
 let channelAuth = {}; // { channelName: authString } from PX registration
+let _connectingPromise = null; // single-flight guard for connect()
 
 // ---------------------------------------------------------------------------
 // CONNECT
 // ---------------------------------------------------------------------------
+
+/**
+ * Fully tear down the current Pusher client: unbind ALL event handlers, then
+ * disconnect, then null the reference.
+ *
+ * This is the fix for the boot-retry zombie-client bug (diagnosed 2026-06-02).
+ * connect() used to do `new Pusher()` on every attempt WITHOUT tearing down
+ * the previous client. pusher-js auto-connects and runs its own internal
+ * reconnect loop, and the old client's `state_change` handler keeps writing
+ * the shared module-level `connectionState` — so a zombie from a failed boot
+ * attempt could flip connectionState back to 'disconnected' AFTER the live
+ * client connected, leaving the service stuck disconnected until a manual
+ * /reconnect (which only "worked" because by then PX had evicted the stale
+ * sessions AND the zombies had gone quiet). Unbinding handlers before
+ * replacing the client guarantees exactly one writer of connectionState.
+ */
+function _teardownClient() {
+  if (!pusherClient) return;
+  try { pusherClient.connection && pusherClient.connection.unbind_all && pusherClient.connection.unbind_all(); } catch (_) {}
+  try { pusherClient.unbind_all && pusherClient.unbind_all(); } catch (_) {}
+  try { pusherClient.disconnect(); } catch (_) {}
+  pusherClient = null;
+}
+
+/**
+ * Single-flight wrapper around the real connect sequence. If a connect is
+ * already in progress, concurrent callers (boot-retry loop, runtime watchdog,
+ * manual /reconnect) get the SAME in-flight promise instead of each spawning a
+ * competing Pusher client. Combined with _teardownClient(), this ensures there
+ * is only ever one live client.
+ */
+async function connect() {
+  if (_connectingPromise) {
+    log.info('WS', 'connect() already in progress — returning in-flight promise');
+    return _connectingPromise;
+  }
+  _connectingPromise = _doConnect();
+  try {
+    return await _connectingPromise;
+  } finally {
+    _connectingPromise = null;
+  }
+}
 
 /**
  * Full connection sequence:
@@ -400,8 +444,12 @@ let channelAuth = {}; // { channelName: authString } from PX registration
  * 5. Subscribe to broadcast + private channels
  * 6. Bind event handlers
  */
-async function connect() {
+async function _doConnect() {
   log.info('WS', 'Starting WebSocket connection...');
+
+  // Kill any prior client (and its bound handlers) before creating a new one,
+  // so a failed/previous attempt's client can't keep racing connectionState.
+  _teardownClient();
 
   // 1. Get Pusher config
   const wsConfig = await px.getWebSocketConfig();
@@ -463,6 +511,10 @@ async function connect() {
   // 3. Wait for connection
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
+      // Tear down the half-open client so it doesn't keep consuming a PX
+      // session slot — otherwise the next boot-retry attempt hits
+      // session_num_exceed against a session this very attempt is holding.
+      _teardownClient();
       reject(new Error('Pusher connection timeout (30s)'));
     }, 30000);
 
@@ -494,6 +546,10 @@ async function connect() {
         resolve();
       } catch (err) {
         log.error('WS', `Post-connect setup failed: ${err.message}`);
+        // Registration/subscribe failed but the socket is fully connected and
+        // holding a PX session — tear it down before rejecting so the retry
+        // doesn't collide with our own orphaned session.
+        _teardownClient();
         reject(err);
       }
     });
@@ -2152,7 +2208,9 @@ function resume() {
 function disconnect() {
   if (healthCheckTimer) clearInterval(healthCheckTimer);
   if (pusherClient) {
-    pusherClient.disconnect();
+    // Unbind handlers + disconnect + null the ref (not just disconnect) so the
+    // old client can't keep emitting state_change into the shared state.
+    _teardownClient();
     log.info('WS', 'Disconnected');
   }
   connectionState = 'disconnected';
