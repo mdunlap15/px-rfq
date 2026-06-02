@@ -1,0 +1,470 @@
+// ============================================================================
+// golf-outrights.js — Bulk-post YES offers on PX golf outright markets
+// (Top 1 / 5 / 10 / 20 / Make Cut), priced from DraftKings + sweetener.
+// ============================================================================
+// Why DK and not DataGolf: DataGolf's outright odds use "dead-heat" settlement
+// rules, while PX settles "ties included." The two produce materially different
+// fair probabilities, so DataGolf is not a substitute — we must scrape DK.
+//
+// Pricing model (per Mike's existing workflow):
+//   offered_implied = dk_implied × (1 + GOLF_OUTRIGHTS_SWEETENER)
+//   We post YES offers only (= responding to NO requests from PX bettors).
+//
+// Reuses:
+//   - services/px-single.js for ALL PX I/O (second account, isolated session)
+//   - services/dk-scraper.js → fetchGolfOutrights(slug) for DK odds
+//
+// State (Supabase tables — see scripts/_golf_outrights_schema.sql):
+//   golf_outright_tournaments  — slug → DK URL (operator-managed)
+//   golf_outright_config       — per (player, market) row: risk_amount, enabled
+//   golf_outright_wagers       — runtime state of posted wagers
+//
+// All operations no-op cleanly when GOLF_OUTRIGHTS_ENABLED is unset.
+// ============================================================================
+
+const log = require('./logger');
+const pxSingle = require('./px-single');
+const dkScraper = require('./dk-scraper');
+const db = require('./db');
+
+const TBL_TOURN  = 'golf_outright_tournaments';
+const TBL_CONFIG = 'golf_outright_config';
+const TBL_WAGERS = 'golf_outright_wagers';
+
+function _cfg() {
+  return {
+    enabled: String(process.env.GOLF_OUTRIGHTS_ENABLED || '').toLowerCase() === 'true',
+    sweetener: Number(process.env.GOLF_OUTRIGHTS_SWEETENER) || 0.01,
+    refreshMin: Number(process.env.GOLF_OUTRIGHTS_REFRESH_MINUTES) || 10,
+    driftPp: Number(process.env.GOLF_OUTRIGHTS_DRIFT_PP) || 2,
+  };
+}
+function isEnabled() { return _cfg().enabled; }
+
+const aImpl = a => { if (a == null || a === '') return null; const n = Number(a); if (!isFinite(n) || n === 0) return null; return n >= 0 ? 100 / (n + 100) : (-n) / (-n + 100); };
+const americanFromImplied = p => {
+  if (!isFinite(p) || p <= 0 || p >= 1) return null;
+  return p >= 0.5 ? Math.round(-100 * p / (1 - p)) : Math.round((1 / p - 1) * 100);
+};
+
+// Normalize player names for fuzzy DK↔PX matching. Lowercase, strip diacritics,
+// drop periods/apostrophes/dashes, collapse whitespace. Mirrors the DataGolf
+// approach used in the matchup pipeline.
+function _normName(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[.'’`-]/g, ' ')
+    .replace(/\b(jr|sr|ii|iii|iv)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// PX market-name regex for each outright market type — match by marketName
+// since PX uses descriptive names ("Tournament Winner", "Top 5 Finish").
+const PX_MARKET_PATTERNS = [
+  { key: 'top_1',    re: /tournament\s+winner|^winner$|^outright\s+winner$|to\s+win\s+(?:the\s+)?tournament/i },
+  { key: 'top_5',    re: /top[\s-]?5(?:\s+finish)?$/i },
+  { key: 'top_10',   re: /top[\s-]?10(?:\s+finish)?$/i },
+  { key: 'top_20',   re: /top[\s-]?20(?:\s+finish)?$/i },
+  { key: 'make_cut', re: /make.*cut|miss.*cut|cut/i },
+];
+function classifyPxMarketName(name) {
+  for (const p of PX_MARKET_PATTERNS) if (p.re.test(name || '')) return p.key;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tournaments (operator-managed)
+// ---------------------------------------------------------------------------
+async function listTournaments() {
+  const sb = db.getClient && db.getClient();
+  if (!sb) throw new Error('Supabase not available');
+  const { data, error } = await sb.from(TBL_TOURN).select('*').order('created_at', { ascending: false });
+  if (error) throw new Error('listTournaments: ' + error.message);
+  return data || [];
+}
+async function upsertTournament({ dk_slug, dk_url, tournament_name, enabled = true, notes = null }) {
+  const sb = db.getClient();
+  if (!dk_slug && dk_url) {
+    // Extract slug from URL: /leagues/golf/<slug>?...
+    const m = String(dk_url).match(/\/leagues\/golf\/([^/?#]+)/i);
+    if (m) dk_slug = m[1];
+  }
+  if (!dk_slug || !dk_url) throw new Error('upsertTournament: dk_slug + dk_url required');
+  const row = { dk_slug, dk_url, tournament_name, enabled: !!enabled, notes };
+  const { error } = await sb.from(TBL_TOURN).upsert(row, { onConflict: 'dk_slug' });
+  if (error) throw new Error('upsertTournament: ' + error.message);
+  return { ok: true, dk_slug };
+}
+async function deleteTournament(dk_slug) {
+  const sb = db.getClient();
+  const { error } = await sb.from(TBL_TOURN).delete().eq('dk_slug', dk_slug);
+  if (error) throw new Error('deleteTournament: ' + error.message);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Discovery: scrape DK + match to PX outright lines + upsert config
+// ---------------------------------------------------------------------------
+
+// For a given DK player name + market_type, find the matching PX line_id from
+// the SINGLE-LEG account's events. Returns { px_line_id, px_event_id, px_market_id }
+// or null. Caches the per-tournament PX market scan to avoid N×M calls.
+async function _pxMarketsFor(slug) {
+  const events = await pxSingle.fetchSportEvents();
+  // Match tournament by slug — DK slugs like "the-memorial-tournament" tend to
+  // appear normalized in PX event names. Use loose contains-all-words match.
+  const slugWords = String(slug).split('-').filter(w => w.length > 2);
+  const golfEvents = events.filter(e => String(e.sport_name || '').toLowerCase().includes('golf'));
+  const matched = golfEvents.filter(e => {
+    const n = String(e.name || '').toLowerCase();
+    return slugWords.every(w => n.includes(w.toLowerCase()));
+  });
+  if (!matched.length) return { eventCount: 0, byMarketType: {} };
+  const byMarketType = {}; // 'top_5' -> [{ player_name, line_id, event_id, market_id }, ...]
+  for (const evt of matched) {
+    let mkts;
+    try { mkts = await pxSingle.fetchMarkets(evt.event_id); }
+    catch (e) { log.warn('GolfOut', `PX get_markets ${evt.event_id} failed: ${e.message}`); continue; }
+    for (const mkt of mkts) {
+      const mtype = classifyPxMarketName(mkt.name);
+      if (!mtype) continue;
+      if (!byMarketType[mtype]) byMarketType[mtype] = [];
+      // PX outrights typically expose selections as a flat list, one per player
+      const flat = [];
+      if (Array.isArray(mkt.selections)) {
+        for (const g of mkt.selections) {
+          if (Array.isArray(g)) flat.push(...g);
+          else flat.push(g);
+        }
+      }
+      for (const s of flat) {
+        if (!s || !s.line_id) continue;
+        byMarketType[mtype].push({
+          player_name: s.name || s.display_name || '',
+          player_norm: _normName(s.name || s.display_name || ''),
+          line_id: s.line_id,
+          event_id: evt.event_id,
+          market_id: mkt.id,
+        });
+      }
+    }
+  }
+  return { eventCount: matched.length, byMarketType };
+}
+
+async function syncTournament(dk_slug) {
+  const sb = db.getClient();
+  if (!sb) throw new Error('Supabase not available');
+  const { data: tRow, error: tErr } = await sb.from(TBL_TOURN).select('*').eq('dk_slug', dk_slug).maybeSingle();
+  if (tErr) throw new Error('syncTournament select: ' + tErr.message);
+  if (!tRow) throw new Error('syncTournament: tournament not registered: ' + dk_slug);
+
+  // 1. Scrape DK
+  let dk;
+  try { dk = await dkScraper.fetchGolfOutrights(dk_slug); }
+  catch (e) { throw new Error('DK scrape failed: ' + e.message); }
+  if (!dk.markets || !dk.markets.length) {
+    return { ok: true, dk_slug, dk_markets: 0, px_events: 0, upserted: 0, warning: 'DK returned no markets — wrong slug or no outrights up yet' };
+  }
+
+  // 2. Build PX line lookup (one fetch per tournament)
+  const px = await _pxMarketsFor(dk_slug);
+
+  // 3. For each (DK market × DK player), find PX line + upsert config
+  const { sweetener } = _cfg();
+  const upserts = [];
+  let dkSelections = 0, pxMatched = 0;
+  for (const dkMkt of dk.markets) {
+    const pxList = px.byMarketType[dkMkt.marketType] || [];
+    const pxByNorm = new Map();
+    for (const p of pxList) pxByNorm.set(p.player_norm, p);
+    for (const sel of dkMkt.selections) {
+      dkSelections++;
+      const dkImpl = aImpl(sel.americanOdds);
+      if (dkImpl == null) continue;
+      const offeredImpl = Math.min(0.99, dkImpl * (1 + sweetener));
+      const offeredAm = americanFromImplied(offeredImpl);
+      const pxMatch = pxByNorm.get(_normName(sel.playerName));
+      if (pxMatch) pxMatched++;
+      upserts.push({
+        dk_slug,
+        market_type: dkMkt.marketType,
+        player_name: sel.playerName,
+        side: 'yes',
+        px_line_id: pxMatch ? pxMatch.line_id : null,
+        px_event_id: pxMatch ? pxMatch.event_id : null,
+        px_market_id: pxMatch ? pxMatch.market_id : null,
+        dk_american_odds: sel.americanOdds,
+        dk_implied: Math.round(dkImpl * 100000) / 100000,
+        offered_implied: Math.round(offeredImpl * 100000) / 100000,
+        offered_american: offeredAm,
+      });
+    }
+  }
+
+  // Upsert in chunks (Supabase limits payload size)
+  let upserted = 0;
+  for (let i = 0; i < upserts.length; i += 500) {
+    const chunk = upserts.slice(i, i + 500);
+    const { error } = await sb.from(TBL_CONFIG).upsert(chunk, {
+      onConflict: 'dk_slug,market_type,player_name,side',
+      ignoreDuplicates: false,
+    });
+    if (error) throw new Error('upsert chunk: ' + error.message);
+    upserted += chunk.length;
+  }
+  // Touch tournament last_scraped_at
+  await sb.from(TBL_TOURN).update({ last_scraped_at: new Date().toISOString() }).eq('dk_slug', dk_slug);
+
+  return {
+    ok: true,
+    dk_slug,
+    dk_markets: dk.markets.length,
+    dk_selections: dkSelections,
+    px_events: px.eventCount,
+    px_matched_selections: pxMatched,
+    upserted,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Posting
+// ---------------------------------------------------------------------------
+async function _activeWagersByConfigId() {
+  const sb = db.getClient();
+  const { data, error } = await sb.from(TBL_WAGERS)
+    .select('wager_id, config_id, px_line_id, posted_odds, posted_dk_implied, status')
+    .in('status', ['posted', 'partially_matched']);
+  if (error) throw new Error('activeWagers: ' + error.message);
+  const byCfg = new Map();
+  for (const w of (data || [])) {
+    if (w.config_id != null && !byCfg.has(w.config_id)) byCfg.set(w.config_id, w);
+  }
+  return byCfg;
+}
+
+async function postEnabled() {
+  const sb = db.getClient();
+  // enabled + risk-set + has PX line + has offered_american
+  const { data: cfgRows, error } = await sb.from(TBL_CONFIG)
+    .select('*')
+    .eq('enabled', true)
+    .not('risk_amount', 'is', null)
+    .gt('risk_amount', 0)
+    .not('px_line_id', 'is', null)
+    .not('offered_american', 'is', null);
+  if (error) throw new Error('postEnabled select: ' + error.message);
+  if (!cfgRows || !cfgRows.length) return { posted: 0, skipped: 0, errors: [], detail: 'no enabled+ready rows' };
+
+  const active = await _activeWagersByConfigId();
+  const ladder = await pxSingle.fetchOddsLadder();
+
+  const orders = []; const skipped = [];
+  for (const row of cfgRows) {
+    if (active.has(row.id)) { skipped.push({ id: row.id, reason: 'already-posted' }); continue; }
+    const snapped = pxSingle.snapToLadder(Number(row.offered_american), ladder);
+    orders.push({
+      _config_id: row.id,
+      _dk_slug: row.dk_slug,
+      _dk_implied: Number(row.dk_implied),
+      _event_id: row.px_event_id,
+      line_id: row.px_line_id,
+      odds: snapped,
+      stake: Number(row.risk_amount),
+      external_id: 'go_' + row.id + '_' + Date.now(),
+    });
+  }
+  if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
+
+  let posted = 0;
+  const errors = [];
+  const wagerRows = [];
+  for (let i = 0; i < orders.length; i += 20) {
+    const batch = orders.slice(i, i + 20);
+    let resp;
+    try { resp = await pxSingle.placeMultipleWagers(batch.map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }))); }
+    catch (e) { errors.push('batch error: ' + e.message); continue; }
+    for (const w of resp.succeed_wagers) {
+      const m = batch.find(o => o.external_id === w.external_id);
+      if (!m) continue;
+      posted++;
+      wagerRows.push({
+        wager_id: w.wager_id || w.id,
+        config_id: m._config_id,
+        dk_slug: m._dk_slug,
+        px_line_id: m.line_id,
+        px_event_id: m._event_id,
+        external_id: m.external_id,
+        posted_odds: m.odds,
+        posted_stake: m.stake,
+        posted_dk_implied: m._dk_implied,
+        status: w.matching_status || 'posted',
+        posted_at: new Date().toISOString(),
+        last_seen_at: new Date().toISOString(),
+      });
+    }
+    for (const f of resp.failed_wagers) {
+      const idx = f.index != null ? f.index : -1;
+      const ext = idx >= 0 && idx < batch.length ? batch[idx].external_id : null;
+      errors.push((ext || '?') + ': ' + (f.message || f.error || 'unknown'));
+    }
+  }
+  if (wagerRows.length) {
+    const { error: insErr } = await sb.from(TBL_WAGERS).upsert(wagerRows, { onConflict: 'wager_id' });
+    if (insErr) errors.push('wagers upsert: ' + insErr.message);
+  }
+  return { posted, skipped: skipped.length, errors, skippedDetail: skipped };
+}
+
+async function cancelAll() {
+  const sb = db.getClient();
+  const { data, error } = await sb.from(TBL_WAGERS)
+    .select('wager_id, px_line_id')
+    .in('status', ['posted', 'partially_matched']);
+  if (error) throw new Error('cancelAll select: ' + error.message);
+  let cancelled = 0; const errors = [];
+  for (const w of (data || [])) {
+    try {
+      await pxSingle.cancelWager(w.wager_id);
+      cancelled++;
+      await sb.from(TBL_WAGERS).update({ status: 'cancelled', cancelled_at: new Date().toISOString(), last_seen_at: new Date().toISOString() }).eq('wager_id', w.wager_id);
+    } catch (e) { errors.push(w.wager_id + ': ' + e.message); }
+  }
+  return { cancelled, errors };
+}
+
+// Drift detection: for each active wager, recompute the current DK implied,
+// compare to posted_dk_implied. If shifted by > driftPp, cancel + repost on
+// next postEnabled cycle.
+async function refreshDrift() {
+  const { driftPp, sweetener } = _cfg();
+  const sb = db.getClient();
+  const { data: wagers, error } = await sb.from(TBL_WAGERS)
+    .select('wager_id, config_id, posted_dk_implied')
+    .in('status', ['posted', 'partially_matched']);
+  if (error) throw new Error('refreshDrift select: ' + error.message);
+  if (!wagers || !wagers.length) return { drifted: 0, errors: [] };
+
+  // Pull current DK implied per config row
+  const cfgIds = wagers.map(w => w.config_id).filter(Boolean);
+  if (!cfgIds.length) return { drifted: 0, errors: [] };
+  const { data: cfgRows, error: cErr } = await sb.from(TBL_CONFIG)
+    .select('id, dk_implied')
+    .in('id', cfgIds);
+  if (cErr) throw new Error('refreshDrift cfg: ' + cErr.message);
+  const cfgById = new Map((cfgRows || []).map(r => [r.id, r]));
+
+  let drifted = 0; const errors = [];
+  for (const w of wagers) {
+    const cfg = cfgById.get(w.config_id);
+    if (!cfg || cfg.dk_implied == null) continue;
+    const driftPpNow = Math.abs((Number(cfg.dk_implied) - Number(w.posted_dk_implied)) * 100);
+    if (driftPpNow >= driftPp) {
+      try {
+        await pxSingle.cancelWager(w.wager_id);
+        await sb.from(TBL_WAGERS).update({
+          status: 'cancelled',
+          status_detail: `DK drift ${driftPpNow.toFixed(2)}pp >= ${driftPp}pp`,
+          cancelled_at: new Date().toISOString(),
+          last_seen_at: new Date().toISOString(),
+        }).eq('wager_id', w.wager_id);
+        drifted++;
+      } catch (e) { errors.push(w.wager_id + ': ' + e.message); }
+    }
+  }
+  return { drifted, errors };
+}
+
+// ---------------------------------------------------------------------------
+// State for UI
+// ---------------------------------------------------------------------------
+async function loadState() {
+  const sb = db.getClient();
+  if (!sb) return { error: 'no DB' };
+  const [tRes, cRes, wRes] = await Promise.all([
+    sb.from(TBL_TOURN).select('*').order('created_at', { ascending: false }),
+    sb.from(TBL_CONFIG).select('*').order('dk_slug').order('market_type').order('player_name'),
+    sb.from(TBL_WAGERS).select('*').in('status', ['posted', 'partially_matched']),
+  ]);
+  if (tRes.error) return { error: 'tournaments: ' + tRes.error.message };
+  if (cRes.error) return { error: 'config: ' + cRes.error.message };
+  if (wRes.error) return { error: 'wagers: ' + wRes.error.message };
+  const wagerByCfg = new Map();
+  for (const w of (wRes.data || [])) {
+    if (!wagerByCfg.has(w.config_id)) wagerByCfg.set(w.config_id, []);
+    wagerByCfg.get(w.config_id).push(w);
+  }
+  const enriched = (cRes.data || []).map(r => ({ ...r, active_wagers: wagerByCfg.get(r.id) || [] }));
+  return {
+    tournaments: tRes.data || [],
+    config: enriched,
+    totalActive: (wRes.data || []).length,
+  };
+}
+
+async function updateConfig(updates) {
+  const sb = db.getClient();
+  if (!Array.isArray(updates) || !updates.length) return { updated: 0 };
+  let updated = 0; const errors = [];
+  for (const u of updates) {
+    if (!u.id) { errors.push('missing id'); continue; }
+    const patch = {};
+    if (u.risk_amount !== undefined) patch.risk_amount = u.risk_amount === null ? null : Number(u.risk_amount);
+    if (u.enabled !== undefined) patch.enabled = !!u.enabled;
+    if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
+    if (Object.keys(patch).length === 0) continue;
+    const { error } = await sb.from(TBL_CONFIG).update(patch).eq('id', u.id);
+    if (error) errors.push(u.id + ': ' + error.message);
+    else updated++;
+  }
+  return { updated, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle worker
+// ---------------------------------------------------------------------------
+let _workerHandle = null;
+async function _workerTick() {
+  if (!isEnabled()) return;
+  try {
+    const sb = db.getClient();
+    const { data: tourns } = await sb.from(TBL_TOURN).select('dk_slug').eq('enabled', true);
+    for (const t of (tourns || [])) {
+      try { await syncTournament(t.dk_slug); }
+      catch (e) { log.warn('GolfOut', `sync ${t.dk_slug}: ${e.message}`); }
+    }
+    await refreshDrift();
+    await postEnabled();
+    log.debug('GolfOut', `worker tick ok (${(tourns || []).length} tournaments)`);
+  } catch (e) {
+    log.error('GolfOut', 'worker tick error: ' + e.message);
+  }
+}
+
+function startWorker() {
+  if (!isEnabled()) { log.info('GolfOut', 'GOLF_OUTRIGHTS_ENABLED not true — worker disabled'); return; }
+  if (_workerHandle) return;
+  const { refreshMin } = _cfg();
+  const intervalMs = Math.max(1, refreshMin) * 60 * 1000;
+  log.info('GolfOut', `Starting outright worker (every ${refreshMin}min)`);
+  setTimeout(() => { _workerTick().catch(() => {}); }, 20_000);
+  _workerHandle = setInterval(() => { _workerTick().catch(() => {}); }, intervalMs);
+}
+function stopWorker() { if (_workerHandle) { clearInterval(_workerHandle); _workerHandle = null; } }
+
+module.exports = {
+  isEnabled,
+  listTournaments,
+  upsertTournament,
+  deleteTournament,
+  syncTournament,
+  loadState,
+  postEnabled,
+  cancelAll,
+  refreshDrift,
+  updateConfig,
+  startWorker,
+  stopWorker,
+};

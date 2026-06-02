@@ -673,6 +673,14 @@ async function startup() {
   } catch (e) {
     log.warn('Startup', 'GolfSL worker did not start: ' + e.message);
   }
+  // Start Golf Outrights lifecycle worker (second PX account). No-op when
+  // GOLF_OUTRIGHTS_ENABLED is unset/false; safe to call regardless.
+  try {
+    const go = require('./services/golf-outrights');
+    go.startWorker();
+  } catch (e) {
+    log.warn('Startup', 'GolfOut worker did not start: ' + e.message);
+  }
   console.log('');
 }
 
@@ -5769,6 +5777,69 @@ function startStatusServer() {
   // Repost: drift-check (cancel where stale) + post-enabled (place new offers)
   app.post('/single-leg/golf/repost', async (req, res) => {
     const m = _gslEnabledGuard(res); if (!m) return;
+    try {
+      const drift = await m.refreshDrift();
+      const post = await m.postEnabled();
+      res.json({ ok: true, drift, post });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // -----------------------------------------------------------------------
+  // Golf Outrights (second PX account — bulk-post YES offers on Top
+  // 1/5/10/20/Make Cut markets priced from DK + sweetener). Gated on
+  // GOLF_OUTRIGHTS_ENABLED. Lazy-required so a missing dep doesn't crash boot.
+  // -----------------------------------------------------------------------
+  let golfOutrights = null;
+  function _go() {
+    if (golfOutrights) return golfOutrights;
+    try { golfOutrights = require('./services/golf-outrights'); return golfOutrights; }
+    catch (e) { log.error('GolfOut', 'module load failed: ' + e.message); return null; }
+  }
+  function _goEnabledGuard(res) {
+    const m = _go();
+    if (!m) { res.status(500).json({ ok: false, error: 'golf-outrights module unavailable' }); return null; }
+    if (!m.isEnabled()) { res.status(503).json({ ok: false, error: 'GOLF_OUTRIGHTS_ENABLED is not true' }); return null; }
+    return m;
+  }
+  app.get('/single-leg/golf-outrights/state', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.loadState()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/tournaments', async (req, res) => {
+    // body: { dk_slug?, dk_url, tournament_name?, enabled?, notes? }
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.upsertTournament(req.body || {})) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.delete('/single-leg/golf-outrights/tournaments/:slug', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.deleteTournament(req.params.slug)) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/sync/:slug', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug)) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/config', async (req, res) => {
+    // body: { updates: [{ id, risk_amount?, enabled?, notes? }, ...] }
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.updateConfig((req.body && req.body.updates) || [])) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/post-all', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.postEnabled()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/cancel-all', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.cancelAll()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/single-leg/golf-outrights/repost', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
     try {
       const drift = await m.refreshDrift();
       const post = await m.postEnabled();

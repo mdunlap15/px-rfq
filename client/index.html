@@ -607,6 +607,9 @@
       <a class="nav-item" onclick="switchSection('golfSingleLeg', this)" id="nav-golfSingleLeg">
         <span class="nav-icon">&#9971;</span> Golf Single-Leg
       </a>
+      <a class="nav-item" onclick="switchSection('golfOutrights', this)" id="nav-golfOutrights">
+        <span class="nav-icon">&#9819;</span> Golf Outrights
+      </a>
     </nav>
     <div class="sidebar-footer">
       <button class="btn" id="pause-btn" onclick="togglePause()">Pause</button>
@@ -1449,6 +1452,88 @@
             <p><b>Lifecycle (auto every <code>GOLF_SINGLE_LEG_REFRESH_MINUTES</code>):</b> discover new PX matchups → upsert config (default enabled=false, risk=null) → cancel wagers for matchups that disappeared or are within <code>GOLF_SINGLE_LEG_CANCEL_BEFORE_TEEOFF_MINUTES</code> of tee → for each active wager, recompute fair and cancel+repost if drift &ge; <code>GOLF_SINGLE_LEG_DRIFT_PP</code>pp implied → post offers for any enabled+risk-set side that doesn't have an active wager.</p>
             <p><b>Account isolation:</b> uses <code>PX_SINGLE_ACCESS_KEY</code>/<code>PX_SINGLE_SECRET_KEY</code> via <code>services/px-single.js</code>; never touches the parlay SP's PX session.</p>
             <p><b>Manual buttons:</b> Sync = discover only. Post All = post enabled rows. Repost = drift-check + post. Cancel All = cancel every active wager (use carefully).</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================================================================
+           GOLF OUTRIGHTS SECTION
+           Bulk-post YES offers on PX outrights (Top 1/5/10/20/Make Cut)
+           priced from DraftKings + sweetener. Backend gated on
+           GOLF_OUTRIGHTS_ENABLED.
+           =================================================================== -->
+      <div id="section-golfOutrights" class="section" style="display:none;">
+        <div class="card">
+          <div class="card-header">
+            <span>Tournaments</span>
+            <span style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn" onclick="gorRefresh(true)">Refresh</button>
+            </span>
+          </div>
+          <div class="card-body" style="padding:10px 14px;">
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:center; font-size:11px;">
+              <input type="text" id="gor-new-url" placeholder="Paste DK tournament URL (e.g. https://sportsbook.draftkings.com/leagues/golf/the-memorial-tournament)" style="flex:1; min-width:260px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:11px;">
+              <input type="text" id="gor-new-name" placeholder="Tournament name (optional)" style="width:200px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:11px;">
+              <button class="btn" onclick="gorAddTournament()">Add tournament</button>
+            </div>
+            <div id="gor-tournaments-list" style="font-size:12px;"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span>Actions</span>
+            <span style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn" onclick="gorSaveDirty(this)">Save Edits</button>
+              <button class="btn" onclick="gorPostAll(this)">Post All</button>
+              <button class="btn" onclick="gorRepost(this)">Repost</button>
+              <button class="btn" onclick="gorCancelAll(this)" style="border-color:var(--red); color:var(--red);">Cancel All</button>
+            </span>
+          </div>
+          <div class="card-body" id="gor-status" style="padding:10px 14px; font-size:12px; color:var(--text2);">
+            <div class="empty-state"><div class="icon">...</div>Loading…</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span>Players</span>
+            <span style="font-size:11px; color:var(--text3); display:flex; gap:8px; align-items:center;">
+              Filter:
+              <select id="gor-filter-tournament" onchange="gorRender()" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;"><option value="">all tournaments</option></select>
+              <select id="gor-filter-market" onchange="gorRender()" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;">
+                <option value="">all markets</option><option value="top_1">Top 1</option><option value="top_5">Top 5</option><option value="top_10">Top 10</option><option value="top_20">Top 20</option><option value="make_cut">Make Cut</option>
+              </select>
+              <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gor-filter-enabled-only" onchange="gorRender()"> enabled only</label>
+              <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gor-filter-matched-only" onchange="gorRender()" checked> PX-matched only</label>
+            </span>
+          </div>
+          <div id="gor-bulk-bar" style="padding:8px 14px; border-bottom:1px solid var(--border); display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:11px;">
+            <span style="color:var(--text3);">Bulk apply to <b id="gor-visible-count" style="color:var(--text);">0</b> visible row(s):</span>
+            <span style="display:flex; gap:4px; align-items:center;">
+              <span style="color:var(--text3);">Risk $</span>
+              <input type="number" id="gor-bulk-risk" min="0" step="1" placeholder="20" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gorBulkApplyRisk();}">
+              <button class="btn" onclick="gorBulkApplyRisk()">Set risk on visible</button>
+            </span>
+            <span style="color:var(--text3);">·</span>
+            <button class="btn" onclick="gorBulkSetEnabled(true)">Enable all visible</button>
+            <button class="btn" onclick="gorBulkSetEnabled(false)">Disable all visible</button>
+            <span style="flex:1;"></span>
+            <span style="color:var(--text3);">Stages dirty — click <b>Save Edits</b> in Actions.</span>
+          </div>
+          <div class="card-body" id="gor-table" style="padding:0;">
+            <div class="empty-state" style="padding:30px;"><div class="icon">-</div>Add a tournament and click Sync.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header" onclick="toggleCard(this)"><span><span class="toggle-icon collapsed">&#9660;</span>How this works</span></div>
+          <div class="card-body collapsed" style="padding:12px; font-size:12px; line-height:1.6; color:var(--text2);">
+            <p><b>Purpose:</b> bulk-post YES offers on PX golf outright markets (Top 1/5/10/20/Make Cut) from the single-leg PX account, priced from DraftKings with a small sweetener. DK is used (not DataGolf) because DK uses ties-included settlement that matches PX; DataGolf uses dead-heat rules that don't.</p>
+            <p><b>Pricing:</b> <code>offered_implied = dk_implied × (1 + GOLF_OUTRIGHTS_SWEETENER)</code>. Default sweetener 1%. Per-fill edge ≈ sweetener × stake.</p>
+            <p><b>Workflow:</b> (1) paste a DK tournament URL into the Tournaments card and click Add. (2) Click Sync on that tournament — scrapes DK + matches players to PX outright lines. (3) Use bulk-apply to set Risk $ on all players, click Enable on the ones you want. Save Edits. (4) Post All.</p>
+            <p><b>Lifecycle (auto every <code>GOLF_OUTRIGHTS_REFRESH_MINUTES</code>):</b> sync each enabled tournament from DK → for each active wager, recompute the DK implied and cancel+repost if drift ≥ <code>GOLF_OUTRIGHTS_DRIFT_PP</code>pp → post any newly-enabled players.</p>
+            <p><b>Account isolation:</b> uses the same <code>PX_SINGLE_ACCESS_KEY</code>/<code>PX_SINGLE_SECRET_KEY</code> as Golf Single-Leg; never touches the parlay SP.</p>
           </div>
         </div>
       </div>
@@ -14359,7 +14444,7 @@
   }
 
   // Tab switching
-  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config', golfSingleLeg: 'Golf Single-Leg' };
+  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config', golfSingleLeg: 'Golf Single-Leg', golfOutrights: 'Golf Outrights' };
   let activeSection = 'portfolio';
   function switchPnlBreakdown(tab) {
     const sportEl = document.getElementById('chart-pnl-sport');
@@ -14481,6 +14566,8 @@
     if (section === 'lost' && !window._lostAnalysisLoaded) loadLostAnalysis();
     // Auto-load Golf Single-Leg on first activation.
     if (section === 'golfSingleLeg' && !window._gslLoaded) gslLoad(false);
+    // Auto-load Golf Outrights on first activation.
+    if (section === 'golfOutrights' && !window._gorLoaded) gorRefresh(true);
   }
 
   // =====================================================================
@@ -14746,6 +14833,263 @@
   }
 
   function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+  // =====================================================================
+  // GOLF OUTRIGHTS TAB — UI for the second-account outrights bot.
+  // Mirrors Golf Single-Leg but adds tournaments management (DK URL paste).
+  // =====================================================================
+  window._gorDirty = new Map(); // id -> patch
+  window._gorState = null;
+  window._gorLoaded = false;
+
+  async function gorRefresh(showLoading) {
+    const sEl = document.getElementById('gor-status');
+    if (showLoading && sEl) sEl.innerHTML = '<div class="empty-state"><div class="icon">...</div>Loading…</div>';
+    try {
+      const r = await fetch('/single-leg/golf-outrights/state', { credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) {
+        const tip = r.status === 503 ? ' (set GOLF_OUTRIGHTS_ENABLED=true in Railway)' : '';
+        if (sEl) sEl.innerHTML = '<div style="color:var(--red);">' + (j.error || ('HTTP ' + r.status)) + tip + '</div>';
+        return;
+      }
+      window._gorState = j; window._gorLoaded = true;
+      // Tournament filter dropdown
+      const sel = document.getElementById('gor-filter-tournament');
+      if (sel) {
+        const slugs = Array.from(new Set((j.config || []).map(r => r.dk_slug))).sort();
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">all tournaments</option>' + slugs.map(s => '<option value="' + escHtml(s) + '"' + (s === cur ? ' selected' : '') + '>' + escHtml(s) + '</option>').join('');
+      }
+      gorRenderTournaments();
+      gorRender();
+    } catch (e) { if (sEl) sEl.innerHTML = '<div style="color:var(--red);">load failed: ' + escHtml(e.message) + '</div>'; }
+  }
+
+  function gorRenderTournaments() {
+    const el = document.getElementById('gor-tournaments-list');
+    if (!el) return;
+    const ts = (window._gorState && window._gorState.tournaments) || [];
+    if (!ts.length) { el.innerHTML = '<div style="color:var(--text3);">No tournaments yet. Paste a DK URL above and click Add.</div>'; return; }
+    el.innerHTML = '<table style="width:100%; font-size:12px; border-collapse:collapse;">'
+      + '<thead><tr style="background:var(--surface2); color:var(--text3);"><th style="padding:4px 8px; text-align:left;">Slug</th><th style="padding:4px 8px; text-align:left;">Name</th><th style="padding:4px 8px; text-align:left;">Last scraped</th><th style="padding:4px 8px;">Actions</th></tr></thead><tbody>'
+      + ts.map(t => '<tr>'
+          + '<td style="padding:4px 8px; font-family:monospace; color:var(--accent);">' + escHtml(t.dk_slug) + '</td>'
+          + '<td style="padding:4px 8px;">' + escHtml(t.tournament_name || '') + '</td>'
+          + '<td style="padding:4px 8px; color:var(--text3); font-size:11px;">' + (t.last_scraped_at ? new Date(t.last_scraped_at).toLocaleString() : '—') + '</td>'
+          + '<td style="padding:4px 8px; text-align:right; white-space:nowrap;">'
+          + '<button class="btn" onclick="gorSyncTournament(\'' + escHtml(t.dk_slug) + '\', this)" title="Scrape DK + match to PX lines + upsert config">Sync</button> '
+          + '<button class="btn" onclick="gorRemoveTournament(\'' + escHtml(t.dk_slug) + '\')" style="border-color:var(--red); color:var(--red);">Remove</button>'
+          + '</td></tr>').join('')
+      + '</tbody></table>';
+  }
+
+  async function gorAddTournament() {
+    const url = (document.getElementById('gor-new-url')?.value || '').trim();
+    const name = (document.getElementById('gor-new-name')?.value || '').trim() || null;
+    if (!url) { alert('Paste a DK tournament URL first.'); return; }
+    try {
+      const r = await fetch('/single-leg/golf-outrights/tournaments', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dk_url: url, tournament_name: name }) });
+      const j = await r.json();
+      if (!j.ok) { alert('Add failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      document.getElementById('gor-new-url').value = '';
+      document.getElementById('gor-new-name').value = '';
+      await gorRefresh(false);
+      alert('Tournament added: ' + j.dk_slug + '\nClick Sync on its row to scrape DK + match PX lines.');
+    } catch (e) { alert('Add error: ' + e.message); }
+  }
+
+  async function gorRemoveTournament(slug) {
+    if (!confirm('Remove tournament "' + slug + '"? Existing player rows + wagers are kept (cancel them separately if needed).')) return;
+    try {
+      const r = await fetch('/single-leg/golf-outrights/tournaments/' + encodeURIComponent(slug), { method: 'DELETE', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Remove failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      await gorRefresh(false);
+    } catch (e) { alert('Remove error: ' + e.message); }
+  }
+
+  async function gorSyncTournament(slug, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+      const r = await fetch('/single-leg/golf-outrights/sync/' + encodeURIComponent(slug), { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      await gorRefresh(false);
+      alert('Sync ok. DK markets: ' + (j.dk_markets || 0) + ' · DK selections: ' + (j.dk_selections || 0) + ' · PX events: ' + (j.px_events || 0) + ' · PX-matched: ' + (j.px_matched_selections || 0) + ' · upserted: ' + (j.upserted || 0) + (j.warning ? '\n\n' + j.warning : ''));
+    } catch (e) { alert('Sync error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync'; } }
+  }
+
+  function _gorFilteredRows(cfg) {
+    const ft = document.getElementById('gor-filter-tournament')?.value || '';
+    const fm = document.getElementById('gor-filter-market')?.value || '';
+    const onlyEnabled = !!document.getElementById('gor-filter-enabled-only')?.checked;
+    const onlyMatched = !!document.getElementById('gor-filter-matched-only')?.checked;
+    let rows = (cfg || []).slice();
+    if (ft) rows = rows.filter(r => r.dk_slug === ft);
+    if (fm) rows = rows.filter(r => r.market_type === fm);
+    if (onlyEnabled) rows = rows.filter(r => r.enabled);
+    if (onlyMatched) rows = rows.filter(r => !!r.px_line_id);
+    return rows;
+  }
+
+  function gorRender() {
+    const s = window._gorState;
+    const sEl = document.getElementById('gor-status');
+    const tEl = document.getElementById('gor-table');
+    if (!s || !Array.isArray(s.config)) { if (sEl) sEl.innerHTML = '<div class="empty-state"><div class="icon">-</div>No state.</div>'; return; }
+    const cfg = s.config;
+    const matched = cfg.filter(r => r.px_line_id);
+    const enabled = cfg.filter(r => r.enabled);
+    const enabledWithoutRisk = enabled.filter(r => !(Number(r.risk_amount) > 0));
+    if (sEl) sEl.innerHTML =
+      '<div style="display:flex; gap:24px; flex-wrap:wrap;">'
+      + '<div><span style="color:var(--text3);">Players:</span> <b>' + cfg.length + '</b></div>'
+      + '<div><span style="color:var(--text3);">PX-matched:</span> <b>' + matched.length + '</b></div>'
+      + '<div><span style="color:var(--text3);">Enabled:</span> <b>' + enabled.length + '</b>'
+      + (enabledWithoutRisk.length ? ' <span style="color:var(--amber); margin-left:4px;">⚠ ' + enabledWithoutRisk.length + ' without risk</span>' : '') + '</div>'
+      + '<div><span style="color:var(--text3);">Active wagers:</span> <b>' + (s.totalActive || 0) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Dirty:</span> <b id="gor-dirty-count">' + window._gorDirty.size + '</b></div>'
+      + '</div>';
+
+    const rows = _gorFilteredRows(cfg);
+    const vis = document.getElementById('gor-visible-count'); if (vis) vis.textContent = String(rows.length);
+    rows.sort((a, b) => {
+      if (a.dk_slug !== b.dk_slug) return String(a.dk_slug).localeCompare(String(b.dk_slug));
+      if (a.market_type !== b.market_type) return String(a.market_type).localeCompare(String(b.market_type));
+      // Sort by DK odds ascending (favorites first within each market)
+      return (Number(a.dk_american_odds) || 0) - (Number(b.dk_american_odds) || 0);
+    });
+
+    if (!rows.length) { tEl.innerHTML = '<div class="empty-state" style="padding:30px;"><div class="icon">-</div>No rows match filter.</div>'; return; }
+    let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">'
+      + '<thead><tr style="background:var(--surface2); color:var(--text3); text-align:left;">'
+      + '<th style="padding:6px 10px;">Tournament / Market</th>'
+      + '<th style="padding:6px 10px;">Player</th>'
+      + '<th style="padding:6px 10px; text-align:right;">DK Odds</th>'
+      + '<th style="padding:6px 10px; text-align:right;">Our Offered</th>'
+      + '<th style="padding:6px 10px;">PX</th>'
+      + '<th style="padding:6px 10px;">Active</th>'
+      + '<th style="padding:6px 10px;">Risk $</th>'
+      + '<th style="padding:6px 10px;">Enabled</th>'
+      + '</tr></thead><tbody>';
+    let lastGroup = null;
+    for (const r of rows) {
+      const grp = r.dk_slug + ' / ' + r.market_type;
+      if (grp !== lastGroup) {
+        html += '<tr><td colspan="8" style="padding:6px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(grp) + '</td></tr>';
+        lastGroup = grp;
+      }
+      const dirty = window._gorDirty.get(r.id) || {};
+      const riskShown = dirty.risk_amount !== undefined ? dirty.risk_amount : (r.risk_amount != null ? r.risk_amount : '');
+      const enabledShown = dirty.enabled !== undefined ? dirty.enabled : !!r.enabled;
+      const isDirty = window._gorDirty.has(r.id);
+      const dkAm = r.dk_american_odds != null ? ((r.dk_american_odds >= 0 ? '+' : '') + r.dk_american_odds) : '—';
+      const offAm = r.offered_american != null ? ((r.offered_american >= 0 ? '+' : '') + r.offered_american) : '—';
+      const pxLbl = r.px_line_id ? '<span style="color:var(--green); font-size:10px;">matched</span>' : '<span style="color:var(--amber); font-size:10px;">no PX line</span>';
+      const active = (r.active_wagers || []).length
+        ? '<span style="color:var(--green);">' + (r.active_wagers[0].posted_odds >= 0 ? '+' : '') + r.active_wagers[0].posted_odds + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
+        : '<span style="color:var(--text3);">—</span>';
+      html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
+        + '<td style="padding:4px 10px; color:var(--text3); font-size:10px;">↳</td>'
+        + '<td style="padding:4px 10px;">' + escHtml(r.player_name) + '</td>'
+        + '<td style="padding:4px 10px; text-align:right; font-family:monospace;">' + dkAm + '</td>'
+        + '<td style="padding:4px 10px; text-align:right; font-family:monospace; color:var(--accent);">' + offAm + '</td>'
+        + '<td style="padding:4px 10px;">' + pxLbl + '</td>'
+        + '<td style="padding:4px 10px;">' + active + '</td>'
+        + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gorSetRisk(' + r.id + ', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
+        + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + (r.px_line_id ? '' : ' disabled title="no PX line — cannot enable"') + ' onchange="gorSetEnabled(' + r.id + ', this.checked)"></td>'
+        + '</tr>';
+    }
+    html += '</tbody></table></div>';
+    tEl.innerHTML = html;
+  }
+
+  function gorSetRisk(id, val) {
+    const num = val === '' || val == null ? null : Number(val);
+    const d = window._gorDirty.get(id) || {}; d.risk_amount = isNaN(num) ? null : num;
+    window._gorDirty.set(id, d);
+    const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
+  }
+  function gorSetEnabled(id, val) {
+    const d = window._gorDirty.get(id) || {}; d.enabled = !!val;
+    window._gorDirty.set(id, d);
+    const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
+  }
+
+  function gorBulkApplyRisk() {
+    const inp = document.getElementById('gor-bulk-risk');
+    const valRaw = inp ? inp.value : '';
+    const num = valRaw === '' || valRaw == null ? null : Number(valRaw);
+    if (num === null || isNaN(num) || num < 0) { alert('Enter a non-negative risk amount.'); return; }
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+    const rows = _gorFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows.'); return; }
+    if (!confirm('Set Risk $' + num + ' on ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)')) return;
+    for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.risk_amount = num; window._gorDirty.set(r.id, d); }
+    gorRender();
+  }
+  function gorBulkSetEnabled(en) {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+    const rows = _gorFilteredRows(s.config).filter(r => en ? !!r.px_line_id : true); // only enable PX-matched rows
+    if (!rows.length) { alert(en ? 'No PX-matched visible rows to enable.' : 'No visible rows to disable.'); return; }
+    const lbl = en ? 'Enable' : 'Disable';
+    if (!confirm(lbl + ' ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)')) return;
+    for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.enabled = !!en; window._gorDirty.set(r.id, d); }
+    gorRender();
+  }
+
+  async function gorSaveDirty(btn) {
+    if (window._gorDirty.size === 0) { alert('No edits.'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      const updates = Array.from(window._gorDirty.entries()).map(([id, patch]) => ({ id, ...patch }));
+      const r = await fetch('/single-leg/golf-outrights/config', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }) });
+      const j = await r.json();
+      if (!j.ok) { alert('Save failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      window._gorDirty.clear();
+      await gorRefresh(false);
+      alert('Saved ' + (j.updated || 0) + ' edit(s).' + (j.errors && j.errors.length ? '\n\n' + j.errors.slice(0, 5).join('\n') : ''));
+    } catch (e) { alert('Save error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save Edits'; } }
+  }
+
+  async function gorPostAll(btn) {
+    if (window._gorDirty.size > 0 && !confirm('Unsaved edits will be ignored. Continue?')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
+    try {
+      const r = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Post failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      alert('Posted: ' + (j.posted || 0) + '\nSkipped: ' + (j.skipped || 0) + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+      await gorRefresh(false);
+    } catch (e) { alert('Post error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Post All'; } }
+  }
+  async function gorCancelAll(btn) {
+    if (!confirm('Cancel EVERY active wager on the single-leg account (outrights). Irreversible.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+    try {
+      const r = await fetch('/single-leg/golf-outrights/cancel-all', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      alert('Cancelled: ' + (j.cancelled || 0) + (j.errors && j.errors.length ? '\n\n' + j.errors.slice(0, 5).join('\n') : ''));
+      await gorRefresh(false);
+    } catch (e) { alert('Cancel error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Cancel All'; } }
+  }
+  async function gorRepost(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Reposting…'; }
+    try {
+      const r = await fetch('/single-leg/golf-outrights/repost', { method: 'POST', credentials: 'include' });
+      const j = await r.json();
+      if (!j.ok) { alert('Repost failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      alert('Drift-cancelled: ' + (j.drift?.drifted || 0) + '\nPosted: ' + (j.post?.posted || 0));
+      await gorRefresh(false);
+    } catch (e) { alert('Repost error: ' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Repost'; } }
+  }
   // Backwards compat alias
   function switchTab(tab, btn) { switchSection(tab, btn); }
 

@@ -2868,6 +2868,162 @@ async function debugMmaScraperState({ url = 'https://sportsbook.draftkings.com/l
   }
 }
 
+// ============================================================================
+// GOLF OUTRIGHTS — per-tournament Top 1/5/10/20/Make Cut scraper
+// ============================================================================
+// Different from fetchGolfMatchups: outright markets live on per-tournament
+// URLs (e.g. /leagues/golf/the-memorial-tournament) not the general PGA hub.
+// Caller passes the tournament slug; we navigate to the outrights category
+// and capture market-by-market selections.
+//
+// Cache keyed by slug separately from the matchup scraper. Mike pastes the
+// DK tournament URL into the UI; the orchestrator iterates active slugs.
+// ============================================================================
+
+// Match DK market names for the five outright market types we care about.
+// Patterns chosen loose enough to survive DK rename variants (e.g. "Top 5"
+// vs "Top 5 Finish" vs "Top-5 Finish").
+const GOLF_OUTRIGHT_MARKETS = [
+  { key: 'top_1',    re: /^(?:tournament\s+)?(?:outright\s+)?winner$|^to\s+win\s+(?:the\s+)?tournament$/i },
+  { key: 'top_5',    re: /^top[\s-]?5(?:\s+finish)?$/i },
+  { key: 'top_10',   re: /^top[\s-]?10(?:\s+finish)?$/i },
+  { key: 'top_20',   re: /^top[\s-]?20(?:\s+finish)?$/i },
+  { key: 'make_cut', re: /make\s*(?:\/\s*miss\s*)?(?:the\s+)?cut/i },
+];
+
+function categorizeOutrightMarketName(name) {
+  if (!name) return null;
+  for (const m of GOLF_OUTRIGHT_MARKETS) if (m.re.test(name)) return m.key;
+  return null;
+}
+
+const GOLF_OUTRIGHT_SUBCATEGORIES = [
+  'outrights',
+  'tournament-winner',
+  'finishing-position',
+  'tournament',
+];
+
+async function fetchGolfOutrights(slug, { force = false } = {}) {
+  if (!slug || typeof slug !== 'string') throw new Error('fetchGolfOutrights: slug required (DK tournament URL segment, e.g. "the-memorial-tournament")');
+  const cacheKey = 'golf_outright_' + slug;
+  if (!force && cacheBySport[cacheKey] && Date.now() - cacheBySport[cacheKey].at < CACHE_TTL_MS) {
+    return cacheBySport[cacheKey].data;
+  }
+  if (inFlightBySport[cacheKey]) return inFlightBySport[cacheKey];
+
+  inFlightBySport[cacheKey] = (async () => {
+    const startedAt = Date.now();
+    const browser = await puppeteer().launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    });
+    try {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1400, height: 900 });
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+      const payloads = [];
+      const seenMarketNames = new Set();
+      page.on('response', async (resp) => {
+        const url = resp.url();
+        if (!url.includes('sportsbook-nash.draftkings.com')) return;
+        try {
+          const ct = resp.headers()['content-type'] || '';
+          if (!ct.includes('json')) return;
+          const data = await resp.json();
+          if (!data || !data.selections || !data.markets) return;
+          for (const m of (data.markets || [])) {
+            const n = m.marketType?.name;
+            if (n) seenMarketNames.add(n);
+          }
+          const hasOutright = (data.markets || []).some(m => categorizeOutrightMarketName(m.marketType?.name || ''));
+          if (hasOutright) payloads.push(data);
+        } catch { /* ignore */ }
+      });
+
+      // Try each subcategory slug — DK has been observed to use multiple names
+      // for the outrights tab. Bail after we get payloads.
+      const base = `https://sportsbook.draftkings.com/leagues/golf/${encodeURIComponent(slug)}`;
+      let lastErr = null;
+      for (const sc of GOLF_OUTRIGHT_SUBCATEGORIES) {
+        if (payloads.length > 0) break;
+        const url = `${base}?category=tournament&subcategory=${sc}`;
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+          await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
+        } catch (err) {
+          lastErr = err;
+          log.debug('DkScraper', `Golf outright ${slug} / ${sc} navigation failed: ${err.message}`);
+        }
+      }
+
+      const markets = parseGolfOutrightData(payloads);
+      const totalSelections = markets.reduce((s, m) => s + m.selections.length, 0);
+      const payload = {
+        fetchedAt: new Date().toISOString(),
+        slug,
+        markets,
+        scrapeMs: Date.now() - startedAt,
+        payloadCount: payloads.length,
+        seenMarketNames: markets.length === 0 ? [...seenMarketNames].sort() : undefined,
+        lastError: lastErr ? lastErr.message : undefined,
+      };
+      cacheBySport[cacheKey] = { at: Date.now(), data: payload };
+      log.info('DkScraper', `Golf outrights [${slug}]: ${markets.length} markets / ${totalSelections} selections (${payload.scrapeMs}ms, ${payloads.length} payloads)`);
+      return payload;
+    } finally {
+      await browser.close();
+      delete inFlightBySport[cacheKey];
+    }
+  })().catch(err => { delete inFlightBySport[cacheKey]; throw err; });
+  return inFlightBySport[cacheKey];
+}
+
+// Parse DK outright payloads → array of { marketType, marketName, selections:
+// [{ playerName, americanOdds, dkSelectionId }] }. Dedupes by marketId across
+// DK re-pushes.
+function parseGolfOutrightData(payloads) {
+  const eventsById = {};
+  const marketsById = {};
+  const selectionsByMarketId = {};
+  for (const payload of (payloads || [])) {
+    for (const e of (payload.events || [])) eventsById[e.id] = e;
+    for (const m of (payload.markets || [])) {
+      if (!categorizeOutrightMarketName(m.marketType?.name || '')) continue;
+      marketsById[m.id] = m;
+      if (!selectionsByMarketId[m.id]) selectionsByMarketId[m.id] = [];
+    }
+    for (const s of (payload.selections || [])) {
+      if (selectionsByMarketId[s.marketId]) selectionsByMarketId[s.marketId].push(s);
+    }
+  }
+  const out = [];
+  for (const m of Object.values(marketsById)) {
+    const marketType = categorizeOutrightMarketName(m.marketType?.name || '');
+    if (!marketType) continue;
+    const sels = selectionsByMarketId[m.id] || [];
+    // Dedupe selections by displayName (DK re-sends create dupes)
+    const seenSel = new Set();
+    const cleanSels = [];
+    for (const s of sels) {
+      const name = (s.label || s.displayName || s.name || '').trim();
+      if (!name || seenSel.has(name)) continue;
+      seenSel.add(name);
+      const american = Number(s.displayOdds?.american || s.odds?.american);
+      if (!isFinite(american)) continue;
+      cleanSels.push({ playerName: name, americanOdds: american, dkSelectionId: s.id });
+    }
+    out.push({
+      marketType,
+      marketName: m.marketType?.name || '',
+      marketId: m.id,
+      selections: cleanSels,
+    });
+  }
+  return out;
+}
+
 module.exports = {
   fetchSeriesMarkets,
   fetchSeriesWinners,
@@ -2886,6 +3042,8 @@ module.exports = {
   lookupDkGameLines,
   debugMmaScraperState,
   fetchGolfMatchups,
+  fetchGolfOutrights,
+  parseGolfOutrightData,
   fetchLiveMarkets,
   probeDkPage,
   parseSeriesData,
