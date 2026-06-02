@@ -34,6 +34,7 @@ const log = require('./logger');
 const config = require('../config');
 const pxSingle = require('./px-single');
 const lineManager = require('./line-manager');
+const oddsFeed = require('./odds-feed');
 const pricer = require('./pricer');
 const db = require('./db');
 
@@ -160,14 +161,65 @@ async function syncConfig(matchups) {
 function _fairForLine(lineId) {
   const info = lineManager.lookupLine(lineId);
   if (!info) return { fair: null, reason: 'line not in parlay-SP index' };
-  const fp = Number(info.fairProb);
-  if (!isFinite(fp) || fp <= 0 || fp >= 1) return { fair: null, reason: 'no fair_prob on line' };
-  // Honor the manual-upload override if present (bookPriceOverride bypasses vig
-  // entirely — Mike's golf-matchup workflow already populates this).
+
+  // Manual-upload override (BetOnline/Bookmaker paste). bookPriceOverride is
+  // a per-side price that bypasses vig entirely — Mike's golf-matchup workflow
+  // pre-populates this when he wants to fix the offered price directly.
   if (info.bookPriceOverride != null) {
-    return { fair: fp, override: Number(info.bookPriceOverride), sport: info.sport, marketType: info.marketType };
+    const fpOverride = Number(info.fairProb);
+    return {
+      fair: isFinite(fpOverride) && fpOverride > 0 ? fpOverride : 0.5,
+      override: Number(info.bookPriceOverride),
+      sport: info.sport, marketType: info.marketType,
+    };
   }
-  return { fair: fp, sport: info.sport || 'golf_matchups', marketType: info.marketType || 'moneyline' };
+
+  // Stored fairProb path. Only populated at line-registration time for
+  // *player props* (see line-manager.js fairProbOver/Under wiring). For
+  // moneyline-shaped markets — including golf matchups — fairProb is NOT
+  // stored at registration; the parlay SP's pricer looks it up at quote
+  // time via oddsFeed.getGolfMatchupEvent. Mirror that path here.
+  const directFp = Number(info.fairProb);
+  if (isFinite(directFp) && directFp > 0 && directFp < 1) {
+    return { fair: directFp, sport: info.sport, marketType: info.marketType };
+  }
+
+  // Golf-matchup fallback: re-do the same cache lookup the parlay SP's
+  // pricer does at RFQ time. Diagnosed 2026-06-02 on Harris English vs
+  // Chris Gotterup — DataGolf had the matchup and the cache held it, but
+  // _fairForLine was only checking the never-populated info.fairProb.
+  if (info.sport === 'golf_matchups' && info.homeTeam && info.awayTeam) {
+    try {
+      const roundNum = info.roundNum || null;
+      const ev = oddsFeed.getGolfMatchupEvent(info.homeTeam, info.awayTeam, roundNum);
+      if (!ev || !ev.markets || !ev.markets.h2h) {
+        return { fair: null, reason: 'odds cache: no entry for ' + info.homeTeam + ' vs ' + info.awayTeam + (roundNum ? ' R' + roundNum : '') };
+      }
+      // Cache event stores both orientations and may return either; match
+      // this line's player (info.teamName) against the returned event's
+      // home/away to pick the correct fairProb side.
+      const h2h = ev.markets.h2h;
+      let fp = null;
+      if (info.teamName && info.teamName === ev.homeTeam && h2h.home && Number(h2h.home.fairProb) > 0) {
+        fp = Number(h2h.home.fairProb);
+      } else if (info.teamName && info.teamName === ev.awayTeam && h2h.away && Number(h2h.away.fairProb) > 0) {
+        fp = Number(h2h.away.fairProb);
+      } else if (info.competitorId != null) {
+        // Player-name mismatch fallback: use info.selection ('home'/'away').
+        const sel = String(info.selection || '').toLowerCase();
+        if (sel === 'home' && h2h.home) fp = Number(h2h.home.fairProb);
+        else if (sel === 'away' && h2h.away) fp = Number(h2h.away.fairProb);
+      }
+      if (isFinite(fp) && fp > 0 && fp < 1) {
+        return { fair: fp, sport: info.sport, marketType: info.marketType || 'moneyline' };
+      }
+      return { fair: null, reason: 'cache event present but player side did not match (line teamName="' + info.teamName + '" vs cache home="' + ev.homeTeam + '" / away="' + ev.awayTeam + '")' };
+    } catch (e) {
+      return { fair: null, reason: 'cache lookup error: ' + e.message };
+    }
+  }
+
+  return { fair: null, reason: 'no fair_prob on line' };
 }
 
 function _americanFromImplied(p) {
