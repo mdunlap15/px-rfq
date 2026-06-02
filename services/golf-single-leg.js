@@ -235,7 +235,7 @@ function _impliedFromAmerican(a) {
   return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
 }
 
-function _computeOffered(lineId) {
+function _computeOffered(lineId, rowSweetener) {
   const f = _fairForLine(lineId);
   if (!f.fair) return { ok: false, reason: f.reason };
   // If override is set, just use it (Mike's manual upload pricing).
@@ -246,9 +246,16 @@ function _computeOffered(lineId) {
   // computeSingleLegQuote (which uses parlay-SP vig tuning, too tight for
   // matchups on the SL book) and applies a flat per-side markup on the
   // fair implied prob. Caesars-style spread (~-125/-105 on 50/50 fair)
-  // emerges at sweetener ≈ 0.07. Set GOLF_SL_MATCHUP_SWEETENER_PCT=0 to
-  // disable this path and fall back to computeSingleLegQuote.
-  const slSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
+  // emerges at sweetener ≈ 0.07.
+  //
+  // Per-row sweetener (golf_single_leg_config.sweetener_pct, a FRACTION) wins
+  // when set; a blank/null/<=0 row value falls back to the global default
+  // GOLF_SL_MATCHUP_SWEETENER_PCT. Set the global to 0 to disable the path
+  // entirely (falls through to computeSingleLegQuote).
+  const globalSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
+  const rowSw = Number(rowSweetener);
+  const usingRow = isFinite(rowSw) && rowSw > 0;
+  const slSweetener = usingRow ? rowSw : globalSweetener;
   if (slSweetener > 0 && f.sport === 'golf_matchups') {
     let offeredProb = f.fair * (1 + slSweetener);
     // Cap at 0.99 to avoid degenerate American-odds conversion at extreme
@@ -263,7 +270,7 @@ function _computeOffered(lineId) {
       offeredProb,
       americanOdds: _americanFromImplied(offeredProb),
       vig: slSweetener,
-      source: 'sl-matchup-sweetener',
+      source: usingRow ? 'sl-matchup-sweetener(row)' : 'sl-matchup-sweetener(global)',
     };
   }
   // Otherwise route through the standard single-leg quote path.
@@ -318,7 +325,7 @@ async function postEnabled(opts = {}) {
   const skipped = [];
   for (const row of cfgRows) {
     if (activeByLine.has(row.line_id)) { skipped.push({ line_id: row.line_id, reason: 'already-posted' }); continue; }
-    const q = _computeOffered(row.line_id);
+    const q = _computeOffered(row.line_id, row.sweetener_pct);
     if (!q.ok) { skipped.push({ line_id: row.line_id, reason: q.reason }); continue; }
     const snapped = pxSingle.snapToLadder(q.americanOdds, ladder);
     orders.push({
@@ -419,6 +426,14 @@ async function cancelStale(currentLineIdSet) {
 async function refreshDrift() {
   const { driftPp } = _cfg();
   const sb = db.getClient();
+  // Per-line sweetener map so the current-offered recompute uses the same
+  // markup postEnabled would. Defensive: if the column doesn't exist yet
+  // (migration not run) the catch leaves the map empty → global default.
+  const swByLine = new Map();
+  try {
+    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, sweetener_pct');
+    for (const c of (cfgRows || [])) swByLine.set(c.line_id, c.sweetener_pct);
+  } catch (_) { /* column may not exist yet — fall back to global default */ }
   const { data, error } = await sb.from(TBL_WAGERS)
     .select('wager_id, line_id, posted_fair_prob, posted_odds')
     .in('status', ['posted', 'partially_matched']);
@@ -426,7 +441,7 @@ async function refreshDrift() {
   let drifted = 0;
   const errors = [];
   for (const w of (data || [])) {
-    const q = _computeOffered(w.line_id);
+    const q = _computeOffered(w.line_id, swByLine.get(w.line_id));
     if (!q.ok) continue;
     const driftPpNow = Math.abs((q.offeredProb - _impliedFromAmerican(w.posted_odds)) * 100);
     if (driftPpNow >= driftPp) {
@@ -459,12 +474,13 @@ async function loadState() {
   if (wErr) return { error: 'wagers: ' + wErr.message };
   // Enrich each config row with current fair + offered (best-effort)
   const enriched = (cfg || []).map(r => {
-    const q = _computeOffered(r.line_id);
+    const q = _computeOffered(r.line_id, r.sweetener_pct);
     return {
       ...r,
       current_fair_prob: q.ok ? q.fair : null,
       current_offered_prob: q.ok ? q.offeredProb : null,
       current_american: q.ok ? q.americanOdds : null,
+      offered_source: q.ok ? q.source : null,
       fair_unavailable_reason: q.ok ? null : q.reason,
     };
   });
@@ -476,7 +492,10 @@ async function loadState() {
   for (const r of enriched) {
     r.active_wagers = activeByLine.get(r.line_id) || [];
   }
-  return { config: enriched, totalActive: (wagers || []).length };
+  // Expose the global default (fraction) so the UI can show it as the
+  // per-row placeholder ("blank = default").
+  const defaultSweetenerPct = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
+  return { config: enriched, totalActive: (wagers || []).length, defaultSweetenerPct };
 }
 
 // ---------------------------------------------------------------------------
@@ -494,8 +513,27 @@ async function updateConfig(updates) {
     if (u.risk_amount !== undefined) patch.risk_amount = u.risk_amount === null ? null : Number(u.risk_amount);
     if (u.enabled !== undefined) patch.enabled = !!u.enabled;
     if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
+    if (u.sweetener_pct !== undefined) {
+      // Stored as a FRACTION. Blank/null/<=0 → null (use global default).
+      // Clamp to 0.5 as a safety net against a percent/fraction unit mixup
+      // (50% markup just never fills; it can't silently under-price).
+      const n = u.sweetener_pct === null ? null : Number(u.sweetener_pct);
+      patch.sweetener_pct = (n != null && isFinite(n) && n > 0) ? Math.min(n, 0.5) : null;
+    }
     if (Object.keys(patch).length === 0) continue;
-    const { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
+    let { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
+    // Graceful degrade: if the sweetener_pct column doesn't exist yet (migration
+    // not run), still persist the rest of the patch so risk/enabled edits work.
+    if (error && /sweetener_pct|column/i.test(error.message) && 'sweetener_pct' in patch) {
+      const { sweetener_pct, ...rest } = patch;
+      if (Object.keys(rest).length) {
+        const retry = await sb.from(TBL_CONFIG).update(rest).eq('line_id', u.line_id);
+        error = retry.error;
+      } else {
+        error = null; // nothing left to write
+      }
+      if (!error) errors.push(u.line_id + ': sweetener_pct not saved (run _golf_sl_sweetener_column.sql migration)');
+    }
     if (error) errors.push(u.line_id + ': ' + error.message);
     else updated++;
   }
