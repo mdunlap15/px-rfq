@@ -18,7 +18,7 @@
 // ============================================================================
 
 const log = require('./logger');
-const config = require('../config');
+const { config } = require('../config');
 
 const BASE = config.px && config.px.baseUrl ? config.px.baseUrl : 'https://cash.api.prophetx.co';
 

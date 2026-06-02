@@ -31,7 +31,7 @@
 // ============================================================================
 
 const log = require('./logger');
-const config = require('../config');
+const { config } = require('../config');
 const pxSingle = require('./px-single');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
