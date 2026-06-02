@@ -242,6 +242,30 @@ function _computeOffered(lineId) {
   if (f.override != null && f.override > 0 && f.override < 1) {
     return { ok: true, fair: f.fair, offeredProb: f.override, americanOdds: _americanFromImplied(f.override), source: 'override' };
   }
+  // Single-leg-account golf-matchup sweetener path. Bypasses the shared
+  // computeSingleLegQuote (which uses parlay-SP vig tuning, too tight for
+  // matchups on the SL book) and applies a flat per-side markup on the
+  // fair implied prob. Caesars-style spread (~-125/-105 on 50/50 fair)
+  // emerges at sweetener ≈ 0.07. Set GOLF_SL_MATCHUP_SWEETENER_PCT=0 to
+  // disable this path and fall back to computeSingleLegQuote.
+  const slSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
+  if (slSweetener > 0 && f.sport === 'golf_matchups') {
+    let offeredProb = f.fair * (1 + slSweetener);
+    // Cap at 0.99 to avoid degenerate American-odds conversion at extreme
+    // chalk. Should never bite at realistic fair values for matchups.
+    if (offeredProb > 0.99) offeredProb = 0.99;
+    if (offeredProb <= 0 || offeredProb >= 1) {
+      return { ok: false, reason: 'sweetener produced invalid offered_prob: ' + offeredProb };
+    }
+    return {
+      ok: true,
+      fair: f.fair,
+      offeredProb,
+      americanOdds: _americanFromImplied(offeredProb),
+      vig: slSweetener,
+      source: 'sl-matchup-sweetener',
+    };
+  }
   // Otherwise route through the standard single-leg quote path.
   let q;
   try { q = pricer.computeSingleLegQuote(f.fair, f.sport, f.marketType); }

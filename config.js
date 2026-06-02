@@ -100,6 +100,22 @@ const config = {
     // 0.04 starting recommendation (= 4% per side, ~2% pair vig on
     // coinflip matchups). Tune up if win-rate stays elevated.
     vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.04,
+    // Single-leg-account matchup sweetener — applied ONLY to the second
+    // (single-leg) PX account when posting golf matchup wagers via
+    // services/golf-single-leg.js. Independent of the parlay SP vig stack
+    // above so Mike can quote matchups WIDE on the single-leg book without
+    // disturbing parlay-SP pricing.
+    //
+    // Formula: offered_implied = fair_implied × (1 + GOLF_SL_MATCHUP_SWEETENER_PCT)
+    // applied symmetrically per side. Reference: Caesars typically posts
+    // matchups around -125 / -105 on a 50/50 fair, which is ~7% markup
+    // per side / ~6.8% pair vig. Default 0.07 produces that shape.
+    //
+    // Bypasses pricer.computeSingleLegQuote entirely when this is > 0 AND
+    // the line is sport=golf_matchups. When set to 0, falls back to the
+    // shared computeSingleLegQuote path (useful if Mike wants to disable
+    // the override and let the parlay-SP vig stack apply).
+    golfSlMatchupSweetenerPct: parseFloat(process.env.GOLF_SL_MATCHUP_SWEETENER_PCT) || 0.07,
     // Longshot vig widening: add extra vig on low-PARLAY-fair-prob quotes
     // (long odds). Per-leg favorite ramp only fires above fairProb 0.5 —
     // it doesn't help multi-leg parlays made of dog legs, which hit a low
