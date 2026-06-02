@@ -1324,7 +1324,15 @@ async function loadDeclinesSince(fromIso, opts = {}) {
           .from('declines')
           .select(cols)
           .gte('declined_at', fromIso)
-          .order('declined_at', { ascending: true })
+          // DESC (was ASC): when the row count exceeds MAX_ROWS the tail is
+          // dropped, so we want to keep the MOST RECENT declines, not the
+          // oldest — otherwise today's/yesterday's declines (the ones the
+          // dashboard cares about) get truncated out of the 7-day window.
+          // Secondary sort on parlay_id makes offset pagination deterministic
+          // across pages (Supabase REST pagination needs a tiebreak on a
+          // non-unique sort key).
+          .order('declined_at', { ascending: false })
+          .order('parlay_id', { ascending: true })
           .range(offset, offset + pageSize - 1);
         if (!result.error) { data = result.data; lastErr = null; break; }
         lastErr = result.error;

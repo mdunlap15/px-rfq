@@ -2136,7 +2136,15 @@ const RISK_LIMIT_REASONS = new Set([
 // pulls these values into intel.declines / intel.missedVolume /
 // intel.riskLimitMissed in place of the session counters.
 const ROLLUP_WINDOW_DAYS = 7;
-const ROLLUP_REFRESH_MS = 60 * 1000;
+// Refresh cadence for the 7-day persistent rollup. This was 60s, but the
+// underlying query loads up to 200k decline rows + matched rows into memory
+// and was observed taking 78-119s per pass — i.e. each refresh barely
+// finished before the next one fired (>100% duty cycle), keeping the box
+// almost continuously paginating Supabase. A 7-DAY rollup does not need
+// minute granularity; 10 min cuts the load ~10x with no meaningful staleness.
+// Env-tunable via ROLLUP_REFRESH_MINUTES. (Real fix is a SQL GROUP BY RPC —
+// see scripts/_declines_rollup_rpc.sql — which makes this near-free.)
+const ROLLUP_REFRESH_MS = Math.max(1, Number(process.env.ROLLUP_REFRESH_MINUTES) || 10) * 60 * 1000;
 
 let cachedRollup7d = {
   refreshedAt: null,
