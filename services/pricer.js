@@ -2486,9 +2486,6 @@ function priceParlay(legs, opts = {}) {
           pxEventId: l.lineInfo.pxEventId || null,
           pxEventName: l.lineInfo.pxEventName || null,
           onDemand: l.lineInfo.onDemand || false,
-          // Golf-specific: tournament name + round number for display
-          tournamentName: l.lineInfo.tournamentName || null,
-          roundNum: l.lineInfo.roundNum || null,
         };
       }),
       vig: Math.round(pricedLegs.reduce((s, l) => s + getEffectiveVig(l.fairProb, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0), 0) / pricedLegs.length * 10000) / 10000,
@@ -2591,88 +2588,6 @@ function priceParlay(legs, opts = {}) {
     },
   };
   } // end of _doPhase3
-}
-
-/**
- * Build multiple tier offers for a parlay.
- * Tighter odds at low risk, wider at high risk.
- */
-async function buildOffers(legs) {
-  const base = await priceParlay(legs);
-  if (!base) return null;
-
-  const tiers = [
-    { vigMultiplier: 1.0,  riskMultiplier: 0.5, label: 'tight' },
-    { vigMultiplier: 1.2,  riskMultiplier: 1.0, label: 'medium' },
-    { vigMultiplier: 1.5,  riskMultiplier: 2.0, label: 'wide' },
-  ];
-
-  const offers = [];
-  for (const tier of tiers) {
-    const vig = config.pricing.defaultVig * tier.vigMultiplier;
-    const offeredProb = Math.min(base.meta.fairParlayProb * (1 + vig), 0.99);
-    const decOdds = 1 / offeredProb;
-    const maxRisk = config.pricing.maxRiskPerParlay * tier.riskMultiplier;
-
-    const validUntil = Math.floor((Date.now() / 1000 + config.pricing.offerValidSeconds) * 1e9);
-
-    offers.push({
-      valid_until: validUntil,
-      odds: decimalToAmerican(decOdds),
-      max_risk: maxRisk,
-      estimated_price: base.offer.estimated_price,
-    });
-  }
-
-  return {
-    offers,
-    meta: base.meta,
-  };
-}
-
-/**
- * Compute a multiplicative boost to the parlay's fair probability to account
- * for correlation between same-game legs. Returns 1.0 if no correlated pairs.
- *
- * Factors are conservative estimates of the positive correlation between:
- *   - moneyline/spread + total on the same game (both depend on game flow)
- *   - double_chance + total similarly
- *
- * For same-team spread + total, the correlation is stronger when the bettor
- * takes the favorite and the over (winning teams tend to score more).
- *
- * Each correlated pair multiplies the boost independently; a 3-leg same-game
- * SGP therefore compounds multiple pair penalties.
- */
-function computeCorrelationBoost(pricedLegs) {
-  // Group by event id
-  const byEvent = {};
-  for (const pl of pricedLegs) {
-    const eid = pl.lineInfo.pxEventId;
-    if (!eid) continue;
-    if (!byEvent[eid]) byEvent[eid] = [];
-    byEvent[eid].push(pl);
-  }
-  let boost = 1.0;
-  for (const legs of Object.values(byEvent)) {
-    if (legs.length < 2) continue;
-    // Find moneyline, spread, and total legs in this event
-    const ml = legs.find(l => l.lineInfo.marketType === 'moneyline');
-    const spread = legs.find(l => l.lineInfo.marketType === 'spread');
-    const total = legs.find(l => l.lineInfo.marketType === 'total');
-    const dc = legs.find(l => l.lineInfo.marketType === 'double_chance');
-    const btts = legs.find(l => l.lineInfo.marketType === 'btts' || l.lineInfo.marketType === 'both_teams_to_score');
-    // Spread + total: strongest correlation among allowed combinations
-    if (spread && total) boost *= 1.22;
-    // Moneyline + total: moderately correlated
-    if (ml && total) boost *= 1.15;
-    // Double-chance + total: weaker but positive
-    if (dc && total) boost *= 1.12;
-    // BTTS + moneyline/spread: BTTS yes requires both teams to score,
-    // which is correlated with a close game (dog ML / cover scenario)
-    if (btts && (ml || spread)) boost *= 1.10;
-  }
-  return boost;
 }
 
 /**
@@ -3446,7 +3361,6 @@ function getLastPriceFailure() {
 
 module.exports = {
   priceParlay,
-  buildOffers,
   shouldDecline,
   validateForConfirmation,
   getLastPriceFailure,

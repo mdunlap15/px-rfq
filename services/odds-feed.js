@@ -815,14 +815,6 @@ async function fetchOddsForSport(sport, opts) {
     const key = normalizeEventKey(event.homeTeam, event.awayTeam);
     const markets = {};
 
-    // Group odds by market_type and sportsbook
-    const byMarketAndBook = {};
-    for (const row of event.odds) {
-      const mk = `${row.market_type}|${row.sportsbook}`;
-      if (!byMarketAndBook[mk]) byMarketAndBook[mk] = [];
-      byMarketAndBook[mk].push(row);
-    }
-
     // Process moneyline
     const mlBooks = getBookPairs(event.odds, 'moneyline');
     if (mlBooks.length > 0) {

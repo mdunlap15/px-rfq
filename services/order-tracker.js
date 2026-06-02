@@ -3988,7 +3988,6 @@ function rebuildAllExposure() {
   // them as not-really-open. Exposure tables and Deployed counters
   // should not include them, matching Open Positions view which
   // already filters phantoms.
-  let skippedFinished = 0;
   let skippedPhantom = 0;
   let skippedNoUuid = 0;
   for (const order of Object.values(orders)) {
@@ -4021,7 +4020,6 @@ function rebuildAllExposure() {
     }
     addExposure(order);
   }
-  if (skippedFinished > 0) log.info('Exposure', `Skipped ${skippedFinished} finished orders during rebuild`);
   if (skippedPhantom > 0) log.info('Exposure', `Skipped ${skippedPhantom} phantom-flagged orders during rebuild`);
   if (skippedNoUuid > 0) log.info('Exposure', `Skipped ${skippedNoUuid} no-orderUuid (unfinalized) orders during rebuild`);
   // Also rebuild template-exposure from the same order set so the ramp
