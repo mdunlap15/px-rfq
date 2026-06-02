@@ -363,17 +363,34 @@ async function saveDecline(entry) {
     };
     const { error } = await db.from('declines').insert(row);
     if (error) {
-      // Table may not exist — log once and keep going
-      if (!saveDecline._warned) {
-        log.error('DB', `saveDecline failed (run the SQL migration to create 'declines' table): ${error.message}`);
-        saveDecline._warned = true;
-      }
+      _reportSaveDeclineError(error.message, "(run the SQL migration to create 'declines' table / add missing column)");
     }
   } catch (err) {
-    if (!saveDecline._warned) {
-      log.error('DB', `saveDecline error: ${err.message}`);
-      saveDecline._warned = true;
+    _reportSaveDeclineError(err.message, '');
+  }
+}
+
+// Schema errors (missing table/column) are permanent for the process lifetime,
+// so we warn ONCE and suppress thereafter. But a genuine transient failure
+// (Supabase outage, network) must NOT be silenced forever — otherwise a real
+// data-integrity hole goes invisible. Throttle non-schema errors to once/60s.
+function _isSchemaError(msg) {
+  const m = String(msg || '').toLowerCase();
+  return m.includes('does not exist') || m.includes('could not find') ||
+         m.includes('schema cache') || m.includes('column') || m.includes('relation');
+}
+function _reportSaveDeclineError(msg, hint) {
+  if (_isSchemaError(msg)) {
+    if (!saveDecline._schemaWarned) {
+      log.error('DB', `saveDecline schema error ${hint}: ${msg}`);
+      saveDecline._schemaWarned = true;
     }
+    return;
+  }
+  const now = Date.now();
+  if (!saveDecline._lastErrAt || now - saveDecline._lastErrAt > 60_000) {
+    log.error('DB', `saveDecline error: ${msg}`);
+    saveDecline._lastErrAt = now;
   }
 }
 
