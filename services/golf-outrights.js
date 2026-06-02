@@ -60,17 +60,24 @@ function _normName(s) {
     .trim();
 }
 
-// PX market-name regex for each outright market type — match by marketName
-// since PX uses descriptive names ("Tournament Winner", "Top 5 Finish").
-const PX_MARKET_PATTERNS = [
-  { key: 'top_1',    re: /tournament\s+winner|^winner$|^outright\s+winner$|to\s+win\s+(?:the\s+)?tournament/i },
-  { key: 'top_5',    re: /top[\s-]?5(?:\s+finish)?$/i },
-  { key: 'top_10',   re: /top[\s-]?10(?:\s+finish)?$/i },
-  { key: 'top_20',   re: /top[\s-]?20(?:\s+finish)?$/i },
-  { key: 'make_cut', re: /make.*cut|miss.*cut|cut/i },
+// PX data model for outrights: EACH PLAYER IS ITS OWN MARKET inside an
+// EVENT that names the market_type. Verified 2026-06-02 on The Memorial:
+//   event.name = "2026 the Memorial Tournament... - Tournament Winner"
+//     market.name = "Rickie Fowler"   selections = [YES, NO]
+//     market.name = "Jordan Spieth"   selections = [YES, NO]
+//     ... (72 player markets total)
+//
+// So we classify market_type from the EVENT name (not the market name),
+// use market.name as player_name, and grab the YES selection's line_id.
+const PX_EVENT_PATTERNS = [
+  { key: 'top_1',    re: /tournament\s+winner|outright\s+winner|to\s+win\s+(?:the\s+)?tournament|^winner$/i },
+  { key: 'top_5',    re: /top[\s-]?5(?:\s+finish)?/i },
+  { key: 'top_10',   re: /top[\s-]?10(?:\s+finish)?/i },
+  { key: 'top_20',   re: /top[\s-]?20(?:\s+finish)?/i },
+  { key: 'make_cut', re: /make.*cut|miss.*cut/i },
 ];
-function classifyPxMarketName(name) {
-  for (const p of PX_MARKET_PATTERNS) if (p.re.test(name || '')) return p.key;
+function classifyPxEventName(name) {
+  for (const p of PX_EVENT_PATTERNS) if (p.re.test(name || '')) return p.key;
   return null;
 }
 
@@ -122,16 +129,22 @@ async function _pxMarketsFor(slug) {
     return slugWords.every(w => n.includes(w.toLowerCase()));
   });
   if (!matched.length) return { eventCount: 0, byMarketType: {} };
-  const byMarketType = {}; // 'top_5' -> [{ player_name, line_id, event_id, market_id }, ...]
+  // PX model: event_name carries the market_type ("...Tournament Winner",
+  // "...Top 5 Finish"). Each market inside is one player as a YES/NO pair.
+  const byMarketType = {}; // 'top_1' -> [{ player_name, line_id, event_id, market_id }, ...]
+  let eventsScanned = 0;
   for (const evt of matched) {
+    const mtype = classifyPxEventName(evt.name);
+    if (!mtype) continue; // novelty event ("Will Any Player Be Bogey Free…") etc.
+    eventsScanned++;
     let mkts;
     try { mkts = await pxSingle.fetchMarkets(evt.event_id); }
     catch (e) { log.warn('GolfOut', `PX get_markets ${evt.event_id} failed: ${e.message}`); continue; }
+    if (!byMarketType[mtype]) byMarketType[mtype] = [];
     for (const mkt of mkts) {
-      const mtype = classifyPxMarketName(mkt.name);
-      if (!mtype) continue;
-      if (!byMarketType[mtype]) byMarketType[mtype] = [];
-      // PX outrights typically expose selections as a flat list, one per player
+      const playerName = String(mkt.name || '').trim();
+      if (!playerName) continue;
+      // Flatten selections + find the YES one (case-insensitive).
       const flat = [];
       if (Array.isArray(mkt.selections)) {
         for (const g of mkt.selections) {
@@ -139,19 +152,18 @@ async function _pxMarketsFor(slug) {
           else flat.push(g);
         }
       }
-      for (const s of flat) {
-        if (!s || !s.line_id) continue;
-        byMarketType[mtype].push({
-          player_name: s.name || s.display_name || '',
-          player_norm: _normName(s.name || s.display_name || ''),
-          line_id: s.line_id,
-          event_id: evt.event_id,
-          market_id: mkt.id,
-        });
-      }
+      const yesSel = flat.find(s => s && /^yes$/i.test(String(s.name || '').trim()));
+      if (!yesSel || !yesSel.line_id) continue;
+      byMarketType[mtype].push({
+        player_name: playerName,
+        player_norm: _normName(playerName),
+        line_id: yesSel.line_id,
+        event_id: evt.event_id,
+        market_id: mkt.id,
+      });
     }
   }
-  return { eventCount: matched.length, byMarketType };
+  return { eventCount: eventsScanned, byMarketType };
 }
 
 async function syncTournament(dk_slug) {
