@@ -14988,6 +14988,9 @@
   }
   function gslAlert(title, bodyHtml) { return _gslShowModal(title, bodyHtml, { confirm: false }); }
   function gslConfirm(title, bodyHtml, opts) { return _gslShowModal(title, bodyHtml, Object.assign({ confirm: true }, opts || {})); }
+  // Generic aliases — the Outrights tab uses the same centered modal.
+  function uiAlert(title, bodyHtml) { return _gslShowModal(title, bodyHtml, { confirm: false }); }
+  function uiConfirm(title, bodyHtml, opts) { return _gslShowModal(title, bodyHtml, Object.assign({ confirm: true }, opts || {})); }
 
   async function gslPostAll(btn) {
     if (window._gslDirty.size > 0 && !(await gslConfirm('Unsaved edits', 'You have unsaved edits. <b>Post All ignores them.</b> Continue?'))) return;
@@ -15129,26 +15132,26 @@
   async function gorAddTournament() {
     const url = (document.getElementById('gor-new-url')?.value || '').trim();
     const name = (document.getElementById('gor-new-name')?.value || '').trim() || null;
-    if (!url) { alert('Paste a DK tournament URL first.'); return; }
+    if (!url) { await uiAlert('Add tournament', 'Paste a DK tournament URL first.'); return; }
     try {
       const r = await fetch('/single-leg/golf-outrights/tournaments', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dk_url: url, tournament_name: name }) });
       const j = await r.json();
-      if (!j.ok) { alert('Add failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Add failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       document.getElementById('gor-new-url').value = '';
       document.getElementById('gor-new-name').value = '';
       await gorRefresh(false);
-      alert('Tournament added: ' + j.dk_slug + '\nClick Sync on its row to scrape DK + match PX lines.');
-    } catch (e) { alert('Add error: ' + e.message); }
+      await uiAlert('Tournament added', '<div style="font-size:14px;"><b>' + escHtml(j.dk_slug) + '</b></div><div style="margin-top:6px; color:var(--text2);">Click <b>Sync</b> on its row to scrape DK + match PX lines.</div>');
+    } catch (e) { await uiAlert('Add error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
   }
 
   async function gorRemoveTournament(slug) {
-    if (!confirm('Remove tournament "' + slug + '"? Existing player rows + wagers are kept (cancel them separately if needed).')) return;
+    if (!(await uiConfirm('Remove tournament', 'Remove tournament <b>' + escHtml(slug) + '</b>? Existing player rows + wagers are kept (cancel them separately if needed).', { danger: true, okText: 'Remove' }))) return;
     try {
       const r = await fetch('/single-leg/golf-outrights/tournaments/' + encodeURIComponent(slug), { method: 'DELETE', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Remove failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Remove failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       await gorRefresh(false);
-    } catch (e) { alert('Remove error: ' + e.message); }
+    } catch (e) { await uiAlert('Remove error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
   }
 
   async function gorSyncTournament(slug, btn) {
@@ -15156,17 +15159,18 @@
     try {
       const r = await fetch('/single-leg/golf-outrights/sync/' + encodeURIComponent(slug), { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Sync failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       await gorRefresh(false);
       const captured = (j.captured_keys || []).join(', ') || 'none';
       const seen = (j.seen_market_names || []).join(' | ') || 'none';
       const uncat = (j.uncategorized || []);
-      alert('Sync ok. DK markets: ' + (j.dk_markets || 0) + ' · DK selections: ' + (j.dk_selections || 0) + ' · PX events: ' + (j.px_events || 0) + ' · PX-matched: ' + (j.px_matched_selections || 0) + ' · upserted: ' + (j.upserted || 0)
-        + '\n\nMarket types captured: ' + captured
-        + '\nDK market names seen: ' + seen
-        + (uncat.length ? '\nUncategorized (regex miss?): ' + uncat.join(' | ') : '')
-        + (j.warning ? '\n\n' + j.warning : ''));
-    } catch (e) { alert('Sync error: ' + e.message); }
+      let body = '<div style="font-size:14px; margin-bottom:8px;">DK markets <b>' + (j.dk_markets || 0) + '</b> · DK selections <b>' + (j.dk_selections || 0) + '</b> · PX events <b>' + (j.px_events || 0) + '</b> · PX-matched <b>' + (j.px_matched_selections || 0) + '</b> · upserted <b>' + (j.upserted || 0) + '</b></div>'
+        + '<div style="font-size:12px;"><span style="color:var(--text3);">Market types captured:</span> ' + escHtml(captured) + '</div>'
+        + '<div style="font-size:12px; margin-top:4px;"><span style="color:var(--text3);">DK market names seen:</span> ' + escHtml(seen) + '</div>'
+        + (uncat.length ? '<div style="font-size:12px; margin-top:4px; color:var(--amber);">Uncategorized (regex miss?): ' + escHtml(uncat.join(' | ')) + '</div>' : '')
+        + (j.warning ? '<div style="font-size:12px; margin-top:8px; color:var(--amber);">' + escHtml(j.warning) + '</div>' : '');
+      await uiAlert('Sync complete', body);
+    } catch (e) { await uiAlert('Sync error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync'; } }
   }
 
@@ -15303,108 +15307,112 @@
     const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
     gorRender(); // re-render so the Posts preview + colors update immediately
   }
-  function gorBulkSetSide(side) {
-    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+  async function gorBulkSetSide(side) {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { await uiAlert('Bulk side', 'No data loaded.'); return; }
     const rows = _gorFilteredRows(s.config);
-    if (!rows.length) { alert('No visible rows. Check your filter.'); return; }
+    if (!rows.length) { await uiAlert('Bulk side', 'No visible rows. Check your filter.'); return; }
     const lbl = side === 'yes' ? 'YES (back the player)' : 'NO (lay the field)';
-    if (!confirm('Set ' + rows.length + ' visible row(s) to post the ' + lbl + ' side? (Dirty — Save Edits to persist.)')) return;
+    if (!(await uiConfirm('Bulk side', 'Set ' + rows.length + ' visible row(s) to post the <b>' + lbl + '</b> side? (Dirty — Save Edits to persist.)'))) return;
     for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.post_side = (side === 'yes') ? 'yes' : 'no'; window._gorDirty.set(r.id, d); }
     gorRender();
   }
   // Cancel ONE resting offer.
   async function gorCancelWager(wagerId) {
     if (!wagerId) return;
-    if (!confirm('Cancel this resting offer on PX?')) return;
+    if (!(await uiConfirm('Cancel offer', 'Cancel this resting offer on PX?', { danger: true, okText: 'Cancel offer' }))) return;
     try {
       const r = await fetch('/single-leg/golf-outrights/cancel-wager', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wager_id: wagerId }) });
       const j = await r.json();
-      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Cancel failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       await gorRefresh(false);
-    } catch (e) { alert('Cancel error: ' + e.message); }
+    } catch (e) { await uiAlert('Cancel error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
   }
   // Edit-risk: cancel this row's live offer + repost at the CURRENT SAVED config
   // (risk/side). Save Edits first if you changed them.
   async function gorRepostOne(configId) {
-    if (window._gorDirty.has(configId)) { if (!confirm('This row has unsaved edits — Update reposts at the SAVED values, ignoring them. Save Edits first if you want the new amount. Continue anyway?')) return; }
-    else if (!confirm('Cancel this offer and repost at the current Risk $ / side?')) return;
+    if (window._gorDirty.has(configId)) {
+      if (!(await uiConfirm('Update offer', 'This row has <b>unsaved edits</b> — Update reposts at the SAVED values, ignoring them. Save Edits first if you want the new amount. Continue anyway?'))) return;
+    } else if (!(await uiConfirm('Update offer', 'Cancel this offer and repost at the current Risk $ / side?'))) return;
     try {
       const r = await fetch('/single-leg/golf-outrights/repost-one', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: configId }) });
       const j = await r.json();
-      if (!j.ok) { alert('Update failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Update failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       await gorRefresh(false);
-      alert('Cancelled: ' + (j.cancelled || 0) + ' · Posted: ' + (j.posted || 0) + (j.detail ? '\n' + j.detail : '') + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
-    } catch (e) { alert('Update error: ' + e.message); }
+      await uiAlert('Update — results', '<div style="font-size:14px;">Cancelled: <b>' + (j.cancelled || 0) + '</b> · Posted: <b>' + (j.posted || 0) + '</b></div>'
+        + (j.detail ? '<div style="margin-top:6px; color:var(--text2); font-size:12px;">' + escHtml(j.detail) + '</div>' : '')
+        + (j.errors && j.errors.length ? '<div style="margin-top:8px; color:var(--red); font-size:12px;"><b>Errors</b><ul style="margin:4px 0 0 16px; padding:0;">' + j.errors.slice(0, 5).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
+    } catch (e) { await uiAlert('Update error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
   }
 
-  function gorBulkApplyRisk() {
+  async function gorBulkApplyRisk() {
     const inp = document.getElementById('gor-bulk-risk');
     const valRaw = inp ? inp.value : '';
     const num = valRaw === '' || valRaw == null ? null : Number(valRaw);
-    if (num === null || isNaN(num) || num < 0) { alert('Enter a non-negative risk amount.'); return; }
-    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+    if (num === null || isNaN(num) || num < 0) { await uiAlert('Bulk risk', 'Enter a non-negative risk amount.'); return; }
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { await uiAlert('Bulk risk', 'No data loaded.'); return; }
     const rows = _gorFilteredRows(s.config);
-    if (!rows.length) { alert('No visible rows.'); return; }
-    if (!confirm('Set Risk $' + num + ' on ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)')) return;
+    if (!rows.length) { await uiAlert('Bulk risk', 'No visible rows.'); return; }
+    if (!(await uiConfirm('Bulk risk', 'Set Risk <b>$' + num + '</b> on ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)'))) return;
     for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.risk_amount = num; window._gorDirty.set(r.id, d); }
     gorRender();
   }
-  function gorBulkClearRisk() {
-    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+  async function gorBulkClearRisk() {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { await uiAlert('Bulk clear', 'No data loaded.'); return; }
     const rows = _gorFilteredRows(s.config);
-    if (!rows.length) { alert('No visible rows to clear. Check your filter.'); return; }
-    if (!confirm('Clear Risk $ on ' + rows.length + ' visible row(s)? Blank risk never posts. (Dirty — Save Edits to persist.)')) return;
+    if (!rows.length) { await uiAlert('Bulk clear', 'No visible rows to clear. Check your filter.'); return; }
+    if (!(await uiConfirm('Bulk clear', 'Clear Risk $ on ' + rows.length + ' visible row(s)? Blank risk never posts. (Dirty — Save Edits to persist.)'))) return;
     for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.risk_amount = null; window._gorDirty.set(r.id, d); }
     const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
     gorRender();
   }
-  function gorBulkSetEnabled(en) {
-    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+  async function gorBulkSetEnabled(en) {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { await uiAlert('Bulk enable', 'No data loaded.'); return; }
     const rows = _gorFilteredRows(s.config).filter(r => en ? !!r.px_line_id : true); // only enable PX-matched rows
-    if (!rows.length) { alert(en ? 'No PX-matched visible rows to enable.' : 'No visible rows to disable.'); return; }
+    if (!rows.length) { await uiAlert('Bulk enable', en ? 'No PX-matched visible rows to enable.' : 'No visible rows to disable.'); return; }
     const lbl = en ? 'Enable' : 'Disable';
-    if (!confirm(lbl + ' ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)')) return;
+    if (!(await uiConfirm(lbl + ' visible', lbl + ' ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)'))) return;
     for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.enabled = !!en; window._gorDirty.set(r.id, d); }
     gorRender();
   }
 
   async function gorSaveDirty(btn) {
-    if (window._gorDirty.size === 0) { alert('No edits.'); return; }
+    if (window._gorDirty.size === 0) { await uiAlert('Save edits', 'No edits.'); return; }
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
       const updates = Array.from(window._gorDirty.entries()).map(([id, patch]) => ({ id, ...patch }));
       const r = await fetch('/single-leg/golf-outrights/config', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }) });
       const j = await r.json();
-      if (!j.ok) { alert('Save failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await uiAlert('Save failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       window._gorDirty.clear();
       await gorRefresh(false);
-      alert('Saved ' + (j.updated || 0) + ' edit(s).' + (j.errors && j.errors.length ? '\n\n' + j.errors.slice(0, 5).join('\n') : ''));
-    } catch (e) { alert('Save error: ' + e.message); }
+      await uiAlert('Saved', '<div style="font-size:14px;">Saved <b>' + (j.updated || 0) + '</b> edit(s).</div>' + (j.errors && j.errors.length ? '<div style="margin-top:8px; color:var(--red); font-size:12px;"><ul style="margin:0 0 0 16px; padding:0;">' + j.errors.slice(0, 5).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
+    } catch (e) { await uiAlert('Save error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Save Edits'; } }
   }
 
   async function gorPostAll(btn) {
-    if (window._gorDirty.size > 0 && !confirm('Unsaved edits will be ignored. Continue?')) return;
+    if (window._gorDirty.size > 0 && !(await uiConfirm('Post All', 'You have unsaved edits. <b>Post All ignores them.</b> Continue?'))) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
     try {
       const r = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Post failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      alert('Posted: ' + (j.posted || 0) + '\nSkipped: ' + (j.skipped || 0) + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+      if (!j.ok) { await uiAlert('Post failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await uiAlert('Post All — results', '<div style="font-size:14px;"><b style="color:var(--green);">Posted: ' + (j.posted || 0) + '</b> &nbsp;·&nbsp; Skipped: ' + (j.skipped || 0) + '</div>'
+        + (j.errors && j.errors.length ? '<div style="margin-top:10px; color:var(--red); font-size:12px;"><b>Errors (' + j.errors.length + ')</b><ul style="margin:4px 0 0 16px; padding:0;">' + j.errors.slice(0, 8).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
       await gorRefresh(false);
-    } catch (e) { alert('Post error: ' + e.message); }
+    } catch (e) { await uiAlert('Post error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Post All'; } }
   }
   async function gorCancelAll(btn) {
-    if (!confirm('Cancel EVERY active wager on the single-leg account (outrights). Irreversible.')) return;
+    if (!(await uiConfirm('Cancel all (outrights)', 'Cancel <b>EVERY</b> active wager on the outrights account? This is <b>irreversible</b>.', { danger: true, okText: 'Cancel All' }))) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
     try {
       const r = await fetch('/single-leg/golf-outrights/cancel-all', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      alert('Cancelled: ' + (j.cancelled || 0) + (j.errors && j.errors.length ? '\n\n' + j.errors.slice(0, 5).join('\n') : ''));
+      if (!j.ok) { await uiAlert('Cancel failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await uiAlert('Cancel All — results', '<div style="font-size:14px;"><b>Cancelled: ' + (j.cancelled || 0) + '</b></div>' + (j.errors && j.errors.length ? '<div style="margin-top:8px; color:var(--red); font-size:12px;"><ul style="margin:0 0 0 16px; padding:0;">' + j.errors.slice(0, 8).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
       await gorRefresh(false);
-    } catch (e) { alert('Cancel error: ' + e.message); }
+    } catch (e) { await uiAlert('Cancel error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Cancel All'; } }
   }
   async function gorRepost(btn) {
@@ -15412,10 +15420,10 @@
     try {
       const r = await fetch('/single-leg/golf-outrights/repost', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Repost failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      alert('Drift-cancelled: ' + (j.drift?.drifted || 0) + '\nPosted: ' + (j.post?.posted || 0));
+      if (!j.ok) { await uiAlert('Repost failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await uiAlert('Repost — results', '<div style="font-size:14px;">Drift-cancelled: <b>' + (j.drift?.drifted || 0) + '</b> &nbsp;·&nbsp; Posted: <b>' + (j.post?.posted || 0) + '</b></div>');
       await gorRefresh(false);
-    } catch (e) { alert('Repost error: ' + e.message); }
+    } catch (e) { await uiAlert('Repost error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Repost'; } }
   }
   // Backwards compat alias
