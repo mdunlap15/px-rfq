@@ -169,67 +169,85 @@ async function syncConfig(matchups) {
 // Pricing — get fair_prob for a line, then compute offered via the same
 // path the RFQ pricer uses for single-leg golf matchups.
 // ---------------------------------------------------------------------------
-function _fairForLine(lineId) {
+// Look up the de-vigged consensus fair for ONE player in a golf matchup,
+// directly from the shared odds cache (DataGolf) by PLAYER NAME — no
+// dependency on the parlay-SP line index. This is what the single-leg book
+// needs: its PX line_ids live on a different account and are NOT in the
+// parlay-SP lineIndex, so the line_id-based lookup always missed ("line not
+// in parlay-SP index"). The config row carries the player names, so we key
+// off those instead.
+function _normName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function _lastWord(s) { const p = String(s || '').trim().split(/\s+/); return p.length ? _normName(p[p.length - 1]) : ''; }
+
+function _golfFairByNames(sideName, opponentName, roundNum) {
+  if (!sideName || !opponentName) return { fair: null, reason: 'missing player names' };
+  try {
+    const ev = oddsFeed.getGolfMatchupEvent(sideName, opponentName, roundNum || null);
+    if (!ev || !ev.markets || !ev.markets.h2h) {
+      return { fair: null, reason: 'odds cache: no entry for ' + sideName + ' vs ' + opponentName + (roundNum ? ' R' + roundNum : '') };
+    }
+    const h2h = ev.markets.h2h;
+    // Cache stores both orientations; match this side's player to the returned
+    // event's home/away (normalized, with a last-name fallback for PX-vs-
+    // DataGolf name differences like "Alex" vs "Alexander").
+    const sN = _normName(sideName);
+    let side = null;
+    if (sN && sN === _normName(ev.homeTeam)) side = h2h.home;
+    else if (sN && sN === _normName(ev.awayTeam)) side = h2h.away;
+    else {
+      const sL = _lastWord(sideName);
+      if (sL && sL === _lastWord(ev.homeTeam)) side = h2h.home;
+      else if (sL && sL === _lastWord(ev.awayTeam)) side = h2h.away;
+    }
+    const fp = side ? Number(side.fairProb) : NaN;
+    if (isFinite(fp) && fp > 0 && fp < 1) {
+      return { fair: fp, sport: 'golf_matchups', marketType: 'moneyline' };
+    }
+    return { fair: null, reason: 'cache entry found but could not match "' + sideName + '" to home="' + ev.homeTeam + '"/away="' + ev.awayTeam + '"' };
+  } catch (e) {
+    return { fair: null, reason: 'cache lookup error: ' + e.message };
+  }
+}
+
+// ctx (optional): { sideName, opponentName, roundNum } from the single-leg
+// config row. Used to price golf matchups by name when the line isn't in the
+// parlay-SP index (the normal case for the single-leg account).
+function _fairForLine(lineId, ctx) {
   const info = lineManager.lookupLine(lineId);
-  if (!info) return { fair: null, reason: 'line not in parlay-SP index' };
 
-  // Manual-upload override (BetOnline/Bookmaker paste). bookPriceOverride is
-  // a per-side price that bypasses vig entirely — Mike's golf-matchup workflow
-  // pre-populates this when he wants to fix the offered price directly.
-  if (info.bookPriceOverride != null) {
-    const fpOverride = Number(info.fairProb);
-    return {
-      fair: isFinite(fpOverride) && fpOverride > 0 ? fpOverride : 0.5,
-      override: Number(info.bookPriceOverride),
-      sport: info.sport, marketType: info.marketType,
-    };
-  }
-
-  // Stored fairProb path. Only populated at line-registration time for
-  // *player props* (see line-manager.js fairProbOver/Under wiring). For
-  // moneyline-shaped markets — including golf matchups — fairProb is NOT
-  // stored at registration; the parlay SP's pricer looks it up at quote
-  // time via oddsFeed.getGolfMatchupEvent. Mirror that path here.
-  const directFp = Number(info.fairProb);
-  if (isFinite(directFp) && directFp > 0 && directFp < 1) {
-    return { fair: directFp, sport: info.sport, marketType: info.marketType };
-  }
-
-  // Golf-matchup fallback: re-do the same cache lookup the parlay SP's
-  // pricer does at RFQ time. Diagnosed 2026-06-02 on Harris English vs
-  // Chris Gotterup — DataGolf had the matchup and the cache held it, but
-  // _fairForLine was only checking the never-populated info.fairProb.
-  if (info.sport === 'golf_matchups' && info.homeTeam && info.awayTeam) {
-    try {
-      const roundNum = info.roundNum || null;
-      const ev = oddsFeed.getGolfMatchupEvent(info.homeTeam, info.awayTeam, roundNum);
-      if (!ev || !ev.markets || !ev.markets.h2h) {
-        return { fair: null, reason: 'odds cache: no entry for ' + info.homeTeam + ' vs ' + info.awayTeam + (roundNum ? ' R' + roundNum : '') };
-      }
-      // Cache event stores both orientations and may return either; match
-      // this line's player (info.teamName) against the returned event's
-      // home/away to pick the correct fairProb side.
-      const h2h = ev.markets.h2h;
-      let fp = null;
-      if (info.teamName && info.teamName === ev.homeTeam && h2h.home && Number(h2h.home.fairProb) > 0) {
-        fp = Number(h2h.home.fairProb);
-      } else if (info.teamName && info.teamName === ev.awayTeam && h2h.away && Number(h2h.away.fairProb) > 0) {
-        fp = Number(h2h.away.fairProb);
-      } else if (info.competitorId != null) {
-        // Player-name mismatch fallback: use info.selection ('home'/'away').
-        const sel = String(info.selection || '').toLowerCase();
-        if (sel === 'home' && h2h.home) fp = Number(h2h.home.fairProb);
-        else if (sel === 'away' && h2h.away) fp = Number(h2h.away.fairProb);
-      }
-      if (isFinite(fp) && fp > 0 && fp < 1) {
-        return { fair: fp, sport: info.sport, marketType: info.marketType || 'moneyline' };
-      }
-      return { fair: null, reason: 'cache event present but player side did not match (line teamName="' + info.teamName + '" vs cache home="' + ev.homeTeam + '" / away="' + ev.awayTeam + '")' };
-    } catch (e) {
-      return { fair: null, reason: 'cache lookup error: ' + e.message };
+  // If the line IS in the parlay-SP index, honor its override / stored fair.
+  if (info) {
+    // Manual-upload override (BetOnline/Bookmaker paste). bookPriceOverride is
+    // a per-side price that bypasses vig entirely.
+    if (info.bookPriceOverride != null) {
+      const fpOverride = Number(info.fairProb);
+      return {
+        fair: isFinite(fpOverride) && fpOverride > 0 ? fpOverride : 0.5,
+        override: Number(info.bookPriceOverride),
+        sport: info.sport, marketType: info.marketType,
+      };
+    }
+    // Stored fairProb (player props only — moneyline-shaped markets don't
+    // store it at registration).
+    const directFp = Number(info.fairProb);
+    if (isFinite(directFp) && directFp > 0 && directFp < 1) {
+      return { fair: directFp, sport: info.sport, marketType: info.marketType };
+    }
+    // Index-based golf cache lookup (line happened to be registered with
+    // home/away names).
+    if (info.sport === 'golf_matchups' && info.homeTeam && info.awayTeam) {
+      const byIdx = _golfFairByNames(info.teamName || info.homeTeam, info.teamName === info.awayTeam ? info.homeTeam : info.awayTeam, info.roundNum);
+      if (byIdx.fair) return byIdx;
     }
   }
 
+  // Primary path for the single-leg book: price by player name from the config
+  // row, independent of the parlay-SP line index.
+  if (ctx && ctx.sideName && ctx.opponentName) {
+    return _golfFairByNames(ctx.sideName, ctx.opponentName, ctx.roundNum);
+  }
+
+  if (!info) return { fair: null, reason: 'line not in parlay-SP index (and no matchup names available)' };
   return { fair: null, reason: 'no fair_prob on line' };
 }
 
@@ -246,8 +264,8 @@ function _impliedFromAmerican(a) {
   return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
 }
 
-function _computeOffered(lineId, rowSweetener) {
-  const f = _fairForLine(lineId);
+function _computeOffered(lineId, rowSweetener, ctx) {
+  const f = _fairForLine(lineId, ctx);
   if (!f.fair) return { ok: false, reason: f.reason };
   // If override is set, just use it (Mike's manual upload pricing).
   if (f.override != null && f.override > 0 && f.override < 1) {
@@ -336,7 +354,7 @@ async function postEnabled(opts = {}) {
   const skipped = [];
   for (const row of cfgRows) {
     if (activeByLine.has(row.line_id)) { skipped.push({ line_id: row.line_id, reason: 'already-posted' }); continue; }
-    const q = _computeOffered(row.line_id, row.sweetener_pct);
+    const q = _computeOffered(row.line_id, row.sweetener_pct, { sideName: row.side_name, opponentName: row.side_opponent, roundNum: row.round_num });
     if (!q.ok) { skipped.push({ line_id: row.line_id, reason: q.reason }); continue; }
     const snapped = pxSingle.snapToLadder(q.americanOdds, ladder);
     orders.push({
@@ -459,14 +477,20 @@ async function cancelStale(currentLineIdSet) {
 async function refreshDrift() {
   const { driftPp } = _cfg();
   const sb = db.getClient();
-  // Per-line sweetener map so the current-offered recompute uses the same
-  // markup postEnabled would. Defensive: if the column doesn't exist yet
-  // (migration not run) the catch leaves the map empty → global default.
-  const swByLine = new Map();
+  // Per-line config map (sweetener + matchup names) so the current-offered
+  // recompute uses the same markup AND the same name-based fair lookup that
+  // postEnabled does. Defensive: if sweetener_pct doesn't exist yet the
+  // select narrows; fall back to names-only.
+  const cfgByLine = new Map();
   try {
-    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, sweetener_pct');
-    for (const c of (cfgRows || [])) swByLine.set(c.line_id, c.sweetener_pct);
-  } catch (_) { /* column may not exist yet — fall back to global default */ }
+    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, sweetener_pct, side_name, side_opponent, round_num');
+    for (const c of (cfgRows || [])) cfgByLine.set(c.line_id, c);
+  } catch (_) {
+    try {
+      const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, side_name, side_opponent, round_num');
+      for (const c of (cfgRows || [])) cfgByLine.set(c.line_id, c);
+    } catch (_) { /* leave empty — global default + line-index lookup */ }
+  }
   const { data, error } = await sb.from(TBL_WAGERS)
     .select('wager_id, line_id, posted_fair_prob, posted_odds')
     .in('status', ['posted', 'partially_matched']);
@@ -474,7 +498,8 @@ async function refreshDrift() {
   let drifted = 0;
   const errors = [];
   for (const w of (data || [])) {
-    const q = _computeOffered(w.line_id, swByLine.get(w.line_id));
+    const c = cfgByLine.get(w.line_id) || {};
+    const q = _computeOffered(w.line_id, c.sweetener_pct, { sideName: c.side_name, opponentName: c.side_opponent, roundNum: c.round_num });
     if (!q.ok) continue;
     const driftPpNow = Math.abs((q.offeredProb - _impliedFromAmerican(w.posted_odds)) * 100);
     if (driftPpNow >= driftPp) {
@@ -507,7 +532,7 @@ async function loadState() {
   if (wErr) return { error: 'wagers: ' + wErr.message };
   // Enrich each config row with current fair + offered (best-effort)
   const enriched = (cfg || []).map(r => {
-    const q = _computeOffered(r.line_id, r.sweetener_pct);
+    const q = _computeOffered(r.line_id, r.sweetener_pct, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num });
     return {
       ...r,
       current_fair_prob: q.ok ? q.fair : null,
