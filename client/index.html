@@ -15242,11 +15242,22 @@
       const sideShown = dirty.post_side !== undefined ? dirty.post_side : (r.post_side || 'no');
       const isDirty = window._gorDirty.has(r.id);
       const dkAm = r.dk_american_odds != null ? ((r.dk_american_odds >= 0 ? '+' : '') + r.dk_american_odds) : '—';
-      const offAm = r.offered_american != null ? ((r.offered_american >= 0 ? '+' : '') + r.offered_american) : '—';
-      // Posts preview = exactly what we send PX (within a tick after ladder snap).
-      // NO (default): complement of offered on the NO line (cp backs YES at offered).
+      // Our Offered (YES) is editable: blank = auto (DK + sweetener); a typed value
+      // overrides just this row. Reflect staged dirty edits immediately
+      // (ovDirty: number=override, null=reverted to auto, undefined=not staged).
+      const autoAmer = (r.offered_american != null) ? Number(r.offered_american) : null;
+      const savedOv = (r.manual_offered_american != null && Number(r.manual_offered_american) !== 0) ? Number(r.manual_offered_american) : null;
+      const ovDirty = dirty.manual_offered_american;
+      const effAmer = (ovDirty !== undefined) ? (ovDirty == null ? autoAmer : ovDirty) : (savedOv != null ? savedOv : autoAmer);
+      const isOv = (ovDirty !== undefined) ? (ovDirty != null) : (savedOv != null);
+      const offeredVal = (effAmer != null) ? ((effAmer >= 0 ? '+' : '') + effAmer) : '';
+      const autoPlaceholder = (autoAmer != null) ? ((autoAmer >= 0 ? '+' : '') + autoAmer) : '';
+      const autoArg = (autoAmer != null) ? autoAmer : 'null';
+      // Posts preview = exactly what we send PX (within a tick after ladder snap),
+      // using the EFFECTIVE offered price (override or auto).
+      // NO (default): complement on the NO line (cp backs YES at offered).
       // YES: offered on the YES line (cp backs NO).
-      const offImp = _amToImp(r.offered_american);
+      const offImp = _amToImp(effAmer);
       let postsLbl;
       if (sideShown === 'no' && !r.px_no_line_id) {
         postsLbl = '<span style="color:var(--amber);" title="NO line not captured yet — click Sync after running the migration">NO (no line)</span>';
@@ -15256,7 +15267,7 @@
         const na = _impToAm(1 - offImp);
         postsLbl = na != null ? '<span style="color:var(--red);">NO ' + (na >= 0 ? '+' : '') + na + '</span>' : '<span style="color:var(--text3);">—</span>';
       } else {
-        postsLbl = '<span style="color:var(--green);">YES ' + offAm + '</span>';
+        postsLbl = '<span style="color:var(--green);">YES ' + (offeredVal || '—') + '</span>';
       }
       const pxLbl = r.px_line_id ? '<span style="color:var(--green); font-size:10px;">matched</span>' : '<span style="color:var(--amber); font-size:10px;">no PX line</span>';
       const aw = (r.active_wagers || [])[0];
@@ -15273,7 +15284,12 @@
         + '<td style="padding:4px 10px; color:var(--text3); font-size:10px;">↳</td>'
         + '<td style="padding:4px 10px;">' + escHtml(r.player_name) + '</td>'
         + '<td style="padding:4px 10px; text-align:right; font-family:monospace;">' + dkAm + '</td>'
-        + '<td style="padding:4px 10px; text-align:right; font-family:monospace; color:var(--accent);">' + offAm + '</td>'
+        + '<td style="padding:4px 10px; text-align:right; white-space:nowrap;">'
+          + '<input type="text" inputmode="numeric" value="' + escHtml(offeredVal) + '" placeholder="' + escHtml(autoPlaceholder) + '"'
+          + ' title="YES price a counterparty pays to back ' + escHtml(r.player_name || '') + '. Blank = auto (DK + sweetener)' + (autoPlaceholder ? ' (' + escHtml(autoPlaceholder) + ')' : '') + '. Type to override this one line; the Side toggle decides how it posts."'
+          + ' onchange="gorSetOffered(' + r.id + ', this.value, ' + autoArg + ')"'
+          + ' style="width:64px; text-align:right; font-family:monospace; background:var(--surface2); color:' + (isOv ? 'var(--accent)' : 'var(--text)') + '; border:1px solid ' + (isOv ? 'var(--accent)' : 'var(--border)') + '; border-radius:3px; padding:2px 4px; font-size:11px;">'
+        + '</td>'
         + '<td style="padding:4px 10px;"><select onchange="gorSetSide(' + r.id + ', this.value)" style="background:var(--surface2); color:' + (sideShown === 'yes' ? 'var(--green)' : 'var(--red)') + '; border:1px solid var(--border); border-radius:3px; padding:1px 4px; font-size:11px;"><option value="no"' + (sideShown === 'no' ? ' selected' : '') + '>NO</option><option value="yes"' + (sideShown === 'yes' ? ' selected' : '') + '>YES</option></select></td>'
         + '<td style="padding:4px 10px; font-family:monospace; font-size:11px;">' + postsLbl + '</td>'
         + '<td style="padding:4px 10px;">' + pxLbl + '</td>'
@@ -15300,6 +15316,21 @@
   // American odds <-> implied helpers for the "Posts" preview.
   function _amToImp(a) { a = Number(a); if (!isFinite(a) || a === 0) return null; return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100); }
   function _impToAm(p) { if (!isFinite(p) || p <= 0 || p >= 1) return null; return p >= 0.5 ? Math.round(-100 * p / (1 - p)) : Math.round((1 / p - 1) * 100); }
+  // Stage a manual "Our Offered (YES)" override as a dirty edit. Blank / 0 /
+  // equals-auto reverts to the auto price (null). Persisted via Save Edits.
+  function gorSetOffered(id, val, autoAmer) {
+    const d = window._gorDirty.get(id) || {};
+    const t = String(val == null ? '' : val).trim().replace(/^\+/, '');
+    const n = (t === '') ? NaN : Number(t);
+    if (!isFinite(n) || n === 0 || (autoAmer != null && Math.round(n) === Number(autoAmer))) {
+      d.manual_offered_american = null; // blank / 0 / equals auto = no override
+    } else {
+      d.manual_offered_american = Math.round(n);
+    }
+    window._gorDirty.set(id, d);
+    const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
+    gorRender(); // refresh the Posts preview + override styling immediately
+  }
   // Stage the post side (yes/no) as a dirty edit; persisted via Save Edits.
   function gorSetSide(id, val) {
     const d = window._gorDirty.get(id) || {}; d.post_side = (val === 'yes') ? 'yes' : 'no';

@@ -284,14 +284,20 @@ async function _activeWagersByConfigId() {
 // Returns { ok, side, lineId, odds } or { ok:false, reason }.
 function _buildOutrightOrder(row, ladder) {
   const side = (row.post_side === 'yes') ? 'yes' : 'no';
-  const offImpl = Number(row.offered_implied);
-  if (!(offImpl > 0 && offImpl < 1)) return { ok: false, reason: 'no offered_implied' };
+  // Effective offered YES price: a manual override (operator-typed) if set, else
+  // the auto price (DK american x (1 + sweetener)). The override is always the
+  // YES price a counterparty pays; the side toggle decides how it's realized
+  // (NO = post the complement on the NO line so the cp backs YES at this price).
+  const manual = (row.manual_offered_american != null && Number(row.manual_offered_american) !== 0) ? Number(row.manual_offered_american) : null;
+  const offImpl = manual != null ? aImpl(manual) : Number(row.offered_implied);
+  if (!(offImpl > 0 && offImpl < 1)) return { ok: false, reason: 'no offered price' };
+  const offAmerican = manual != null ? manual : Number(row.offered_american);
   let lineId, rawAmerican;
   if (side === 'yes') {
     lineId = row.px_line_id;
-    rawAmerican = Number(row.offered_american);
+    rawAmerican = offAmerican;
     if (!lineId) return { ok: false, reason: 'no PX yes line' };
-    if (!isFinite(rawAmerican)) return { ok: false, reason: 'no offered_american' };
+    if (!isFinite(rawAmerican)) return { ok: false, reason: 'no offered price' };
   } else {
     lineId = row.px_no_line_id;
     rawAmerican = americanFromImplied(1 - offImpl);
@@ -299,7 +305,7 @@ function _buildOutrightOrder(row, ladder) {
     if (rawAmerican == null) return { ok: false, reason: 'no-side odds out of range' };
   }
   const snapped = pxSingle.snapToLadder(rawAmerican, ladder);
-  return { ok: true, side, lineId, odds: snapped };
+  return { ok: true, side, lineId, odds: snapped, isOverride: manual != null };
 }
 
 // Place a batch of orders on PX and record the resulting wagers. Shared by
@@ -468,7 +474,7 @@ async function refreshDrift() {
   const cfgIds = wagers.map(w => w.config_id).filter(Boolean);
   if (!cfgIds.length) return { drifted: 0, errors: [] };
   const { data: cfgRows, error: cErr } = await sb.from(TBL_CONFIG)
-    .select('id, dk_implied')
+    .select('id, dk_implied, manual_offered_american')
     .in('id', cfgIds);
   if (cErr) throw new Error('refreshDrift cfg: ' + cErr.message);
   const cfgById = new Map((cfgRows || []).map(r => [r.id, r]));
@@ -477,6 +483,9 @@ async function refreshDrift() {
   for (const w of wagers) {
     const cfg = cfgById.get(w.config_id);
     if (!cfg || cfg.dk_implied == null) continue;
+    // Manually-priced offers ignore DK drift — the operator set the price on
+    // purpose, so don't pull it just because DK moved.
+    if (cfg.manual_offered_american != null && Number(cfg.manual_offered_american) !== 0) continue;
     const driftPpNow = Math.abs((Number(cfg.dk_implied) - Number(w.posted_dk_implied)) * 100);
     if (driftPpNow >= driftPp) {
       try {
@@ -540,8 +549,20 @@ async function updateConfig(updates) {
     if (u.enabled !== undefined) patch.enabled = !!u.enabled;
     if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
     if (u.post_side !== undefined) patch.post_side = (u.post_side === 'yes') ? 'yes' : 'no';
+    if (u.manual_offered_american !== undefined) {
+      // YES price the operator wants to offer. null/0/blank → auto. Round to int.
+      const n = u.manual_offered_american === null ? null : Number(u.manual_offered_american);
+      patch.manual_offered_american = (n != null && isFinite(n) && n !== 0) ? Math.round(n) : null;
+    }
     if (Object.keys(patch).length === 0) continue;
-    const { error } = await sb.from(TBL_CONFIG).update(patch).eq('id', u.id);
+    let { error } = await sb.from(TBL_CONFIG).update(patch).eq('id', u.id);
+    // Graceful degrade: if manual_offered_american column doesn't exist yet, still
+    // persist the rest so the edit isn't lost.
+    if (error && /manual_offered_american|column/i.test(error.message) && 'manual_offered_american' in patch) {
+      const { manual_offered_american, ...rest } = patch;
+      error = Object.keys(rest).length ? (await sb.from(TBL_CONFIG).update(rest).eq('id', u.id)).error : null;
+      if (!error) errors.push(u.id + ': offer override not saved (run scripts/_golf_outrights_manual_offer_column.sql)');
+    }
     if (error) errors.push(u.id + ': ' + error.message);
     else updated++;
   }
