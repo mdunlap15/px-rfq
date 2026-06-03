@@ -14692,8 +14692,11 @@
       const swShown = swFrac != null ? String(+(swFrac * 100).toFixed(2)) : '';
       const isDirty = window._gslDirty.has(r.line_id);
       const fairPct = r.current_fair_prob != null ? (r.current_fair_prob * 100).toFixed(1) + '%' : '<span style="color:var(--text3);" title="' + escHtml(r.fair_unavailable_reason || '') + '">—</span>';
+      // OUR OFFERED = counterparty-facing line (what a taker pays). posted_american
+      // is the favorable side we actually rest (shows under Active Wager once filled).
       const offeredPct = r.current_offered_prob != null ? (r.current_offered_prob * 100).toFixed(1) + '%' : '—';
       const american = r.current_american != null ? (r.current_american >= 0 ? '+' : '') + r.current_american : '';
+      const postedHint = r.posted_american != null ? '<span style="color:var(--text3); font-size:9px;" title="The wager we actually rest (our favorable side); the counterparty takes the line shown.">post ' + (r.posted_american >= 0 ? '+' : '') + r.posted_american + '</span>' : '';
       const activeStr = (r.active_wagers || []).length
         ? '<span style="color:var(--green);">' + (r.active_wagers[0].posted_odds >= 0 ? '+' : '') + r.active_wagers[0].posted_odds
             + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
@@ -14704,7 +14707,7 @@
         + '<td style="padding:4px 10px;">' + escHtml(r.side_name || '?') + ' <span style="color:var(--text3); font-size:10px;">vs ' + escHtml(r.side_opponent || '?') + '</span></td>'
         + '<td style="padding:4px 10px; color:var(--text3);">' + (r.round_num != null ? 'R' + r.round_num : '') + '</td>'
         + '<td style="padding:4px 10px; text-align:right;">' + fairPct + '</td>'
-        + '<td style="padding:4px 10px; text-align:right;">' + offeredPct + ' <span style="color:var(--text3); font-size:10px;">' + american + '</span></td>'
+        + '<td style="padding:4px 10px; text-align:right;">' + offeredPct + ' <span style="color:var(--text3); font-size:10px;">' + american + '</span>' + (postedHint ? '<br>' + postedHint : '') + '</td>'
         + '<td style="padding:4px 10px;">' + activeStr + '</td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gslSetRisk(\'' + r.line_id + '\', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="0.5" value="' + escHtml(swShown) + '" placeholder="' + swDefaultPct + '" title="Per-side markup % over fair. Blank = global default (' + swDefaultPct + '%)." onchange="gslSetSweetener(\'' + r.line_id + '\', this.value)" style="width:56px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'

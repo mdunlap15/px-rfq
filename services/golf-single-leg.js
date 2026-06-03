@@ -273,9 +273,20 @@ function _computeOffered(lineId, rowSweetener, ctx) {
   }
   // Single-leg-account golf-matchup sweetener path. Bypasses the shared
   // computeSingleLegQuote (which uses parlay-SP vig tuning, too tight for
-  // matchups on the SL book) and applies a flat per-side markup on the
-  // fair implied prob. Caesars-style spread (~-125/-105 on 50/50 fair)
-  // emerges at sweetener ≈ 0.07.
+  // matchups on the SL book) and applies a flat per-side markup.
+  //
+  // CRITICAL — side convention (fixed 2026-06-03): on px-single's
+  // place_multiple_wagers, the `odds` we submit on a line_id become OUR OWN
+  // position's odds; the counterparty who matches takes the COMPLEMENTARY
+  // side. (This is the opposite of the parlay-SP RFQ callback, where the
+  // offered odds are what the counterparty pays.) So to make the COUNTERPARTY
+  // pay the sweetener, we must post OUR side at the FAVORABLE complement:
+  //   offeredProb(our side) = 1 − fair_opponent × (1 + s)
+  //                         = 1 − (1 − fair_ours) × (1 + s)
+  // Then the counterparty on the other side is at fair_opp × (1+s) — i.e. they
+  // pay the vig and we collect it. (Was offeredProb = fair × (1+s), which made
+  // US hold the vigged short side and PAY the vig — symptom: posted Hojgaard
+  // -120 and we held -120 instead of offering it to a taker.)
   //
   // Per-row sweetener (golf_single_leg_config.sweetener_pct, a FRACTION) wins
   // when set; a blank/null/<=0 row value falls back to the global default
@@ -286,18 +297,22 @@ function _computeOffered(lineId, rowSweetener, ctx) {
   const usingRow = isFinite(rowSw) && rowSw > 0;
   const slSweetener = usingRow ? rowSw : globalSweetener;
   if (slSweetener > 0 && f.sport === 'golf_matchups') {
-    let offeredProb = f.fair * (1 + slSweetener);
-    // Cap at 0.99 to avoid degenerate American-odds conversion at extreme
-    // chalk. Should never bite at realistic fair values for matchups.
-    if (offeredProb > 0.99) offeredProb = 0.99;
+    // OUR posted side, favorable — counterparty on the other side pays the vig.
+    let offeredProb = 1 - (1 - f.fair) * (1 + slSweetener);
+    // The counterparty's implied price (for display/logging) is the complement.
+    const counterpartyProb = (1 - f.fair) * (1 + slSweetener);
     if (offeredProb <= 0 || offeredProb >= 1) {
-      return { ok: false, reason: 'sweetener produced invalid offered_prob: ' + offeredProb };
+      // Happens only for extreme dogs where (1−fair)(1+s) ≥ 1 — can't offer a
+      // sane price on that side; skip it.
+      return { ok: false, reason: 'sweetener produced invalid offered_prob: ' + offeredProb + ' (selection too far from even to price with ' + (slSweetener * 100).toFixed(1) + '% markup)' };
     }
     return {
       ok: true,
       fair: f.fair,
-      offeredProb,
+      offeredProb,                                   // OUR posted side
       americanOdds: _americanFromImplied(offeredProb),
+      counterpartyProb,                              // what the taker pays
+      counterpartyAmerican: _americanFromImplied(counterpartyProb),
       vig: slSweetener,
       source: usingRow ? 'sl-matchup-sweetener(row)' : 'sl-matchup-sweetener(global)',
     };
@@ -533,11 +548,19 @@ async function loadState() {
   // Enrich each config row with current fair + offered (best-effort)
   const enriched = (cfg || []).map(r => {
     const q = _computeOffered(r.line_id, r.sweetener_pct, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num });
+    // "OUR OFFERED" shows the COUNTERPARTY-facing line (what a taker pays) —
+    // that's the price we're putting into the market. The wager we actually
+    // post (and that shows under ACTIVE WAGER once filled) is the favorable
+    // complement (posted_american). For non-sweetener paths that don't expose
+    // a counterparty price, fall back to the posted side.
+    const cpProb = q.ok ? (q.counterpartyProb != null ? q.counterpartyProb : q.offeredProb) : null;
+    const cpAmer = q.ok ? (q.counterpartyAmerican != null ? q.counterpartyAmerican : q.americanOdds) : null;
     return {
       ...r,
       current_fair_prob: q.ok ? q.fair : null,
-      current_offered_prob: q.ok ? q.offeredProb : null,
-      current_american: q.ok ? q.americanOdds : null,
+      current_offered_prob: cpProb,            // counterparty-facing (display)
+      current_american: cpAmer,                // counterparty-facing (display)
+      posted_american: q.ok ? q.americanOdds : null,   // what we actually post (our side)
       offered_source: q.ok ? q.source : null,
       fair_unavailable_reason: q.ok ? null : q.reason,
     };
