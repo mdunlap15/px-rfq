@@ -14902,43 +14902,141 @@
     try {
       const r = await fetch('/single-leg/golf/sync', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      if (!j.ok) { await gslAlert('Sync failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
       await gslLoad(true);
-      alert('Sync complete. ' + (j.matchups || 0) + ' matchup(s) seen, ' + (j.upserted || 0) + ' side(s) upserted.'
-        + (j.duplicatesCollapsed ? '\n(' + j.duplicatesCollapsed + ' duplicate line_id row(s) collapsed.)' : ''));
-    } catch (e) { alert('Sync error: ' + e.message); }
+      await gslAlert('Sync complete', '<div style="font-size:14px;"><b>' + (j.matchups || 0) + '</b> matchup(s) seen &nbsp;·&nbsp; <b>' + (j.upserted || 0) + '</b> side(s) upserted</div>'
+        + (j.duplicatesCollapsed ? '<div style="margin-top:6px; font-size:12px; color:var(--text2);">' + j.duplicatesCollapsed + ' duplicate line_id row(s) collapsed.</div>' : ''));
+    } catch (e) { await gslAlert('Sync error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync from PX'; } }
   }
 
+  // ---- Reusable centered modal (replaces native alert/confirm on the SL tab).
+  // Uses the existing .modal-overlay/.modal-card styles. gslAlert -> Promise<void>;
+  // gslConfirm -> Promise<bool>. A singleton overlay is injected once and reused.
+  function _gslModalEl() {
+    let el = document.getElementById('gsl-modal');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'gsl-modal';
+    el.className = 'modal-overlay';
+    el.innerHTML =
+      '<div class="modal-card" style="width:580px;">'
+      + '<div class="modal-header"><span id="gsl-modal-title"></span>'
+      + '<button class="close-btn" id="gsl-modal-x">&times;</button></div>'
+      + '<div class="modal-body" id="gsl-modal-body"></div>'
+      + '<div class="modal-footer" style="justify-content:flex-end; gap:8px;">'
+      + '<button class="btn" id="gsl-modal-cancel" style="display:none;">Cancel</button>'
+      + '<button class="btn" id="gsl-modal-ok">OK</button>'
+      + '</div></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function _gslShowModal(title, bodyHtml, opts) {
+    opts = opts || {};
+    return new Promise(resolve => {
+      const el = _gslModalEl();
+      el.querySelector('#gsl-modal-title').textContent = title || '';
+      el.querySelector('#gsl-modal-body').innerHTML = bodyHtml || '';
+      const okBtn = el.querySelector('#gsl-modal-ok');
+      const cancelBtn = el.querySelector('#gsl-modal-cancel');
+      const xBtn = el.querySelector('#gsl-modal-x');
+      const isConfirm = !!opts.confirm;
+      okBtn.textContent = opts.okText || 'OK';
+      cancelBtn.style.display = isConfirm ? '' : 'none';
+      okBtn.style.borderColor = opts.danger ? 'var(--red)' : '';
+      okBtn.style.color = opts.danger ? 'var(--red)' : '';
+      function onKey(e) {
+        if (e.key === 'Escape') cleanup(isConfirm ? false : true);
+        else if (e.key === 'Enter') cleanup(true);
+      }
+      function cleanup(result) {
+        el.classList.remove('open');
+        document.removeEventListener('keydown', onKey);
+        okBtn.onclick = cancelBtn.onclick = xBtn.onclick = el.onclick = null;
+        resolve(result);
+      }
+      okBtn.onclick = () => cleanup(true);
+      cancelBtn.onclick = () => cleanup(false);
+      xBtn.onclick = () => cleanup(isConfirm ? false : true);
+      el.onclick = (e) => { if (e.target === el) cleanup(isConfirm ? false : true); };
+      document.addEventListener('keydown', onKey);
+      el.classList.add('open');
+      okBtn.focus();
+    });
+  }
+  function gslAlert(title, bodyHtml) { return _gslShowModal(title, bodyHtml, { confirm: false }); }
+  function gslConfirm(title, bodyHtml, opts) { return _gslShowModal(title, bodyHtml, Object.assign({ confirm: true }, opts || {})); }
+
   async function gslPostAll(btn) {
-    if (window._gslDirty.size > 0 && !confirm('You have unsaved edits. Post All ignores them. Continue?')) return;
+    if (window._gslDirty.size > 0 && !(await gslConfirm('Unsaved edits', 'You have unsaved edits. <b>Post All ignores them.</b> Continue?'))) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Posting...'; }
     try {
       const r = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Post failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      const errLines = (j.errors || []).slice(0, 5).join('\n');
-      const skipLines = (j.skippedDetail || []).slice(0, 5).map(s => s.line_id.slice(0, 12) + ': ' + s.reason).join('\n');
-      const placeLines = (j.placeDetail || []).slice(0, 8).map(p => (p.wager_id ? ('wager ' + String(p.wager_id).slice(0, 10)) : 'NO WAGER_ID') + ' · ' + (p.status || '?') + ' · ' + (p.odds >= 0 ? '+' : '') + p.odds + ' @ $' + p.stake).join('\n');
-      alert('Posted: ' + (j.posted || 0) + (j.suspect ? '\n⚠ Suspect (success but no wager_id, NOT recorded): ' + j.suspect : '') + '\nSkipped: ' + (j.skipped || 0)
-        + (placeLines ? '\n\nPX response:\n' + placeLines : '')
-        + (errLines ? '\n\nErrors:\n' + errLines : '')
-        + (skipLines ? '\n\nSkipped detail:\n' + skipLines : ''));
+      if (!j.ok) { await gslAlert('Post failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await gslAlert('Post All — results', gslBuildPostSummary(j));
       await gslLoad(true);
-    } catch (e) { alert('Post error: ' + e.message); }
+    } catch (e) { await gslAlert('Post error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Post All'; } }
   }
 
+  // Build the formatted HTML body for the Post All results modal. Shows the
+  // PLAYER NAME (+ matchup) per wager rather than the raw PX wager_id.
+  function gslBuildPostSummary(j) {
+    const pd = j.placeDetail || [];
+    let html = '<div style="margin-bottom:10px; font-size:14px;">'
+      + '<b style="color:var(--green);">Posted: ' + (j.posted || 0) + '</b>'
+      + ' &nbsp;·&nbsp; Skipped: ' + (j.skipped || 0)
+      + (j.suspect ? ' &nbsp;·&nbsp; <span style="color:var(--red);">⚠ Suspect (no wager_id): ' + j.suspect + '</span>' : '')
+      + '</div>';
+    if (pd.length) {
+      const rows = pd.slice(0, 60).map(p => {
+        const name = escHtml(p.side_name || (p.line_id ? p.line_id.slice(0, 8) : '?'));
+        const matchup = p.matchup ? '<div style="font-size:11px; color:var(--text3);">' + escHtml(p.matchup) + '</div>' : '';
+        const odds = (p.odds >= 0 ? '+' : '') + p.odds;
+        const ok = !!p.wager_id;
+        const stat = ok ? escHtml(p.status || 'posted') : '⚠ no wager_id';
+        const statColor = ok ? 'var(--text2)' : 'var(--red)';
+        return '<tr style="border-top:1px solid var(--border);">'
+          + '<td style="padding:4px 8px;">' + name + matchup + '</td>'
+          + '<td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums;">' + odds + '</td>'
+          + '<td style="padding:4px 8px; text-align:right;">$' + p.stake + '</td>'
+          + '<td style="padding:4px 8px; color:' + statColor + ';">' + stat + '</td>'
+          + '</tr>';
+      }).join('');
+      html += '<div style="font-size:11px; color:var(--text3); margin-bottom:2px;">PX RESPONSE</div>'
+        + '<table style="width:100%; border-collapse:collapse; font-size:13px;">'
+        + '<thead><tr style="color:var(--text3); font-size:11px; text-align:left;">'
+        + '<th style="padding:2px 8px;">Player</th><th style="padding:2px 8px; text-align:right;">Odds</th>'
+        + '<th style="padding:2px 8px; text-align:right;">Stake</th><th style="padding:2px 8px;">Status</th></tr></thead>'
+        + '<tbody>' + rows + '</tbody></table>';
+      if (pd.length > 60) html += '<div style="font-size:11px; color:var(--text3); margin-top:4px;">… +' + (pd.length - 60) + ' more</div>';
+    }
+    const errs = j.errors || [];
+    if (errs.length) {
+      html += '<div style="margin-top:12px; color:var(--red); font-size:12px;"><b>Errors (' + errs.length + ')</b>'
+        + '<ul style="margin:4px 0 0 16px; padding:0;">' + errs.slice(0, 8).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>';
+    }
+    const skd = j.skippedDetail || [];
+    if (skd.length) {
+      html += '<div style="margin-top:12px; color:var(--text2); font-size:12px;"><b>Skipped (' + skd.length + ')</b>'
+        + '<ul style="margin:4px 0 0 16px; padding:0;">' + skd.slice(0, 8).map(s => '<li>' + escHtml((s.line_id || '?').slice(0, 12) + ': ' + s.reason) + '</li>').join('') + '</ul></div>';
+    }
+    return html;
+  }
+
   async function gslCancelAll(btn) {
-    if (!confirm('Cancel EVERY active wager on the single-leg account? This is irreversible.')) return;
+    if (!(await gslConfirm('Cancel all wagers', 'Cancel <b>EVERY</b> active wager on the single-leg account? This is <b>irreversible</b>.', { danger: true, okText: 'Cancel All' }))) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Cancelling...'; }
     try {
       const r = await fetch('/single-leg/golf/cancel-all', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      alert('Cancelled: ' + (j.cancelled || 0) + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+      if (!j.ok) { await gslAlert('Cancel failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      const errs = (j.errors || []);
+      await gslAlert('Cancel All — results', '<div style="font-size:14px;"><b>Cancelled: ' + (j.cancelled || 0) + '</b></div>'
+        + (errs.length ? '<div style="margin-top:10px; color:var(--red); font-size:12px;"><b>Errors (' + errs.length + ')</b><ul style="margin:4px 0 0 16px; padding:0;">' + errs.slice(0, 8).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
       await gslLoad(true);
-    } catch (e) { alert('Cancel error: ' + e.message); }
+    } catch (e) { await gslAlert('Cancel error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Cancel All'; } }
   }
 
@@ -14947,10 +15045,10 @@
     try {
       const r = await fetch('/single-leg/golf/repost', { method: 'POST', credentials: 'include' });
       const j = await r.json();
-      if (!j.ok) { alert('Repost failed: ' + (j.error || ('HTTP ' + r.status))); return; }
-      alert('Drift-cancelled: ' + (j.drift?.drifted || 0) + '\nPosted: ' + (j.post?.posted || 0));
+      if (!j.ok) { await gslAlert('Repost failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await gslAlert('Repost — results', '<div style="font-size:14px;">Drift-cancelled: <b>' + (j.drift?.drifted || 0) + '</b> &nbsp;·&nbsp; Posted: <b>' + (j.post?.posted || 0) + '</b></div>');
       await gslLoad(true);
-    } catch (e) { alert('Repost error: ' + e.message); }
+    } catch (e) { await gslAlert('Repost error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Repost'; } }
   }
 

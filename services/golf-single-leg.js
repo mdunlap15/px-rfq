@@ -529,7 +529,8 @@ async function postEnabled(opts = {}) {
       if (!matching) { errors.push('succeed_wager could not be matched to a sent order: ' + JSON.stringify(w).slice(0, 200)); continue; }
       const wagerId = w.wager_id || w.id || w.wagerId || null;
       const status = w.matching_status || w.status || (wagerId ? 'posted' : 'unknown');
-      placeDetail.push({ line_id: matching.line_id, wager_id: wagerId, status, odds: matching.odds, stake: matching.stake });
+      placeDetail.push({ line_id: matching.line_id, wager_id: wagerId, status, odds: matching.odds, stake: matching.stake,
+        side_name: matching._meta && matching._meta.side_name, matchup: matching._meta && matching._meta.matchup });
       if (!wagerId) {
         // PX claims success but gave us no id to track/cancel it — this is the
         // exact failure mode behind "posted but not visible on the book".
