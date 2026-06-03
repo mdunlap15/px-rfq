@@ -278,26 +278,65 @@ function _computeOffered(lineId, ctx, overrideAmerican) {
   if (f.override != null && f.override > 0 && f.override < 1) {
     return { ok: true, fair: f.fair, offeredProb: f.override, americanOdds: _americanFromImplied(f.override), backProb: f.override, counterpartyProb: f.override, counterpartyAmerican: _americanFromImplied(f.override), autoAmerican: _americanFromImplied(f.override), isOverride: true, source: 'override' };
   }
-  // Single-leg golf-matchup markup. Lines auto-load at the global markup
-  // (GOLF_SL_MATCHUP_SWEETENER_PCT, default 0.07); the operator can OVERRIDE an
-  // individual line via the editable "Our Offered" field (manual_offered_american).
+  // Single-leg golf-matchup line. The AUTO line uses the SAME pricer the RFQ
+  // Lines tab "MY ODDS" column uses (pricer.computeSingleLegQuote) so the two
+  // tabs always show identical numbers for the same matchup (operator request
+  // 2026-06-04 — was a flat sweetener that diverged: Lines -138 vs SL -144).
+  // The operator can OVERRIDE an individual line via the editable "Our Offered"
+  // field (manual_offered_american) to widen/adjust it.
   //
   // SIDE CONVENTION: on px-single's place_multiple_wagers, the `odds` we submit
   // on a line_id become OUR OWN position. So "counterparty backs THIS player at
   // backProb" is realized by the wager we post on the OPPONENT's line (we hold
   // the opponent at 1−backProb). The DISPLAY "Our Offered" is backProb (this
   // player's price — favorite negative, dog positive).
-  const slSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
-  if (slSweetener > 0 && f.sport === 'golf_matchups') {
-    const autoBackProb = f.fair * (1 + slSweetener);
+  if (f.sport === 'golf_matchups') {
+    // Mirror the RFQ Lines-tab MY ODDS cascade EXACTLY (index.js ~10835) so the
+    // two tabs show identical lines for the same matchup:
+    //   1. getGolfMatchupFairProb → if it returns bookPriceOverride (raw
+    //      BetOnline/Bovada posted price from DataGolf, or a manual upload),
+    //      quote AT that book price.
+    //   2. else computeSingleLegQuote(fairProb) — de-vig + our vig curve.
+    // (consensusImplied is null for golf matchups — Pin/FD/DK don't cover the
+    // DataGolf golf feed — so we omit it, matching the Lines tab for golf.)
+    const synthInfo = {
+      sport: 'golf_matchups', marketType: 'moneyline',
+      teamName: ctx && ctx.sideName, homeTeam: ctx && ctx.sideName,
+      awayTeam: ctx && ctx.opponentName,
+      roundNum: (ctx && ctx.roundNum != null) ? ctx.roundNum : null,
+      pxEventName: '', marketName: '',
+    };
+    let fairProb = null, bookPriceOverride = null;
+    try {
+      const golfRes = pricer.getGolfMatchupFairProb(synthInfo);
+      if (golfRes != null && typeof golfRes === 'object') { fairProb = golfRes.fairProb; bookPriceOverride = golfRes.bookPriceOverride; }
+      else if (golfRes != null) { fairProb = golfRes; }
+    } catch (_) { /* fall through to consensus fair */ }
+    // getGolfMatchupFairProb is STRICT (null when no BetOnline/Bovada) — the
+    // Lines tab would show blank there, but the SL book still wants to make a
+    // market, so fall back to the de-vigged consensus fair we already resolved.
+    if (fairProb == null) fairProb = f.fair;
+
+    let autoBackProb;
+    let vigUsed = null;
+    if (bookPriceOverride != null && bookPriceOverride > 0 && bookPriceOverride < 1) {
+      autoBackProb = bookPriceOverride;                       // quote AT book — matches Lines tab
+    } else {
+      let q;
+      try { q = pricer.computeSingleLegQuote(fairProb, 'golf_matchups', 'moneyline'); }
+      catch (e) { return { ok: false, reason: 'computeSingleLegQuote: ' + e.message }; }
+      if (!q || q.impliedProb == null || !(q.impliedProb > 0 && q.impliedProb < 1)) {
+        return { ok: false, reason: 'computeSingleLegQuote returned invalid implied' };
+      }
+      autoBackProb = q.impliedProb;
+      vigUsed = q.vig;
+    }
     const autoAmerican = (autoBackProb > 0 && autoBackProb < 1) ? _americanFromImplied(autoBackProb) : null;
     const ov = Number(overrideAmerican);
     const hasOverride = isFinite(ov) && ov !== 0;
     const backProb = hasOverride ? _impliedFromAmerican(ov) : autoBackProb;
     if (!(backProb > 0 && backProb < 1)) {
-      return { ok: false, reason: hasOverride
-        ? ('invalid override odds: ' + overrideAmerican)
-        : ('auto back price out of range: ' + backProb + ' (selection too far from even for ' + (slSweetener * 100).toFixed(1) + '% markup)') };
+      return { ok: false, reason: hasOverride ? ('invalid override odds: ' + overrideAmerican) : 'auto back price out of range' };
     }
     return {
       ok: true,
@@ -307,8 +346,8 @@ function _computeOffered(lineId, ctx, overrideAmerican) {
       counterpartyAmerican: _americanFromImplied(backProb),  // effective line (override or auto)
       autoAmerican,                                   // un-overridden line (UI reference + revert detect)
       isOverride: hasOverride,
-      vig: slSweetener,
-      source: hasOverride ? 'manual-override' : 'sl-matchup-sweetener',
+      vig: vigUsed,
+      source: hasOverride ? 'manual-override' : (bookPriceOverride != null ? 'lines-tab-book' : 'lines-tab-quote'),
     };
   }
   // Otherwise route through the standard single-leg quote path.
