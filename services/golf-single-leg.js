@@ -297,22 +297,30 @@ function _computeOffered(lineId, rowSweetener, ctx) {
   const usingRow = isFinite(rowSw) && rowSw > 0;
   const slSweetener = usingRow ? rowSw : globalSweetener;
   if (slSweetener > 0 && f.sport === 'golf_matchups') {
-    // OUR posted side, favorable — counterparty on the other side pays the vig.
+    // OUR posted side, favorable — what we actually rest on this player's line
+    // (we hold this player; the counterparty taking it backs the opponent and
+    // pays the vig). UNCHANGED — this is what gets posted to PX.
     let offeredProb = 1 - (1 - f.fair) * (1 + slSweetener);
-    // The counterparty's implied price (for display/logging) is the complement.
-    const counterpartyProb = (1 - f.fair) * (1 + slSweetener);
     if (offeredProb <= 0 || offeredProb >= 1) {
       // Happens only for extreme dogs where (1−fair)(1+s) ≥ 1 — can't offer a
       // sane price on that side; skip it.
       return { ok: false, reason: 'sweetener produced invalid offered_prob: ' + offeredProb + ' (selection too far from even to price with ' + (slSweetener * 100).toFixed(1) + '% markup)' };
     }
+    // DISPLAY ("OUR OFFERED"): the price a counterparty pays to BACK THIS
+    // player, RFQ-lines convention — favorite negative, dog positive, vig
+    // baked in. This is fair × (1+s) (NOT the complement). It's realized by the
+    // wager we post on the OPPONENT's line; across both rows the two displayed
+    // prices form a normal 2-way market (e.g. Fitz -144 / Fox +109) where the
+    // counterparty pays the ~s overround and we collect.
+    const backProb = f.fair * (1 + slSweetener);
+    const backAmerican = (backProb > 0 && backProb < 1) ? _americanFromImplied(backProb) : null;
     return {
       ok: true,
       fair: f.fair,
-      offeredProb,                                   // OUR posted side
+      offeredProb,                                   // OUR posted side (to PX)
       americanOdds: _americanFromImplied(offeredProb),
-      counterpartyProb,                              // what the taker pays
-      counterpartyAmerican: _americanFromImplied(counterpartyProb),
+      counterpartyProb: backProb,                    // counterparty backs THIS player (display)
+      counterpartyAmerican: backAmerican,
       vig: slSweetener,
       source: usingRow ? 'sl-matchup-sweetener(row)' : 'sl-matchup-sweetener(global)',
     };
