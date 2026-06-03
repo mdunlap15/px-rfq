@@ -14647,14 +14647,24 @@
     const enabledWithoutRisk = enabled.filter(r => !(Number(r.risk_amount) > 0));
     const withActive = cfg.filter(r => (r.active_wagers || []).length > 0);
     const tournaments = new Set(cfg.map(r => r.tournament_name || '(none)'));
+    // Risk staked = total $ that would post on the next Post All (enabled+risk).
+    const riskStaked = enabledWithRisk.reduce((sum, r) => sum + (Number(r.risk_amount) || 0), 0);
+    // Active exposure = total $ resting on the book right now.
+    const activeExposure = withActive.reduce((sum, r) => sum + (r.active_wagers || []).reduce((s2, w) => s2 + (Number(w.posted_stake) || 0), 0), 0);
+    // /state now returns `enabled` (bot on/off). Surface it loudly — the tab is
+    // viewable even when disabled (so you can cancel), so make the state obvious.
+    const botOff = (s.enabled === false);
 
     statusEl.innerHTML =
-      '<div style="display:flex; gap:24px; flex-wrap:wrap;">'
+      (botOff ? '<div style="margin-bottom:8px; padding:4px 10px; background:rgba(255,80,80,0.12); border:1px solid var(--red); border-radius:4px; color:var(--red); font-weight:600; display:inline-block;">● BOT DISABLED — not posting (GOLF_SINGLE_LEG_ENABLED=false). You can still Cancel All.</div>' : '')
+      + '<div style="display:flex; gap:24px; flex-wrap:wrap;">'
       + '<div><span style="color:var(--text3);">Sides:</span> <b>' + cfg.length + '</b></div>'
       + '<div><span style="color:var(--text3);">Tournaments:</span> <b>' + tournaments.size + '</b></div>'
       + '<div><span style="color:var(--text3);">Enabled:</span> <b>' + enabled.length + '</b>'
       + (enabledWithoutRisk.length ? ' <span style="color:var(--amber); margin-left:4px;" title="enabled but no risk_amount set — will not post">⚠ ' + enabledWithoutRisk.length + ' without risk</span>' : '') + '</div>'
-      + '<div><span style="color:var(--text3);">Active wagers:</span> <b>' + (s.totalActive || 0) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Risk staked:</span> <b title="Total $ that posts on the next Post All (enabled rows with risk)">$' + riskStaked.toFixed(0) + '</b></div>'
+      + '<div><span style="color:var(--text3);">Active wagers:</span> <b>' + (s.totalActive || 0) + '</b>'
+      + (activeExposure > 0 ? ' <span style="color:var(--text3);">($' + activeExposure.toFixed(0) + ')</span>' : '') + '</div>'
       + '<div><span style="color:var(--text3);">Dirty edits:</span> <b id="gsl-dirty-count">' + window._gslDirty.size + '</b></div>'
       + '</div>';
 
@@ -14675,6 +14685,22 @@
     });
 
     if (!rows.length) { tableEl.innerHTML = '<div class="empty-state" style="padding:30px;"><div class="icon">-</div>No matchups match filter.</div>'; return; }
+
+    // Pair vig (overround we collect) per matchup = sum of both sides' offered
+    // implied − 1. From full cfg so it's stable regardless of filter. (Uses the
+    // saved/server line, not unsaved dirty overrides — refreshes after Save.)
+    const vigByMatchup = {};
+    {
+      const byM = {};
+      for (const r of cfg) { const k = (r.event_id != null ? r.event_id : '?') + '|' + (r.market_id != null ? r.market_id : '?'); (byM[k] = byM[k] || []).push(r); }
+      for (const k in byM) {
+        const sides = byM[k];
+        if (sides.length === 2) {
+          const a = Number(sides[0].current_offered_prob), b = Number(sides[1].current_offered_prob);
+          if (isFinite(a) && isFinite(b)) vigByMatchup[k] = (a + b - 1);
+        }
+      }
+    }
 
     let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">'
       + '<thead><tr style="background:var(--surface2); color:var(--text3); text-align:left;">'
@@ -14701,6 +14727,11 @@
       }
       const matchupHeader = mName !== lastMatchup;
       if (matchupHeader) lastMatchup = mName;
+      const mKey = (r.event_id != null ? r.event_id : '?') + '|' + (r.market_id != null ? r.market_id : '?');
+      const mVig = vigByMatchup[mKey];
+      const vigStr = (matchupHeader && mVig != null && isFinite(mVig))
+        ? ' <span style="color:var(--text3); font-weight:400; font-size:10px;" title="Overround we collect across both sides of this matchup">· vig ' + (mVig * 100).toFixed(1) + '%</span>'
+        : '';
       const dirty = window._gslDirty.get(r.line_id) || {};
       const riskShown = dirty.risk_amount !== undefined ? dirty.risk_amount : (r.risk_amount != null ? r.risk_amount : '');
       const enabledShown = dirty.enabled !== undefined ? dirty.enabled : !!r.enabled;
@@ -14724,8 +14755,21 @@
             + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
             + ' <span style="color:var(--text3); font-size:10px;">' + escHtml(r.active_wagers[0].status || '') + '</span>'
         : '<span style="color:var(--text3);">—</span>';
+      // Clear per-row state (was: only the error reason, blank otherwise).
+      let statusCell;
+      if (r.fair_unavailable_reason) {
+        statusCell = '<span style="color:var(--amber);" title="' + escHtml(r.fair_unavailable_reason) + '">⚠ no price</span>';
+      } else if ((r.active_wagers || []).length) {
+        statusCell = '<span style="color:var(--green);">● live</span>';
+      } else if (enabledShown && Number(riskShown) > 0) {
+        statusCell = '<span style="color:var(--text2);">✓ ready</span>';
+      } else if (enabledShown) {
+        statusCell = '<span style="color:var(--amber);" title="enabled but no risk — will not post">⚠ no risk</span>';
+      } else {
+        statusCell = '<span style="color:var(--text3);">off</span>';
+      }
       html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
-        + '<td style="padding:4px 10px;' + (matchupHeader ? '' : ' color:var(--text3);') + '">' + (matchupHeader ? escHtml(mName) : '<span style="color:var(--text3); font-size:10px;">↳</span>') + '</td>'
+        + '<td style="padding:4px 10px;' + (matchupHeader ? '' : ' color:var(--text3);') + '">' + (matchupHeader ? (escHtml(mName) + vigStr) : '<span style="color:var(--text3); font-size:10px;">↳</span>') + '</td>'
         + '<td style="padding:4px 10px;">' + escHtml(r.side_name || '?') + ' <span style="color:var(--text3); font-size:10px;">vs ' + escHtml(r.side_opponent || '?') + '</span></td>'
         + '<td style="padding:4px 10px; color:var(--text3);">' + (r.round_num != null ? 'R' + r.round_num : '') + '</td>'
         + '<td style="padding:4px 10px; text-align:right;">' + fairPct + '</td>'
@@ -14739,7 +14783,7 @@
         + '<td style="padding:4px 10px;">' + activeStr + '</td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gslSetRisk(\'' + r.line_id + '\', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
         + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + ' onchange="gslSetEnabled(\'' + r.line_id + '\', this.checked)"></td>'
-        + '<td style="padding:4px 10px; font-size:10px; color:var(--text3);">' + escHtml(r.fair_unavailable_reason || '') + '</td>'
+        + '<td style="padding:4px 10px; font-size:10px;">' + statusCell + '</td>'
         + '</tr>';
     }
     html += '</tbody></table></div>';
