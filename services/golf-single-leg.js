@@ -625,6 +625,18 @@ async function updateConfig(updates) {
 // Lifecycle worker
 // ---------------------------------------------------------------------------
 let _workerHandle = null;
+// Auto-posting is OPT-IN, default OFF. 2026-06-03 incident: the worker called
+// postEnabled() every 5-min tick; each time an offer got MATCHED the line no
+// longer had a resting wager, so the next tick saw it as "empty" and posted
+// AGAIN — a fill-and-repost loop with no cumulative cap that racked up 12
+// matched plays on a single matchup that the operator never intended. With
+// autopost OFF the worker still syncs matchups and cancels stale/drifted
+// offers, but only an explicit manual "Post All" places new offers. Set
+// GOLF_SL_WORKER_AUTOPOST=true to restore continuous posting (do NOT until a
+// per-matchup exposure cap exists, or it will run away again).
+function _workerAutopostEnabled() {
+  return String(process.env.GOLF_SL_WORKER_AUTOPOST || '').toLowerCase() === 'true';
+}
 async function _workerTick() {
   if (!isEnabled()) return;
   try {
@@ -634,8 +646,10 @@ async function _workerTick() {
     for (const m of matchups) for (const s of m.sides) currentLineIds.add(s.line_id);
     await cancelStale(currentLineIds);
     await refreshDrift();
-    await postEnabled(); // re-post anything cancelled-for-drift or newly enabled
-    log.debug('GolfSL', `worker tick ok (${matchups.length} matchups)`);
+    if (_workerAutopostEnabled()) {
+      await postEnabled(); // re-post anything cancelled-for-drift or newly enabled
+    }
+    log.debug('GolfSL', `worker tick ok (${matchups.length} matchups, autopost=${_workerAutopostEnabled()})`);
   } catch (e) {
     log.error('GolfSL', 'worker tick error: ' + e.message);
   }
