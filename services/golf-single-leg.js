@@ -264,6 +264,32 @@ function _impliedFromAmerican(a) {
   return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
 }
 
+// Move an American line `ticks` rungs TOWARD THE BETTOR (sweeten). On the
+// American scale, higher payout == numerically larger odds across the whole
+// range (-110 < -109 < … < -101 < +101 < +102 …), so "sweeter for the bettor"
+// is always the next rung up the sorted ladder. With a PX odds ladder we snap
+// to the nearest rung then step up `ticks`; without one (cold cache) we nudge
+// by `ticks` integer points — which still gives -110 → -109 for the near-even
+// case — skipping the invalid |odds|<100 gap. Returns the sweetened American.
+function _sweetenAmerican(american, ladder, ticks) {
+  const a = Number(american);
+  const n = Number.isInteger(ticks) ? ticks : 1;
+  if (!isFinite(a) || a === 0 || n <= 0) return american;
+  if (Array.isArray(ladder) && ladder.length) {
+    const sorted = ladder.slice().sort((x, y) => x - y);
+    let idx = 0, best = Infinity;
+    for (let i = 0; i < sorted.length; i++) {
+      const d = Math.abs(sorted[i] - a);
+      if (d < best) { best = d; idx = i; }
+    }
+    return sorted[Math.min(idx + n, sorted.length - 1)];
+  }
+  // No ladder: integer nudge toward the bettor, jumping the invalid (-100,100).
+  let v = a + n;
+  if (v > -100 && v < 100) v = 100;
+  return v;
+}
+
 // Compute the BACK-THIS-PLAYER price for a single-leg golf matchup row.
 //   - `ctx`: { sideName, opponentName, roundNum } for the name-based fair lookup.
 //   - `overrideAmerican`: optional manual line (American odds the counterparty
@@ -331,7 +357,27 @@ function _computeOffered(lineId, ctx, overrideAmerican) {
       autoBackProb = q.impliedProb;
       vigUsed = q.vig;
     }
-    const autoAmerican = (autoBackProb > 0 && autoBackProb < 1) ? _americanFromImplied(autoBackProb) : null;
+    let autoAmerican = (autoBackProb > 0 && autoBackProb < 1) ? _americanFromImplied(autoBackProb) : null;
+    // --- 1-tick sweetener (operator request 2026-06-03) ---------------------
+    // Post N PX-ladder rung(s) BETTER than the book/auto price on each side so
+    // the single-leg book is more attractive than the source book; we hold the
+    // complement. Applies to the AUTO line ONLY — a manual override is the exact
+    // price the operator typed, left untouched. Both the displayed "Our Offered"
+    // and the posted complement flow from autoBackProb, so sweetening here keeps
+    // the display and the actual posting in lockstep. -110/-110 → -109/-109
+    // (we hold +109 on both sides). Disable via GOLF_SL_SWEETEN_TICKS=0.
+    const sweetenTicks = (config.pricing && Number.isInteger(config.pricing.golfSlSweetenTicks))
+      ? config.pricing.golfSlSweetenTicks : 1;
+    if (autoAmerican != null && sweetenTicks > 0) {
+      let ladder = null;
+      try { ladder = pxSingle.getCachedLadder(); } catch (_) { ladder = null; }
+      const sweetened = _sweetenAmerican(autoAmerican, ladder, sweetenTicks);
+      const sweetProb = _impliedFromAmerican(sweetened);
+      if (sweetProb != null && sweetProb > 0 && sweetProb < 1) {
+        autoAmerican = sweetened;
+        autoBackProb = sweetProb;   // display + posted complement both inherit this
+      }
+    }
     const ov = Number(overrideAmerican);
     const hasOverride = isFinite(ov) && ov !== 0;
     const backProb = hasOverride ? _impliedFromAmerican(ov) : autoBackProb;
@@ -616,6 +662,12 @@ async function loadState() {
   ]);
   if (cfgErr) return { error: 'config: ' + cfgErr.message };
   if (wErr) return { error: 'wagers: ' + wErr.message };
+  // Warm the odds-ladder cache (once, if cold) so the 1-tick sweetener in
+  // _computeOffered steps on real PX rungs for the DISPLAY too — keeping the
+  // shown "Our Offered" in lockstep with what postEnabled() will actually post.
+  // Cached 1h; a failure (PX unreachable / feature off) just leaves the
+  // sweetener on its ±1 fallback, which is correct for near-even lines anyway.
+  try { if (!pxSingle.getCachedLadder()) await pxSingle.fetchOddsLadder(); } catch (_) { /* cold-cache fallback */ }
   // Enrich each config row with current fair + the editable "Our Offered" line
   // (counterparty backs THIS player; override or auto).
   const enriched = (cfg || []).map(r => {

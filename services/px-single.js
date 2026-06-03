@@ -207,6 +207,15 @@ async function fetchOddsLadder(force = false) {
   return ladder;
 }
 
+// Synchronous read of the last-fetched ladder (or null) — no API round-trip.
+// Used by the golf single-leg 1-tick sweetener so _computeOffered (sync) can
+// step on real PX rungs. postEnabled()/loadState() warm the cache via
+// fetchOddsLadder() first; a cold cache makes the sweetener fall back to a
+// 1-point nudge, which still covers the near-even case (-110 → -109).
+function getCachedLadder() {
+  return oddsLadderCache.ladder || null;
+}
+
 function snapToLadder(odds, ladder) {
   if (!Array.isArray(ladder) || !ladder.length) return Math.round(odds);
   let best = ladder[0];
@@ -229,6 +238,7 @@ module.exports = {
   cancelWagersByEvent,
   cancelWagersByMarket,
   fetchOddsLadder,
+  getCachedLadder,
   snapToLadder,
   // for tests / debugging
   _tokenCache: () => ({ ...tokenCache, token: tokenCache.token ? '<set>' : null }),
