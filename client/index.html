@@ -15155,7 +15155,14 @@
       const j = await r.json();
       if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
       await gorRefresh(false);
-      alert('Sync ok. DK markets: ' + (j.dk_markets || 0) + ' · DK selections: ' + (j.dk_selections || 0) + ' · PX events: ' + (j.px_events || 0) + ' · PX-matched: ' + (j.px_matched_selections || 0) + ' · upserted: ' + (j.upserted || 0) + (j.warning ? '\n\n' + j.warning : ''));
+      const captured = (j.captured_keys || []).join(', ') || 'none';
+      const seen = (j.seen_market_names || []).join(' | ') || 'none';
+      const uncat = (j.uncategorized || []);
+      alert('Sync ok. DK markets: ' + (j.dk_markets || 0) + ' · DK selections: ' + (j.dk_selections || 0) + ' · PX events: ' + (j.px_events || 0) + ' · PX-matched: ' + (j.px_matched_selections || 0) + ' · upserted: ' + (j.upserted || 0)
+        + '\n\nMarket types captured: ' + captured
+        + '\nDK market names seen: ' + seen
+        + (uncat.length ? '\nUncategorized (regex miss?): ' + uncat.join(' | ') : '')
+        + (j.warning ? '\n\n' + j.warning : ''));
     } catch (e) { alert('Sync error: ' + e.message); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync'; } }
   }

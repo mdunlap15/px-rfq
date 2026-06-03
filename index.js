@@ -5835,7 +5835,9 @@ function startStatusServer() {
   });
   app.post('/single-leg/golf-outrights/sync/:slug', async (req, res) => {
     const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug)) }); }
+    // Manual Sync forces a fresh DK scrape (bypass the 15-min cache) so the
+    // operator sees current market availability.
+    try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug, { force: true })) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   app.post('/single-leg/golf-outrights/config', async (req, res) => {

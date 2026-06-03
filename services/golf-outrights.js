@@ -166,19 +166,28 @@ async function _pxMarketsFor(slug) {
   return { eventCount: eventsScanned, byMarketType };
 }
 
-async function syncTournament(dk_slug) {
+async function syncTournament(dk_slug, opts = {}) {
   const sb = db.getClient();
   if (!sb) throw new Error('Supabase not available');
   const { data: tRow, error: tErr } = await sb.from(TBL_TOURN).select('*').eq('dk_slug', dk_slug).maybeSingle();
   if (tErr) throw new Error('syncTournament select: ' + tErr.message);
   if (!tRow) throw new Error('syncTournament: tournament not registered: ' + dk_slug);
 
-  // 1. Scrape DK
+  // 1. Scrape DK. `force` (manual Sync) bypasses the 15-min scraper cache so the
+  // operator always sees current DK state; the worker omits it to stay cached.
   let dk;
-  try { dk = await dkScraper.fetchGolfOutrights(dk_slug); }
+  try { dk = await dkScraper.fetchGolfOutrights(dk_slug, { force: !!opts.force }); }
   catch (e) { throw new Error('DK scrape failed: ' + e.message); }
+  // Scraper diagnostics — surfaced in the return so the UI shows exactly what DK
+  // served. Distinguishes "DK hasn't posted Top 5/10/20 yet" from "we hit the
+  // wrong subcategory tab" (nothing seen) from "regex miss" (seen but uncategorized).
+  const diag = {
+    captured_keys: dk.capturedKeys || [],
+    seen_market_names: dk.seenMarketNames || [],
+    uncategorized: dk.uncategorizedMarketNames || [],
+  };
   if (!dk.markets || !dk.markets.length) {
-    return { ok: true, dk_slug, dk_markets: 0, px_events: 0, upserted: 0, warning: 'DK returned no markets — wrong slug or no outrights up yet' };
+    return { ok: true, dk_slug, dk_markets: 0, px_events: 0, upserted: 0, ...diag, warning: 'DK returned no categorizable outright markets — wrong slug or no outrights up yet' };
   }
 
   // 2. Build PX line lookup (one fetch per tournament)
@@ -238,6 +247,7 @@ async function syncTournament(dk_slug) {
     px_events: px.eventCount,
     px_matched_selections: pxMatched,
     upserted,
+    ...diag,
   };
 }
 
