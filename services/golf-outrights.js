@@ -154,10 +154,15 @@ async function _pxMarketsFor(slug) {
       }
       const yesSel = flat.find(s => s && /^yes$/i.test(String(s.name || '').trim()));
       if (!yesSel || !yesSel.line_id) continue;
+      // Also grab the NO selection's line_id — needed to post the NO side (we hold
+      // NO; the counterparty backs YES). Markets are YES/NO pairs, but tolerate a
+      // missing NO selection (skips only the NO-side post for that row).
+      const noSel = flat.find(s => s && /^no$/i.test(String(s.name || '').trim()));
       byMarketType[mtype].push({
         player_name: playerName,
         player_norm: _normName(playerName),
         line_id: yesSel.line_id,
+        no_line_id: (noSel && noSel.line_id) ? noSel.line_id : null,
         event_id: evt.event_id,
         market_id: mkt.id,
       });
@@ -215,6 +220,7 @@ async function syncTournament(dk_slug, opts = {}) {
         player_name: sel.playerName,
         side: 'yes',
         px_line_id: pxMatch ? pxMatch.line_id : null,
+        px_no_line_id: pxMatch ? pxMatch.no_line_id : null,
         px_event_id: pxMatch ? pxMatch.event_id : null,
         px_market_id: pxMatch ? pxMatch.market_id : null,
         dk_american_odds: sel.americanOdds,
@@ -267,53 +273,58 @@ async function _activeWagersByConfigId() {
   return byCfg;
 }
 
-async function postEnabled() {
-  const sb = db.getClient();
-  // enabled + risk-set + has PX line + has offered_american
-  const { data: cfgRows, error } = await sb.from(TBL_CONFIG)
-    .select('*')
-    .eq('enabled', true)
-    .not('risk_amount', 'is', null)
-    .gt('risk_amount', 0)
-    .not('px_line_id', 'is', null)
-    .not('offered_american', 'is', null);
-  if (error) throw new Error('postEnabled select: ' + error.message);
-  if (!cfgRows || !cfgRows.length) return { posted: 0, skipped: 0, errors: [], detail: 'no enabled+ready rows' };
-
-  const active = await _activeWagersByConfigId();
-  const ladder = await pxSingle.fetchOddsLadder();
-
-  const orders = []; const skipped = [];
-  for (const row of cfgRows) {
-    if (active.has(row.id)) { skipped.push({ id: row.id, reason: 'already-posted' }); continue; }
-    const snapped = pxSingle.snapToLadder(Number(row.offered_american), ladder);
-    orders.push({
-      _config_id: row.id,
-      _dk_slug: row.dk_slug,
-      _dk_implied: Number(row.dk_implied),
-      _event_id: row.px_event_id,
-      line_id: row.px_line_id,
-      odds: snapped,
-      stake: Number(row.risk_amount),
-      external_id: 'go_' + row.id + '_' + Date.now(),
-    });
+// Build the PX order for one config row, honoring post_side. THE single place the
+// side math lives, so both postEnabled and repostOne are guaranteed consistent.
+//   post_side 'no'  (default) = LAY THE FIELD: post on the NO line at the
+//      complement of our offered YES price, so the counterparty backs YES at the
+//      offered price (e.g. McIlroy offered YES +193 -> we post NO -193; cp gets
+//      YES +193). This is the +EV book side.
+//   post_side 'yes'          = BACK THE PLAYER: post on the YES line at the
+//      offered price; the counterparty backs NO and we hold the player's YES.
+// Returns { ok, side, lineId, odds } or { ok:false, reason }.
+function _buildOutrightOrder(row, ladder) {
+  const side = (row.post_side === 'yes') ? 'yes' : 'no';
+  const offImpl = Number(row.offered_implied);
+  if (!(offImpl > 0 && offImpl < 1)) return { ok: false, reason: 'no offered_implied' };
+  let lineId, rawAmerican;
+  if (side === 'yes') {
+    lineId = row.px_line_id;
+    rawAmerican = Number(row.offered_american);
+    if (!lineId) return { ok: false, reason: 'no PX yes line' };
+    if (!isFinite(rawAmerican)) return { ok: false, reason: 'no offered_american' };
+  } else {
+    lineId = row.px_no_line_id;
+    rawAmerican = americanFromImplied(1 - offImpl);
+    if (!lineId) return { ok: false, reason: 'no PX no line (re-sync after migration)' };
+    if (rawAmerican == null) return { ok: false, reason: 'no-side odds out of range' };
   }
-  if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
+  const snapped = pxSingle.snapToLadder(rawAmerican, ladder);
+  return { ok: true, side, lineId, odds: snapped };
+}
 
-  let posted = 0;
-  const errors = [];
-  const wagerRows = [];
+// Place a batch of orders on PX and record the resulting wagers. Shared by
+// postEnabled (bulk) and repostOne (single). Returns { posted, errors }.
+async function _placeAndRecord(orders) {
+  const sb = db.getClient();
+  let posted = 0; const errors = []; const wagerRows = [];
   for (let i = 0; i < orders.length; i += 20) {
     const batch = orders.slice(i, i + 20);
     let resp;
     try { resp = await pxSingle.placeMultipleWagers(batch.map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }))); }
     catch (e) { errors.push('batch error: ' + e.message); continue; }
-    for (const w of resp.succeed_wagers) {
+    for (const w of (resp.succeed_wagers || [])) {
       const m = batch.find(o => o.external_id === w.external_id);
       if (!m) continue;
+      const wagerId = w.wager_id || w.id || null;
+      if (!wagerId) {
+        // PX claimed success but gave no id to track/cancel — same "posted but
+        // not on book" failure mode guarded in the single-leg bot. Don't record.
+        errors.push((m.external_id) + ': succeeded with no wager_id — verify on PX');
+        continue;
+      }
       posted++;
       wagerRows.push({
-        wager_id: w.wager_id || w.id,
+        wager_id: wagerId,
         config_id: m._config_id,
         dk_slug: m._dk_slug,
         px_line_id: m.line_id,
@@ -327,7 +338,7 @@ async function postEnabled() {
         last_seen_at: new Date().toISOString(),
       });
     }
-    for (const f of resp.failed_wagers) {
+    for (const f of (resp.failed_wagers || [])) {
       const idx = f.index != null ? f.index : -1;
       const ext = idx >= 0 && idx < batch.length ? batch[idx].external_id : null;
       errors.push((ext || '?') + ': ' + (f.message || f.error || 'unknown'));
@@ -337,7 +348,91 @@ async function postEnabled() {
     const { error: insErr } = await sb.from(TBL_WAGERS).upsert(wagerRows, { onConflict: 'wager_id' });
     if (insErr) errors.push('wagers upsert: ' + insErr.message);
   }
+  return { posted, errors };
+}
+
+async function postEnabled() {
+  const sb = db.getClient();
+  // enabled + risk-set + has offered price. (PX line presence is checked per-row
+  // in _buildOutrightOrder, since the required line depends on post_side.)
+  const { data: cfgRows, error } = await sb.from(TBL_CONFIG)
+    .select('*')
+    .eq('enabled', true)
+    .not('risk_amount', 'is', null)
+    .gt('risk_amount', 0)
+    .not('offered_american', 'is', null);
+  if (error) throw new Error('postEnabled select: ' + error.message);
+  if (!cfgRows || !cfgRows.length) return { posted: 0, skipped: 0, errors: [], detail: 'no enabled+ready rows' };
+
+  const active = await _activeWagersByConfigId();
+  const ladder = await pxSingle.fetchOddsLadder();
+
+  const orders = []; const skipped = [];
+  for (const row of cfgRows) {
+    if (active.has(row.id)) { skipped.push({ id: row.id, reason: 'already-posted' }); continue; }
+    const b = _buildOutrightOrder(row, ladder);
+    if (!b.ok) { skipped.push({ id: row.id, reason: b.reason }); continue; }
+    orders.push({
+      _config_id: row.id,
+      _dk_slug: row.dk_slug,
+      _dk_implied: Number(row.dk_implied),
+      _event_id: row.px_event_id,
+      line_id: b.lineId,
+      odds: b.odds,
+      stake: Number(row.risk_amount),
+      external_id: 'go_' + row.id + '_' + Date.now(),
+    });
+  }
+  if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
+
+  const { posted, errors } = await _placeAndRecord(orders);
   return { posted, skipped: skipped.length, errors, skippedDetail: skipped };
+}
+
+// Cancel a single resting wager by PX wager_id (per-line Cancel button).
+async function cancelOne(wagerId) {
+  const sb = db.getClient();
+  if (!wagerId) throw new Error('wager_id required');
+  await pxSingle.cancelWager(wagerId);
+  await sb.from(TBL_WAGERS).update({
+    status: 'cancelled', status_detail: 'manual cancel (single)',
+    cancelled_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
+  }).eq('wager_id', wagerId);
+  return { ok: true, cancelled: wagerId };
+}
+
+// Edit-risk on a live offer: cancel this row's active wager(s) and repost at the
+// current config (new stake/side). PX can't change a resting stake in place, so
+// this is the cancel+repost path behind the per-line "Update" button.
+async function repostOne(configId) {
+  const sb = db.getClient();
+  if (configId == null) throw new Error('config_id required');
+  const { data: row, error: rErr } = await sb.from(TBL_CONFIG).select('*').eq('id', configId).maybeSingle();
+  if (rErr) throw new Error('repostOne select: ' + rErr.message);
+  if (!row) throw new Error('config row not found: ' + configId);
+
+  let cancelled = 0; const errors = [];
+  const { data: act } = await sb.from(TBL_WAGERS).select('wager_id').eq('config_id', configId).in('status', ['posted', 'partially_matched']);
+  for (const w of (act || [])) {
+    try {
+      await pxSingle.cancelWager(w.wager_id);
+      await sb.from(TBL_WAGERS).update({ status: 'cancelled', status_detail: 'edit-risk repost', cancelled_at: new Date().toISOString(), last_seen_at: new Date().toISOString() }).eq('wager_id', w.wager_id);
+      cancelled++;
+    } catch (e) { errors.push('cancel ' + w.wager_id + ': ' + e.message); }
+  }
+
+  if (!row.enabled) return { ok: true, cancelled, posted: 0, errors, detail: 'row disabled — cancelled only' };
+  if (!(Number(row.risk_amount) > 0)) return { ok: true, cancelled, posted: 0, errors, detail: 'no risk set — cancelled only' };
+  const ladder = await pxSingle.fetchOddsLadder();
+  const b = _buildOutrightOrder(row, ladder);
+  if (!b.ok) return { ok: true, cancelled, posted: 0, errors: errors.concat(b.reason) };
+  const order = {
+    _config_id: row.id, _dk_slug: row.dk_slug, _dk_implied: Number(row.dk_implied),
+    _event_id: row.px_event_id, line_id: b.lineId, odds: b.odds,
+    stake: Number(row.risk_amount), external_id: 'go_' + row.id + '_' + Date.now(),
+  };
+  const { posted, errors: postErrs } = await _placeAndRecord([order]);
+  return { ok: true, cancelled, posted, errors: errors.concat(postErrs) };
 }
 
 async function cancelAll() {
@@ -418,7 +513,15 @@ async function loadState() {
     if (!wagerByCfg.has(w.config_id)) wagerByCfg.set(w.config_id, []);
     wagerByCfg.get(w.config_id).push(w);
   }
-  const enriched = (cRes.data || []).map(r => ({ ...r, active_wagers: wagerByCfg.get(r.id) || [] }));
+  // Tag each active wager with the side it represents (compare its line_id to the
+  // row's NO line) so the UI can label live offers YES/NO without extra columns.
+  const enriched = (cRes.data || []).map(r => {
+    const aw = (wagerByCfg.get(r.id) || []).map(w => ({
+      ...w,
+      side: (w.px_line_id != null && r.px_no_line_id != null && String(w.px_line_id) === String(r.px_no_line_id)) ? 'no' : 'yes',
+    }));
+    return { ...r, active_wagers: aw };
+  });
   return {
     tournaments: tRes.data || [],
     config: enriched,
@@ -436,6 +539,7 @@ async function updateConfig(updates) {
     if (u.risk_amount !== undefined) patch.risk_amount = u.risk_amount === null ? null : Number(u.risk_amount);
     if (u.enabled !== undefined) patch.enabled = !!u.enabled;
     if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
+    if (u.post_side !== undefined) patch.post_side = (u.post_side === 'yes') ? 'yes' : 'no';
     if (Object.keys(patch).length === 0) continue;
     const { error } = await sb.from(TBL_CONFIG).update(patch).eq('id', u.id);
     if (error) errors.push(u.id + ': ' + error.message);
@@ -497,6 +601,8 @@ module.exports = {
   loadState,
   postEnabled,
   cancelAll,
+  cancelOne,
+  repostOne,
   refreshDrift,
   updateConfig,
   startWorker,

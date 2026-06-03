@@ -1521,6 +1521,9 @@
             <span style="color:var(--text3);">·</span>
             <button class="btn" onclick="gorBulkSetEnabled(true)">Enable all visible</button>
             <button class="btn" onclick="gorBulkSetEnabled(false)">Disable all visible</button>
+            <span style="color:var(--text3);">·</span>
+            <button class="btn" onclick="gorBulkSetSide('no')" title="Set every visible row to post the NO side (you lay the field; counterparty backs YES)">All NO</button>
+            <button class="btn" onclick="gorBulkSetSide('yes')" title="Set every visible row to post the YES side (you back the player)">All YES</button>
             <span style="flex:1;"></span>
             <span style="color:var(--text3);">Stages dirty — click <b>Save Edits</b> in Actions.</span>
           </div>
@@ -15214,7 +15217,9 @@
       + '<th style="padding:6px 10px;">Tournament / Market</th>'
       + '<th style="padding:6px 10px;">Player</th>'
       + '<th style="padding:6px 10px; text-align:right;">DK Odds</th>'
-      + '<th style="padding:6px 10px; text-align:right;">Our Offered</th>'
+      + '<th style="padding:6px 10px; text-align:right;" title="Price a counterparty pays to back YES">Our Offered (YES)</th>'
+      + '<th style="padding:6px 10px;">Side</th>'
+      + '<th style="padding:6px 10px;" title="What we actually post on PX">Posts</th>'
       + '<th style="padding:6px 10px;">PX</th>'
       + '<th style="padding:6px 10px;">Active</th>'
       + '<th style="padding:6px 10px;">Risk $</th>'
@@ -15224,26 +15229,51 @@
     for (const r of rows) {
       const grp = r.dk_slug + ' / ' + r.market_type;
       if (grp !== lastGroup) {
-        html += '<tr><td colspan="8" style="padding:6px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(grp) + '</td></tr>';
+        html += '<tr><td colspan="10" style="padding:6px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(grp) + '</td></tr>';
         lastGroup = grp;
       }
       const dirty = window._gorDirty.get(r.id) || {};
       const riskShown = dirty.risk_amount !== undefined ? dirty.risk_amount : (r.risk_amount != null ? r.risk_amount : '');
       const enabledShown = dirty.enabled !== undefined ? dirty.enabled : !!r.enabled;
+      const sideShown = dirty.post_side !== undefined ? dirty.post_side : (r.post_side || 'no');
       const isDirty = window._gorDirty.has(r.id);
       const dkAm = r.dk_american_odds != null ? ((r.dk_american_odds >= 0 ? '+' : '') + r.dk_american_odds) : '—';
       const offAm = r.offered_american != null ? ((r.offered_american >= 0 ? '+' : '') + r.offered_american) : '—';
+      // Posts preview = exactly what we send PX (within a tick after ladder snap).
+      // NO (default): complement of offered on the NO line (cp backs YES at offered).
+      // YES: offered on the YES line (cp backs NO).
+      const offImp = _amToImp(r.offered_american);
+      let postsLbl;
+      if (sideShown === 'no' && !r.px_no_line_id) {
+        postsLbl = '<span style="color:var(--amber);" title="NO line not captured yet — click Sync after running the migration">NO (no line)</span>';
+      } else if (offImp == null) {
+        postsLbl = '<span style="color:var(--text3);">—</span>';
+      } else if (sideShown === 'no') {
+        const na = _impToAm(1 - offImp);
+        postsLbl = na != null ? '<span style="color:var(--red);">NO ' + (na >= 0 ? '+' : '') + na + '</span>' : '<span style="color:var(--text3);">—</span>';
+      } else {
+        postsLbl = '<span style="color:var(--green);">YES ' + offAm + '</span>';
+      }
       const pxLbl = r.px_line_id ? '<span style="color:var(--green); font-size:10px;">matched</span>' : '<span style="color:var(--amber); font-size:10px;">no PX line</span>';
-      const active = (r.active_wagers || []).length
-        ? '<span style="color:var(--green);">' + (r.active_wagers[0].posted_odds >= 0 ? '+' : '') + r.active_wagers[0].posted_odds + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
-        : '<span style="color:var(--text3);">—</span>';
+      const aw = (r.active_wagers || [])[0];
+      let activeCell;
+      if (aw) {
+        const sideLbl = String(aw.side || 'yes').toUpperCase();
+        activeCell = '<span style="color:var(--green); white-space:nowrap;">' + sideLbl + ' ' + (aw.posted_odds >= 0 ? '+' : '') + aw.posted_odds + ' @ $' + (Number(aw.posted_stake) || 0).toFixed(0) + '</span>'
+          + ' <button class="btn" style="padding:1px 6px; font-size:10px;" onclick="gorCancelWager(\'' + escHtml(aw.wager_id) + '\')" title="Cancel this resting offer">Cancel</button>'
+          + ' <button class="btn" style="padding:1px 6px; font-size:10px;" onclick="gorRepostOne(' + r.id + ')" title="Cancel + repost at the current Risk $ / side (save edits first)">Update</button>';
+      } else {
+        activeCell = '<span style="color:var(--text3);">—</span>';
+      }
       html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
         + '<td style="padding:4px 10px; color:var(--text3); font-size:10px;">↳</td>'
         + '<td style="padding:4px 10px;">' + escHtml(r.player_name) + '</td>'
         + '<td style="padding:4px 10px; text-align:right; font-family:monospace;">' + dkAm + '</td>'
         + '<td style="padding:4px 10px; text-align:right; font-family:monospace; color:var(--accent);">' + offAm + '</td>'
+        + '<td style="padding:4px 10px;"><select onchange="gorSetSide(' + r.id + ', this.value)" style="background:var(--surface2); color:' + (sideShown === 'yes' ? 'var(--green)' : 'var(--red)') + '; border:1px solid var(--border); border-radius:3px; padding:1px 4px; font-size:11px;"><option value="no"' + (sideShown === 'no' ? ' selected' : '') + '>NO</option><option value="yes"' + (sideShown === 'yes' ? ' selected' : '') + '>YES</option></select></td>'
+        + '<td style="padding:4px 10px; font-family:monospace; font-size:11px;">' + postsLbl + '</td>'
         + '<td style="padding:4px 10px;">' + pxLbl + '</td>'
-        + '<td style="padding:4px 10px;">' + active + '</td>'
+        + '<td style="padding:4px 10px;">' + activeCell + '</td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gorSetRisk(' + r.id + ', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
         + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + (r.px_line_id ? '' : ' disabled title="no PX line — cannot enable"') + ' onchange="gorSetEnabled(' + r.id + ', this.checked)"></td>'
         + '</tr>';
@@ -15262,6 +15292,49 @@
     const d = window._gorDirty.get(id) || {}; d.enabled = !!val;
     window._gorDirty.set(id, d);
     const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
+  }
+  // American odds <-> implied helpers for the "Posts" preview.
+  function _amToImp(a) { a = Number(a); if (!isFinite(a) || a === 0) return null; return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100); }
+  function _impToAm(p) { if (!isFinite(p) || p <= 0 || p >= 1) return null; return p >= 0.5 ? Math.round(-100 * p / (1 - p)) : Math.round((1 / p - 1) * 100); }
+  // Stage the post side (yes/no) as a dirty edit; persisted via Save Edits.
+  function gorSetSide(id, val) {
+    const d = window._gorDirty.get(id) || {}; d.post_side = (val === 'yes') ? 'yes' : 'no';
+    window._gorDirty.set(id, d);
+    const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
+    gorRender(); // re-render so the Posts preview + colors update immediately
+  }
+  function gorBulkSetSide(side) {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+    const rows = _gorFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows. Check your filter.'); return; }
+    const lbl = side === 'yes' ? 'YES (back the player)' : 'NO (lay the field)';
+    if (!confirm('Set ' + rows.length + ' visible row(s) to post the ' + lbl + ' side? (Dirty — Save Edits to persist.)')) return;
+    for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.post_side = (side === 'yes') ? 'yes' : 'no'; window._gorDirty.set(r.id, d); }
+    gorRender();
+  }
+  // Cancel ONE resting offer.
+  async function gorCancelWager(wagerId) {
+    if (!wagerId) return;
+    if (!confirm('Cancel this resting offer on PX?')) return;
+    try {
+      const r = await fetch('/single-leg/golf-outrights/cancel-wager', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wager_id: wagerId }) });
+      const j = await r.json();
+      if (!j.ok) { alert('Cancel failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      await gorRefresh(false);
+    } catch (e) { alert('Cancel error: ' + e.message); }
+  }
+  // Edit-risk: cancel this row's live offer + repost at the CURRENT SAVED config
+  // (risk/side). Save Edits first if you changed them.
+  async function gorRepostOne(configId) {
+    if (window._gorDirty.has(configId)) { if (!confirm('This row has unsaved edits — Update reposts at the SAVED values, ignoring them. Save Edits first if you want the new amount. Continue anyway?')) return; }
+    else if (!confirm('Cancel this offer and repost at the current Risk $ / side?')) return;
+    try {
+      const r = await fetch('/single-leg/golf-outrights/repost-one', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: configId }) });
+      const j = await r.json();
+      if (!j.ok) { alert('Update failed: ' + (j.error || ('HTTP ' + r.status))); return; }
+      await gorRefresh(false);
+      alert('Cancelled: ' + (j.cancelled || 0) + ' · Posted: ' + (j.posted || 0) + (j.detail ? '\n' + j.detail : '') + (j.errors && j.errors.length ? '\n\nErrors:\n' + j.errors.slice(0, 5).join('\n') : ''));
+    } catch (e) { alert('Update error: ' + e.message); }
   }
 
   function gorBulkApplyRisk() {

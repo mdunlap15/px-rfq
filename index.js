@@ -5856,6 +5856,19 @@ function startStatusServer() {
     try { res.json({ ok: true, ...(await m.cancelAll()) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
+  // Cancel ONE resting wager (per-line Cancel button). body: { wager_id }
+  app.post('/single-leg/golf-outrights/cancel-wager', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.cancelOne((req.body && req.body.wager_id) || null)) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Edit-risk on a live offer: cancel this row's wager(s) + repost at current
+  // config (new stake/side). body: { config_id }
+  app.post('/single-leg/golf-outrights/repost-one', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.repostOne((req.body && req.body.config_id) != null ? req.body.config_id : null)) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
   app.post('/single-leg/golf-outrights/repost', async (req, res) => {
     const m = _goEnabledGuard(res); if (!m) return;
     try {
