@@ -96,6 +96,86 @@ function puppeteer() {
   return _puppeteer;
 }
 
+// ---------------------------------------------------------------------------
+// Global Chromium launch governor.
+// ---------------------------------------------------------------------------
+// Every scrape type (golf outrights/matchups, mlb F5, nba/nhl props, game
+// lines, …) used to call puppeteer().launch() independently with no global
+// cap. On Railway's constrained container, launching several Chromium
+// instances at once exhausts the process/fork budget and the OS refuses to
+// spawn the next one — observed 2026-06-02 as:
+//   "Failed to launch the browser process ... posix_spawn ...
+//    chrome_crashpad_handler: Resource temporarily unavailable (11)"
+// (EAGAIN on fork, signal 6) when a manual Golf-Outrights sync fired while
+// background scrapers were running.
+//
+// _launchBrowser():
+//   1. Caps concurrent live browsers across ALL scrape types in this module
+//      (SCRAPER_MAX_BROWSERS, default 1 — serialize; the crash was from
+//      over-parallelism, so serializing is strictly safer than crashing).
+//   2. Adds --no-zygote to cut the number of helper processes Chromium forks.
+//   3. Retries the launch on the transient "temporarily unavailable" spawn
+//      failure with a short backoff.
+//   4. Releases the slot exactly once — when the caller closes the browser, or
+//      if it disconnects/crashes without an explicit close.
+const MAX_CONCURRENT_BROWSERS = Math.max(1, Number(process.env.SCRAPER_MAX_BROWSERS) || 1);
+let _activeBrowsers = 0;
+const _browserQueue = [];
+function _acquireBrowserSlot() {
+  return new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (_activeBrowsers < MAX_CONCURRENT_BROWSERS) { _activeBrowsers++; resolve(); }
+      else _browserQueue.push(tryAcquire);
+    };
+    tryAcquire();
+  });
+}
+function _releaseBrowserSlot() {
+  _activeBrowsers = Math.max(0, _activeBrowsers - 1);
+  const next = _browserQueue.shift();
+  if (next) next();
+}
+
+async function _launchBrowser(opts = {}) {
+  await _acquireBrowserSlot();
+  // Merge caller args with the container-hardened defaults (dedup).
+  const args = Array.from(new Set([
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-zygote',
+    ...((opts && opts.args) || []),
+  ]));
+  const launchOpts = { headless: true, ...opts, args };
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const browser = await puppeteer().launch(launchOpts);
+      // Transfer slot-release responsibility to the browser lifecycle: release
+      // exactly once, on close() OR on disconnect (crash without close).
+      let released = false;
+      const releaseOnce = () => { if (!released) { released = true; _releaseBrowserSlot(); } };
+      const origClose = browser.close.bind(browser);
+      browser.close = async () => { try { return await origClose(); } finally { releaseOnce(); } };
+      browser.on('disconnected', releaseOnce);
+      return browser;
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.message) || '');
+      const transient = /temporarily unavailable|Failed to launch|spawn|EAGAIN|signal 6|crashpad/i.test(msg);
+      if (transient && attempt < 2) {
+        log.warn('DkScraper', `Chromium launch attempt ${attempt + 1}/3 failed (${msg.slice(0, 90)}) — retrying after backoff`);
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+  }
+  _releaseBrowserSlot(); // launch ultimately failed — give the slot back
+  throw lastErr;
+}
+
 /**
  * Fetch the full parsed payload: an array of series, each with two
  * teams, decimal odds, implied probs, and de-vigged fair probs.
@@ -119,7 +199,7 @@ async function fetchSeriesMarkets(sport, { force = false } = {}) {
 
   inFlightBySport[sport] = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: [
         '--no-sandbox',
@@ -261,7 +341,7 @@ async function fetchMmaFightOdds({ force = false } = {}) {
 
   inFlightBySport.mma = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -463,7 +543,7 @@ async function fetchMlbF5Odds({ force = false } = {}) {
 
   inFlightBySport.mlbF5 = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -780,7 +860,7 @@ async function fetchDkPlayerProps(sport, { force = false } = {}) {
 
   inFlightBySport[cacheKey] = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -1161,7 +1241,7 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
 
   inFlightBySport[cacheKey] = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -2081,7 +2161,7 @@ async function fetchLiveMarkets(sport, { force = false } = {}) {
 
   liveInFlightBySport[sport] = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -2371,7 +2451,7 @@ async function fetchGolfMatchups({ force = false } = {}) {
 
   inFlightBySport.golf = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
@@ -2595,7 +2675,7 @@ function lookupGolfMatchupFairProb(teamName, roundNum) {
  */
 async function probeDkPage({ url, subcategory = null, postWaitMs = 10000, eventDetailNav = false, maxEventDetails = 3, captureAllDkHosts = false }) {
   const startedAt = Date.now();
-  const browser = await puppeteer().launch({
+  const browser = await _launchBrowser({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   });
@@ -2766,7 +2846,7 @@ async function probeDkPage({ url, subcategory = null, postWaitMs = 10000, eventD
  * Doesn't write to cacheBySport.mma so it can't taint live data.
  */
 async function debugMmaScraperState({ url = 'https://sportsbook.draftkings.com/leagues/mma/ufc' } = {}) {
-  const browser = await puppeteer().launch({
+  const browser = await _launchBrowser({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   });
@@ -2914,7 +2994,7 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
 
   inFlightBySport[cacheKey] = (async () => {
     const startedAt = Date.now();
-    const browser = await puppeteer().launch({
+    const browser = await _launchBrowser({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
