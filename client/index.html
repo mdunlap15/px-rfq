@@ -1432,16 +1432,19 @@
               <span style="color:var(--text3);">Risk $</span>
               <input type="number" id="gsl-bulk-risk" min="0" step="1" placeholder="50" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gslBulkApplyRisk();}">
               <button class="btn" onclick="gslBulkApplyRisk()" title="Set this risk amount on every visible row (stages as dirty edits)">Set risk on visible</button>
+              <button class="btn" onclick="gslBulkClearRisk()" title="Clear (blank) the Risk $ on every visible row — blank risk never posts (stages as dirty edits)">Clear risk</button>
             </span>
             <span style="color:var(--text3);">·</span>
             <span style="display:flex; gap:4px; align-items:center;">
               <span style="color:var(--text3);">Sweet %</span>
               <input type="number" id="gsl-bulk-sweetener" min="0" step="0.5" placeholder="7" title="Per-side markup % over fair (blank on a row = global default)" style="width:56px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gslBulkApplySweetener();}">
               <button class="btn" onclick="gslBulkApplySweetener()" title="Set this sweetener % on every visible row (stages as dirty edits)">Set sweetener on visible</button>
+              <button class="btn" onclick="gslBulkClearSweetener()" title="Clear (blank) the Sweet % on every visible row — reverts to the global default (stages as dirty edits)">Clear sweetener</button>
             </span>
             <span style="color:var(--text3);">·</span>
             <button class="btn" onclick="gslBulkSetEnabled(true)" title="Toggle enabled=true on every visible row">Enable all visible</button>
             <button class="btn" onclick="gslBulkSetEnabled(false)" title="Toggle enabled=false on every visible row">Disable all visible</button>
+            <button class="btn" onclick="gslBulkClearAll()" title="Clear Risk $ AND Sweet % on every visible row in one click (stages as dirty edits — Save Edits to persist)">Clear risk + sweetener</button>
             <span style="flex:1;"></span>
             <span style="color:var(--text3);">Stages dirty — click <b>Save Edits</b> in Status to persist.</span>
           </div>
@@ -1520,6 +1523,7 @@
               <span style="color:var(--text3);">Risk $</span>
               <input type="number" id="gor-bulk-risk" min="0" step="1" placeholder="20" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gorBulkApplyRisk();}">
               <button class="btn" onclick="gorBulkApplyRisk()">Set risk on visible</button>
+              <button class="btn" onclick="gorBulkClearRisk()" title="Clear (blank) the Risk $ on every visible row — blank risk never posts (stages as dirty edits)">Clear risk</button>
             </span>
             <span style="color:var(--text3);">·</span>
             <button class="btn" onclick="gorBulkSetEnabled(true)">Enable all visible</button>
@@ -14775,6 +14779,25 @@
     gslRender();
   }
 
+  // ---- Bulk clear: blank Risk $ / Sweet % on every visible row ----
+  // Staged as null dirty edits (blank risk never posts; blank sweetener reverts
+  // to the global default). Save Edits persists. fields: array of column keys.
+  function _gslBulkClear(fields, label) {
+    const s = window._gslState; if (!s || !Array.isArray(s.config)) { alert('No data loaded — Sync from PX first.'); return; }
+    const rows = _gslFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows to clear. Check your filter.'); return; }
+    if (!confirm('Clear ' + label + ' on ' + rows.length + ' visible row(s)? (Stages as dirty edits — click Save Edits to persist.)')) return;
+    for (const r of rows) {
+      const d = window._gslDirty.get(r.line_id) || {};
+      for (const f of fields) d[f] = null;
+      window._gslDirty.set(r.line_id, d);
+    }
+    gslRender();
+  }
+  function gslBulkClearRisk()      { _gslBulkClear(['risk_amount'], 'Risk $'); }
+  function gslBulkClearSweetener() { _gslBulkClear(['sweetener_pct'], 'Sweet %'); }
+  function gslBulkClearAll()       { _gslBulkClear(['risk_amount', 'sweetener_pct'], 'Risk $ AND Sweet %'); }
+
   // ---- Bulk apply: set the same sweetener % on every visible row ----
   // Input is whole PERCENT; staged as a FRACTION dirty edit per row.
   function gslBulkApplySweetener() {
@@ -15077,6 +15100,15 @@
     if (!rows.length) { alert('No visible rows.'); return; }
     if (!confirm('Set Risk $' + num + ' on ' + rows.length + ' visible row(s)? (Dirty — Save Edits to persist.)')) return;
     for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.risk_amount = num; window._gorDirty.set(r.id, d); }
+    gorRender();
+  }
+  function gorBulkClearRisk() {
+    const s = window._gorState; if (!s || !Array.isArray(s.config)) { alert('No data loaded.'); return; }
+    const rows = _gorFilteredRows(s.config);
+    if (!rows.length) { alert('No visible rows to clear. Check your filter.'); return; }
+    if (!confirm('Clear Risk $ on ' + rows.length + ' visible row(s)? Blank risk never posts. (Dirty — Save Edits to persist.)')) return;
+    for (const r of rows) { const d = window._gorDirty.get(r.id) || {}; d.risk_amount = null; window._gorDirty.set(r.id, d); }
+    const c = document.getElementById('gor-dirty-count'); if (c) c.textContent = window._gorDirty.size;
     gorRender();
   }
   function gorBulkSetEnabled(en) {
