@@ -2963,11 +2963,16 @@ async function debugMmaScraperState({ url = 'https://sportsbook.draftkings.com/l
 // Match DK market names for the five outright market types we care about.
 // Patterns chosen loose enough to survive DK rename variants (e.g. "Top 5"
 // vs "Top 5 Finish" vs "Top-5 Finish").
+// Loosened to survive DK name variants: "Top 5", "Top 5 Finish", "Top 5
+// Finishing Position", "To Finish Top 5", etc. Anchored on the number with a
+// word boundary so "Top 5" never matches "Top 50". top_20 is checked before
+// top_10 before top_5 so a "Top 20" name can't be shadowed (the array order is
+// the eval order in categorizeOutrightMarketName).
 const GOLF_OUTRIGHT_MARKETS = [
-  { key: 'top_1',    re: /^(?:tournament\s+)?(?:outright\s+)?winner$|^to\s+win\s+(?:the\s+)?tournament$/i },
-  { key: 'top_5',    re: /^top[\s-]?5(?:\s+finish)?$/i },
-  { key: 'top_10',   re: /^top[\s-]?10(?:\s+finish)?$/i },
-  { key: 'top_20',   re: /^top[\s-]?20(?:\s+finish)?$/i },
+  { key: 'top_1',    re: /^(?:tournament\s+)?(?:outright\s+)?winner\b|^to\s+win\b/i },
+  { key: 'top_20',   re: /top[\s-]?20\b/i },
+  { key: 'top_10',   re: /top[\s-]?10\b/i },
+  { key: 'top_5',    re: /top[\s-]?5\b/i },
   { key: 'make_cut', re: /make\s*(?:\/\s*miss\s*)?(?:the\s+)?cut/i },
 ];
 
@@ -2977,10 +2982,20 @@ function categorizeOutrightMarketName(name) {
   return null;
 }
 
+// DK splits the winner and the finishing-position markets (Top 5/10/20/Make
+// Cut) across DIFFERENT subcategory tabs, so we must visit them ALL and
+// accumulate — bailing after the first (the winner) was why only Top 1 loaded.
 const GOLF_OUTRIGHT_SUBCATEGORIES = [
   'outrights',
   'tournament-winner',
   'finishing-position',
+  'finishing-positions',
+  'top-finishes',
+  'top-5-finish',
+  'top-10-finish',
+  'top-20-finish',
+  'make-cut',
+  'make-the-cut',
   'tournament',
 ];
 
@@ -3022,35 +3037,49 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
         } catch { /* ignore */ }
       });
 
-      // Try each subcategory slug — DK has been observed to use multiple names
-      // for the outrights tab. Bail after we get payloads.
+      // Visit the default tournament page AND every candidate subcategory,
+      // accumulating payloads from all of them. DK splits Winner vs the
+      // finishing-position markets (Top 5/10/20/Make Cut) across different
+      // tabs; parseGolfOutrightData dedupes markets by marketId, so revisiting
+      // the winner across tabs is harmless. (Previously we bailed after the
+      // first payload, which is why only Top 1 ever loaded.)
       const base = `https://sportsbook.draftkings.com/leagues/golf/${encodeURIComponent(slug)}`;
       let lastErr = null;
-      for (const sc of GOLF_OUTRIGHT_SUBCATEGORIES) {
-        if (payloads.length > 0) break;
-        const url = `${base}?category=tournament&subcategory=${sc}`;
+      const navTargets = [base, ...GOLF_OUTRIGHT_SUBCATEGORIES.map(sc => `${base}?category=tournament&subcategory=${sc}`)];
+      // Track which market keys we've captured so we can stop early once all
+      // five are in hand (avoids navigating every tab when the first few cover
+      // everything).
+      const haveKeys = () => new Set(parseGolfOutrightData(payloads).map(m => m.marketType));
+      for (const url of navTargets) {
+        if (haveKeys().size >= 5) break; // all of top_1/5/10/20/make_cut found
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
           await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
         } catch (err) {
           lastErr = err;
-          log.debug('DkScraper', `Golf outright ${slug} / ${sc} navigation failed: ${err.message}`);
+          log.debug('DkScraper', `Golf outright ${slug} nav failed (${url}): ${err.message}`);
         }
       }
 
       const markets = parseGolfOutrightData(payloads);
       const totalSelections = markets.reduce((s, m) => s + m.selections.length, 0);
+      const capturedKeys = markets.map(m => m.marketType);
+      // Always surface the DK market names we saw but did NOT categorize, so a
+      // missing Top-N tab vs a name-regex miss is diagnosable from the payload.
+      const uncategorized = [...seenMarketNames].filter(n => !categorizeOutrightMarketName(n)).sort();
       const payload = {
         fetchedAt: new Date().toISOString(),
         slug,
         markets,
         scrapeMs: Date.now() - startedAt,
         payloadCount: payloads.length,
-        seenMarketNames: markets.length === 0 ? [...seenMarketNames].sort() : undefined,
+        capturedKeys,
+        seenMarketNames: [...seenMarketNames].sort(),
+        uncategorizedMarketNames: uncategorized,
         lastError: lastErr ? lastErr.message : undefined,
       };
       cacheBySport[cacheKey] = { at: Date.now(), data: payload };
-      log.info('DkScraper', `Golf outrights [${slug}]: ${markets.length} markets / ${totalSelections} selections (${payload.scrapeMs}ms, ${payloads.length} payloads)`);
+      log.info('DkScraper', `Golf outrights [${slug}]: ${markets.length} markets [${capturedKeys.join(',') || 'none'}] / ${totalSelections} selections (${payload.scrapeMs}ms, ${payloads.length} payloads)` + (uncategorized.length ? ` · uncategorized DK names: ${uncategorized.slice(0, 12).join(' | ')}` : ''));
       return payload;
     } finally {
       await browser.close();
