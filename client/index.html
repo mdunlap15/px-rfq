@@ -1611,6 +1611,30 @@
   // DASHBOARD REFRESH
   // -----------------------------------------------------------------------
 
+  // Render only the panels belonging to one section. Used by both the 10s
+  // refresh loop (active tab only) and switchSection (render the freshly-shown
+  // tab from cached data so it's current immediately). Self-managed tabs
+  // (golf*, lines, lost, config, exposure) own their data and aren't listed.
+  function _renderSectionPanels(section, orders, intel, status) {
+    if (!orders) return;
+    const safe = (name, fn) => { try { fn(); } catch (err) { console.warn('[render] ' + name + ' threw — continuing', err); } };
+    if (section === 'portfolio') {
+      safe('renderPortfolioSummary', () => renderPortfolioSummary(orders.stats || {}, orders.recentOrders || [], (status && status.portfolio) || {}));
+      safe('renderPortfolio',        () => renderPortfolio(orders));
+      safe('renderPositions',        () => renderPositions(orders));
+      safe('renderSettled',          () => renderSettled(orders));
+    } else if (section === 'orders') {
+      safe('renderOrders',  () => renderOrders(orders));
+      safe('renderHistory', () => renderHistory(orders));
+    } else if (section === 'intel') {
+      safe('renderMarketIntel',     () => renderMarketIntel(intel));
+      safe('renderWinRateHeatmap',  () => renderWinRateHeatmap(intel, orders));
+      safe('renderCompetitiveness', () => renderCompetitiveness(intel));
+    } else if (section === 'analytics') {
+      safe('renderAnalytics', () => renderAnalytics(orders, intel));
+    }
+  }
+
   async function refreshDashboard() {
     const indicator = document.getElementById('refresh-indicator');
     indicator.style.display = 'flex';
@@ -1677,20 +1701,18 @@
         catch (err) { console.warn('[refreshDashboard] ' + name + ' threw — continuing', err); }
       };
       rerenderWithFocus(() => {
-        safeRender('renderStatus',           () => renderStatus(status));
+        // Always-on (top status bar + nav badge are visible on every tab; cheap).
+        safeRender('renderStatus',            () => renderStatus(status));
         safeRender('updateNotificationBadge', () => updateNotificationBadge(orders));
-        safeRender('renderPortfolioSummary', () => renderPortfolioSummary(orders.stats || {}, orders.recentOrders || [], status.portfolio || {}));
-        safeRender('renderPortfolio',        () => renderPortfolio(orders));
-        safeRender('renderOrders',           () => renderOrders(orders));
-        safeRender('renderPositions',        () => renderPositions(orders));
-        safeRender('renderSettled',          () => renderSettled(orders));
-        safeRender('renderMarketIntel',      () => renderMarketIntel(intel));
+        window._lastStatus = status;
         window._lastIntel = intel;
         window._lastOrders = orders;
-        safeRender('renderWinRateHeatmap',   () => renderWinRateHeatmap(intel, orders));
-        safeRender('renderCompetitiveness',  () => renderCompetitiveness(intel));
-        safeRender('renderAnalytics',        () => renderAnalytics(orders, intel));
-        safeRender('renderHistory',          () => renderHistory(orders));
+        // Render ONLY the active tab's panels. Previously every panel — including
+        // renderAnalytics (13 SVG charts) and renderHistory (full order sort) —
+        // re-rendered every ~10s on EVERY tab, blocking the main thread and
+        // freezing inputs on tabs like Golf Single-Leg. Self-managed tabs (golf,
+        // lines, lost, config, exposure) render nothing here. (fix 2026-06-03)
+        _renderSectionPanels(activeSection, orders, intel, status);
       });
       // Lines tab piggy-back: when the operator is currently viewing the
       // Lines tab, kick off a /lines/detail re-fetch on the same cadence.
@@ -14557,6 +14579,10 @@
     if (navEl) navEl.classList.add('active');
     const titleEl = document.getElementById('section-title');
     if (titleEl) titleEl.textContent = sectionNames[section] || section;
+    // Render the freshly-shown tab now from the last fetched data — refresh only
+    // renders the active tab, so a just-switched-to tab would otherwise show
+    // stale/empty content until the next 10s tick.
+    _renderSectionPanels(section, window._lastOrders, window._lastIntel, window._lastStatus);
     // Clear Portfolio notification badge when switching to Portfolio
     // (badge tracks newly-confirmed parlays = new open positions, which
     // is what the Portfolio tab surfaces)
