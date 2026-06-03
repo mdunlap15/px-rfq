@@ -5741,10 +5741,24 @@ function startStatusServer() {
     if (!m.isEnabled()) { res.status(503).json({ ok: false, error: 'GOLF_SINGLE_LEG_ENABLED is not true' }); return null; }
     return m;
   }
-  // State: full UI dump (config rows enriched with current fair / offered / active wagers)
+  // Module-only guard (NO isEnabled check) for read-only + safety-cancel
+  // endpoints. Critical: cancelling resting offers must work even when the bot
+  // is disabled (GOLF_SINGLE_LEG_ENABLED=false). Otherwise killing the bot via
+  // env var also locks you out of pulling offers it already posted — backwards,
+  // and exactly the trap hit during the 2026-06-03 runaway. Likewise /state is
+  // read-only, so the tab stays viewable (to see + cancel active wagers) when
+  // disabled.
+  function _gslModuleGuard(res) {
+    const m = _gsl();
+    if (!m) { res.status(500).json({ ok: false, error: 'golf-single-leg module unavailable' }); return null; }
+    return m;
+  }
+  // State: full UI dump (config rows enriched with current fair / offered /
+  // active wagers). Works even when disabled so the operator can always view
+  // and cancel resting wagers.
   app.get('/single-leg/golf/state', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.loadState()) }); }
+    const m = _gslModuleGuard(res); if (!m) return;
+    try { res.json({ ok: true, enabled: m.isEnabled(), ...(await m.loadState()) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   // Sync: refresh PX matchups + upsert config rows for newly-seen lines
@@ -5768,9 +5782,11 @@ function startStatusServer() {
     try { res.json({ ok: true, ...(await m.postEnabled()) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
-  // Cancel ALL active wagers (idempotent)
+  // Cancel ALL active wagers (idempotent). Uses the module-only guard so it
+  // works even when GOLF_SINGLE_LEG_ENABLED=false — pulling resting offers must
+  // never be blocked by the same flag that stops posting.
   app.post('/single-leg/golf/cancel-all', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
+    const m = _gslModuleGuard(res); if (!m) return;
     try { res.json({ ok: true, ...(await m.cancelAll()) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
