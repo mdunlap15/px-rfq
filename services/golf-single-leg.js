@@ -156,7 +156,7 @@ async function syncConfig(matchups) {
   const dupCount = rows.length - deduped.length;
   if (dupCount > 0) log.warn('GolfSL', `syncConfig: collapsed ${dupCount} duplicate line_id row(s) before upsert (${rows.length} → ${deduped.length})`);
   // Upsert on line_id — only descriptive fields written; risk_amount + enabled
-  // + sweetener_pct are user-controlled and we don't overwrite them after first insert.
+  // are user-controlled and we don't overwrite them after first insert.
   const { error } = await sb.from(TBL_CONFIG).upsert(deduped, {
     onConflict: 'line_id',
     ignoreDuplicates: false,
@@ -264,38 +264,27 @@ function _impliedFromAmerican(a) {
   return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
 }
 
-function _computeOffered(lineId, rowSweetener, ctx) {
+function _computeOffered(lineId, ctx) {
   const f = _fairForLine(lineId, ctx);
   if (!f.fair) return { ok: false, reason: f.reason };
   // If override is set, just use it (Mike's manual upload pricing).
   if (f.override != null && f.override > 0 && f.override < 1) {
     return { ok: true, fair: f.fair, offeredProb: f.override, americanOdds: _americanFromImplied(f.override), source: 'override' };
   }
-  // Single-leg-account golf-matchup sweetener path. Bypasses the shared
-  // computeSingleLegQuote (which uses parlay-SP vig tuning, too tight for
-  // matchups on the SL book) and applies a flat per-side markup.
+  // Single-leg-account golf-matchup markup. Bypasses the shared
+  // computeSingleLegQuote (parlay-SP vig tuning, too tight for SL matchups) and
+  // applies a flat markup set ONCE globally (GOLF_SL_MATCHUP_SWEETENER_PCT,
+  // default 0.07). The per-row sweetener field was removed 2026-06-03 — the
+  // operator wanted the tab simple: lines just load at the standard markup.
   //
-  // CRITICAL — side convention (fixed 2026-06-03): on px-single's
-  // place_multiple_wagers, the `odds` we submit on a line_id become OUR OWN
-  // position's odds; the counterparty who matches takes the COMPLEMENTARY
-  // side. (This is the opposite of the parlay-SP RFQ callback, where the
-  // offered odds are what the counterparty pays.) So to make the COUNTERPARTY
-  // pay the sweetener, we must post OUR side at the FAVORABLE complement:
-  //   offeredProb(our side) = 1 − fair_opponent × (1 + s)
-  //                         = 1 − (1 − fair_ours) × (1 + s)
-  // Then the counterparty on the other side is at fair_opp × (1+s) — i.e. they
-  // pay the vig and we collect it. (Was offeredProb = fair × (1+s), which made
-  // US hold the vigged short side and PAY the vig — symptom: posted Hojgaard
-  // -120 and we held -120 instead of offering it to a taker.)
-  //
-  // Per-row sweetener (golf_single_leg_config.sweetener_pct, a FRACTION) wins
-  // when set; a blank/null/<=0 row value falls back to the global default
-  // GOLF_SL_MATCHUP_SWEETENER_PCT. Set the global to 0 to disable the path
-  // entirely (falls through to computeSingleLegQuote).
-  const globalSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
-  const rowSw = Number(rowSweetener);
-  const usingRow = isFinite(rowSw) && rowSw > 0;
-  const slSweetener = usingRow ? rowSw : globalSweetener;
+  // SIDE CONVENTION: on px-single's place_multiple_wagers, the `odds` we submit
+  // on a line_id become OUR OWN position's odds; the counterparty who matches
+  // takes the COMPLEMENTARY side. So to make the COUNTERPARTY pay the markup we
+  // post our side at the favorable complement:
+  //   offeredProb(our side) = 1 − (1 − fair_ours) × (1 + s)   → posted to PX
+  // and the DISPLAY ("OUR OFFERED") is fair_ours × (1 + s) = what a counterparty
+  // pays to back THIS player (favorite negative, dog positive).
+  const slSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
   if (slSweetener > 0 && f.sport === 'golf_matchups') {
     // OUR posted side, favorable — what we actually rest on this player's line
     // (we hold this player; the counterparty taking it backs the opponent and
@@ -322,7 +311,7 @@ function _computeOffered(lineId, rowSweetener, ctx) {
       counterpartyProb: backProb,                    // counterparty backs THIS player (display)
       counterpartyAmerican: backAmerican,
       vig: slSweetener,
-      source: usingRow ? 'sl-matchup-sweetener(row)' : 'sl-matchup-sweetener(global)',
+      source: 'sl-matchup-sweetener',
     };
   }
   // Otherwise route through the standard single-leg quote path.
@@ -377,7 +366,7 @@ async function postEnabled(opts = {}) {
   const skipped = [];
   for (const row of cfgRows) {
     if (activeByLine.has(row.line_id)) { skipped.push({ line_id: row.line_id, reason: 'already-posted' }); continue; }
-    const q = _computeOffered(row.line_id, row.sweetener_pct, { sideName: row.side_name, opponentName: row.side_opponent, roundNum: row.round_num });
+    const q = _computeOffered(row.line_id, { sideName: row.side_name, opponentName: row.side_opponent, roundNum: row.round_num });
     if (!q.ok) { skipped.push({ line_id: row.line_id, reason: q.reason }); continue; }
     const snapped = pxSingle.snapToLadder(q.americanOdds, ladder);
     orders.push({
@@ -500,20 +489,14 @@ async function cancelStale(currentLineIdSet) {
 async function refreshDrift() {
   const { driftPp } = _cfg();
   const sb = db.getClient();
-  // Per-line config map (sweetener + matchup names) so the current-offered
-  // recompute uses the same markup AND the same name-based fair lookup that
-  // postEnabled does. Defensive: if sweetener_pct doesn't exist yet the
-  // select narrows; fall back to names-only.
+  // Per-line matchup-name map so the current-offered recompute uses the same
+  // name-based fair lookup postEnabled does (single-leg line_ids aren't in the
+  // parlay-SP index, so we price by player name from the config row).
   const cfgByLine = new Map();
   try {
-    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, sweetener_pct, side_name, side_opponent, round_num');
+    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, side_name, side_opponent, round_num');
     for (const c of (cfgRows || [])) cfgByLine.set(c.line_id, c);
-  } catch (_) {
-    try {
-      const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, side_name, side_opponent, round_num');
-      for (const c of (cfgRows || [])) cfgByLine.set(c.line_id, c);
-    } catch (_) { /* leave empty — global default + line-index lookup */ }
-  }
+  } catch (_) { /* leave empty — name-based lookup just won't have ctx */ }
   const { data, error } = await sb.from(TBL_WAGERS)
     .select('wager_id, line_id, posted_fair_prob, posted_odds')
     .in('status', ['posted', 'partially_matched']);
@@ -522,7 +505,7 @@ async function refreshDrift() {
   const errors = [];
   for (const w of (data || [])) {
     const c = cfgByLine.get(w.line_id) || {};
-    const q = _computeOffered(w.line_id, c.sweetener_pct, { sideName: c.side_name, opponentName: c.side_opponent, roundNum: c.round_num });
+    const q = _computeOffered(w.line_id, { sideName: c.side_name, opponentName: c.side_opponent, roundNum: c.round_num });
     if (!q.ok) continue;
     const driftPpNow = Math.abs((q.offeredProb - _impliedFromAmerican(w.posted_odds)) * 100);
     if (driftPpNow >= driftPp) {
@@ -555,7 +538,7 @@ async function loadState() {
   if (wErr) return { error: 'wagers: ' + wErr.message };
   // Enrich each config row with current fair + offered (best-effort)
   const enriched = (cfg || []).map(r => {
-    const q = _computeOffered(r.line_id, r.sweetener_pct, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num });
+    const q = _computeOffered(r.line_id, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num });
     // "OUR OFFERED" shows the COUNTERPARTY-facing line (what a taker pays) —
     // that's the price we're putting into the market. The wager we actually
     // post (and that shows under ACTIVE WAGER once filled) is the favorable
@@ -602,27 +585,8 @@ async function updateConfig(updates) {
     if (u.risk_amount !== undefined) patch.risk_amount = u.risk_amount === null ? null : Number(u.risk_amount);
     if (u.enabled !== undefined) patch.enabled = !!u.enabled;
     if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
-    if (u.sweetener_pct !== undefined) {
-      // Stored as a FRACTION. Blank/null/<=0 → null (use global default).
-      // Clamp to 0.5 as a safety net against a percent/fraction unit mixup
-      // (50% markup just never fills; it can't silently under-price).
-      const n = u.sweetener_pct === null ? null : Number(u.sweetener_pct);
-      patch.sweetener_pct = (n != null && isFinite(n) && n > 0) ? Math.min(n, 0.5) : null;
-    }
     if (Object.keys(patch).length === 0) continue;
-    let { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
-    // Graceful degrade: if the sweetener_pct column doesn't exist yet (migration
-    // not run), still persist the rest of the patch so risk/enabled edits work.
-    if (error && /sweetener_pct|column/i.test(error.message) && 'sweetener_pct' in patch) {
-      const { sweetener_pct, ...rest } = patch;
-      if (Object.keys(rest).length) {
-        const retry = await sb.from(TBL_CONFIG).update(rest).eq('line_id', u.line_id);
-        error = retry.error;
-      } else {
-        error = null; // nothing left to write
-      }
-      if (!error) errors.push(u.line_id + ': sweetener_pct not saved (run _golf_sl_sweetener_column.sql migration)');
-    }
+    const { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
     if (error) errors.push(u.line_id + ': ' + error.message);
     else updated++;
   }

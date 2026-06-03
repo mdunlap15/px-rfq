@@ -1435,16 +1435,8 @@
               <button class="btn" onclick="gslBulkClearRisk()" title="Clear (blank) the Risk $ on every visible row — blank risk never posts (stages as dirty edits)">Clear risk</button>
             </span>
             <span style="color:var(--text3);">·</span>
-            <span style="display:flex; gap:4px; align-items:center;">
-              <span style="color:var(--text3);">Sweet %</span>
-              <input type="number" id="gsl-bulk-sweetener" min="0" step="0.5" placeholder="7" title="Per-side markup % over fair (blank on a row = global default)" style="width:56px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); gslBulkApplySweetener();}">
-              <button class="btn" onclick="gslBulkApplySweetener()" title="Set this sweetener % on every visible row (stages as dirty edits)">Set sweetener on visible</button>
-              <button class="btn" onclick="gslBulkClearSweetener()" title="Clear (blank) the Sweet % on every visible row — reverts to the global default (stages as dirty edits)">Clear sweetener</button>
-            </span>
-            <span style="color:var(--text3);">·</span>
             <button class="btn" onclick="gslBulkSetEnabled(true)" title="Toggle enabled=true on every visible row">Enable all visible</button>
             <button class="btn" onclick="gslBulkSetEnabled(false)" title="Toggle enabled=false on every visible row">Disable all visible</button>
-            <button class="btn" onclick="gslBulkClearAll()" title="Clear Risk $ AND Sweet % on every visible row in one click (stages as dirty edits — Save Edits to persist)">Clear risk + sweetener</button>
             <span style="flex:1;"></span>
             <span style="color:var(--text3);">Stages dirty — click <b>Save Edits</b> in Status to persist.</span>
           </div>
@@ -14693,14 +14685,9 @@
       + '<th style="padding:6px 10px; text-align:right;">Our Offered</th>'
       + '<th style="padding:6px 10px;">Active Wager</th>'
       + '<th style="padding:6px 10px;">Risk $</th>'
-      + '<th style="padding:6px 10px;" title="Per-side markup % over fair. Blank = global default.">Sweet %</th>'
       + '<th style="padding:6px 10px;">Enabled</th>'
       + '<th style="padding:6px 10px;">Status</th>'
       + '</tr></thead><tbody>';
-
-    // Global default sweetener (fraction → percent) for the per-row placeholder.
-    const swDefaultPct = (window._gslState && window._gslState.defaultSweetenerPct != null)
-      ? +(window._gslState.defaultSweetenerPct * 100).toFixed(1) : 7;
 
     let lastTournament = null;
     let lastMatchup = null;
@@ -14709,7 +14696,7 @@
       const mName = r.matchup_name || '(unnamed)';
       const tournHeader = tName !== lastTournament;
       if (tournHeader) {
-        html += '<tr><td colspan="10" style="padding:8px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(tName) + '</td></tr>';
+        html += '<tr><td colspan="9" style="padding:8px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(tName) + '</td></tr>';
         lastTournament = tName; lastMatchup = null;
       }
       const matchupHeader = mName !== lastMatchup;
@@ -14717,9 +14704,6 @@
       const dirty = window._gslDirty.get(r.line_id) || {};
       const riskShown = dirty.risk_amount !== undefined ? dirty.risk_amount : (r.risk_amount != null ? r.risk_amount : '');
       const enabledShown = dirty.enabled !== undefined ? dirty.enabled : !!r.enabled;
-      // Sweetener stored as a FRACTION (dirty patch or DB row); shown in percent.
-      const swFrac = dirty.sweetener_pct !== undefined ? dirty.sweetener_pct : (r.sweetener_pct != null ? r.sweetener_pct : null);
-      const swShown = swFrac != null ? String(+(swFrac * 100).toFixed(2)) : '';
       const isDirty = window._gslDirty.has(r.line_id);
       const fairPct = r.current_fair_prob != null ? (r.current_fair_prob * 100).toFixed(1) + '%' : '<span style="color:var(--text3);" title="' + escHtml(r.fair_unavailable_reason || '') + '">—</span>';
       // OUR OFFERED = the price a counterparty pays to back THIS player
@@ -14739,7 +14723,6 @@
         + '<td style="padding:4px 10px; text-align:right;">' + offeredPct + ' <span style="color:var(--text3); font-size:10px;">' + american + '</span></td>'
         + '<td style="padding:4px 10px;">' + activeStr + '</td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gslSetRisk(\'' + r.line_id + '\', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
-        + '<td style="padding:4px 10px;"><input type="number" min="0" step="0.5" value="' + escHtml(swShown) + '" placeholder="' + swDefaultPct + '" title="Per-side markup % over fair. Blank = global default (' + swDefaultPct + '%)." onchange="gslSetSweetener(\'' + r.line_id + '\', this.value)" style="width:56px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
         + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + ' onchange="gslSetEnabled(\'' + r.line_id + '\', this.checked)"></td>'
         + '<td style="padding:4px 10px; font-size:10px; color:var(--text3);">' + escHtml(r.fair_unavailable_reason || '') + '</td>'
         + '</tr>';
@@ -14758,15 +14741,6 @@
   function gslSetEnabled(lineId, val) {
     const d = window._gslDirty.get(lineId) || {};
     d.enabled = !!val;
-    window._gslDirty.set(lineId, d);
-    const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
-  }
-  // Input is in whole PERCENT; stored as a FRACTION. Blank/<=0 → null (use the
-  // global default). Staged as a dirty edit, persisted by Save Edits.
-  function gslSetSweetener(lineId, val) {
-    const pct = val === '' || val == null ? null : Number(val);
-    const d = window._gslDirty.get(lineId) || {};
-    d.sweetener_pct = (pct == null || isNaN(pct) || pct <= 0) ? null : pct / 100;
     window._gslDirty.set(lineId, d);
     const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
   }
@@ -14804,39 +14778,16 @@
     gslRender();
   }
 
-  // ---- Bulk clear: blank Risk $ / Sweet % on every visible row ----
-  // Staged as null dirty edits (blank risk never posts; blank sweetener reverts
-  // to the global default). Save Edits persists. fields: array of column keys.
-  function _gslBulkClear(fields, label) {
+  // ---- Bulk clear: blank Risk $ on every visible row ----
+  // Staged as a null dirty edit (blank risk never posts). Save Edits persists.
+  function gslBulkClearRisk() {
     const s = window._gslState; if (!s || !Array.isArray(s.config)) { alert('No data loaded — Sync from PX first.'); return; }
     const rows = _gslFilteredRows(s.config);
     if (!rows.length) { alert('No visible rows to clear. Check your filter.'); return; }
-    if (!confirm('Clear ' + label + ' on ' + rows.length + ' visible row(s)? (Stages as dirty edits — click Save Edits to persist.)')) return;
+    if (!confirm('Clear Risk $ on ' + rows.length + ' visible row(s)? Blank risk never posts. (Stages as dirty edits — click Save Edits to persist.)')) return;
     for (const r of rows) {
       const d = window._gslDirty.get(r.line_id) || {};
-      for (const f of fields) d[f] = null;
-      window._gslDirty.set(r.line_id, d);
-    }
-    gslRender();
-  }
-  function gslBulkClearRisk()      { _gslBulkClear(['risk_amount'], 'Risk $'); }
-  function gslBulkClearSweetener() { _gslBulkClear(['sweetener_pct'], 'Sweet %'); }
-  function gslBulkClearAll()       { _gslBulkClear(['risk_amount', 'sweetener_pct'], 'Risk $ AND Sweet %'); }
-
-  // ---- Bulk apply: set the same sweetener % on every visible row ----
-  // Input is whole PERCENT; staged as a FRACTION dirty edit per row.
-  function gslBulkApplySweetener() {
-    const inp = document.getElementById('gsl-bulk-sweetener');
-    const valRaw = inp ? inp.value : '';
-    const pct = valRaw === '' || valRaw == null ? null : Number(valRaw);
-    if (pct === null || isNaN(pct) || pct <= 0) { alert('Enter a positive sweetener %.'); return; }
-    const s = window._gslState; if (!s || !Array.isArray(s.config)) { alert('No data loaded — Sync from PX first.'); return; }
-    const rows = _gslFilteredRows(s.config);
-    if (!rows.length) { alert('No visible rows to apply to. Check your filter.'); return; }
-    if (!confirm('Set sweetener ' + pct + '% on ' + rows.length + ' visible row(s)? (Stages as dirty edits — click Save Edits to persist.)')) return;
-    for (const r of rows) {
-      const d = window._gslDirty.get(r.line_id) || {};
-      d.sweetener_pct = pct / 100;
+      d.risk_amount = null;
       window._gslDirty.set(r.line_id, d);
     }
     gslRender();
