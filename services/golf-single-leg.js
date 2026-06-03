@@ -264,54 +264,51 @@ function _impliedFromAmerican(a) {
   return a >= 0 ? 100 / (a + 100) : (-a) / (-a + 100);
 }
 
-function _computeOffered(lineId, ctx) {
+// Compute the BACK-THIS-PLAYER price for a single-leg golf matchup row.
+//   - `ctx`: { sideName, opponentName, roundNum } for the name-based fair lookup.
+//   - `overrideAmerican`: optional manual line (American odds the counterparty
+//     pays to back THIS player). When set, it replaces the auto markup price.
+// Returns backProb = counterparty's implied price to back this player. The
+// price we actually POST on this row's line is the complement of the OPPONENT's
+// backProb (computed by the caller via opponent pairing) — see _postedOddsForRow.
+function _computeOffered(lineId, ctx, overrideAmerican) {
   const f = _fairForLine(lineId, ctx);
   if (!f.fair) return { ok: false, reason: f.reason };
-  // If override is set, just use it (Mike's manual upload pricing).
+  // If a bookPriceOverride is set (manual upload path), just use it.
   if (f.override != null && f.override > 0 && f.override < 1) {
-    return { ok: true, fair: f.fair, offeredProb: f.override, americanOdds: _americanFromImplied(f.override), source: 'override' };
+    return { ok: true, fair: f.fair, offeredProb: f.override, americanOdds: _americanFromImplied(f.override), backProb: f.override, counterpartyProb: f.override, counterpartyAmerican: _americanFromImplied(f.override), autoAmerican: _americanFromImplied(f.override), isOverride: true, source: 'override' };
   }
-  // Single-leg-account golf-matchup markup. Bypasses the shared
-  // computeSingleLegQuote (parlay-SP vig tuning, too tight for SL matchups) and
-  // applies a flat markup set ONCE globally (GOLF_SL_MATCHUP_SWEETENER_PCT,
-  // default 0.07). The per-row sweetener field was removed 2026-06-03 — the
-  // operator wanted the tab simple: lines just load at the standard markup.
+  // Single-leg golf-matchup markup. Lines auto-load at the global markup
+  // (GOLF_SL_MATCHUP_SWEETENER_PCT, default 0.07); the operator can OVERRIDE an
+  // individual line via the editable "Our Offered" field (manual_offered_american).
   //
   // SIDE CONVENTION: on px-single's place_multiple_wagers, the `odds` we submit
-  // on a line_id become OUR OWN position's odds; the counterparty who matches
-  // takes the COMPLEMENTARY side. So to make the COUNTERPARTY pay the markup we
-  // post our side at the favorable complement:
-  //   offeredProb(our side) = 1 − (1 − fair_ours) × (1 + s)   → posted to PX
-  // and the DISPLAY ("OUR OFFERED") is fair_ours × (1 + s) = what a counterparty
-  // pays to back THIS player (favorite negative, dog positive).
+  // on a line_id become OUR OWN position. So "counterparty backs THIS player at
+  // backProb" is realized by the wager we post on the OPPONENT's line (we hold
+  // the opponent at 1−backProb). The DISPLAY "Our Offered" is backProb (this
+  // player's price — favorite negative, dog positive).
   const slSweetener = Number(config.pricing.golfSlMatchupSweetenerPct) || 0;
   if (slSweetener > 0 && f.sport === 'golf_matchups') {
-    // OUR posted side, favorable — what we actually rest on this player's line
-    // (we hold this player; the counterparty taking it backs the opponent and
-    // pays the vig). UNCHANGED — this is what gets posted to PX.
-    let offeredProb = 1 - (1 - f.fair) * (1 + slSweetener);
-    if (offeredProb <= 0 || offeredProb >= 1) {
-      // Happens only for extreme dogs where (1−fair)(1+s) ≥ 1 — can't offer a
-      // sane price on that side; skip it.
-      return { ok: false, reason: 'sweetener produced invalid offered_prob: ' + offeredProb + ' (selection too far from even to price with ' + (slSweetener * 100).toFixed(1) + '% markup)' };
+    const autoBackProb = f.fair * (1 + slSweetener);
+    const autoAmerican = (autoBackProb > 0 && autoBackProb < 1) ? _americanFromImplied(autoBackProb) : null;
+    const ov = Number(overrideAmerican);
+    const hasOverride = isFinite(ov) && ov !== 0;
+    const backProb = hasOverride ? _impliedFromAmerican(ov) : autoBackProb;
+    if (!(backProb > 0 && backProb < 1)) {
+      return { ok: false, reason: hasOverride
+        ? ('invalid override odds: ' + overrideAmerican)
+        : ('auto back price out of range: ' + backProb + ' (selection too far from even for ' + (slSweetener * 100).toFixed(1) + '% markup)') };
     }
-    // DISPLAY ("OUR OFFERED"): the price a counterparty pays to BACK THIS
-    // player, RFQ-lines convention — favorite negative, dog positive, vig
-    // baked in. This is fair × (1+s) (NOT the complement). It's realized by the
-    // wager we post on the OPPONENT's line; across both rows the two displayed
-    // prices form a normal 2-way market (e.g. Fitz -144 / Fox +109) where the
-    // counterparty pays the ~s overround and we collect.
-    const backProb = f.fair * (1 + slSweetener);
-    const backAmerican = (backProb > 0 && backProb < 1) ? _americanFromImplied(backProb) : null;
     return {
       ok: true,
       fair: f.fair,
-      offeredProb,                                   // OUR posted side (to PX)
-      americanOdds: _americanFromImplied(offeredProb),
-      counterpartyProb: backProb,                    // counterparty backs THIS player (display)
-      counterpartyAmerican: backAmerican,
+      backProb,                                       // counterparty backs THIS player (effective)
+      counterpartyProb: backProb,
+      counterpartyAmerican: _americanFromImplied(backProb),  // effective line (override or auto)
+      autoAmerican,                                   // un-overridden line (UI reference + revert detect)
+      isOverride: hasOverride,
       vig: slSweetener,
-      source: 'sl-matchup-sweetener',
+      source: hasOverride ? 'manual-override' : 'sl-matchup-sweetener',
     };
   }
   // Otherwise route through the standard single-leg quote path.
@@ -327,6 +324,45 @@ function _computeOffered(lineId, ctx) {
     vig: q.vig,
     source: 'computeSingleLegQuote',
   };
+}
+
+function _ctxOf(row) {
+  return { sideName: row.side_name, opponentName: row.side_opponent, roundNum: row.round_num };
+}
+
+// Build a (event_id|market_id) → [rows] map so we can find each row's opponent
+// (the OTHER side of the same matchup market).
+function _buildMatchupMap(rows) {
+  const m = new Map();
+  for (const r of (rows || [])) {
+    const k = (r.event_id != null ? r.event_id : '?') + '|' + (r.market_id != null ? r.market_id : '?');
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(r);
+  }
+  return m;
+}
+function _opponentRow(row, byMatchup) {
+  const k = (row.event_id != null ? row.event_id : '?') + '|' + (row.market_id != null ? row.market_id : '?');
+  const peers = byMatchup.get(k) || [];
+  return peers.find(p => p.line_id !== row.line_id) || null;
+}
+
+// The American odds we actually POST on `row`'s line. We hold `row`'s player;
+// the counterparty who matches backs the OPPONENT at the opponent's
+// back-price, so our held implied = 1 − backProb(opponent). With no overrides
+// this equals 1 − (1 − fair_row)(1+s) — identical to the pre-override behavior.
+// Returns { ok, american, snapped, fair, postedImplied } or { ok:false, reason }.
+function _postedOddsForRow(row, byMatchup, ladder) {
+  const opp = _opponentRow(row, byMatchup);
+  if (!opp) return { ok: false, reason: 'no opponent row found in matchup' };
+  const qOpp = _computeOffered(opp.line_id, _ctxOf(opp), opp.manual_offered_american);
+  if (!qOpp.ok || qOpp.backProb == null) return { ok: false, reason: 'opponent unpriced (' + (qOpp.reason || 'no backProb') + ')' };
+  const postedImplied = 1 - qOpp.backProb;
+  if (!(postedImplied > 0 && postedImplied < 1)) return { ok: false, reason: 'posted implied out of range: ' + postedImplied.toFixed(4) };
+  const american = _americanFromImplied(postedImplied);
+  if (american == null) return { ok: false, reason: 'posted american conversion failed' };
+  const qR = _computeOffered(row.line_id, _ctxOf(row), row.manual_offered_american);
+  return { ok: true, american, snapped: ladder ? pxSingle.snapToLadder(american, ladder) : american, fair: qR.ok ? qR.fair : null, postedImplied };
 }
 
 // ---------------------------------------------------------------------------
@@ -361,20 +397,25 @@ async function postEnabled(opts = {}) {
   // Skip lines that already have an active wager
   const activeByLine = await _activeWagersByLine();
   const ladder = await pxSingle.fetchOddsLadder();
+  // Load ALL rows to resolve each enabled row's opponent (posted odds are the
+  // complement of the opponent's back-price, which honors the opponent's
+  // manual override).
+  const { data: allRows, error: allErr } = await sb.from(TBL_CONFIG).select('*');
+  if (allErr) throw new Error('postEnabled all-rows select: ' + allErr.message);
+  const byMatchup = _buildMatchupMap(allRows || cfgRows);
 
   const orders = [];
   const skipped = [];
   for (const row of cfgRows) {
     if (activeByLine.has(row.line_id)) { skipped.push({ line_id: row.line_id, reason: 'already-posted' }); continue; }
-    const q = _computeOffered(row.line_id, { sideName: row.side_name, opponentName: row.side_opponent, roundNum: row.round_num });
-    if (!q.ok) { skipped.push({ line_id: row.line_id, reason: q.reason }); continue; }
-    const snapped = pxSingle.snapToLadder(q.americanOdds, ladder);
+    const p = _postedOddsForRow(row, byMatchup, ladder);
+    if (!p.ok) { skipped.push({ line_id: row.line_id, reason: p.reason }); continue; }
     orders.push({
       line_id: row.line_id,
-      odds: snapped,
+      odds: p.snapped,
       stake: Number(row.risk_amount),
       external_id: 'gsl_' + row.line_id.slice(0, 8) + '_' + Date.now(),
-      _meta: { fair: q.fair, side_name: row.side_name, matchup: row.matchup_name },
+      _meta: { fair: p.fair, side_name: row.side_name, matchup: row.matchup_name },
     });
   }
   if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
@@ -489,14 +530,13 @@ async function cancelStale(currentLineIdSet) {
 async function refreshDrift() {
   const { driftPp } = _cfg();
   const sb = db.getClient();
-  // Per-line matchup-name map so the current-offered recompute uses the same
-  // name-based fair lookup postEnabled does (single-leg line_ids aren't in the
-  // parlay-SP index, so we price by player name from the config row).
-  const cfgByLine = new Map();
-  try {
-    const { data: cfgRows } = await sb.from(TBL_CONFIG).select('line_id, side_name, side_opponent, round_num');
-    for (const c of (cfgRows || [])) cfgByLine.set(c.line_id, c);
-  } catch (_) { /* leave empty — name-based lookup just won't have ctx */ }
+  // Load ALL config rows (names + overrides) so we recompute each wager's
+  // expected posted odds exactly as postEnabled does (opponent-derived, honoring
+  // overrides). Keyed by line_id for the wager → config-row lookup.
+  const { data: allRows } = await sb.from(TBL_CONFIG).select('*');
+  const byLineId = new Map();
+  for (const r of (allRows || [])) byLineId.set(r.line_id, r);
+  const byMatchup = _buildMatchupMap(allRows || []);
   const { data, error } = await sb.from(TBL_WAGERS)
     .select('wager_id, line_id, posted_fair_prob, posted_odds')
     .in('status', ['posted', 'partially_matched']);
@@ -504,10 +544,11 @@ async function refreshDrift() {
   let drifted = 0;
   const errors = [];
   for (const w of (data || [])) {
-    const c = cfgByLine.get(w.line_id) || {};
-    const q = _computeOffered(w.line_id, { sideName: c.side_name, opponentName: c.side_opponent, roundNum: c.round_num });
-    if (!q.ok) continue;
-    const driftPpNow = Math.abs((q.offeredProb - _impliedFromAmerican(w.posted_odds)) * 100);
+    const row = byLineId.get(w.line_id);
+    if (!row) continue; // line no longer in config — cancelStale handles it
+    const p = _postedOddsForRow(row, byMatchup, null);
+    if (!p.ok) continue;
+    const driftPpNow = Math.abs((p.postedImplied - _impliedFromAmerican(w.posted_odds)) * 100);
     if (driftPpNow >= driftPp) {
       try {
         await pxSingle.cancelWager(w.wager_id);
@@ -536,22 +577,19 @@ async function loadState() {
   ]);
   if (cfgErr) return { error: 'config: ' + cfgErr.message };
   if (wErr) return { error: 'wagers: ' + wErr.message };
-  // Enrich each config row with current fair + offered (best-effort)
+  // Enrich each config row with current fair + the editable "Our Offered" line
+  // (counterparty backs THIS player; override or auto).
   const enriched = (cfg || []).map(r => {
-    const q = _computeOffered(r.line_id, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num });
-    // "OUR OFFERED" shows the COUNTERPARTY-facing line (what a taker pays) —
-    // that's the price we're putting into the market. The wager we actually
-    // post (and that shows under ACTIVE WAGER once filled) is the favorable
-    // complement (posted_american). For non-sweetener paths that don't expose
-    // a counterparty price, fall back to the posted side.
+    const q = _computeOffered(r.line_id, { sideName: r.side_name, opponentName: r.side_opponent, roundNum: r.round_num }, r.manual_offered_american);
     const cpProb = q.ok ? (q.counterpartyProb != null ? q.counterpartyProb : q.offeredProb) : null;
     const cpAmer = q.ok ? (q.counterpartyAmerican != null ? q.counterpartyAmerican : q.americanOdds) : null;
     return {
       ...r,
       current_fair_prob: q.ok ? q.fair : null,
-      current_offered_prob: cpProb,            // counterparty-facing (display)
-      current_american: cpAmer,                // counterparty-facing (display)
-      posted_american: q.ok ? q.americanOdds : null,   // what we actually post (our side)
+      current_offered_prob: cpProb,            // effective line implied (display)
+      current_american: cpAmer,                // effective line (override or auto)
+      auto_american: q.ok ? (q.autoAmerican != null ? q.autoAmerican : cpAmer) : null, // un-overridden line
+      is_override: q.ok ? !!q.isOverride : false,
       offered_source: q.ok ? q.source : null,
       fair_unavailable_reason: q.ok ? null : q.reason,
     };
@@ -585,8 +623,21 @@ async function updateConfig(updates) {
     if (u.risk_amount !== undefined) patch.risk_amount = u.risk_amount === null ? null : Number(u.risk_amount);
     if (u.enabled !== undefined) patch.enabled = !!u.enabled;
     if (u.notes !== undefined) patch.notes = u.notes ? String(u.notes) : null;
+    if (u.manual_offered_american !== undefined) {
+      // Manual line override = American odds a counterparty pays to back this
+      // player. null/0/blank → no override (auto markup). Round to integer.
+      const n = u.manual_offered_american === null ? null : Number(u.manual_offered_american);
+      patch.manual_offered_american = (n != null && isFinite(n) && n !== 0) ? Math.round(n) : null;
+    }
     if (Object.keys(patch).length === 0) continue;
-    const { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
+    let { error } = await sb.from(TBL_CONFIG).update(patch).eq('line_id', u.line_id);
+    // Graceful degrade: if manual_offered_american column doesn't exist yet,
+    // still persist risk/enabled/notes so the rest of the edit lands.
+    if (error && /manual_offered_american|column/i.test(error.message) && 'manual_offered_american' in patch) {
+      const { manual_offered_american, ...rest } = patch;
+      error = Object.keys(rest).length ? (await sb.from(TBL_CONFIG).update(rest).eq('line_id', u.line_id)).error : null;
+      if (!error) errors.push(u.line_id + ': line override not saved (run scripts/_golf_sl_override_column.sql migration)');
+    }
     if (error) errors.push(u.line_id + ': ' + error.message);
     else updated++;
   }

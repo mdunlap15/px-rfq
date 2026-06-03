@@ -14707,9 +14707,18 @@
       const isDirty = window._gslDirty.has(r.line_id);
       const fairPct = r.current_fair_prob != null ? (r.current_fair_prob * 100).toFixed(1) + '%' : '<span style="color:var(--text3);" title="' + escHtml(r.fair_unavailable_reason || '') + '">—</span>';
       // OUR OFFERED = the price a counterparty pays to back THIS player
-      // (RFQ-lines convention: favorite negative, dog positive, vig baked in).
-      const offeredPct = r.current_offered_prob != null ? (r.current_offered_prob * 100).toFixed(1) + '%' : '—';
-      const american = r.current_american != null ? (r.current_american >= 0 ? '+' : '') + r.current_american : '';
+      // (RFQ-lines convention: favorite negative, dog positive). Editable: blank
+      // = auto markup; a typed value overrides just this line. Reflect staged
+      // dirty edits immediately (ovDirty: number=override, null=reverted to auto).
+      const ovDirty = dirty.manual_offered_american;
+      const effAmer = (ovDirty !== undefined) ? (ovDirty == null ? r.auto_american : ovDirty)
+                                              : r.current_american;
+      const isOv = (ovDirty !== undefined) ? (ovDirty != null) : !!r.is_override;
+      const offeredVal = (effAmer != null) ? ((effAmer >= 0 ? '+' : '') + effAmer) : '';
+      const effImplied = (effAmer != null) ? (effAmer >= 0 ? 100 / (effAmer + 100) : (-effAmer) / (-effAmer + 100)) : null;
+      const offeredPct = effImplied != null ? (effImplied * 100).toFixed(1) + '%' : '';
+      const autoAmerArg = (r.auto_american != null) ? r.auto_american : 'null';
+      const autoPlaceholder = (r.auto_american != null) ? ((r.auto_american >= 0 ? '+' : '') + r.auto_american) : '';
       const activeStr = (r.active_wagers || []).length
         ? '<span style="color:var(--green);">' + (r.active_wagers[0].posted_odds >= 0 ? '+' : '') + r.active_wagers[0].posted_odds
             + ' @ $' + (Number(r.active_wagers[0].posted_stake)||0).toFixed(0) + '</span>'
@@ -14720,7 +14729,13 @@
         + '<td style="padding:4px 10px;">' + escHtml(r.side_name || '?') + ' <span style="color:var(--text3); font-size:10px;">vs ' + escHtml(r.side_opponent || '?') + '</span></td>'
         + '<td style="padding:4px 10px; color:var(--text3);">' + (r.round_num != null ? 'R' + r.round_num : '') + '</td>'
         + '<td style="padding:4px 10px; text-align:right;">' + fairPct + '</td>'
-        + '<td style="padding:4px 10px; text-align:right;">' + offeredPct + ' <span style="color:var(--text3); font-size:10px;">' + american + '</span></td>'
+        + '<td style="padding:4px 10px; text-align:right; white-space:nowrap;">'
+          + '<input type="text" inputmode="numeric" value="' + escHtml(offeredVal) + '" placeholder="' + escHtml(autoPlaceholder) + '"'
+          + ' title="Line a counterparty pays to back ' + escHtml(r.side_name || '') + '. Blank = auto markup' + (autoPlaceholder ? ' (' + escHtml(autoPlaceholder) + ')' : '') + '. Type to override this one line; you take the other side."'
+          + ' onchange="gslSetOverride(\'' + r.line_id + '\', this.value, ' + autoAmerArg + ')"'
+          + ' style="width:62px; text-align:right; background:var(--surface2); color:' + (isOv ? 'var(--accent)' : 'var(--text)') + '; border:1px solid ' + (isOv ? 'var(--accent)' : 'var(--border)') + '; border-radius:3px; padding:2px 4px; font-size:11px;">'
+          + ' <span style="color:var(--text3); font-size:9px;">' + offeredPct + '</span>'
+        + '</td>'
         + '<td style="padding:4px 10px;">' + activeStr + '</td>'
         + '<td style="padding:4px 10px;"><input type="number" min="0" step="1" value="' + escHtml(String(riskShown)) + '" onchange="gslSetRisk(\'' + r.line_id + '\', this.value)" style="width:70px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px;"></td>'
         + '<td style="padding:4px 10px;"><input type="checkbox"' + (enabledShown ? ' checked' : '') + ' onchange="gslSetEnabled(\'' + r.line_id + '\', this.checked)"></td>'
@@ -14743,6 +14758,21 @@
     d.enabled = !!val;
     window._gslDirty.set(lineId, d);
     const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
+  }
+  // Manual line override (American odds a counterparty pays to back this player).
+  // Blank, 0, or a value equal to the auto line → null (revert to auto markup).
+  // Staged as a dirty edit; Save Edits persists via /single-leg/golf/config.
+  function gslSetOverride(lineId, val, autoAmer) {
+    const num = (val === '' || val == null) ? null : Number(val);
+    const d = window._gslDirty.get(lineId) || {};
+    if (num == null || isNaN(num) || num === 0 || (autoAmer != null && Math.round(num) === Math.round(autoAmer))) {
+      d.manual_offered_american = null; // auto
+    } else {
+      d.manual_offered_american = Math.round(num);
+    }
+    window._gslDirty.set(lineId, d);
+    const c = document.getElementById('gsl-dirty-count'); if (c) c.textContent = window._gslDirty.size;
+    gslRender(); // re-render so the override styling + implied % update immediately
   }
 
   // ---- Filter helper (shared by gslRender + bulk-apply controls) ----
