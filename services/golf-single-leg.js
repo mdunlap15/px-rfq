@@ -625,15 +625,20 @@ async function updateConfig(updates) {
 // Lifecycle worker
 // ---------------------------------------------------------------------------
 let _workerHandle = null;
-// Auto-posting is OPT-IN, default OFF. 2026-06-03 incident: the worker called
-// postEnabled() every 5-min tick; each time an offer got MATCHED the line no
-// longer had a resting wager, so the next tick saw it as "empty" and posted
-// AGAIN — a fill-and-repost loop with no cumulative cap that racked up 12
-// matched plays on a single matchup that the operator never intended. With
-// autopost OFF the worker still syncs matchups and cancels stale/drifted
-// offers, but only an explicit manual "Post All" places new offers. Set
-// GOLF_SL_WORKER_AUTOPOST=true to restore continuous posting (do NOT until a
-// per-matchup exposure cap exists, or it will run away again).
+// Posting is MANUAL by design (operator decision 2026-06-03): the operator
+// sets the Risk $ they want per row and clicks "Post All" to post exactly
+// those amounts, once. The worker NEVER auto-posts by default.
+//
+// Why: 2026-06-03 incident — the worker called postEnabled() every 5-min tick;
+// each time an offer got MATCHED the line no longer had a resting wager, so
+// the next tick saw it as "empty" and posted AGAIN — a fill-and-repost loop
+// that racked up 12 matched plays on a single matchup the operator never
+// intended. With autopost OFF the worker still syncs matchups and cancels
+// stale/drifted offers, but only an explicit manual "Post All" places offers.
+//
+// GOLF_SL_WORKER_AUTOPOST=true would restore continuous re-posting (true MM
+// behavior). The operator does NOT want this — leave it unset. (There is
+// deliberately no exposure cap; amounts are exactly what the operator posts.)
 function _workerAutopostEnabled() {
   return String(process.env.GOLF_SL_WORKER_AUTOPOST || '').toLowerCase() === 'true';
 }
