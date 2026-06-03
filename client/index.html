@@ -1418,6 +1418,7 @@
             <span style="font-size:11px; color:var(--text3); display:flex; gap:8px; align-items:center;">
               Filter:
               <select id="gsl-filter-tournament" onchange="gslRender()" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;"><option value="">all tournaments</option></select>
+              <select id="gsl-filter-scope" onchange="gslRender()" title="Tournament-length vs single-round matchups" style="background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;"><option value="">all scopes</option></select>
               <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gsl-filter-enabled-only" onchange="gslRender()"> enabled only</label>
               <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="gsl-filter-active-only" onchange="gslRender()"> with active wager</label>
             </span>
@@ -14629,6 +14630,20 @@
         const cur = sel.value;
         sel.innerHTML = '<option value="">all tournaments</option>' + tournaments.map(t => '<option value="' + escHtml(t) + '"' + (t === cur ? ' selected' : '') + '>' + escHtml(t) + '</option>').join('');
       }
+      // Repopulate scope filter (tournament-length vs single-round). Only shows
+      // scopes actually present: "Tournament" when any row has round_num=null,
+      // plus "Round N" for each distinct round number discovered from PX.
+      const scopeSel = document.getElementById('gsl-filter-scope');
+      if (scopeSel) {
+        const cfgRows = j.config || [];
+        const hasTourn = cfgRows.some(r => r.round_num == null);
+        const rounds = Array.from(new Set(cfgRows.filter(r => r.round_num != null).map(r => Number(r.round_num)))).sort((a, b) => a - b);
+        const cur = scopeSel.value;
+        let opts = '<option value="">all scopes</option>';
+        if (hasTourn) opts += '<option value="T"' + (cur === 'T' ? ' selected' : '') + '>Tournament</option>';
+        opts += rounds.map(n => '<option value="' + n + '"' + (cur === String(n) ? ' selected' : '') + '>Round ' + n + '</option>').join('');
+        scopeSel.innerHTML = opts;
+      }
       gslRender();
     } catch (e) {
       statusEl.innerHTML = '<div style="color:var(--red);">load failed: ' + escHtml(e.message) + '</div>';
@@ -14822,10 +14837,14 @@
   // ---- Filter helper (shared by gslRender + bulk-apply controls) ----
   function _gslFilteredRows(cfg) {
     const filterT = document.getElementById('gsl-filter-tournament')?.value || '';
+    const filterScope = document.getElementById('gsl-filter-scope')?.value || '';
     const onlyEnabled = !!document.getElementById('gsl-filter-enabled-only')?.checked;
     const onlyActive = !!document.getElementById('gsl-filter-active-only')?.checked;
     let rows = (cfg || []).slice();
     if (filterT) rows = rows.filter(r => (r.tournament_name || '(none)') === filterT);
+    // Scope: 'T' = tournament-length (round_num null); '1'..'4' = that round.
+    if (filterScope === 'T') rows = rows.filter(r => r.round_num == null);
+    else if (filterScope) rows = rows.filter(r => Number(r.round_num) === Number(filterScope));
     if (onlyEnabled) rows = rows.filter(r => r.enabled);
     if (onlyActive) rows = rows.filter(r => (r.active_wagers || []).length > 0);
     return rows;

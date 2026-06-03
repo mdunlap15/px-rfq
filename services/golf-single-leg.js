@@ -78,10 +78,20 @@ function _flattenSelections(selections) {
   return out;
 }
 
+// Extract a golf round number (1-4) from a PX market/event name. Robust to the
+// label variants PX might use for round matchups; restricted to 1-4 to avoid
+// false positives from stray digits in player names. Tournament-length matchups
+// (no round token) return null. NOTE: the definitive check is against PX's real
+// round-matchup naming once they post one — if a variant slips through, add it
+// here (it drives BOTH the scope filter and round-vs-tournament pricing).
 function _parseRoundNum(name) {
   if (!name) return null;
-  const m = String(name).match(/round\s+(\d+)|\(r(\d+)/i);
-  if (m) return parseInt(m[1] || m[2], 10);
+  const s = String(name);
+  let m;
+  if ((m = s.match(/\bround\s*([1-4])\b/i))) return parseInt(m[1], 10);   // "Round 3", "round3"
+  if ((m = s.match(/\brd\.?\s*([1-4])\b/i))) return parseInt(m[1], 10);    // "Rd 3", "Rd. 3"
+  if ((m = s.match(/\(?\br([1-4])\b/i))) return parseInt(m[1], 10);        // "(R3", "R3"
+  if ((m = s.match(/\b([1-4])(?:st|nd|rd|th)\s+round\b/i))) return parseInt(m[1], 10); // "3rd Round"
   return null;
 }
 

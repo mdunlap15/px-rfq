@@ -438,6 +438,16 @@ async function updateConfig(updates) {
 // Lifecycle worker
 // ---------------------------------------------------------------------------
 let _workerHandle = null;
+// Posting is MANUAL by design — same operator decision + incident history as the
+// Golf Single-Leg bot (2026-06-03): an unconditional postEnabled() on every tick
+// re-posts an offer the moment a prior one fills (the line is empty again), which
+// is the fill-and-repost runaway loop that racked up unintended plays. The worker
+// still syncs DK/PX and cancels stale/drifted offers, but it NEVER auto-posts
+// unless GOLF_OUTRIGHTS_WORKER_AUTOPOST=true is explicitly set. Leave it unset.
+// Offers are placed only by an explicit "Post All" / "Repost" button click.
+function _workerAutopostEnabled() {
+  return String(process.env.GOLF_OUTRIGHTS_WORKER_AUTOPOST || '').toLowerCase() === 'true';
+}
 async function _workerTick() {
   if (!isEnabled()) return;
   try {
@@ -448,8 +458,10 @@ async function _workerTick() {
       catch (e) { log.warn('GolfOut', `sync ${t.dk_slug}: ${e.message}`); }
     }
     await refreshDrift();
-    await postEnabled();
-    log.debug('GolfOut', `worker tick ok (${(tourns || []).length} tournaments)`);
+    if (_workerAutopostEnabled()) {
+      await postEnabled(); // re-post drift-cancelled / newly enabled rows (opt-in)
+    }
+    log.debug('GolfOut', `worker tick ok (${(tourns || []).length} tournaments, autopost=${_workerAutopostEnabled()})`);
   } catch (e) {
     log.error('GolfOut', 'worker tick error: ' + e.message);
   }
