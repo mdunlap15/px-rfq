@@ -144,14 +144,25 @@ async function syncConfig(matchups) {
     }
   }
   if (!rows.length) return { upserted: 0 };
+  // Dedupe by line_id before upserting. PX can return the same matchup
+  // market/selection more than once (e.g. a side's line_id appearing in two
+  // market entries), which would put duplicate conflict keys in a single
+  // upsert and make Postgres throw "ON CONFLICT DO UPDATE command cannot
+  // affect row a second time". Last write wins (descriptive fields are
+  // identical for a given line_id anyway).
+  const byLine = new Map();
+  for (const r of rows) byLine.set(r.line_id, r);
+  const deduped = Array.from(byLine.values());
+  const dupCount = rows.length - deduped.length;
+  if (dupCount > 0) log.warn('GolfSL', `syncConfig: collapsed ${dupCount} duplicate line_id row(s) before upsert (${rows.length} → ${deduped.length})`);
   // Upsert on line_id — only descriptive fields written; risk_amount + enabled
-  // are user-controlled and we don't overwrite them after first insert.
-  const { error } = await sb.from(TBL_CONFIG).upsert(rows, {
+  // + sweetener_pct are user-controlled and we don't overwrite them after first insert.
+  const { error } = await sb.from(TBL_CONFIG).upsert(deduped, {
     onConflict: 'line_id',
     ignoreDuplicates: false,
   });
   if (error) throw new Error('syncConfig upsert: ' + error.message);
-  return { upserted: rows.length };
+  return { upserted: deduped.length, duplicatesCollapsed: dupCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -340,26 +351,47 @@ async function postEnabled(opts = {}) {
 
   // Batch up to 20 per PX call
   let posted = 0;
+  let suspect = 0; // PX echoed a succeed_wager but with NO wager_id — likely
+                   // not actually resting on the book (the "said posted but
+                   // not on PX" symptom). Surface loudly instead of pretending.
   const errors = [];
+  const placeDetail = []; // per-wager echo for the UI (wager_id/status/odds)
   const wagerRows = [];
   for (let i = 0; i < orders.length; i += 20) {
     const batch = orders.slice(i, i + 20);
     let resp;
     try { resp = await pxSingle.placeMultipleWagers(batch.map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }))); }
     catch (e) { errors.push('batch error: ' + e.message); continue; }
+    log.info('GolfSL', `post batch: ${(resp.succeed_wagers || []).length} succeed, ${(resp.failed_wagers || []).length} failed (sent ${batch.length})`);
+    let si = 0;
     for (const w of resp.succeed_wagers) {
-      const matching = batch.find(o => o.external_id === w.external_id);
-      if (!matching) continue;
+      // Prefer external_id match; fall back to positional if PX didn't echo it
+      // (so we don't silently drop a real placement we can't re-key).
+      let matching = w.external_id ? batch.find(o => o.external_id === w.external_id) : null;
+      if (!matching && !w.external_id && si < batch.length) matching = batch[si];
+      si++;
+      if (!matching) { errors.push('succeed_wager could not be matched to a sent order: ' + JSON.stringify(w).slice(0, 200)); continue; }
+      const wagerId = w.wager_id || w.id || w.wagerId || null;
+      const status = w.matching_status || w.status || (wagerId ? 'posted' : 'unknown');
+      placeDetail.push({ line_id: matching.line_id, wager_id: wagerId, status, odds: matching.odds, stake: matching.stake });
+      if (!wagerId) {
+        // PX claims success but gave us no id to track/cancel it — this is the
+        // exact failure mode behind "posted but not visible on the book".
+        suspect++;
+        log.warn('GolfSL', `succeed_wager has NO wager_id (status=${status}) — not truly placed? raw: ${JSON.stringify(w).slice(0, 300)}`);
+        errors.push((matching.external_id || matching.line_id) + ': succeeded with no wager_id (status=' + status + ') — verify on PX');
+        continue; // do NOT record a phantom wager with a null id
+      }
       posted++;
       wagerRows.push({
-        wager_id: w.wager_id || w.id,
+        wager_id: wagerId,
         line_id: matching.line_id,
         event_id: cfgRows.find(c => c.line_id === matching.line_id)?.event_id,
         external_id: matching.external_id,
         posted_odds: matching.odds,
         posted_stake: matching.stake,
         posted_fair_prob: matching._meta.fair,
-        status: w.matching_status || 'posted',
+        status,
         status_detail: null,
         posted_at: new Date().toISOString(),
         last_seen_at: new Date().toISOString(),
@@ -371,12 +403,13 @@ async function postEnabled(opts = {}) {
       errors.push((ext || '?') + ': ' + (f.message || f.error || 'unknown'));
     }
   }
-  // Persist new wagers
+  // Persist new wagers (only those with real wager_ids)
   if (wagerRows.length) {
     const { error: insErr } = await sb.from(TBL_WAGERS).upsert(wagerRows, { onConflict: 'wager_id' });
     if (insErr) errors.push('wagers upsert: ' + insErr.message);
   }
-  return { posted, skipped: skipped.length, errors, skippedDetail: skipped };
+  if (suspect > 0) log.warn('GolfSL', `${suspect} wager(s) returned success with no wager_id — NOT recorded (likely not on book). Check PX response log above.`);
+  return { posted, suspect, skipped: skipped.length, errors, placeDetail, skippedDetail: skipped };
 }
 
 // ---------------------------------------------------------------------------

@@ -14828,7 +14828,8 @@
       const j = await r.json();
       if (!j.ok) { alert('Sync failed: ' + (j.error || ('HTTP ' + r.status))); return; }
       await gslLoad(true);
-      alert('Sync complete. ' + (j.matchups || 0) + ' matchup(s) seen, ' + (j.upserted || 0) + ' side(s) upserted.');
+      alert('Sync complete. ' + (j.matchups || 0) + ' matchup(s) seen, ' + (j.upserted || 0) + ' side(s) upserted.'
+        + (j.duplicatesCollapsed ? '\n(' + j.duplicatesCollapsed + ' duplicate line_id row(s) collapsed.)' : ''));
     } catch (e) { alert('Sync error: ' + e.message); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Sync from PX'; } }
   }
@@ -14842,7 +14843,9 @@
       if (!j.ok) { alert('Post failed: ' + (j.error || ('HTTP ' + r.status))); return; }
       const errLines = (j.errors || []).slice(0, 5).join('\n');
       const skipLines = (j.skippedDetail || []).slice(0, 5).map(s => s.line_id.slice(0, 12) + ': ' + s.reason).join('\n');
-      alert('Posted: ' + (j.posted || 0) + '\nSkipped: ' + (j.skipped || 0)
+      const placeLines = (j.placeDetail || []).slice(0, 8).map(p => (p.wager_id ? ('wager ' + String(p.wager_id).slice(0, 10)) : 'NO WAGER_ID') + ' · ' + (p.status || '?') + ' · ' + (p.odds >= 0 ? '+' : '') + p.odds + ' @ $' + p.stake).join('\n');
+      alert('Posted: ' + (j.posted || 0) + (j.suspect ? '\n⚠ Suspect (success but no wager_id, NOT recorded): ' + j.suspect : '') + '\nSkipped: ' + (j.skipped || 0)
+        + (placeLines ? '\n\nPX response:\n' + placeLines : '')
         + (errLines ? '\n\nErrors:\n' + errLines : '')
         + (skipLines ? '\n\nSkipped detail:\n' + skipLines : ''));
       await gslLoad(true);

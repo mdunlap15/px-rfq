@@ -156,10 +156,23 @@ async function placeMultipleWagers(orders) {
       external_id: o.external_id,
     })),
   };
+  log.info('PX-Single', `place_multiple_wagers request: ${JSON.stringify(payload.data)}`);
   const j = await pxFetch('/partner/mm/place_multiple_wagers', 'POST', payload);
+  // Log the RAW response so we can verify PX's actual shape — the parlay SP
+  // doesn't use this endpoint, so its field names (succeed_wagers / wager_id /
+  // status / external_id) are unverified against live PX. Diagnosing the
+  // "said posted but not on book" case (2026-06-02).
+  try {
+    const dataStr = JSON.stringify(j && j.data);
+    log.info('PX-Single', `place_multiple_wagers raw data: ${dataStr ? dataStr.slice(0, 1500) : '(no .data) top-level: ' + JSON.stringify(j).slice(0, 1500)}`);
+  } catch (_) {}
+  // Be liberal in what we accept: PX may nest these under j.data or return
+  // them at the top level.
+  const root = (j && j.data) ? j.data : (j || {});
   return {
-    succeed_wagers: (j.data && j.data.succeed_wagers) || [],
-    failed_wagers: (j.data && j.data.failed_wagers) || [],
+    succeed_wagers: root.succeed_wagers || root.succeeded_wagers || root.wagers || [],
+    failed_wagers: root.failed_wagers || root.failures || [],
+    _raw: root,
   };
 }
 
