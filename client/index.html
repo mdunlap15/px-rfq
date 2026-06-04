@@ -1668,6 +1668,16 @@
         }
       }).catch(() => {});
 
+      // Authoritative daily P&L from Supabase parlay_orders (INCLUDES losses).
+      // The in-memory recentOrders buffer misses "silent losses" — PX only emits
+      // settle events on our WINS — so summing it overstates the Daily Volume
+      // chart's P&L as gross-wins (~$100K vs the true ~$24K net). The chart must
+      // source net P&L here. Non-blocking; re-renders the chart once it lands.
+      fetchJSON('/daily-pnl?days=400&groupBy=quoted_at').then(d => {
+        window._dvDailyPnlPayload = d;
+        if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+      }).catch(() => {});
+
       // Fetch PX-native open positions. This is the authoritative list
       // of truly-open parlays (PX status='finalized'). The tracker's
       // confirmed list drifts high (silent losses accumulate as
@@ -9086,6 +9096,26 @@
       }
     }
 
+    // P&L is AUTHORITATIVE from Supabase /daily-pnl (includes losses), NOT the
+    // in-memory buffer above. The buffer misses "silent losses" (PX only emits
+    // settle events on our wins), so summing it overstated P&L as gross-wins
+    // (~$100K vs true ~$24K net). Zero the buffer-derived pnl/settled, then set
+    // net pnl per day from the Supabase series. Mirrors the mobile app. Risk /
+    // volume / drill-down stay from the buffer (only filled in from Supabase for
+    // historical days the buffer doesn't carry).
+    const _dvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
+    if (_dvSeries) {
+      for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
+      for (const row of _dvSeries) {
+        const day = row.date;
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        if (row.pnl != null) byDay[day].pnl = row.pnl;
+        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
+        if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+      }
+    }
+
     const allDayKeys = Object.keys(byDay).sort();
     if (allDayKeys.length === 0) {
       el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No daily data</div></div>';
@@ -9469,6 +9499,22 @@
       if (o.pnl != null) {
         byDay[day].pnl += o.pnl;
         byDay[day].settled++;
+      }
+    }
+
+    // P&L authoritative from Supabase /daily-pnl (includes losses) — same fix as
+    // renderChartDailyVolume. The in-memory buffer misses silent losses, so its
+    // pnl is gross-wins. Zero buffer pnl/settled, then set net per day.
+    const _odvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
+    if (_odvSeries) {
+      for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
+      for (const row of _odvSeries) {
+        const day = row.date;
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        if (row.pnl != null) byDay[day].pnl = row.pnl;
+        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
+        if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
       }
     }
 
