@@ -5776,10 +5776,16 @@ function startStatusServer() {
     try { res.json({ ok: true, ...(await m.updateConfig((req.body && req.body.updates) || [])) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
-  // Post: place offers for every enabled+risk-set line
+  // Post: place offers for every enabled+risk-set line (Post All), or just the
+  // selected lines (body.only = [line_id,...]). body.dryRun = return the plan
+  // without placing (powers the confirm-preview modal).
   app.post('/single-leg/golf/post-all', async (req, res) => {
     const m = _gslEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.postEnabled()) }); }
+    const opts = {
+      dryRun: !!(req.body && req.body.dryRun),
+      only: (req.body && Array.isArray(req.body.only)) ? req.body.only : undefined,
+    };
+    try { res.json({ ok: true, ...(await m.postEnabled(opts)) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   // Cancel ALL active wagers (idempotent). Uses the module-only guard so it
@@ -5788,6 +5794,12 @@ function startStatusServer() {
   app.post('/single-leg/golf/cancel-all', async (req, res) => {
     const m = _gslModuleGuard(res); if (!m) return;
     try { res.json({ ok: true, ...(await m.cancelAll()) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // Cancel ONE resting wager (per-line Cancel button). body: { wager_id }
+  app.post('/single-leg/golf/cancel-wager', async (req, res) => {
+    const m = _gslModuleGuard(res); if (!m) return;
+    try { res.json({ ok: true, ...(await m.cancelOne((req.body && req.body.wager_id) || null)) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   // Repost: drift-check (cancel where stale) + post-enabled (place new offers)
@@ -5848,7 +5860,11 @@ function startStatusServer() {
   });
   app.post('/single-leg/golf-outrights/post-all', async (req, res) => {
     const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.postEnabled()) }); }
+    const opts = {
+      dryRun: !!(req.body && req.body.dryRun),
+      only: (req.body && Array.isArray(req.body.only)) ? req.body.only : undefined,
+    };
+    try { res.json({ ok: true, ...(await m.postEnabled(opts)) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   app.post('/single-leg/golf-outrights/cancel-all', async (req, res) => {

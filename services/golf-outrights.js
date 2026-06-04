@@ -357,18 +357,19 @@ async function _placeAndRecord(orders) {
   return { posted, errors };
 }
 
-async function postEnabled() {
+async function postEnabled(opts = {}) {
   const sb = db.getClient();
-  // enabled + risk-set + has offered price. (PX line presence is checked per-row
-  // in _buildOutrightOrder, since the required line depends on post_side.)
-  const { data: cfgRows, error } = await sb.from(TBL_CONFIG)
-    .select('*')
-    .eq('enabled', true)
-    .not('risk_amount', 'is', null)
-    .gt('risk_amount', 0)
-    .not('offered_american', 'is', null);
+  // Which rows: opts.only (config ids) = post exactly those SELECTED rows
+  // (ignores the enabled flag — selection is the explicit intent); otherwise
+  // every enabled + risk-set row. opts.dryRun = build the plan, place NOTHING.
+  // (PX line presence is checked per-row in _buildOutrightOrder, since the
+  // required line depends on post_side.)
+  let q = sb.from(TBL_CONFIG).select('*').not('risk_amount', 'is', null).gt('risk_amount', 0).not('offered_american', 'is', null);
+  if (Array.isArray(opts.only) && opts.only.length) q = q.in('id', opts.only);
+  else q = q.eq('enabled', true);
+  const { data: cfgRows, error } = await q;
   if (error) throw new Error('postEnabled select: ' + error.message);
-  if (!cfgRows || !cfgRows.length) return { posted: 0, skipped: 0, errors: [], detail: 'no enabled+ready rows' };
+  if (!cfgRows || !cfgRows.length) return { posted: 0, skipped: 0, errors: [], dryRun: !!opts.dryRun, plan: [], detail: (Array.isArray(opts.only) && opts.only.length) ? 'no selected rows ready' : 'no enabled+ready rows' };
 
   const active = await _activeWagersByConfigId();
   const ladder = await pxSingle.fetchOddsLadder();
@@ -383,11 +384,22 @@ async function postEnabled() {
       _dk_slug: row.dk_slug,
       _dk_implied: Number(row.dk_implied),
       _event_id: row.px_event_id,
+      _player: row.player_name,
+      _market: row.market_type,
+      _side: b.side,
       line_id: b.lineId,
       odds: b.odds,
       stake: Number(row.risk_amount),
       external_id: 'go_' + row.id + '_' + Date.now(),
     });
+  }
+  // Dry-run: return the exact plan without touching PX (powers the confirm modal).
+  if (opts.dryRun) {
+    return {
+      ok: true, dryRun: true,
+      plan: orders.map(o => ({ config_id: o._config_id, player_name: o._player, market_type: o._market, side: o._side, odds: o.odds, stake: o.stake })),
+      skipped: skipped.length, skippedDetail: skipped,
+    };
   }
   if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
 

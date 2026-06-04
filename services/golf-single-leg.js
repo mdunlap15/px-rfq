@@ -495,14 +495,18 @@ async function _activeWagersByLine() {
 
 async function postEnabled(opts = {}) {
   const sb = db.getClient();
-  // Fetch enabled & risk-configured rows
-  const { data: cfgRows, error } = await sb.from(TBL_CONFIG)
-    .select('*')
-    .eq('enabled', true)
-    .not('risk_amount', 'is', null)
-    .gt('risk_amount', 0);
+  // Which rows to post:
+  //   opts.only (array of line_ids) = post exactly those SELECTED rows (ignores
+  //     the enabled flag — selecting + Post Selected is the explicit intent).
+  //   otherwise = every enabled + risk-set row (Post All).
+  // opts.dryRun = build the order plan but place NOTHING (powers the confirm
+  //     preview modal).
+  let q = sb.from(TBL_CONFIG).select('*').not('risk_amount', 'is', null).gt('risk_amount', 0);
+  if (Array.isArray(opts.only) && opts.only.length) q = q.in('line_id', opts.only);
+  else q = q.eq('enabled', true);
+  const { data: cfgRows, error } = await q;
   if (error) throw new Error('postEnabled select: ' + error.message);
-  if (!cfgRows || cfgRows.length === 0) return { posted: 0, skipped: 0, errors: [], detail: 'no enabled+risk-set rows' };
+  if (!cfgRows || cfgRows.length === 0) return { posted: 0, skipped: 0, errors: [], dryRun: !!opts.dryRun, plan: [], detail: (Array.isArray(opts.only) && opts.only.length) ? 'no selected rows with risk set' : 'no enabled+risk-set rows' };
 
   // Skip lines that already have an active wager
   const activeByLine = await _activeWagersByLine();
@@ -527,6 +531,15 @@ async function postEnabled(opts = {}) {
       external_id: 'gsl_' + row.line_id.slice(0, 8) + '_' + Date.now(),
       _meta: { fair: p.fair, side_name: row.side_name, matchup: row.matchup_name },
     });
+  }
+  // Dry-run: return the exact plan (what WOULD post) without touching PX. Powers
+  // the confirm-preview modal; the client re-calls without dryRun on confirm.
+  if (opts.dryRun) {
+    return {
+      ok: true, dryRun: true,
+      plan: orders.map(o => ({ line_id: o.line_id, side_name: o._meta.side_name, matchup: o._meta.matchup, odds: o.odds, stake: o.stake })),
+      skipped: skipped.length, skippedDetail: skipped,
+    };
   }
   if (!orders.length) return { posted: 0, skipped: skipped.length, errors: [], skippedDetail: skipped };
 
@@ -613,6 +626,18 @@ async function cancelAll() {
     } catch (e) { errors.push(w.wager_id + ': ' + e.message); }
   }
   return { cancelled, errors };
+}
+
+// Cancel ONE resting wager by PX wager_id (per-line Cancel button).
+async function cancelOne(wagerId) {
+  const sb = db.getClient();
+  if (!wagerId) throw new Error('wager_id required');
+  await pxSingle.cancelWager(wagerId);
+  await sb.from(TBL_WAGERS).update({
+    status: 'cancelled', status_detail: 'manual cancel (single)',
+    cancelled_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
+  }).eq('wager_id', wagerId);
+  return { ok: true, cancelled: wagerId };
 }
 
 async function cancelStale(currentLineIdSet) {
@@ -825,6 +850,7 @@ module.exports = {
   loadState,
   postEnabled,
   cancelAll,
+  cancelOne,
   cancelStale,
   refreshDrift,
   updateConfig,
