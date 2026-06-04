@@ -1403,7 +1403,6 @@
               <button class="btn" onclick="gslSync(this)" title="Fetch latest PX golf matchups and upsert new sides into config (enabled=false by default)">Sync from PX</button>
               <button class="btn" onclick="gslSaveDirty(this)" title="Save all edited risk amounts / enabled toggles">Save Edits</button>
               <button class="btn" onclick="gslPostAll(this)" title="Preview, then place offers for every enabled+risk-set side">Post All</button>
-              <button class="btn" onclick="gslPostSelected(this)" title="Preview, then post only the rows ticked in the leftmost column (risk required; ignores the enabled flag)">Post selected (<span id="gsl-selected-count">0</span>)</button>
               <button class="btn" onclick="gslRepost(this)" title="Drift-check then re-post (cancels stale offers and replaces with current odds)">Repost</button>
               <button class="btn" onclick="gslCancelAll(this)" style="border-color:var(--red); color:var(--red);" title="Cancel every active wager on the single-leg account">Cancel All</button>
               <button class="btn" onclick="gslLoad(true)" title="Refresh dashboard from /single-leg/golf/state">Refresh</button>
@@ -1489,7 +1488,6 @@
             <span style="display:flex; gap:6px; flex-wrap:wrap;">
               <button class="btn" onclick="gorSaveDirty(this)">Save Edits</button>
               <button class="btn" onclick="gorPostAll(this)" title="Preview, then place offers for every enabled+risk-set row">Post All</button>
-              <button class="btn" onclick="gorPostSelected(this)" title="Preview, then post only the rows ticked in the leftmost column (risk required; ignores the enabled flag)">Post selected (<span id="gor-selected-count">0</span>)</button>
               <button class="btn" onclick="gorRepost(this)">Repost</button>
               <button class="btn" onclick="gorCancelAll(this)" style="border-color:var(--red); color:var(--red);">Cancel All</button>
             </span>
@@ -14722,10 +14720,8 @@
       }
     }
 
-    const allVisSelected = rows.length > 0 && rows.every(r => window._gslSelected.has(r.line_id));
     let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">'
       + '<thead><tr style="background:var(--surface2); color:var(--text3); text-align:left;">'
-      + '<th style="padding:6px 10px;" title="Select rows to Post Selected"><input type="checkbox"' + (allVisSelected ? ' checked' : '') + ' onchange="gslSelectAllVisible(this.checked)"></th>'
       + '<th style="padding:6px 10px;">Tournament / Matchup</th>'
       + '<th style="padding:6px 10px;">Side</th>'
       + '<th style="padding:6px 10px;">Round</th>'
@@ -14744,7 +14740,7 @@
       const mName = r.matchup_name || '(unnamed)';
       const tournHeader = tName !== lastTournament;
       if (tournHeader) {
-        html += '<tr><td colspan="10" style="padding:8px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(tName) + '</td></tr>';
+        html += '<tr><td colspan="9" style="padding:8px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(tName) + '</td></tr>';
         lastTournament = tName; lastMatchup = null;
       }
       const matchupHeader = mName !== lastMatchup;
@@ -14792,9 +14788,7 @@
       } else {
         statusCell = '<span style="color:var(--text3);">off</span>';
       }
-      const isSel = window._gslSelected.has(r.line_id);
       html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
-        + '<td style="padding:4px 10px;"><input type="checkbox"' + (isSel ? ' checked' : '') + ' onchange="gslToggleSelect(\'' + r.line_id + '\', this.checked)"></td>'
         + '<td style="padding:4px 10px;' + (matchupHeader ? '' : ' color:var(--text3);') + '">' + (matchupHeader ? (escHtml(mName) + vigStr) : '<span style="color:var(--text3); font-size:10px;">↳</span>') + '</td>'
         + '<td style="padding:4px 10px;">' + escHtml(r.side_name || '?') + ' <span style="color:var(--text3); font-size:10px;">vs ' + escHtml(r.side_opponent || '?') + '</span></td>'
         + '<td style="padding:4px 10px; color:var(--text3);">' + (r.round_num != null ? 'R' + r.round_num : '') + '</td>'
@@ -14814,7 +14808,6 @@
     }
     html += '</tbody></table></div>';
     tableEl.innerHTML = html;
-    const sc = document.getElementById('gsl-selected-count'); if (sc) sc.textContent = window._gslSelected.size;
   }
 
   function gslSetRisk(lineId, val) {
@@ -15031,49 +15024,26 @@
       + sk.slice(0, 8).map(s => '<li>' + escHtml(String(s.line_id || s.id || '?')).slice(0, 14) + ': ' + escHtml(s.reason || '') + '</li>').join('') + '</ul></div>';
   }
 
-  window._gslSelected = new Set(); // line_ids ticked for "Post selected"
-  function gslToggleSelect(lineId, checked) {
-    if (checked) window._gslSelected.add(lineId); else window._gslSelected.delete(lineId);
-    const c = document.getElementById('gsl-selected-count'); if (c) c.textContent = window._gslSelected.size;
-  }
-  function gslSelectAllVisible(checked) {
-    const s = window._gslState; if (!s || !Array.isArray(s.config)) return;
-    for (const r of _gslFilteredRows(s.config)) { if (checked) window._gslSelected.add(r.line_id); else window._gslSelected.delete(r.line_id); }
-    gslRender();
-  }
-
   async function gslPostAll(btn) {
     if (window._gslDirty.size > 0 && !(await gslConfirm('Unsaved edits', 'You have unsaved edits. <b>Post All ignores them.</b> Continue?'))) return;
-    await _gslDoPost(btn, undefined, 'Post All');
-  }
-  async function gslPostSelected(btn) {
-    const only = Array.from(window._gslSelected || []);
-    if (!only.length) { await gslAlert('Post selected', 'No rows selected. Tick the checkboxes in the leftmost column first.'); return; }
-    if (window._gslDirty.size > 0 && !(await gslConfirm('Unsaved edits', 'You have unsaved edits. <b>Post Selected ignores them.</b> Continue?'))) return;
-    await _gslDoPost(btn, only, 'Post selected');
-  }
-  // dry-run -> confirm-preview -> real post. `only` = array of line_ids (selected) or undefined (all enabled).
-  async function _gslDoPost(btn, only, label) {
-    const origText = btn ? btn.textContent : label;
+    const origText = btn ? btn.textContent : 'Post All';
     if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
     try {
-      const dryBody = { dryRun: true }; if (only) dryBody.only = only;
-      const dr = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dryBody) });
+      // dry-run -> confirm-preview -> real post (every enabled + risk-set row).
+      const dr = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun: true }) });
       const dj = await dr.json();
-      if (!dj.ok) { await gslAlert(label + ' failed', '<div style="color:var(--red);">' + escHtml(dj.error || ('HTTP ' + dr.status)) + '</div>'); return; }
+      if (!dj.ok) { await gslAlert('Post All failed', '<div style="color:var(--red);">' + escHtml(dj.error || ('HTTP ' + dr.status)) + '</div>'); return; }
       const plan = dj.plan || [];
-      if (!plan.length) { await gslAlert(label, '<div>Nothing to post.' + (dj.detail ? ' ' + escHtml(dj.detail) : '') + '</div>' + _skippedHtml(dj.skippedDetail)); return; }
-      const ok = await gslConfirm('Confirm ' + label, _postPlanHtml(plan, dj.skipped) + _skippedHtml(dj.skippedDetail), { okText: 'Post ' + plan.length });
+      if (!plan.length) { await gslAlert('Post All', '<div>Nothing to post.' + (dj.detail ? ' ' + escHtml(dj.detail) : '') + '</div>' + _skippedHtml(dj.skippedDetail)); return; }
+      const ok = await gslConfirm('Confirm Post All', _postPlanHtml(plan, dj.skipped) + _skippedHtml(dj.skippedDetail), { okText: 'Post ' + plan.length });
       if (!ok) return;
       if (btn) btn.textContent = 'Posting…';
-      const postBody = {}; if (only) postBody.only = only;
-      const r = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(postBody) });
+      const r = await fetch('/single-leg/golf/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
       const j = await r.json();
-      if (!j.ok) { await gslAlert(label + ' failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
-      await gslAlert(label + ' — results', gslBuildPostSummary(j));
-      if (only) window._gslSelected = new Set();
+      if (!j.ok) { await gslAlert('Post All failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await gslAlert('Post All — results', gslBuildPostSummary(j));
       await gslLoad(true);
-    } catch (e) { await gslAlert(label + ' error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
+    } catch (e) { await gslAlert('Post All error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = origText; } }
   }
   // Cancel one resting Single-Leg offer (per-line Cancel button).
@@ -15247,7 +15217,7 @@
       const captured = (j.captured_keys || []).join(', ') || 'none';
       const seen = (j.seen_market_names || []).join(' | ') || 'none';
       const uncat = (j.uncategorized || []);
-      let body = '<div style="font-size:14px; margin-bottom:8px;">DK markets <b>' + (j.dk_markets || 0) + '</b> · DK selections <b>' + (j.dk_selections || 0) + '</b> · PX events <b>' + (j.px_events || 0) + '</b> · PX-matched <b>' + (j.px_matched_selections || 0) + '</b> · upserted <b>' + (j.upserted || 0) + '</b></div>'
+      let body = '<div style="font-size:14px; margin-bottom:8px;">DK markets <b>' + (j.dk_markets || 0) + '</b> · DK selections <b>' + (j.dk_selections || 0) + '</b> · PX events <b>' + (j.px_events || 0) + '</b> · PX-matched <b>' + (j.px_matched_selections || 0) + '</b> · NO-lines <b>' + (j.no_lines_captured || 0) + '</b> · upserted <b>' + (j.upserted || 0) + '</b></div>'
         + '<div style="font-size:12px;"><span style="color:var(--text3);">Market types captured:</span> ' + escHtml(captured) + '</div>'
         + '<div style="font-size:12px; margin-top:4px;"><span style="color:var(--text3);">DK market names seen:</span> ' + escHtml(seen) + '</div>'
         + (uncat.length ? '<div style="font-size:12px; margin-top:4px; color:var(--amber);">Uncategorized (regex miss?): ' + escHtml(uncat.join(' | ')) + '</div>' : '')
@@ -15299,10 +15269,8 @@
     });
 
     if (!rows.length) { tEl.innerHTML = '<div class="empty-state" style="padding:30px;"><div class="icon">-</div>No rows match filter.</div>'; return; }
-    const allVisSelected = rows.length > 0 && rows.every(r => window._gorSelected.has(r.id));
     let html = '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">'
       + '<thead><tr style="background:var(--surface2); color:var(--text3); text-align:left;">'
-      + '<th style="padding:6px 10px;" title="Select rows to Post Selected"><input type="checkbox"' + (allVisSelected ? ' checked' : '') + ' onchange="gorSelectAllVisible(this.checked)"></th>'
       + '<th style="padding:6px 10px;">Tournament / Market</th>'
       + '<th style="padding:6px 10px;">Player</th>'
       + '<th style="padding:6px 10px; text-align:right;">DK Odds</th>'
@@ -15318,7 +15286,7 @@
     for (const r of rows) {
       const grp = r.dk_slug + ' / ' + r.market_type;
       if (grp !== lastGroup) {
-        html += '<tr><td colspan="11" style="padding:6px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(grp) + '</td></tr>';
+        html += '<tr><td colspan="10" style="padding:6px 10px; background:var(--surface2); font-weight:600; color:var(--accent);">' + escHtml(grp) + '</td></tr>';
         lastGroup = grp;
       }
       const dirty = window._gorDirty.get(r.id) || {};
@@ -15365,9 +15333,7 @@
       } else {
         activeCell = '<span style="color:var(--text3);">—</span>';
       }
-      const isSel = window._gorSelected.has(r.id);
       html += '<tr' + (isDirty ? ' style="background:rgba(255,193,7,0.06);"' : '') + '>'
-        + '<td style="padding:4px 10px;"><input type="checkbox"' + (isSel ? ' checked' : '') + ' onchange="gorToggleSelect(' + r.id + ', this.checked)"></td>'
         + '<td style="padding:4px 10px; color:var(--text3); font-size:10px;">↳</td>'
         + '<td style="padding:4px 10px;">' + escHtml(r.player_name) + '</td>'
         + '<td style="padding:4px 10px; text-align:right; font-family:monospace;">' + dkAm + '</td>'
@@ -15387,7 +15353,6 @@
     }
     html += '</tbody></table></div>';
     tEl.innerHTML = html;
-    const sc = document.getElementById('gor-selected-count'); if (sc) sc.textContent = window._gorSelected.size;
   }
 
   function gorSetRisk(id, val) {
@@ -15509,49 +15474,27 @@
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Save Edits'; } }
   }
 
-  window._gorSelected = new Set(); // config ids ticked for "Post selected"
-  function gorToggleSelect(id, checked) {
-    if (checked) window._gorSelected.add(id); else window._gorSelected.delete(id);
-    const c = document.getElementById('gor-selected-count'); if (c) c.textContent = window._gorSelected.size;
-  }
-  function gorSelectAllVisible(checked) {
-    const s = window._gorState; if (!s || !Array.isArray(s.config)) return;
-    for (const r of _gorFilteredRows(s.config)) { if (checked) window._gorSelected.add(r.id); else window._gorSelected.delete(r.id); }
-    gorRender();
-  }
   async function gorPostAll(btn) {
     if (window._gorDirty.size > 0 && !(await uiConfirm('Post All', 'You have unsaved edits. <b>Post All ignores them.</b> Continue?'))) return;
-    await _gorDoPost(btn, undefined, 'Post All');
-  }
-  async function gorPostSelected(btn) {
-    const only = Array.from(window._gorSelected || []);
-    if (!only.length) { await uiAlert('Post selected', 'No rows selected. Tick the checkboxes in the leftmost column first.'); return; }
-    if (window._gorDirty.size > 0 && !(await uiConfirm('Post selected', 'You have unsaved edits. <b>Post Selected ignores them.</b> Continue?'))) return;
-    await _gorDoPost(btn, only, 'Post selected');
-  }
-  // dry-run -> confirm-preview -> real post. `only` = array of config ids (selected) or undefined (all enabled).
-  async function _gorDoPost(btn, only, label) {
-    const origText = btn ? btn.textContent : label;
+    const origText = btn ? btn.textContent : 'Post All';
     if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
     try {
-      const dryBody = { dryRun: true }; if (only) dryBody.only = only;
-      const dr = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dryBody) });
+      // dry-run -> confirm-preview -> real post (every enabled + risk-set row).
+      const dr = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun: true }) });
       const dj = await dr.json();
-      if (!dj.ok) { await uiAlert(label + ' failed', '<div style="color:var(--red);">' + escHtml(dj.error || ('HTTP ' + dr.status)) + '</div>'); return; }
+      if (!dj.ok) { await uiAlert('Post All failed', '<div style="color:var(--red);">' + escHtml(dj.error || ('HTTP ' + dr.status)) + '</div>'); return; }
       const plan = dj.plan || [];
-      if (!plan.length) { await uiAlert(label, '<div>Nothing to post.' + (dj.detail ? ' ' + escHtml(dj.detail) : '') + '</div>' + _skippedHtml(dj.skippedDetail)); return; }
-      const ok = await uiConfirm('Confirm ' + label, _postPlanHtml(plan, dj.skipped) + _skippedHtml(dj.skippedDetail), { okText: 'Post ' + plan.length });
+      if (!plan.length) { await uiAlert('Post All', '<div>Nothing to post.' + (dj.detail ? ' ' + escHtml(dj.detail) : '') + '</div>' + _skippedHtml(dj.skippedDetail)); return; }
+      const ok = await uiConfirm('Confirm Post All', _postPlanHtml(plan, dj.skipped) + _skippedHtml(dj.skippedDetail), { okText: 'Post ' + plan.length });
       if (!ok) return;
       if (btn) btn.textContent = 'Posting…';
-      const postBody = {}; if (only) postBody.only = only;
-      const r = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(postBody) });
+      const r = await fetch('/single-leg/golf-outrights/post-all', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
       const j = await r.json();
-      if (!j.ok) { await uiAlert(label + ' failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
-      await uiAlert(label + ' — results', '<div style="font-size:14px;"><b style="color:var(--green);">Posted: ' + (j.posted || 0) + '</b> &nbsp;·&nbsp; Skipped: ' + (j.skipped || 0) + '</div>'
+      if (!j.ok) { await uiAlert('Post All failed', '<div style="color:var(--red);">' + escHtml(j.error || ('HTTP ' + r.status)) + '</div>'); return; }
+      await uiAlert('Post All — results', '<div style="font-size:14px;"><b style="color:var(--green);">Posted: ' + (j.posted || 0) + '</b> &nbsp;·&nbsp; Skipped: ' + (j.skipped || 0) + '</div>'
         + (j.errors && j.errors.length ? '<div style="margin-top:10px; color:var(--red); font-size:12px;"><b>Errors (' + j.errors.length + ')</b><ul style="margin:4px 0 0 16px; padding:0;">' + j.errors.slice(0, 8).map(e => '<li>' + escHtml(e) + '</li>').join('') + '</ul></div>' : ''));
-      if (only) window._gorSelected = new Set();
       await gorRefresh(false);
-    } catch (e) { await uiAlert(label + ' error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
+    } catch (e) { await uiAlert('Post All error', '<div style="color:var(--red);">' + escHtml(e.message) + '</div>'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = origText; } }
   }
   async function gorCancelAll(btn) {

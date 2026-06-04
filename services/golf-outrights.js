@@ -154,10 +154,13 @@ async function _pxMarketsFor(slug) {
       }
       const yesSel = flat.find(s => s && /^yes$/i.test(String(s.name || '').trim()));
       if (!yesSel || !yesSel.line_id) continue;
-      // Also grab the NO selection's line_id — needed to post the NO side (we hold
-      // NO; the counterparty backs YES). Markets are YES/NO pairs, but tolerate a
-      // missing NO selection (skips only the NO-side post for that row).
-      const noSel = flat.find(s => s && /^no$/i.test(String(s.name || '').trim()));
+      // NO selection line_id — needed to post the NO side (we hold NO; the
+      // counterparty backs YES). Prefer a selection literally named "No", but
+      // fall back to "the OTHER line in this YES/NO market" — PX doesn't always
+      // name the second side exactly "No", which left px_no_line_id null and the
+      // UI showing "no line" on every row (operator report 2026-06-04).
+      const noSel = flat.find(s => s && /^no$/i.test(String(s.name || '').trim()))
+        || flat.find(s => s && s.line_id && s.line_id !== yesSel.line_id);
       byMarketType[mtype].push({
         player_name: playerName,
         player_norm: _normName(playerName),
@@ -201,7 +204,7 @@ async function syncTournament(dk_slug, opts = {}) {
   // 3. For each (DK market × DK player), find PX line + upsert config
   const { sweetener } = _cfg();
   const upserts = [];
-  let dkSelections = 0, pxMatched = 0;
+  let dkSelections = 0, pxMatched = 0, noLines = 0;
   for (const dkMkt of dk.markets) {
     const pxList = px.byMarketType[dkMkt.marketType] || [];
     const pxByNorm = new Map();
@@ -214,6 +217,7 @@ async function syncTournament(dk_slug, opts = {}) {
       const offeredAm = americanFromImplied(offeredImpl);
       const pxMatch = pxByNorm.get(_normName(sel.playerName));
       if (pxMatch) pxMatched++;
+      if (pxMatch && pxMatch.no_line_id) noLines++;
       upserts.push({
         dk_slug,
         market_type: dkMkt.marketType,
@@ -252,6 +256,7 @@ async function syncTournament(dk_slug, opts = {}) {
     dk_selections: dkSelections,
     px_events: px.eventCount,
     px_matched_selections: pxMatched,
+    no_lines_captured: noLines,
     upserted,
     ...diag,
   };
