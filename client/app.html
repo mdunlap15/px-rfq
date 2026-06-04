@@ -674,6 +674,16 @@
     <div class="summary-peek" id="summary-peek"></div>
     <div class="summary" id="summary"></div>
 
+    <!-- Partner equity (Mike/Rick split) from /bankroll. Hidden until it loads;
+         admin-only (the endpoint isn't in viewer paths, so it 404/403s for
+         viewers and the card stays hidden). Shows Rick's CURRENT portion of the
+         bankroll + his fixed go-forward profit share from the latest snapshot. -->
+    <div class="data-card" id="equity-card" style="display:none; margin-top:10px;">
+      <h3>Partner equity</h3>
+      <div class="row"><div class="label">Rick's stake<div class="sublabel" id="equity-rick-sub"></div></div><div class="value" id="equity-rick-val">—</div></div>
+      <div class="row"><div class="label">Future-profit share<div class="sublabel" id="equity-rick-share-sub"></div></div><div class="value" id="equity-rick-share">—</div></div>
+    </div>
+
     <div id="notify-prompt"></div>
 
     <!-- Hourly fills sparkline (Tier 3). Collapsible, default collapsed
@@ -996,19 +1006,22 @@
         // the previous mobile chart's cumulative ended at $7k while the
         // dashboard's lifetime stat shows $13k+. /daily-pnl reads directly
         // from Supabase and matches the dashboard's view.
-        const [statusResp, ordersResp, pxPnLResp, dailyPnlResp] = await Promise.all([
+        const [statusResp, ordersResp, pxPnLResp, dailyPnlResp, bankrollResp] = await Promise.all([
           fetch(BASE + '/status'),
           fetch(BASE + '/orders'),
           fetch(BASE + '/px-pnl').catch(() => null),
           fetch(BASE + '/daily-pnl?days=30').catch(() => null),
+          fetch(BASE + '/bankroll').catch(() => null),
         ]);
         const status = await statusResp.json();
         const ordersData = await ordersResp.json();
         const pxPnL = pxPnLResp ? await pxPnLResp.json().catch(() => null) : null;
         const dailyPnl = dailyPnlResp ? await dailyPnlResp.json().catch(() => null) : null;
+        const bankroll = bankrollResp ? await bankrollResp.json().catch(() => null) : null;
         const allOrders = ordersData.recentOrders || [];
 
         renderStatus(status, allOrders, pxPnL);
+        renderBankroll(bankroll);
         renderHourlyMetric(allOrders);
         renderSportFilter(allOrders);
         renderParlays(allOrders);
@@ -1032,6 +1045,33 @@
     function getTodayCutoffET() {
       const todayStr = getTodayET();
       return new Date(todayStr + 'T10:00:00-04:00');
+    }
+
+    // Partner equity card. Rick's portion = his CURRENT equity from /bankroll
+    // (snapshot baseline + his cohort-attributed P&L). Future-profit share =
+    // the fixed go-forward ratio from the latest snapshot (postCohort.ratio.rick),
+    // with the stake/total formula shown as a sublabel. Hides on error / no
+    // snapshot / no access.
+    function renderBankroll(b) {
+      const card = document.getElementById('equity-card');
+      if (!card) return;
+      if (!b || b.ok === false || b.rick == null) { card.style.display = 'none'; return; }
+      const money = (v) => (v == null || !isFinite(v)) ? '—'
+        : (v < 0 ? '-$' : '$') + Math.abs(Number(v)).toLocaleString('en-US', { maximumFractionDigits: 0 });
+      const rick = Number(b.rick);
+      const total = (b.total != null) ? Number(b.total) : (Number(b.mike || 0) + rick);
+      const rickPct = total > 0 ? (rick / total * 100) : null;
+      const share = (b.postCohort && b.postCohort.ratio && b.postCohort.ratio.rick != null)
+        ? Number(b.postCohort.ratio.rick) : null;
+      document.getElementById('equity-rick-val').textContent = money(rick);
+      document.getElementById('equity-rick-sub').textContent = rickPct != null
+        ? (rickPct.toFixed(2) + '% of ' + money(total) + (b.asOfUtc ? '' : '')) : '';
+      document.getElementById('equity-rick-share').textContent = share != null
+        ? (share * 100).toFixed(2) + '%' : '—';
+      document.getElementById('equity-rick-share-sub').textContent =
+        (b.snapshotRick != null && b.snapshotEquity) ? (money(b.snapshotRick) + ' / ' + money(b.snapshotEquity) + ' at snapshot')
+        : 'of additional profit / loss';
+      card.style.display = '';
     }
 
     function renderStatus(status, allOrders, pxPnL) {
