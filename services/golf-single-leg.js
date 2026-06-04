@@ -388,6 +388,21 @@ function _computeOffered(lineId, ctx, overrideAmerican) {
         autoBackProb = sweetProb;   // display + posted complement both inherit this
       }
     }
+    // --- minimum-spread floor (operator 2026-06-04: "18 ticks", e.g. -109/-109)
+    // Never quote a matchup tighter than golfMatchupMinPairVig PAIR overround,
+    // even on the raw-book path (round matchups on Bovada run near-pickem, and
+    // the sweetener narrows further). Floor THIS side at fair + half the min
+    // pair overround; the opponent floors symmetrically (de-vigged fairs sum to
+    // 1), so the offered pair sums to >= 1 + minPair. Only widens — a book line
+    // already wider than the floor keeps its (possibly sweetened) price.
+    const minPair = (config.pricing && Number(config.pricing.golfMatchupMinPairVig)) || 0;
+    if (minPair > 0 && fairProb > 0 && fairProb < 1) {
+      const floorProb = fairProb + minPair / 2;
+      if (floorProb > autoBackProb && floorProb < 1) {
+        autoBackProb = floorProb;
+        autoAmerican = _americanFromImplied(autoBackProb);
+      }
+    }
     const ov = Number(overrideAmerican);
     const hasOverride = isFinite(ov) && ov !== 0;
     const backProb = hasOverride ? _impliedFromAmerican(ov) : autoBackProb;

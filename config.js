@@ -100,6 +100,15 @@ const config = {
     // 0.04 starting recommendation (= 4% per side, ~2% pair vig on
     // coinflip matchups). Tune up if win-rate stays elevated.
     vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.04,
+    // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
+    // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
+    // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,
+    // well under our per-leg floor, and the 1-tick sweetener narrows it further.
+    // This guarantees a minimum total margin: golf-single-leg.js floors each
+    // side at fair + (this / 2), so the offered pair sums to >= 1 + this. Only
+    // widens — book lines already wider than the floor keep their price. 0.043 =>
+    // -109/-109 on a 50/50. 0 disables. Single-leg book only (not RFQ pricing).
+    golfMatchupMinPairVig: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN_PAIR) || 0.043,
     // Single-leg-account matchup sweetener — applied ONLY to the second
     // (single-leg) PX account when posting golf matchup wagers via
     // services/golf-single-leg.js. Independent of the parlay SP vig stack
