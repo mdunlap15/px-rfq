@@ -2065,6 +2065,9 @@ function startStatusServer() {
             pushes: 0,
             totalStake: 0,
             pnl: 0,
+            bettorEv: 0,   // Σ bettor EV at our fair model (negative = we hold edge)
+            evStake: 0,    // stake over parlays that had valid EV inputs (for EV ROI)
+            evCount: 0,
             firstSeen: r.confirmed_at,
             lastSeen: r.confirmed_at,
           };
@@ -2073,6 +2076,17 @@ function startStatusServer() {
         agg.fills++;
         const stake = Number(r.confirmed_stake) || 0;
         agg.totalStake += stake;
+        // Counterparty (bettor) EV at our fair model: stake × (fairProb × decimal − 1).
+        // Known at bet time, so computed over every confirmed parlay with valid
+        // inputs (not just settled ones). offered_odds is AMERICAN.
+        const evAmer = r.offered_odds != null ? Number(r.offered_odds) : NaN;
+        const evFair = r.fair_parlay_prob != null ? Number(r.fair_parlay_prob) : NaN;
+        if (isFinite(evAmer) && evAmer !== 0 && evFair > 0 && evFair < 1 && stake > 0) {
+          const dec = evAmer >= 0 ? 1 + evAmer / 100 : 1 + 100 / (-evAmer);
+          agg.bettorEv += stake * (evFair * dec - 1);
+          agg.evStake += stake;
+          agg.evCount++;
+        }
         if (r.pnl != null) {
           agg.settled++;
           agg.pnl += Number(r.pnl) || 0;
@@ -2100,6 +2114,9 @@ function startStatusServer() {
           ...agg,
           roi,                    // SP's ROI on this creator (negative = good for us)
           bettorRoi,              // Bettor's ROI (positive = sharp)
+          bettorEv: agg.bettorEv, // Bettor's total EV at our fair model ($, negative = our edge)
+          bettorEvRoi: agg.evStake > 0 ? agg.bettorEv / agg.evStake : null, // EV as a fraction of staked
+          evCount: agg.evCount,   // parlays with valid EV inputs
           bettorHitRate,          // Fraction of settled parlays the bettor won
           blocked: !!blockedEntry,
           blockedReason: blockedEntry ? blockedEntry.reason : null,
@@ -2114,6 +2131,7 @@ function startStatusServer() {
         totalFills: creators.reduce((s, c) => s + c.fills, 0),
         totalStake: creators.reduce((s, c) => s + c.totalStake, 0),
         totalPnl:   creators.reduce((s, c) => s + c.pnl, 0),
+        totalBettorEv: creators.reduce((s, c) => s + (c.bettorEv || 0), 0),
         untagged,
         windowDays: days,
       };

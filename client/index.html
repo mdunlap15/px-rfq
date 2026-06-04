@@ -11785,6 +11785,7 @@
         + chip('Total fills',       (t.totalFills || 0).toLocaleString())
         + chip('Total stake',       fmtMoney(t.totalStake))
         + chip('Net SP P&L',        fmtMoney(t.totalPnl), (t.totalPnl || 0) >= 0 ? 'var(--green)' : 'var(--red)')
+        + chip('Bettor EV',         fmtMoney(t.totalBettorEv), (t.totalBettorEv || 0) <= 0 ? 'var(--green)' : 'var(--red)', 'Total EV all tracked counterparties received at our fair model (Σ stake × (fairProb × decimal − 1)). Negative = our cumulative expected edge; compare to Net SP P&L to gauge luck vs edge.')
         + chip('Untagged fills',    (t.untagged || 0).toLocaleString(), 'var(--text3)', 'Pre-2026-05-19 rows that could not be backfilled — PX retains only ~30-45 days of orders.')
         + '</div>';
     }
@@ -11835,6 +11836,7 @@
         case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
         case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
         case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+        case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
         case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
         default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
       }
@@ -11870,6 +11872,7 @@
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'totalStake\')" title="Sort by stake">Stake' + sArrow('totalStake') + '</th>'
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'pnl\')" title="Sort by SP P&L">SP P&L' + sArrow('pnl') + '</th>'
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorRoi\')" title="Sort by bettor ROI">Bettor ROI' + sArrow('bettorRoi') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorEv\')" title="Total EV the bettor received at our fair model (Σ stake × (fairProb × decimal − 1)). Negative = we hold edge; near-0 or positive flags a sharp regardless of how their luck landed. Sort by it.">Bettor EV' + sArrow('bettorEv') + '</th>'
       + '<th style="text-align:left;  '  + thBase + '" onclick="creatorsSort(\'lastSeen\')" title="Sort by last seen">First / Last seen' + sArrow('lastSeen') + '</th>'
       + '<th style="text-align:center; padding:6px 8px;">Block</th>'
       + '</tr></thead><tbody>';
@@ -11879,6 +11882,10 @@
       // Bettor ROI: positive = sharp winning. Red emphasis when > 1%.
       const broiColor = c.bettorRoi == null ? 'var(--text3)' : (c.bettorRoi > 0.01 ? 'var(--red)' : (c.bettorRoi < -0.01 ? 'var(--green)' : 'var(--text)'));
       const hitColor  = c.bettorHitRate == null ? 'var(--text3)' : (c.bettorHitRate > 0.55 ? 'var(--red)' : 'var(--text)');
+      // Bettor EV: negative = we hold edge (good, green). Positive = bettor is
+      // +EV against our fair model (alarming, red). Tooltip carries EV-as-%-of-stake.
+      const evColor = (c.bettorEv == null || !Number.isFinite(c.bettorEv)) ? 'var(--text3)' : (c.bettorEv > 0 ? 'var(--red)' : (c.bettorEv < 0 ? 'var(--green)' : 'var(--text)'));
+      const evTip   = (c.bettorEvRoi != null && Number.isFinite(c.bettorEvRoi)) ? ('EV ROI ' + (c.bettorEvRoi * 100).toFixed(2) + '% over ' + (c.evCount || 0) + ' parlays') : 'no EV inputs';
       const firstSeen = c.firstSeen ? c.firstSeen.slice(0, 10) : '';
       const lastSeen  = c.lastSeen ? c.lastSeen.slice(0, 10)   : '';
       // Blocked rows get a faint red tint so they're scannable even with
@@ -11909,12 +11916,13 @@
       html += '<td style="padding:5px 8px; text-align:right;">' + fmtMoney(c.totalStake) + '</td>';
       html += '<td style="padding:5px 8px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(c.pnl) + '</td>';
       html += '<td style="padding:5px 8px; text-align:right; color:' + broiColor + '; font-weight:600;">' + fmtPct(c.bettorRoi) + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right; color:' + evColor + '; font-weight:600;" title="' + escapeHtml(evTip) + '">' + fmtMoney(c.bettorEv) + '</td>';
       html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
       html += '<td style="padding:5px 8px; text-align:center;">' + btn + '</td>';
       html += '</tr>';
       // Hidden detail sub-row, lazily populated by toggleCreatorParlays.
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface);">';
-      html += '<td colspan="10" id="' + rowKey + '-body" style="padding:8px 14px;">';
+      html += '<td colspan="11" id="' + rowKey + '-body" style="padding:8px 14px;">';
       html += expanded ? renderCreatorParlaysBody(c.creatorId) : '';
       html += '</td></tr>';
     }
@@ -12099,12 +12107,14 @@
         case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
         case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
         case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
+        case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
         case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
         default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
       }
     });
     const headers = ['Creator ID', 'Fills', 'Settled', 'SP Wins', 'SP Losses', 'Pushes',
       'Bettor Hit %', 'Total Stake', 'SP P&L', 'SP ROI %', 'Bettor ROI %',
+      'Bettor EV', 'Bettor EV ROI %',
       'First Seen', 'Last Seen', 'Blocked', 'Blocked Reason'];
     const csvRows = [headers.join(',')];
     const pct = v => (v == null || !Number.isFinite(v)) ? '' : (v * 100).toFixed(2);
@@ -12116,6 +12126,7 @@
         (c.totalStake != null ? Number(c.totalStake).toFixed(2) : ''),
         (c.pnl != null ? Number(c.pnl).toFixed(2) : ''),
         pct(c.roi), pct(c.bettorRoi),
+        (c.bettorEv != null ? Number(c.bettorEv).toFixed(2) : ''), pct(c.bettorEvRoi),
         csvEscape((c.firstSeen || '').slice(0, 10)),
         csvEscape((c.lastSeen || '').slice(0, 10)),
         c.blocked ? 'yes' : 'no',
