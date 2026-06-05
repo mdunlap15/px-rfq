@@ -213,7 +213,12 @@ async function syncTournament(dk_slug, opts = {}) {
       dkSelections++;
       const dkImpl = aImpl(sel.americanOdds);
       if (dkImpl == null) continue;
-      const offeredImpl = Math.min(0.99, dkImpl * (1 + sweetener));
+      // Sweeten FOR the counterparty: LOWER the YES implied prob below DK's so the
+      // YES price we expose beats the book (e.g. DK +310 -> we offer +314). The cp
+      // backs YES at this price; on the NO side we post its complement on the NO
+      // line. (Was `(1 + sweetener)`, which made the price WORSE than DK — a vig,
+      // not a sweetener, despite the name. Operator report 2026-06-05.)
+      const offeredImpl = Math.max(0.0001, dkImpl * (1 - sweetener));
       const offeredAm = americanFromImplied(offeredImpl);
       const pxMatch = pxByNorm.get(_normName(sel.playerName));
       if (pxMatch) pxMatched++;
@@ -290,7 +295,7 @@ async function _activeWagersByConfigId() {
 function _buildOutrightOrder(row, ladder) {
   const side = (row.post_side === 'yes') ? 'yes' : 'no';
   // Effective offered YES price: a manual override (operator-typed) if set, else
-  // the auto price (DK american x (1 + sweetener)). The override is always the
+  // the auto price (DK implied x (1 - sweetener) = sweeter than DK). The override is always the
   // YES price a counterparty pays; the side toggle decides how it's realized
   // (NO = post the complement on the NO line so the cp backs YES at this price).
   const manual = (row.manual_offered_american != null && Number(row.manual_offered_american) !== 0) ? Number(row.manual_offered_american) : null;
