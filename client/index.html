@@ -1673,10 +1673,22 @@
       // settle events on our WINS — so summing it overstates the Daily Volume
       // chart's P&L as gross-wins (~$100K vs the true ~$24K net). The chart must
       // source net P&L here. Non-blocking; re-renders the chart once it lands.
-      fetchJSON('/daily-pnl?days=400&groupBy=quoted_at').then(d => {
-        window._dvDailyPnlPayload = d;
-        if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
-      }).catch(() => {});
+      //
+      // groupBy=settled_at (NOT quoted_at): the (status, settled_at) index makes
+      // this query fast. quoted_at is unindexed AND null on settle-reconstructed
+      // rows, so groupBy=quoted_at hit the 8s statement_timeout and returned an
+      // empty {daily:[]} payload — which the override below turned into a blanked
+      // $0 P&L overlay (operator report 2026-06-05). Throttled to >=90s between
+      // fetches: refreshDashboard runs every ~9s and this is a heavy paginated
+      // scan, so refetching every cycle piled overlapping scans on the DB and
+      // made the timeouts worse.
+      if (!window._dvDailyPnlPayload || (Date.now() - (window._dvPnlFetchedAt || 0)) > 90000) {
+        fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
+          window._dvDailyPnlPayload = d;
+          window._dvPnlFetchedAt = Date.now();
+          if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+        }).catch(() => {});
+      }
 
       // Fetch PX-native open positions. This is the authoritative list
       // of truly-open parlays (PX status='finalized'). The tracker's
@@ -9104,7 +9116,10 @@
     // volume / drill-down stay from the buffer (only filled in from Supabase for
     // historical days the buffer doesn't carry).
     const _dvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
-    if (_dvSeries) {
+    // Only override when the payload actually carries rows. An empty [] (e.g. a
+    // timed-out /daily-pnl) is truthy — zeroing then repopulating from nothing
+    // blanked the P&L overlay to $0. With no rows, keep the buffer-derived pnl.
+    if (_dvSeries && _dvSeries.length) {
       for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
       for (const row of _dvSeries) {
         const day = row.date;
@@ -9506,7 +9521,9 @@
     // renderChartDailyVolume. The in-memory buffer misses silent losses, so its
     // pnl is gross-wins. Zero buffer pnl/settled, then set net per day.
     const _odvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
-    if (_odvSeries) {
+    // Empty-array guard — see renderChartDailyVolume: a timed-out payload is a
+    // truthy [] that would zero pnl/settled and never repopulate (blank $0).
+    if (_odvSeries && _odvSeries.length) {
       for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
       for (const row of _odvSeries) {
         const day = row.date;
