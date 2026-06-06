@@ -1899,6 +1899,10 @@
     // PX balance is fetched from the API; open risk is the sum of
     // confirmedStake on orders the tracker considers active.
     const accountPnL = data.portfolio?.accountPnL;
+    // Expose the authoritative account-level net P&L (PX balance + open risk -
+    // starting bankroll) so the Daily Volume chart can anchor its GROSS per-parlay
+    // sum to this true figure instead of overstating (~$24.9K gross vs ~$18K net).
+    window._accountPnL = accountPnL;
     const pnlEl = document.getElementById('stat-pnl');
     if (accountPnL == null) {
       pnlEl.textContent = '—';
@@ -9133,6 +9137,17 @@
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
       }
+      // Anchor the chart total to the authoritative account-level net (the same
+      // accountPnL the header shows = realized net after PX fees). The /daily-pnl
+      // sum is GROSS — pre-fees plus some reconstruction drift — so it overstates
+      // the true net (~$24.9K vs ~$18K). Scale daily P&L uniformly: bars keep
+      // their shape, cumulative reconciles to reality. (Operator decision
+      // 2026-06-05; per-fill drill-down rows stay at their raw PX values.)
+      const _dvGross = _dvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
+      if (window._accountPnL != null && isFinite(window._accountPnL) && _dvGross !== 0) {
+        const _dvScale = window._accountPnL / _dvGross;
+        if (_dvScale > 0 && isFinite(_dvScale)) { for (const k in byDay) byDay[k].pnl *= _dvScale; }
+      }
     }
 
     const allDayKeys = Object.keys(byDay).sort();
@@ -9311,7 +9326,7 @@
     svg += svgRect(pad.l + 70, H - 12, 9, 9, 'var(--green)', 1);
     svg += svgText(pad.l + 83, H - 4, 'Daily P&L', { anchor: 'start', size: 9 });
     svg += svgLine(pad.l + 145, H - 8, pad.l + 161, H - 8, '#f5b942', 2.5);
-    svg += svgText(pad.l + 165, H - 4, 'Cumulative P&L', { anchor: 'start', size: 9 });
+    svg += svgText(pad.l + 165, H - 4, 'Cumulative P&L (net)', { anchor: 'start', size: 9 });
     // Hover hint on the right end
     svg += svgText(W - pad.r, H - 4, 'hover bars for detail · click to filter table below', { anchor: 'end', size: 8, fill: 'var(--text3)' });
 
@@ -9536,6 +9551,15 @@
         if (row.pnl != null) byDay[day].pnl = row.pnl;
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+      }
+      // Anchor day/month totals to the authoritative account-level net — same
+      // scaling as renderChartDailyVolume so the table totals match the chart.
+      // (Per-fill rows below stay at raw PX pnl, so a day's total won't exactly
+      // equal the sum of its fills — that gap is the fees/reconstruction drift.)
+      const _odvGross = _odvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
+      if (window._accountPnL != null && isFinite(window._accountPnL) && _odvGross !== 0) {
+        const _odvScale = window._accountPnL / _odvGross;
+        if (_odvScale > 0 && isFinite(_odvScale)) { for (const k in byDay) byDay[k].pnl *= _odvScale; }
       }
     }
 
