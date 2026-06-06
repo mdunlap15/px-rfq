@@ -607,7 +607,11 @@
       <a class="nav-item" onclick="switchSection('golfSingleLeg', this)" id="nav-golfSingleLeg">
         <span class="nav-icon">&#9971;</span> Golf Single-Leg
       </a>
-      <a class="nav-item" onclick="switchSection('golfOutrights', this)" id="nav-golfOutrights">
+      <!-- Golf Outrights tab hidden 2026-06-05 (operator request; bot errored on
+           post). Posting is also kill-switched in services/golf-outrights.js. To
+           restore: remove style="display:none", re-add the onclick, and set
+           POSTING_DISABLED = false. -->
+      <a class="nav-item" id="nav-golfOutrights" style="display:none">
         <span class="nav-icon">&#9819;</span> Golf Outrights
       </a>
     </nav>
