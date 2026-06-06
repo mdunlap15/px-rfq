@@ -31,6 +31,13 @@ const TBL_TOURN  = 'golf_outright_tournaments';
 const TBL_CONFIG = 'golf_outright_config';
 const TBL_WAGERS = 'golf_outright_wagers';
 
+// Posting kill-switch. Disabled 2026-06-05 after Outrights errored on post
+// (operator request). _placeAndRecord refuses while this is true, which turns
+// off Post All, Repost, and Repost-one in one place. Cancel/view paths stay
+// live so existing offers can still be cleared. Set to false + redeploy to
+// re-enable posting.
+const POSTING_DISABLED = true;
+
 function _cfg() {
   return {
     enabled: String(process.env.GOLF_OUTRIGHTS_ENABLED || '').toLowerCase() === 'true',
@@ -322,6 +329,7 @@ function _buildOutrightOrder(row, ladder) {
 // postEnabled (bulk) and repostOne (single). Returns { posted, errors }.
 async function _placeAndRecord(orders) {
   const sb = db.getClient();
+  if (POSTING_DISABLED) return { posted: 0, errors: ['Golf Outrights posting is disabled (kill-switch)'] };
   let posted = 0; const errors = []; const wagerRows = [];
   for (let i = 0; i < orders.length; i += 20) {
     const batch = orders.slice(i, i + 20);
@@ -466,8 +474,12 @@ async function repostOne(configId) {
 async function cancelAll() {
   const sb = db.getClient();
   const { data, error } = await sb.from(TBL_WAGERS)
+    // Include 'unmatched' — on PX that's a placed-but-not-yet-taken (LIVE)
+    // resting offer. The bot's "active" filter omitted it, so 555 such offers
+    // were live while the tab showed "Active wagers: 0". Cancel All must clear
+    // them too (added 2026-06-05).
     .select('wager_id, px_line_id')
-    .in('status', ['posted', 'partially_matched']);
+    .in('status', ['posted', 'partially_matched', 'unmatched']);
   if (error) throw new Error('cancelAll select: ' + error.message);
   let cancelled = 0; const errors = [];
   for (const w of (data || [])) {
