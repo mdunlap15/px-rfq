@@ -2588,26 +2588,53 @@ const TERMINAL_PARLAY_STATUSES = new Set(['settled', 'rejected', 'voided', 'canc
  * legKey format: `${lineId}:${selection}` — must match the format the
  * caller builds from the new RFQ's legs.
  */
-function getCreatorLegStackCount(creatorId, legKey) {
-  if (!creatorId || !legKey) return 0;
-  let count = 0;
+// Per-(creator, legKey) open-parlay index, rebuilt on a short TTL.
+//
+// WHY: the old implementation scanned ALL orders (terminal included) on EVERY
+// call, and the RFQ gate invokes it once PER LEG of EVERY RFQ with a creator_id
+// — an O(orders × legs) hot-path cost. Enabling MAX_PARLAYS_PER_CREATOR_LEG
+// regressed RFQ p50 latency from <1ms to ~5ms (operator incident 2026-06-07).
+// This caches Map<`${creatorId}|${legKey}`, Set<parlayId>> and rebuilds at most
+// once per TTL, so per-leg lookups are O(1) and the median RFQ never pays the
+// scan (one RFQ per TTL triggers a rebuild; the rest read the cache).
+//
+// Trade-off: the count can be up to STACK_INDEX_TTL_MS stale, so a creator
+// could momentarily exceed the stack limit within that window before the index
+// catches up. Acceptable for a soft anti-stacking gate. Rebuilt from the
+// authoritative `orders` map, so it self-heals — no lifecycle hooks to drift.
+const STACK_INDEX_TTL_MS = 2000;
+let _stackIndex = null;   // Map<`${creatorId}|${legKey}`, Set<parlayId>>
+let _stackIndexAt = 0;
+
+function _rebuildStackIndex() {
+  const idx = new Map();
   for (const parlayId in orders) {
     const o = orders[parlayId];
     if (!o) continue;
-    const cid = o.meta && (o.meta.creatorId || o.meta.creator_id);
-    if (cid !== creatorId) continue;
     if (TERMINAL_PARLAY_STATUSES.has(o.status)) continue;
+    const cid = o.meta && (o.meta.creatorId || o.meta.creator_id);
+    if (!cid) continue;
     const legs = o.legs || (o.meta && o.meta.legs) || [];
     for (const l of legs) {
       const lid = l.lineId || l.line_id;
-      const sel = l.selection || '';
-      if (lid && (lid + ':' + sel) === legKey) {
-        count++;
-        break; // one parlay = one count regardless of leg repetition
-      }
+      if (!lid) continue;
+      const k = cid + '|' + lid + ':' + (l.selection || '');
+      let s = idx.get(k);
+      if (!s) { s = new Set(); idx.set(k, s); }
+      s.add(parlayId); // Set dedups → a parlay counts once per legKey
     }
   }
-  return count;
+  _stackIndex = idx;
+  _stackIndexAt = Date.now();
+}
+
+function getCreatorLegStackCount(creatorId, legKey) {
+  if (!creatorId || !legKey) return 0;
+  if (!_stackIndex || (Date.now() - _stackIndexAt) > STACK_INDEX_TTL_MS) {
+    _rebuildStackIndex();
+  }
+  const s = _stackIndex.get(creatorId + '|' + legKey);
+  return s ? s.size : 0;
 }
 
 /**
