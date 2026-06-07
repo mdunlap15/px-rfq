@@ -865,12 +865,35 @@ async function handleRFQ(data) {
         // No log line — this fires on every RFQ with unknown legs
         // (high volume), so muting it keeps stdout clean.
       } else {
-        // Legacy inline mode — await each resolution.
-        const resolvePromises = unknownAtStart.map(leg => lineManagerEarly.resolveUnknownLine(leg));
-        const resolved = await Promise.all(resolvePromises);
-        const resolvedCount = resolved.filter(Boolean).length;
-        if (resolvedCount > 0) {
-          log.info('RFQ', `On-demand resolved ${resolvedCount}/${unknownAtStart.length} unknown lines for parlay=${parlayId}`);
+        // Inline mode — await resolution so we can quote THIS RFQ once the line
+        // registers. BUT skip the await for legs we've recently FAILED to
+        // resolve (cached per-lineId in _failuresByLineId, 10k cap). Those are
+        // overwhelmingly the unregistered player-prop flood: the event (game) is
+        // known, so resolveUnknownLine takes the SLOW path (fetch markets, line
+        // not found, fail) — 50-150ms each. Awaiting a known-failing line buys
+        // nothing (it declines regardless) and the piled-up latency makes us
+        // lose tied-odds tiebreaker races (operator incident 2026-06-07: prop
+        // flood collapsed win rate 62%->~5%). Fire-and-forget the known
+        // failures (refresh the cache in case they become resolvable) and only
+        // AWAIT fresh/unseen lines — the real alt/game lines we can quote. This
+        // is the TARGETED replacement for the global RESOLVE_INLINE_ON_RFQ=false
+        // fast-mode, which skipped ALL awaits and killed quoting on a cold cache.
+        const getFail = lineManagerEarly.getResolveFailure;
+        const toAwait = [];
+        for (const leg of unknownAtStart) {
+          const lid = leg.line_id || leg.lineId || leg;
+          if (getFail && getFail(lid)) {
+            lineManagerEarly.resolveUnknownLine(leg).catch(err => log.debug('Resolve', `async resolve failed: ${err.message}`));
+          } else {
+            toAwait.push(leg);
+          }
+        }
+        if (toAwait.length > 0) {
+          const resolved = await Promise.all(toAwait.map(leg => lineManagerEarly.resolveUnknownLine(leg)));
+          const resolvedCount = resolved.filter(Boolean).length;
+          if (resolvedCount > 0) {
+            log.info('RFQ', `On-demand resolved ${resolvedCount}/${toAwait.length} unknown lines for parlay=${parlayId}`);
+          }
         }
       }
     }
