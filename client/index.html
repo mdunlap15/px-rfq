@@ -4894,11 +4894,23 @@
     });
 
     // Build lookup: team+eventId composite key → confirmed orders containing that team in that game.
-    // Exclude phantoms AND stale-phantoms (server-side flag) so the Team
-    // Exposure drill-down matches Open Positions and Risk Sim.
-    const confirmedOrders = Object.values(orderState.allOrders).filter(o =>
-      o.status === 'confirmed' && !(o.meta && o.meta.phantom) && !o.isStalePhantom
-    );
+    // Source positions the SAME way as Open Positions / Risk Sim: UNION of
+    // /px-positions (canonical CURRENT open set) and orderState.allOrders
+    // (tracker's confirmed set), with /px-positions winning on parlayId.
+    // Pre-fix this read only orderState.allOrders confirmed rows, so freshly
+    // accepted parlays that live in /px-positions but aren't yet in the recent
+    // /orders window showed a non-zero PARLAYS count (server exposure counts
+    // them) with an empty "No matching confirmed orders found" drill-down.
+    const _expByParlayId = {};
+    for (const o of Object.values(orderState.allOrders || {})) {
+      if (o.status !== 'confirmed' || (o.meta && o.meta.phantom) || o.isStalePhantom || !o.orderUuid) continue;
+      if (o.parlayId) _expByParlayId[o.parlayId] = o;
+    }
+    for (const p of (window._pxPositions?.positions || [])) {
+      if (!p.orderUuid) continue;
+      if (p.parlayId) _expByParlayId[p.parlayId] = p; // PX wins (richer + has liveState)
+    }
+    const confirmedOrders = Object.values(_expByParlayId);
     const teamParlayMap = {};
     for (const o of confirmedOrders) {
       const legs = o.legs || o.meta?.legs || [];
