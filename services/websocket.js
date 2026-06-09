@@ -1625,25 +1625,39 @@ async function handleConfirm(data) {
       return;
     }
 
-    // Belt-and-suspenders blocklist check at confirm time. handleRFQ
-    // already declines blocked creators before pricing, but a creator
-    // could have been added to the blocklist BETWEEN the quote landing
-    // and the confirm arriving (race window of a few seconds to ~minutes
-    // for slow PX confirms). Re-check using meta.creatorId from the
-    // original quote; if now-blocked, reject the confirm.
+    // Blocklist check at confirm time — the LAST gate before a wager lands.
+    // handleRFQ declines blocked creators before pricing, BUT PX frequently
+    // omits creator_id on the live RFQ (it's backfilled to meta only later),
+    // so a blocked counterparty can slip past the RFQ-time gate with
+    // meta.creatorId still null (observed 2026-06-06: blocked creator
+    // 45628ef7 got two $4,940 fills this way). By confirm time the order
+    // exists in PX's order feed WITH its creator_id, so when meta lacks it we
+    // resolve it live (one recent-orders page) and re-check. Also still
+    // catches creators blocked AFTER the quote landed.
     try {
-      const blockedCid = originalOrder.meta && (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
-      if (blockedCid) {
-        const blocklist = require('./creator-blocklist');
-        if (blocklist.isBlocked(blockedCid)) {
-          log.info('Confirm', `Rejecting: creator ${blockedCid} was blocked after quote — parlay=${parlayId}`);
-          orderTracker.recordRejection(parlayId, 'blocked creator (added post-quote)');
-          if (callbackUrl) {
-            try { await px.confirmOrder(callbackUrl, orderUuid, 'reject'); }
-            catch (e) { log.warn('Confirm', `Block-reject POST failed for ${parlayId}: ${e.message}`); }
+      const blocklist = require('./creator-blocklist');
+      let blockedCid = originalOrder.meta && (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
+      // Gap-plug: only pay the REST round-trip when there's actually someone
+      // to block and we don't already know who this counterparty is.
+      if (!blockedCid && typeof blocklist.list === 'function' && blocklist.list().length > 0) {
+        try {
+          const liveOrder = await px.fetchOrderByUuid(orderUuid);
+          const liveCid = liveOrder && liveOrder.creator_id;
+          if (liveCid) {
+            blockedCid = liveCid;
+            if (originalOrder.meta) originalOrder.meta.creatorId = liveCid; // stamp so we don't re-query
+            log.info('Confirm', `Resolved creator ${liveCid} live for parlay=${parlayId} (PX omitted it on the RFQ)`);
           }
-          return;
+        } catch (e) { log.warn('Confirm', `Live creator lookup failed for ${parlayId}: ${e.message}`); }
+      }
+      if (blockedCid && blocklist.isBlocked(blockedCid)) {
+        log.info('Confirm', `Rejecting: blocked creator ${blockedCid} — parlay=${parlayId}`);
+        orderTracker.recordRejection(parlayId, 'blocked creator');
+        if (callbackUrl) {
+          try { await px.confirmOrder(callbackUrl, orderUuid, 'reject'); }
+          catch (e) { log.warn('Confirm', `Block-reject POST failed for ${parlayId}: ${e.message}`); }
         }
+        return;
       }
     } catch (_) { /* blocklist module not loaded yet — allow through */ }
 
