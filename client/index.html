@@ -9053,6 +9053,129 @@
   };
 
   // Daily Volume & P&L — grouped bar chart by day
+  // ===== Settle-date drill-down (Option A) =====================================
+  // Daily Volume tables show each day's header P&L grouped by SETTLEMENT date
+  // (authoritative /daily-pnl, net-scaled to account P&L). The per-parlay
+  // drill-down therefore loads the parlays that SETTLED that day — incl. the
+  // "silent losses" that only the DB has — via /orders-by-date, and net-scales
+  // each row's P&L by the same factor so the rows sum to the day's header total.
+  // Day key is a UTC date (from=to=day → that UTC day), matching getDailyPnL's
+  // server-local (UTC) bucketing.
+  window._dvSettledByDay = window._dvSettledByDay || {};   // day -> {loading, rows, error}
+  if (window._dvScale == null) window._dvScale = 1;
+
+  function _dvLoadSettledDay(day, rerender) {
+    const cache = window._dvSettledByDay;
+    const cur = cache[day];
+    if (cur && (cur.loading || cur.rows)) return;          // already loading/loaded
+    cache[day] = { loading: true, rows: null };
+    fetchJSON('/orders-by-date?from=' + day + '&to=' + day + '&groupBy=settled_at&maxRows=5000')
+      .then(function(r) {
+        cache[day] = { loading: false, rows: (r && Array.isArray(r.orders)) ? r.orders : [] };
+        if (typeof rerender === 'function') rerender();
+      })
+      .catch(function() {
+        cache[day] = { loading: false, rows: [], error: true };
+        if (typeof rerender === 'function') rerender();
+      });
+  }
+
+  // Day-row click: toggle, lazy-load the settled cohort if needed, re-render.
+  window._dvToggleSettledDay = function(dayId, day, which) {
+    toggleDetailRow(dayId);
+    const rerender = which === 'odv'
+      ? function(){ if (window._odvLastOrders) renderOrdersDailyVolume(window._odvLastOrders); }
+      : function(){ if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders); };
+    if (expandedRows.has(dayId)) {
+      const cur = window._dvSettledByDay[day];
+      if (!cur || (!cur.loading && !cur.rows)) { _dvLoadSettledDay(day, rerender); return; }
+    }
+    rerender();   // cached, or collapsing — re-render to reflect state
+  };
+
+  // Build the inner drill-down table for a day's settled parlays (net-scaled).
+  // opts: { dayId, sortMap, sortClick, parlayPrefix }
+  function _dvRenderSettledDay(day, opts) {
+    const c = window._dvSettledByDay[day];
+    if (!c || c.loading) return '<div style="padding:8px 12px;font-size:10px;color:var(--text3);">Loading settled parlays&hellip;</div>';
+    const orders = (c.rows || []).filter(function(o){ return o.pnl != null; });
+    if (!orders.length) return '<div style="padding:8px 12px;font-size:10px;color:var(--text3);">No parlays settled on this day' + (c.error ? ' (load failed &mdash; collapse &amp; reopen to retry)' : '') + '.</div>';
+    const scale = (window._dvScale != null && isFinite(window._dvScale)) ? window._dvScale : 1;
+    const sortState = opts.sortMap[opts.dayId] || { col: 'time', dir: 1 };
+    const arrow = function(col){ return sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : ''; };
+    const hClick = function(col){ return 'onclick="event.stopPropagation(); ' + opts.sortClick + '(\'' + opts.dayId + '\',\'' + col + '\')" style="cursor:pointer;"'; };
+    let out = '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0;">';
+    out += '<tr style="color:var(--text3);">'
+      + '<th ' + hClick('time') + ' style="padding:2px 8px;text-align:left;">Settled' + arrow('time') + '</th>'
+      + '<th ' + hClick('selections') + ' style="padding:2px 8px;text-align:left;">Selections' + arrow('selections') + '</th>'
+      + '<th ' + hClick('legs') + ' style="padding:2px 8px;text-align:center;">Legs' + arrow('legs') + '</th>'
+      + '<th ' + hClick('odds') + ' style="padding:2px 8px;text-align:right;">Odds' + arrow('odds') + '</th>'
+      + '<th ' + hClick('stake') + ' style="padding:2px 8px;text-align:right;">Stake' + arrow('stake') + '</th>'
+      + '<th ' + hClick('pnl') + ' style="padding:2px 8px;text-align:right;">P&L' + arrow('pnl') + '</th>'
+      + '<th ' + hClick('result') + ' style="padding:2px 8px;text-align:center;">Result' + arrow('result') + '</th>'
+      + '</tr>';
+    let subtotal = 0;
+    const rows = orders.map(function(o){
+      const legs = o.legs || (o.meta && o.meta.legs) || [];
+      const selFull = formatParlaySelections(legs);
+      const sel = selFull.length > 60 ? selFull.substring(0, 58) + '..' : selFull;
+      const settledIso = o.settled_at || o.settledAt || '';
+      let timeStr = '--:--';
+      try { if (settledIso) timeStr = new Date(settledIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) {}
+      const oddsNum = o.confirmed_odds || o.offered_odds || o.confirmedOdds || o.offeredOdds || 0;
+      const result = (o.settlement_result || o.settlementResult || (o.status || '').replace('settled_', '') || '-');
+      const pnlScaled = (Number(o.pnl) || 0) * scale;
+      subtotal += pnlScaled;
+      return { o: o, legs: legs, settledIso: settledIso, timeStr: timeStr, sel: sel, selFull: selFull,
+        legCount: legs.length, oddsNum: oddsNum,
+        oddsStr: oddsNum ? (oddsNum > 0 ? '+' + oddsNum : '' + oddsNum) : '-',
+        stake: o.confirmed_stake || o.confirmedStake || 0, pnl: pnlScaled, result: result };
+    });
+    rows.sort(function(a, b){
+      let av, bv;
+      switch (sortState.col) {
+        case 'selections': return sortState.dir * a.sel.localeCompare(b.sel);
+        case 'legs':   av = a.legCount; bv = b.legCount; break;
+        case 'odds':   av = a.oddsNum;  bv = b.oddsNum;  break;
+        case 'stake':  av = a.stake;    bv = b.stake;    break;
+        case 'pnl':    av = a.pnl;      bv = b.pnl;      break;
+        case 'result': return sortState.dir * a.result.localeCompare(b.result);
+        case 'time':
+        default:       return sortState.dir * String(a.settledIso).localeCompare(String(b.settledIso));
+      }
+      return sortState.dir * (av - bv);
+    });
+    for (const r of rows) {
+      const pnlCls = r.pnl > 0 ? 'positive' : r.pnl < 0 ? 'negative' : 'neutral';
+      const resultColor = r.result === 'won' ? 'var(--green)' : r.result === 'lost' ? 'var(--red)' : 'var(--text3)';
+      const pid = ((r.o.parlay_id || r.o.parlayId || r.o.order_uuid || r.o.orderUuid || '') + '').replace(/[^a-z0-9]/gi, '');
+      const detailId = pid ? (opts.parlayPrefix + pid) : '';
+      const expanded = detailId && expandedRows.has(detailId);
+      const click = detailId ? ' onclick="event.stopPropagation(); toggleDetailRow(\'' + detailId + '\')" style="cursor:pointer;border-top:1px solid var(--border);"' : ' style="border-top:1px solid var(--border);"';
+      out += '<tr' + click + '>';
+      out += '<td style="padding:2px 8px;white-space:nowrap;">' + r.timeStr + '</td>';
+      out += '<td style="padding:2px 8px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + r.selFull.replace(/"/g, '&quot;') + '">' + r.sel + '</td>';
+      out += '<td style="padding:2px 8px;text-align:center;">' + r.legCount + '</td>';
+      out += '<td style="padding:2px 8px;text-align:right;">' + r.oddsStr + '</td>';
+      out += '<td style="padding:2px 8px;text-align:right;">' + fmtDollar(r.stake) + '</td>';
+      out += '<td style="padding:2px 8px;text-align:right;" class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td>';
+      out += '<td style="padding:2px 8px;text-align:center;color:' + resultColor + ';">' + (r.result.charAt(0).toUpperCase() + r.result.slice(1)) + '</td>';
+      out += '</tr>';
+      if (detailId) {
+        out += '<tr id="' + detailId + '" style="display:' + (expanded ? 'table-row' : 'none') + ';"><td colspan="7" style="padding:6px 12px; background:var(--surface);">';
+        out += buildLegTable(r.legs, { pad: '4px 8px', showStatus: true, showSport: true });
+        out += '</td></tr>';
+      }
+    }
+    const subCls = subtotal > 0 ? 'positive' : subtotal < 0 ? 'negative' : 'neutral';
+    out += '<tr style="border-top:2px solid var(--border); font-weight:600;">'
+      + '<td colspan="5" style="padding:3px 8px; text-align:right; color:var(--text2);">Day net (settled here) &mdash; matches header:</td>'
+      + '<td style="padding:3px 8px; text-align:right;" class="' + subCls + '">' + fmtPnl(subtotal) + '</td>'
+      + '<td></td></tr>';
+    out += '</table>';
+    return out;
+  }
+
   function renderChartDailyVolume(allOrders) {
     const el = document.getElementById('chart-daily-volume');
     if (!el) return;
@@ -9158,7 +9281,7 @@
       const _dvGross = _dvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
       if (window._accountPnL != null && isFinite(window._accountPnL) && _dvGross !== 0) {
         const _dvScale = window._accountPnL / _dvGross;
-        if (_dvScale > 0 && isFinite(_dvScale)) { for (const k in byDay) byDay[k].pnl *= _dvScale; }
+        if (_dvScale > 0 && isFinite(_dvScale)) { window._dvScale = _dvScale; for (const k in byDay) byDay[k].pnl *= _dvScale; }
       }
     }
 
@@ -9409,7 +9532,7 @@
         const pnlCls = d.pnl > 0 ? 'positive' : d.pnl < 0 ? 'negative' : 'neutral';
         const dayId = 'dv-' + day.replace(/-/g, '');
         const dayExpanded = expandedRows.has(dayId);
-        svg += '<tr onclick="event.stopPropagation(); toggleDetailRow(\'' + dayId + '\')" style="cursor:pointer;">';
+        svg += '<tr onclick="event.stopPropagation(); window._dvToggleSettledDay(\'' + dayId + '\', \'' + day + '\', \'dv\')" style="cursor:pointer;">';
         svg += '<td style="padding:2px 12px;">&#9654; ' + day + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;">' + d.count + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;">' + fmtDollar(d.risk) + '</td>';
@@ -9419,6 +9542,8 @@
 
         // Day detail row: parlay breakdown (sortable)
         svg += '<tr id="' + dayId + '" style="display:' + (dayExpanded ? 'table-row' : 'none') + ';"><td colspan="6" style="padding:0;">';
+        if (dayExpanded) svg += _dvRenderSettledDay(day, { dayId: dayId, sortMap: (window._dvSort || (window._dvSort = {})), sortClick: 'window._dvSortClick', parlayPrefix: 'dvp-' });
+        if (false) {
         svg += '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0;">';
         const sortState = window._dvSort[dayId] || { col: 'time', dir: 1 };
         const arrow = (col) => sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : '';
@@ -9499,7 +9624,8 @@
             svg += '</td></tr>';
           }
         }
-        svg += '</table></td></tr>';
+        }
+        svg += '</td></tr>';
       }
       svg += '</table></td></tr>';
     }
@@ -9571,7 +9697,7 @@
       const _odvGross = _odvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
       if (window._accountPnL != null && isFinite(window._accountPnL) && _odvGross !== 0) {
         const _odvScale = window._accountPnL / _odvGross;
-        if (_odvScale > 0 && isFinite(_odvScale)) { for (const k in byDay) byDay[k].pnl *= _odvScale; }
+        if (_odvScale > 0 && isFinite(_odvScale)) { window._dvScale = _odvScale; for (const k in byDay) byDay[k].pnl *= _odvScale; }
       }
     }
 
@@ -9628,7 +9754,7 @@
         const dPnlCls = d.pnl > 0 ? 'positive' : d.pnl < 0 ? 'negative' : 'neutral';
         const dayId = 'odvd-' + day.replace(/-/g, '');
         const dayExpanded = expandedRows.has(dayId);
-        html += '<tr onclick="event.stopPropagation(); toggleDetailRow(\'' + dayId + '\')" style="cursor:pointer;">';
+        html += '<tr onclick="event.stopPropagation(); window._dvToggleSettledDay(\'' + dayId + '\', \'' + day + '\', \'odv\')" style="cursor:pointer;">';
         html += '<td style="padding:2px 10px;">&#9654; ' + day + '</td>';
         html += '<td style="padding:2px 10px; text-align:center;">' + d.count + '</td>';
         html += '<td style="padding:2px 10px; text-align:center;">' + fmtDollar(d.risk) + '</td>';
@@ -9638,6 +9764,8 @@
 
         // Day detail row: parlay breakdown (sortable)
         html += '<tr id="' + dayId + '" style="display:' + (dayExpanded ? 'table-row' : 'none') + ';"><td colspan="6" style="padding:0;">';
+        if (dayExpanded) html += _dvRenderSettledDay(day, { dayId: dayId, sortMap: (window._odvSort || (window._odvSort = {})), sortClick: 'window._odvSortClick', parlayPrefix: 'odvp-' });
+        if (false) {
         html += '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0;">';
         const sortState = window._odvSort[dayId] || { col: 'time', dir: 1 };
         const arrow = (col) => sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : '';
@@ -9714,7 +9842,8 @@
             html += '</td></tr>';
           }
         }
-        html += '</table></td></tr>';
+        }
+        html += '</td></tr>';
       }
       html += '</table></td></tr>';
     }
