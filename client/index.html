@@ -9100,7 +9100,6 @@
     if (!c || c.loading) return '<div style="padding:8px 12px;font-size:10px;color:var(--text3);">Loading settled parlays&hellip;</div>';
     const orders = (c.rows || []).filter(function(o){ return o.pnl != null; });
     if (!orders.length) return '<div style="padding:8px 12px;font-size:10px;color:var(--text3);">No parlays settled on this day' + (c.error ? ' (load failed &mdash; collapse &amp; reopen to retry)' : '') + '.</div>';
-    const scale = (window._dvScale != null && isFinite(window._dvScale)) ? window._dvScale : 1;
     const sortState = opts.sortMap[opts.dayId] || { col: 'time', dir: 1 };
     const arrow = function(col){ return sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : ''; };
     const hClick = function(col){ return 'onclick="event.stopPropagation(); ' + opts.sortClick + '(\'' + opts.dayId + '\',\'' + col + '\')" style="cursor:pointer;"'; };
@@ -9124,12 +9123,12 @@
       try { if (settledIso) timeStr = new Date(settledIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) {}
       const oddsNum = o.confirmed_odds || o.offered_odds || o.confirmedOdds || o.offeredOdds || 0;
       const result = (o.settlement_result || o.settlementResult || (o.status || '').replace('settled_', '') || '-');
-      const pnlScaled = (Number(o.pnl) || 0) * scale;
-      subtotal += pnlScaled;
+      const pnlRaw = Number(o.pnl) || 0; // GROSS PX P&L — no fees on these
+      subtotal += pnlRaw;
       return { o: o, legs: legs, settledIso: settledIso, timeStr: timeStr, sel: sel, selFull: selFull,
         legCount: legs.length, oddsNum: oddsNum,
         oddsStr: oddsNum ? (oddsNum > 0 ? '+' + oddsNum : '' + oddsNum) : '-',
-        stake: o.confirmed_stake || o.confirmedStake || 0, pnl: pnlScaled, result: result };
+        stake: o.confirmed_stake || o.confirmedStake || 0, pnl: pnlRaw, result: result };
     });
     rows.sort(function(a, b){
       let av, bv;
@@ -9169,7 +9168,7 @@
     }
     const subCls = subtotal > 0 ? 'positive' : subtotal < 0 ? 'negative' : 'neutral';
     out += '<tr style="border-top:2px solid var(--border); font-weight:600;">'
-      + '<td colspan="5" style="padding:3px 8px; text-align:right; color:var(--text2);">Day net (settled here) &mdash; matches header:</td>'
+      + '<td colspan="5" style="padding:3px 8px; text-align:right; color:var(--text2);">Day total (gross PX, settled here):</td>'
       + '<td style="padding:3px 8px; text-align:right;" class="' + subCls + '">' + fmtPnl(subtotal) + '</td>'
       + '<td></td></tr>';
     out += '</table>';
@@ -9272,17 +9271,10 @@
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
       }
-      // Anchor the chart total to the authoritative account-level net (the same
-      // accountPnL the header shows = realized net after PX fees). The /daily-pnl
-      // sum is GROSS — pre-fees plus some reconstruction drift — so it overstates
-      // the true net (~$24.9K vs ~$18K). Scale daily P&L uniformly: bars keep
-      // their shape, cumulative reconciles to reality. (Operator decision
-      // 2026-06-05; per-fill drill-down rows stay at their raw PX values.)
-      const _dvGross = _dvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
-      if (window._accountPnL != null && isFinite(window._accountPnL) && _dvGross !== 0) {
-        const _dvScale = window._accountPnL / _dvGross;
-        if (_dvScale > 0 && isFinite(_dvScale)) { window._dvScale = _dvScale; for (const k in byDay) byDay[k].pnl *= _dvScale; }
-      }
+      // 2026-06-09: show GROSS PX P&L everywhere (no fees on these wagers, per
+      // operator). The /daily-pnl sum IS the gross, so leave byDay[].pnl as-is —
+      // day/month totals and the per-parlay drill-down all read true gross wins.
+      // (Removed the prior account-net scaling, which deflated real winnings.)
     }
 
     const allDayKeys = Object.keys(byDay).sort();
@@ -9690,15 +9682,10 @@
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
       }
-      // Anchor day/month totals to the authoritative account-level net — same
-      // scaling as renderChartDailyVolume so the table totals match the chart.
-      // (Per-fill rows below stay at raw PX pnl, so a day's total won't exactly
-      // equal the sum of its fills — that gap is the fees/reconstruction drift.)
-      const _odvGross = _odvSeries.reduce((s, r) => s + (r.pnl || 0), 0);
-      if (window._accountPnL != null && isFinite(window._accountPnL) && _odvGross !== 0) {
-        const _odvScale = window._accountPnL / _odvGross;
-        if (_odvScale > 0 && isFinite(_odvScale)) { window._dvScale = _odvScale; for (const k in byDay) byDay[k].pnl *= _odvScale; }
-      }
+      // 2026-06-09: show GROSS PX P&L (no fees on these wagers, per operator).
+      // The /daily-pnl sum IS the gross — leave byDay[].pnl as-is so day/month
+      // totals and the per-parlay drill-down all read true gross wins, and the
+      // rows sum exactly to their day header. (Removed account-net scaling.)
     }
 
     // Roll days up into months (YYYY-MM)
