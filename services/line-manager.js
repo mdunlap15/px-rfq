@@ -1563,7 +1563,7 @@ async function seedAllLines() {
               // real DK number (scraper) as the basis; fall back to the raw
               // posted consensus the one-sided source already returned. HR only.
               let overBookPriceOverride = null;
-              if (propType === 'hitter_hr') {
+              if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs') {
                 let mirrorRawOver = oneSidedHit.rawImpliedOver;
                 let mirrorSource = oneSidedHit.source;
                 if (oneSidedHit.source !== 'dk-scraper-one-sided') {
@@ -1578,11 +1578,11 @@ async function seedAllLines() {
                     }
                   } catch (_) { /* DK scraper unavailable — use feed raw posted */ }
                 }
-                const sweet = (config.pricing && config.pricing.propHrBookMirrorSweetener != null)
-                  ? config.pricing.propHrBookMirrorSweetener : 0.005;
+                const sweet = (config.pricing && config.pricing.propBookMirrorSweetener != null)
+                  ? config.pricing.propBookMirrorSweetener : 0.005;
                 if (mirrorRawOver != null && mirrorRawOver > 0 && mirrorRawOver < 1) {
                   overBookPriceOverride = Math.max(0.005, Math.min(0.98, mirrorRawOver * (1 - sweet)));
-                  log.debug('Lines', `HR book-mirror ${playerName}: raw ${(mirrorRawOver * 100).toFixed(1)}% (${mirrorSource}) -> quote ${(overBookPriceOverride * 100).toFixed(1)}% (sweetener ${(sweet * 100).toFixed(2)}%)`);
+                  log.debug('Lines', `${propType} book-mirror ${playerName}: raw ${(mirrorRawOver * 100).toFixed(1)}% (${mirrorSource}) -> quote ${(overBookPriceOverride * 100).toFixed(1)}% (sweetener ${(sweet * 100).toFixed(2)}%)`);
                 }
               }
               for (const sel of sels) {
