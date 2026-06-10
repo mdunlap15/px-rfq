@@ -2848,6 +2848,13 @@ function shouldDecline(legs, parlayId) {
       const propBooks = lineInfo.propBooks || [];
       const trustedSet = config.pricing.propTrustedSingleBooks || [];
       const trustedAlone = both === 1 && propBooks.some(b => trustedSet.includes(String(b).toLowerCase()));
+      // One-sided carve-out: MLB hitter-binary props (HR / hits / total bases /
+      // RBI) are priced intentionally off a single posted side via the one-sided
+      // path (line-manager.js ~1503). TOA one-sided is overround-adjusted;
+      // DK-scraper one-sided is raw implied (leans on the longshot vig). Both
+      // synthesize a valid fairProb, so they must NOT be rejected on
+      // books_with_both_sides=0 — that gate is for 2-sided props only.
+      const oneSidedPriced = ['toa-one-sided', 'dk-scraper-one-sided'].includes(lineInfo.propSource);
       if (isKProp) {
         if (both < 2 && !trustedAlone) {
           return {
@@ -2864,7 +2871,7 @@ function shouldDecline(legs, parlayId) {
         // legitimate props have only Pinnacle or only DK with both sides.
         // The trustedAlone exception now applies here too — single-book
         // props from a trusted source price normally instead of declining.
-        if (both < propMinBooks && !trustedAlone) {
+        if (both < propMinBooks && !trustedAlone && !oneSidedPriced) {
           return {
             declined: true,
             reason: 'prop_low_confidence',
