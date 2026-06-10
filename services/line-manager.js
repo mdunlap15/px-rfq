@@ -1518,7 +1518,8 @@ async function seedAllLines() {
                   if (toaOs && toaOs.fairProbOver != null && toaOs.oneSidedSource === 'toa-one-sided') {
                     oneSidedHit = {
                       source: 'toa-one-sided',
-                      impliedOver: toaOs.fairProbOver,  // already overround-adjusted
+                      impliedOver: toaOs.fairProbOver,  // overround-adjusted (drives EV/risk)
+                      rawImpliedOver: (toaOs.oneSidedRawAvgImplied != null ? toaOs.oneSidedRawAvgImplied : toaOs.fairProbOver), // raw posted avg (book-mirror basis)
                       books: toaOs.books || [],
                       fetchedAt: toaOs.fetchedAt || Date.now(),
                     };
@@ -1536,7 +1537,8 @@ async function seedAllLines() {
                         const dkOver = dkOs.side === 'over' ? dkOs.impliedProb : (1 - dkOs.impliedProb);
                         oneSidedHit = {
                           source: 'dk-scraper-one-sided',
-                          impliedOver: dkOver,  // raw DK implied — no overround adjustment
+                          impliedOver: dkOver,  // raw DK implied
+                          rawImpliedOver: dkOver, // raw DK posted (book-mirror basis)
                           books: ['draftkings'],
                           fetchedAt: dkOs.fetchedAt || Date.now(),
                         };
@@ -1550,11 +1552,39 @@ async function seedAllLines() {
             }
 
             if (oneSidedHit) {
-              // Synthesize the 2-sided fair from the over-side estimate.
-              // Pricer applies standard parlay vig on top — same path as
-              // any other player_prop.
+              // fairOver = overround-adjusted estimate; drives EV/risk weighting.
               const fairOver = oneSidedHit.impliedOver;
               const fairUnder = 1 - fairOver;
+              // HR book-mirror (operator 2026-06-10): quote the OVER at the
+              // book's RAW posted price minus a small sweetener (sweeter for the
+              // counterparty), via bookPriceOverride — pricer quotes it directly,
+              // bypassing de-vig+vig, so we inherit the book's margin (minus the
+              // sweetener) instead of guessing a one-sided de-vig. Prefer the
+              // real DK number (scraper) as the basis; fall back to the raw
+              // posted consensus the one-sided source already returned. HR only.
+              let overBookPriceOverride = null;
+              if (propType === 'hitter_hr') {
+                let mirrorRawOver = oneSidedHit.rawImpliedOver;
+                let mirrorSource = oneSidedHit.source;
+                if (oneSidedHit.source !== 'dk-scraper-one-sided') {
+                  try {
+                    const dk = require('./dk-scraper');
+                    if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
+                      const dkOs = dk.lookupDkPlayerPropOneSidedFairProb(sportKey, propType, playerName, thisLine);
+                      if (dkOs) {
+                        const dkOver = dkOs.side === 'over' ? dkOs.impliedProb : (1 - dkOs.impliedProb);
+                        if (dkOver > 0 && dkOver < 1) { mirrorRawOver = dkOver; mirrorSource = 'dk-scraper-one-sided'; }
+                      }
+                    }
+                  } catch (_) { /* DK scraper unavailable — use feed raw posted */ }
+                }
+                const sweet = (config.pricing && config.pricing.propHrBookMirrorSweetener != null)
+                  ? config.pricing.propHrBookMirrorSweetener : 0.005;
+                if (mirrorRawOver != null && mirrorRawOver > 0 && mirrorRawOver < 1) {
+                  overBookPriceOverride = Math.max(0.005, Math.min(0.98, mirrorRawOver * (1 - sweet)));
+                  log.debug('Lines', `HR book-mirror ${playerName}: raw ${(mirrorRawOver * 100).toFixed(1)}% (${mirrorSource}) -> quote ${(overBookPriceOverride * 100).toFixed(1)}% (sweetener ${(sweet * 100).toFixed(2)}%)`);
+                }
+              }
               for (const sel of sels) {
                 const fairProb = sel.selection === 'over' ? fairOver : fairUnder;
                 _setSeedLine(sel.lineId, {
@@ -1578,6 +1608,9 @@ async function seedAllLines() {
                   fairProbOver: fairOver,
                   fairProbUnder: fairUnder,
                   booksWithBothSides: 0,
+                  // Book-mirror only on the OVER (the side bettors back); the
+                  // UNDER keeps the de-vig+vig path via fairUnder.
+                  bookPriceOverride: sel.selection === 'over' ? overBookPriceOverride : null,
                   propBooks: oneSidedHit.books,
                   propSource: oneSidedHit.source,
                   propFetchedAt: oneSidedHit.fetchedAt || Date.now(),

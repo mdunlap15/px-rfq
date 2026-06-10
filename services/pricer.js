@@ -876,6 +876,14 @@ function priceParlay(legs, opts = {}) {
 
   for (let i = 0; i < legStates.length; i++) {
     const s = legStates[i];
+    // Seeded book-price override (one-sided HR props): quote the book's posted
+    // price + sweetener directly, bypassing de-vig+vig — same mechanism as the
+    // series/golf overrides below. fairProb still drives EV/risk weighting.
+    if (s.lineInfo && s.lineInfo.bookPriceOverride != null) {
+      s.bookPriceOverride = s.lineInfo.bookPriceOverride;
+      fairProbs[i] = (s.lineInfo.fairProb != null) ? s.lineInfo.fairProb : s.lineInfo.bookPriceOverride;
+      continue;
+    }
     // Sync-resolvable fair paths
     const seriesFair = getSeriesFairProb(s.lineInfo);
     if (seriesFair != null) {

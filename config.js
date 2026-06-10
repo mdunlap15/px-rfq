@@ -696,6 +696,13 @@ const config = {
     // de-vig confidence — single-book or near-single-book pricing is
     // just re-quoting that book's vigged line).
     propMinBooksWithBothSides: parseInt(process.env.PROP_MIN_BOOKS_WITH_BOTH_SIDES) || 3,
+    // Player-HR "book-mirror" sweetener: one-sided MLB hitter_hr props are
+    // quoted at the book's RAW posted over price minus this fraction (sweeter
+    // for the counterparty), via bookPriceOverride — no de-vig+vig. Prefer the
+    // real DK number (scraper) as the basis, fall back to the feed's raw posted
+    // consensus. Default 0.5% (operator 2026-06-10). Set 0 for a pure match.
+    propHrBookMirrorSweetener: process.env.PROP_HR_BOOK_MIRROR_SWEETENER !== undefined
+      ? parseFloat(process.env.PROP_HR_BOOK_MIRROR_SWEETENER) : 0.005,
     // Max distance (in stat units) the requested prop line can sit
     // from the primary line for that (player, propType) before we
     // decline. Default ±2 — restricts quoting to near-primary alts
