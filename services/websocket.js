@@ -82,6 +82,11 @@ function extractPlayerNameFromPropMarket(marketName) {
     /\s+(total\s+)?sog$/i,
     /\s+(total\s+)?saves?$/i,
     /\s+anytime\s+(goal|assist)\s*(scorer|recorder)?$/i,
+    // PX names the anytime-goalscorer market "<Player> To Score a Goal" — strip
+    // the FULL phrase before the bare goals pattern below, otherwise only the
+    // trailing " Goal" gets shaved and "<Player> To Score a" fails player
+    // matching. NHL goals props weren't registering at all (observed 2026-06-10).
+    /\s+to\s+score\s+(an?\s+)?goals?$/i,
     /\s+(total\s+)?goals?$/i,
     /\s+(total\s+)?(blocked\s+shots?|blocks?)$/i,
     /\s+(total\s+)?hits?$/i,
