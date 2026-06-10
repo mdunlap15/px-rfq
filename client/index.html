@@ -1121,24 +1121,9 @@
 
       <!-- ===================== SECTION: MARKET INTEL ===================== -->
       <div id="section-intel" class="section" style="display:none;">
-        <!-- Win-rate heatmap — promoted to top of Market Intel for quick scan -->
-        <div class="card">
-          <div class="card-header">
-            <span>Win Rate by Sport &amp; Leg Count</span>
-            <span style="display:flex; align-items:center; gap:12px;">
-              <span id="win-rate-heatmap-tf" style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                <button type="button" class="wrh-tf-btn" data-tf="session" onclick="setWinRateHeatmapTimeframe('session')" style="background:var(--accent); color:var(--text); border:0; padding:4px 10px; font-size:12px; cursor:pointer;">Session</button>
-                <button type="button" class="wrh-tf-btn" data-tf="24h" onclick="setWinRateHeatmapTimeframe('24h')" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:12px; cursor:pointer;">24h</button>
-                <button type="button" class="wrh-tf-btn" data-tf="7d" onclick="setWinRateHeatmapTimeframe('7d')" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:12px; cursor:pointer;">7d</button>
-                <button type="button" class="wrh-tf-btn" data-tf="30d" onclick="setWinRateHeatmapTimeframe('30d')" style="background:transparent; color:var(--text3); border:0; padding:4px 10px; font-size:12px; cursor:pointer;">30d</button>
-              </span>
-              <span id="win-rate-heatmap-summary" style="color: var(--text3); font-weight: 400; font-size: 14px;"></span>
-            </span>
-          </div>
-          <div class="card-body" id="win-rate-heatmap">
-            <div class="empty-state"><div class="icon">-</div><div>Need quoted &amp; matched parlays to compare</div></div>
-          </div>
-        </div>
+        <!-- Win Rate by Sport & Leg Count card removed 2026-06-10 (operator: unused).
+             renderWinRateHeatmap() + setWinRateHeatmapTimeframe() left as dead-code
+             no-ops (the render fn early-returns on the missing #win-rate-heatmap el). -->
 
         <div class="card">
           <div class="card-header">
