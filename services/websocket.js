@@ -1596,6 +1596,19 @@ async function handleRFQ(data) {
         updateRfqOutcome(parlayId, 'submit_error', err.message);
         offerErrors.unshift({ error: err.message, time: new Date().toISOString(), parlayId, stack: err.stack?.split('\n')[1]?.trim() });
         if (offerErrors.length > 50) offerErrors.pop();
+        // Per-combo PX rejection counter (SGP roadmap invariant 7). New
+        // correlated combos collapse fair probs ABOVE the naive product —
+        // the exact shape PX has rejected on team lines with "invalid
+        // estimated prices". A silent rejection pattern would look like
+        // zero demand while making validation gates unreachable; count it
+        // per combo so /sgp-experiments surfaces it from quote one.
+        const combo = result && result.meta && result.meta.sgpCombo;
+        if (combo) {
+          _pxSubmitErrorsByCombo[combo] = (_pxSubmitErrorsByCombo[combo] || 0) + 1;
+          if (/invalid.+price|estimated/i.test(err.message || '')) {
+            log.warn('RFQ', `PX rejected ${combo} offer (possible price-model rejection): ${err.message}`);
+          }
+        }
       });
     } else {
       rfqStages.noCallback++;
@@ -2318,6 +2331,11 @@ const _confirmStallMinOffers = Number(process.env.WS_CONFIRM_STALL_MIN_OFFERS) |
 let _lastConfirmEventAt = Date.now();
 let _offersSinceConfirmEvent = 0;
 
+// Per-sgpCombo PX submit-error counts (SGP roadmap invariant 7) — surfaced
+// via getPxSubmitErrorsByCombo for /sgp-experiments.
+const _pxSubmitErrorsByCombo = {};
+function getPxSubmitErrorsByCombo() { return { ..._pxSubmitErrorsByCombo }; }
+
 // Confirm-outcome telemetry. Every price.confirm.new is tallied by outcome so
 // confirm→fill conversion is OBSERVABLE in real time (GET /confirm-activity)
 // instead of inferred from the DB after the fact. The 'error' bucket is the
@@ -2843,6 +2861,7 @@ module.exports = {
   getReceivedRfqStats,
   getQuoteCoverageStats,
   getConfirmActivity,
+  getPxSubmitErrorsByCombo,
   _classifyMlbProp: classifyMlbProp, // exposed for /prop-opportunity sanity testing
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing

@@ -1374,16 +1374,61 @@ function priceParlay(legs, opts = {}) {
     _eventCounts[eid] = (_eventCounts[eid] || 0) + 1;
   }
   const isSGPParlay = Object.values(_eventCounts).some(c => c >= 2);
-  // Opposing-pitcher K-prop SGPs (kprop_kprop) are functionally
-  // independent — two pitchers in the same game throw to different
-  // batters and their K-counts barely correlate. Books (DK in
-  // particular) treat them as independent and apply only normal vig,
-  // not SGP-widened vig. Without this carve-out we offer ~80 American
-  // odds points tighter than DK on the same combo (operator-flagged
-  // 2026-04-27, Boyd + Vasquez K-prop SGP example: DK +395 vs ours
-  // +314). Suppress sgpVigMult for kprop_kprop so per-leg vig stays at
-  // the normal prop floor (3%) instead of widening to 4.2%.
-  const skipSgpVig = (opts.sgpCombo === 'kprop_kprop');
+
+  // ---- NESTED IMPLICATION DETECTION (SGP roadmap Stage 1) ----
+  // Re-derived from LEG SHAPE (never from opts) so the confirm-path
+  // reprice — which calls priceParlay(legs) with no opts — computes the
+  // identical fair prob (confirm-symmetry invariant). For each detected
+  // pair, the exact joint is P(strong leg): expressed as a fair multiplier
+  // of 1/p_weak, applied to fairParlayProb below and folded into
+  // sgpFairMultiplier so vigFair + per-leg alignment mirror it.
+  let nestedFairMultiplier = 1;
+  let nestedPairCount = 0;
+  if (isSGPParlay) {
+    const usedIdx = new Set();
+    for (let i = 0; i < pricedLegs.length; i++) {
+      if (usedIdx.has(i)) continue;
+      for (let j = i + 1; j < pricedLegs.length; j++) {
+        if (usedIdx.has(j)) continue;
+        const m = matchNestedPair(pricedLegs[i].lineInfo, pricedLegs[j].lineInfo);
+        if (!m) continue;
+        const strongLeg = (m.strong === pricedLegs[i].lineInfo) ? pricedLegs[i] : pricedLegs[j];
+        const weakLeg = (m.strong === pricedLegs[i].lineInfo) ? pricedLegs[j] : pricedLegs[i];
+        // Feed-consistency guard: implication forces P(strong) ≤ P(weak).
+        // Books inverted by more than 8pp = a feed is wrong — fail closed
+        // rather than quote on bad data. (Small inversions are tolerated
+        // and resolve conservatively: collapsing divides out p_weak, so a
+        // too-low p_weak SHORTENS our quote — the safe direction.)
+        if (strongLeg.fairProb > weakLeg.fairProb + 0.08) {
+          log.warn('Pricing', `Nested pair feed inconsistency: P(${strongLeg.lineInfo.propType} ${strongLeg.lineInfo.line})=${(strongLeg.fairProb * 100).toFixed(1)}% > P(${weakLeg.lineInfo.propType} ${weakLeg.lineInfo.line})=${(weakLeg.fairProb * 100).toFixed(1)}% + 8pp for ${strongLeg.lineInfo.playerName} — declining`);
+          priceParlay._lastFailure = {
+            reason: 'nested pair inconsistent',
+            detail: `implication violated by feed: strong ${(strongLeg.fairProb * 100).toFixed(1)}% > weak ${(weakLeg.fairProb * 100).toFixed(1)}% + 8pp (${strongLeg.lineInfo.playerName})`,
+            blockerLeg: { team: strongLeg.lineInfo.teamName, market: strongLeg.lineInfo.marketType, line: strongLeg.lineInfo.line, sport: strongLeg.lineInfo.sport },
+          };
+          return null;
+        }
+        if (weakLeg.fairProb > 0 && weakLeg.fairProb < 1) {
+          nestedFairMultiplier *= 1 / weakLeg.fairProb;
+          nestedPairCount++;
+          usedIdx.add(i); usedIdx.add(j);
+          break;
+        }
+      }
+    }
+  }
+
+  // SGP vig-multiplier suppression:
+  // - prop_nested pairs price EXACTLY (joint = strong leg) — the doubled
+  //   SGP vig exists to cover correlation UNCERTAINTY, of which these have
+  //   none. Detected from leg shape (confirm-symmetric). The weak leg's
+  //   normal per-leg vig still applies, making the quote slightly shorter
+  //   than a pure single-leg price — conservative by design.
+  // - kprop_kprop's old suppression is REMOVED (SGP roadmap Stage 0):
+  //   opposing-pitcher Ks share umpire zone, park K-factor, and weather —
+  //   the same common factors the SGP vig is there to cover. Leaving a
+  //   known-looser carve-out live hands attackers a preferred template.
+  const skipSgpVig = nestedPairCount > 0;
   const sgpVigMult = (isSGPParlay && !skipSgpVig)
     ? Math.max(1, config.pricing.sgpVigMultiplier || 1)
     : 1;
@@ -1573,6 +1618,15 @@ function priceParlay(legs, opts = {}) {
     log.debug('Pricing', `SGP correlation ${sgpCorrelationSign} — fair ${(before*100).toFixed(2)}% × ${sgpCorrelationFactor} = ${(fairParlayProb*100).toFixed(2)}%`);
   }
 
+  // Nested implication collapse: joint = P(strong) exactly, i.e. the weak
+  // leg's factor is divided out of the naive product. Detected above from
+  // leg shape; mirrored into sgpFairMultiplier below (vig alignment).
+  if (nestedFairMultiplier !== 1) {
+    const before = fairParlayProb;
+    fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * nestedFairMultiplier));
+    log.debug('Pricing', `Nested implication collapse (${nestedPairCount} pair${nestedPairCount > 1 ? 's' : ''}) — fair ${(before * 100).toFixed(2)}% × ${nestedFairMultiplier.toFixed(4)} = ${(fairParlayProb * 100).toFixed(2)}% (joint = strong leg)`);
+  }
+
   // Apply vig to ODDS (multiplicative) rather than probability (additive).
   // This scales naturally: a 3% vig on -700 reduces the payout by 3%,
   // not by a fixed probability shift that distorts at extreme odds.
@@ -1732,7 +1786,8 @@ function priceParlay(legs, opts = {}) {
   // edge); post-fix offered tracks Fair × (1 - vig).
   const sgpFairMultiplier =
     (isKpropMlSameTeamSGP ? (1 + (config.pricing.sgpPropMlCorrBoost || 0)) : 1) *
-    sgpCorrelationFactor;
+    sgpCorrelationFactor *
+    nestedFairMultiplier;
   const vigFair = vigLegs.reduce((p, l) => p * l.fairProb, 1) * sgpFairMultiplier;
 
   // ---------------------------------------------------------------------
@@ -2201,6 +2256,14 @@ function priceParlay(legs, opts = {}) {
   const candidateCaps = [config.pricing.maxRiskPerParlay];
   if (parlayHasSeries) candidateCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
   if (parlayHasProp) candidateCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
+  // Experimental-SGP tier (SGP roadmap): combos under small-test rollout get
+  // a much tighter per-ticket cap. Keyed on shape-detected nested pairs OR
+  // the classified combo, so the cap applies even if classification is
+  // bypassed. min() with the caps above — existing parlay types unaffected.
+  const _expCombos = config.pricing.experimentalSgpCombos;
+  if ((nestedPairCount > 0) || (opts.sgpCombo && _expCombos && _expCombos.has(opts.sgpCombo))) {
+    candidateCaps.push(config.pricing.maxRiskSgpExperimental || 15);
+  }
   const maxRisk = Math.min(...candidateCaps);
 
   // PX expects positive bettor-side American odds in offers (e.g., +215).
@@ -2531,6 +2594,11 @@ function priceParlay(legs, opts = {}) {
       // allow-listed; it flows through opts so priceParlay can record it.
       sgpCombo: opts.sgpCombo || null,
       sgpVigMultiplier: isSGP ? sgpVigMult : 1,
+      // Nested-implication collapse (Stage 1): pairs detected from leg
+      // shape and the fair multiplier applied (1/p_weak per pair). >1 means
+      // joint was collapsed to the strong leg(s) — exact pricing.
+      nestedPairs: nestedPairCount || 0,
+      nestedFairMultiplier: nestedFairMultiplier !== 1 ? Math.round(nestedFairMultiplier * 10000) / 10000 : 1,
       // Correlation adjustment applied to the joint fair prob for this SGP
       // before vig. Null if not an SGP or not a recognized combo. Stored
       // so /sgp-stats + order audits can split acceptance + ROI by
@@ -2610,6 +2678,93 @@ function priceParlay(legs, opts = {}) {
 /**
  * Quick check if we should even attempt to price this parlay.
  */
+// ---------------------------------------------------------------------------
+// NESTED IMPLICATION PAIRS (SGP roadmap Stage 1 — exact pricing, zero
+// dependence risk).
+//
+// Two same-player, same-game prop legs where one outcome logically IMPLIES
+// the other have joint probability EXACTLY equal to the implying ("strong")
+// leg's probability: P(A ∧ B) = P(A) when A ⊆ B. No correlation estimation,
+// no model risk — arithmetic. Priced naively as a product these are the
+// single most exploitable SGP shape (e.g. goalscorer + SoT1+ as a product
+// gifts ~+14% bettor ROI), so the table is also a trap-closer.
+//
+// SIDE-KEYED and OVER-ONLY by design: only matching-'over' tuples that
+// satisfy a whitelisted implication qualify. Everything else — under
+// pairs, mixed sides (negatively linked!), non-listed stat pairs — stays
+// under the existing same-player block. K-prop ladders are excluded so
+// the same-pitcher rule's territory is untouched.
+//
+// Launch-gated: pairs only quote when 'prop_nested' is present in
+// SGP_ALLOWED_COMBOS (env, operator-controlled — NOT auto-included).
+// ---------------------------------------------------------------------------
+const _NESTED_LADDER_EXCLUDED_PROPTYPES = new Set(['pitcher_strikeouts']);
+// Cross-stat implication rules: strong propType ⇒ weak propType, with a
+// line condition (ls = strong leg line, lw = weak leg line; anytime YES
+// markets register at 0.5).
+const _NESTED_CROSS_RULES = [
+  // A goal IS a shot on target (Opta convention; own goals excluded from
+  // both player-GS and the scorer's SoT, so the implication is clean).
+  // GS does NOT imply SoT 2+ (the goal contributes exactly one SoT).
+  { sport: (s) => s === 'soccer' || s.startsWith('soccer_'), strong: 'goalscorer', weak: 'sot_1', cond: () => true },
+  { sport: (s) => s === 'soccer' || s.startsWith('soccer_'), strong: 'sot_2', weak: 'sot_1', cond: () => true },
+  // NHL points = goals + assists: N goals (or assists) ⇒ ≥N points.
+  { sport: (s) => s === 'icehockey_nhl', strong: 'goals', weak: 'points', cond: (ls, lw) => ls >= lw },
+  { sport: (s) => s === 'icehockey_nhl', strong: 'assists', weak: 'points', cond: (ls, lw) => ls >= lw },
+  // MLB: a HR is a hit; a HR credits the batter ≥1 RBI; a HR is 4 total bases.
+  { sport: (s) => s === 'baseball_mlb', strong: 'hitter_hr', weak: 'hitter_hits', cond: (ls, lw) => ls === 0.5 && lw === 0.5 },
+  { sport: (s) => s === 'baseball_mlb', strong: 'hitter_hr', weak: 'hitter_rbi_runs', cond: (ls, lw) => ls === 0.5 && lw === 0.5 },
+  { sport: (s) => s === 'baseball_mlb', strong: 'hitter_hr', weak: 'hitter_total_bases', cond: (ls, lw) => ls === 0.5 && lw <= 3.5 },
+  // NBA/WNBA: M made threes ⇒ ≥3M points. Over ls threes = ≥ceil(ls) makes.
+  { sport: (s) => s === 'basketball_nba' || s === 'basketball_wnba', strong: 'threes_made', weak: 'points', cond: (ls, lw) => lw <= 3 * Math.ceil(ls) - 0.5 },
+];
+
+function _nestedNormPlayer(s) {
+  return (s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[.'`]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Match two lineInfos against the implication table. Returns
+ * { strong, weak } (lineInfo refs) when one leg implies the other, else
+ * null. Requirements enforced here: same pxEventId, same normalized
+ * player, BOTH selections 'over' (YES-style one-sided props register as
+ * over), both player_* markets.
+ */
+function matchNestedPair(a, b) {
+  if (!a || !b) return null;
+  if (!/^player_/.test(a.marketType || '') || !/^player_/.test(b.marketType || '')) return null;
+  if (!a.pxEventId || a.pxEventId !== b.pxEventId) return null;
+  if ((a.selection || '') !== 'over' || (b.selection || '') !== 'over') return null;
+  const pa = _nestedNormPlayer(a.playerName || a.teamName);
+  const pb = _nestedNormPlayer(b.playerName || b.teamName);
+  if (!pa || pa !== pb) return null;
+  const sport = a.sport || a.oddsApiSport || '';
+  if (sport !== (b.sport || b.oddsApiSport || '')) return null;
+  const ta = a.propType, tb = b.propType;
+  if (!ta || !tb) return null;
+  const la = a.line != null ? a.line : 0.5;
+  const lb = b.line != null ? b.line : 0.5;
+  // Same-stat ladder: higher over-line implies lower over-line.
+  if (ta === tb && !_NESTED_LADDER_EXCLUDED_PROPTYPES.has(ta)) {
+    if (la > lb) return { strong: a, weak: b };
+    if (lb > la) return { strong: b, weak: a };
+    return null; // identical line = duplicate leg, not a ladder
+  }
+  // Cross-stat rules, tried in both orientations.
+  for (const r of _NESTED_CROSS_RULES) {
+    if (!r.sport(sport)) continue;
+    if (ta === r.strong && tb === r.weak && r.cond(la, lb)) return { strong: a, weak: b };
+    if (tb === r.strong && ta === r.weak && r.cond(lb, la)) return { strong: b, weak: a };
+  }
+  return null;
+}
+
+function _nestedCombosAllowed() {
+  return (config.pricing.sgpAllowedCombos || []).includes('prop_nested');
+}
+
 function shouldDecline(legs, parlayId) {
   // parlayId is OPTIONAL — only used by side-effect-free observability
   // hooks (e.g. SGP shadow logging). Pricing logic must NOT depend on it.
@@ -2754,13 +2909,25 @@ function shouldDecline(legs, parlayId) {
           const playerKey = sport + '|' + player;
           if (playerPropSeen[playerKey]) {
             const prev = playerPropSeen[playerKey];
-            return {
-              declined: true,
-              reason: 'prop_correlation_same_player',
-              detail: `Two prop legs on "${rawPlayer}" in same parlay (${prev.marketType}${prev.line != null ? ' ' + prev.line : ''} + ${mt}${lineInfo.line != null ? ' ' + lineInfo.line : ''}) — same-player props are correlated regardless of which stats they measure`,
-            };
+            // NESTED EXEMPTION (Stage 1): a whitelisted implication pair
+            // (e.g. goalscorer + SoT1+, HR + hit, points ladder) prices
+            // EXACTLY (joint = strong leg) — allow it through when the
+            // operator has enabled 'prop_nested' in SGP_ALLOWED_COMBOS.
+            // Anything not in the side-keyed table still declines here,
+            // including all under/mixed-side same-player pairs (the
+            // permanently-blocked negative-correlation class).
+            if (_nestedCombosAllowed() && matchNestedPair(prev, lineInfo)) {
+              // fall through — classifySgpCombo tags it 'prop_nested' and
+              // priceParlay collapses the pair to the strong leg.
+            } else {
+              return {
+                declined: true,
+                reason: 'prop_correlation_same_player',
+                detail: `Two prop legs on "${rawPlayer}" in same parlay (${prev.marketType}${prev.line != null ? ' ' + prev.line : ''} + ${mt}${lineInfo.line != null ? ' ' + lineInfo.line : ''}) — same-player props are correlated regardless of which stats they measure`,
+              };
+            }
           }
-          playerPropSeen[playerKey] = { marketType: mt, line: lineInfo.line };
+          playerPropSeen[playerKey] = lineInfo;
         }
       }
       // Same-game rule grouping — only build if we've actually seen a
@@ -2805,6 +2972,13 @@ function shouldDecline(legs, parlayId) {
           // combos (K + total, K + run-line, K + opposite-team ML) are
           // still declined by rule (d) with this same reason.
           if (group.props.every(li => li.marketType === 'player_strikeouts')) continue;
+          // NESTED EXEMPTION (Stage 1): exactly two same-player prop legs
+          // forming a whitelisted implication pair, with NO other legs on
+          // the same game, fall through to classifySgpCombo ('prop_nested',
+          // env-gated) + the exact-collapse pricing. Any extra same-game
+          // leg keeps the whole parlay declined here.
+          if (group.others.length === 0 && group.props.length === 2
+              && _nestedCombosAllowed() && matchNestedPair(group.props[0], group.props[1])) continue;
           const propLabels = group.props.map(li =>
             `${li.playerName || li.teamName || '?'} ${li.propType || li.marketType} ${li.selection || ''} ${li.line ?? ''}`.trim());
           const otherLabels = group.others.map(li =>
@@ -3073,13 +3247,19 @@ function shouldDecline(legs, parlayId) {
     const eid = l.lineInfo.pxEventId;
     if (!eid) continue;
     if (!byEvent[eid]) byEvent[eid] = [];
-    byEvent[eid].push({ market: l.lineInfo.marketType, team: l.lineInfo.teamName, home: l.lineInfo.homeTeam, away: l.lineInfo.awayTeam, sport: l.lineInfo.sport });
+    byEvent[eid].push({ market: l.lineInfo.marketType, team: l.lineInfo.teamName, home: l.lineInfo.homeTeam, away: l.lineInfo.awayTeam, sport: l.lineInfo.sport, li: l.lineInfo });
   }
   // Classify a 2-leg SGP group into a stable combo key. Returns null if
   // the group is 3+ legs or the market pair isn't a recognized combo
   // (e.g. spread+spread — blocked by duplicate rules anyway).
   const classifySgpCombo = (entries) => {
     if (entries.length !== 2) return null;
+    // Nested implication pair (Stage 1): two same-player prop legs from
+    // the side-keyed implication table. Checked FIRST so e.g. a soccer
+    // goalscorer+SoT pair never falls through to the generic key match.
+    if (entries[0].li && entries[1].li && matchNestedPair(entries[0].li, entries[1].li)) {
+      return 'prop_nested';
+    }
     const markets = entries.map(e => e.market).sort();
     const key = markets.join('_');
     // Only named combos users can opt in/out of via SGP_ALLOWED_COMBOS:
