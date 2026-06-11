@@ -175,6 +175,37 @@ async function syncConfig(matchups) {
   return { upserted: deduped.length, duplicatesCollapsed: dupCount };
 }
 
+// Remove config rows for events no longer in the current matchup set — i.e.
+// the previous tournament's matchups. Without this, golf_single_leg_config
+// accumulated stale lines every week and the tab filled with dead, unpriced
+// matchups from past events (operator report 2026-06-11: Canadian Open tab
+// "not updating", buried under ~115 stale Memorial rows). GUARDED: skips the
+// purge entirely if discovery returned no events (a transient DataGolf/PX
+// hiccup), so a momentary empty set can never wipe the table. cancelStale()
+// runs first and cancels wagers for departed lines, so no active wager is
+// orphaned by this delete.
+async function purgeStaleConfig(currentEventIds) {
+  const sb = db.getClient && db.getClient();
+  if (!sb) return { purged: 0 };
+  const ids = Array.from(currentEventIds || []).filter((x) => x != null);
+  if (!ids.length) return { purged: 0, skipped: 'empty current event set' };
+  // Only purge rows BOTH (a) not in the current event set AND (b) untouched in
+  // the last 6h. syncConfig re-upserts every current line each tick (fresh
+  // updated_at), so a matchup that briefly drops out of one discovery tick is
+  // protected — its operator settings (enabled/risk) are never wiped by a
+  // transient miss. Past-tournament rows are days stale and clear cleanly.
+  const cutoff = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+  const { data, error } = await sb.from(TBL_CONFIG)
+    .delete()
+    .not('event_id', 'in', '(' + ids.join(',') + ')')
+    .lt('updated_at', cutoff)
+    .select('line_id');
+  if (error) { log.warn('GolfSL', 'purgeStaleConfig: ' + error.message); return { purged: 0, error: error.message }; }
+  const purged = (data || []).length;
+  if (purged > 0) log.info('GolfSL', `purgeStaleConfig: removed ${purged} stale config row(s) from past tournaments`);
+  return { purged };
+}
+
 // ---------------------------------------------------------------------------
 // Pricing — get fair_prob for a line, then compute offered via the same
 // path the RFQ pricer uses for single-leg golf matchups.
@@ -815,6 +846,11 @@ async function _workerTick() {
     const currentLineIds = new Set();
     for (const m of matchups) for (const s of m.sides) currentLineIds.add(s.line_id);
     await cancelStale(currentLineIds);
+    // Purge config rows for past tournaments (events no longer offered) so the
+    // tab shows only the current event's matchups. cancelStale ran first.
+    const currentEventIds = new Set();
+    for (const m of matchups) currentEventIds.add(m.event_id);
+    await purgeStaleConfig(currentEventIds);
     await refreshDrift();
     if (_workerAutopostEnabled()) {
       await postEnabled(); // re-post anything cancelled-for-drift or newly enabled
@@ -847,6 +883,7 @@ module.exports = {
   isEnabled,
   discoverGolfMatchups,
   syncConfig,
+  purgeStaleConfig,
   loadState,
   postEnabled,
   cancelAll,

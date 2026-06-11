@@ -5785,7 +5785,10 @@ function startStatusServer() {
     try {
       const matchups = await m.discoverGolfMatchups();
       const sync = await m.syncConfig(matchups);
-      res.json({ ok: true, matchups: matchups.length, ...sync });
+      const currentEventIds = new Set();
+      for (const mm of matchups) currentEventIds.add(mm.event_id);
+      const purge = await m.purgeStaleConfig(currentEventIds);
+      res.json({ ok: true, matchups: matchups.length, ...sync, ...purge });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
   // Config bulk update: body { updates: [{line_id, risk_amount?, enabled?, notes?}, ...] }
