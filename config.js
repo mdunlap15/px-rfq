@@ -550,6 +550,19 @@ const config = {
     // by more than this fraction from the original quote, reject the confirm.
     confirmationDriftThreshold: parseFloat(process.env.CONFIRMATION_DRIFT_THRESHOLD) || 0.03,
     offerValidSeconds: parseInt(process.env.OFFER_VALID_SECONDS) || 60,
+    // Prop-containing parlays get a shorter offer validity: prop prices move
+    // on lineup/usage news faster than team lines, and 60s of free option
+    // time on a prop quote is a pick-off window. (SGP roadmap Stage 0.)
+    offerValidSecondsProp: parseInt(process.env.OFFER_VALID_SECONDS_PROP) || 30,
+    // Prop-leg staleness gate (replaces the hardcoded 15-min STALE_MS in
+    // pricer's prop_stale check). Arithmetic behind the default:
+    // lineInfo.propFetchedAt is a SEED-TIME snapshot of the TOA prop-cache
+    // fetch time, so worst-case age on perfectly healthy plumbing =
+    // TOA_PROP_TTL (150s) + line-refresh interval (120s) + seed duration
+    // (~90s) ≈ 360s. 420s = that + headroom; anything below ~360s declines
+    // healthy RFQs. Ships as a package with the TOA prop cadence cut
+    // (TOA_PROP_TTL_SECONDS=150 / TOA_PROP_REFRESH_AHEAD_SECONDS=90).
+    stalePropSeconds: parseInt(process.env.STALE_PROP_SECONDS) || 420,
     maxExposurePerTeam: parseFloat(process.env.MAX_EXPOSURE_PER_TEAM) || 5000,
     // Raw vs probability-weighted per-team exposure measurement (PRIMARY cap).
     //
@@ -836,6 +849,29 @@ const config = {
       ? process.env.SGP_ALLOWED_COMBOS
       : 'spread_total'
     ).split(',').map(s => s.trim()).filter(Boolean),
+    // ---- SGP EXPERIMENTAL TIER (correlated-prop combo rollout) ----
+    // New, more-correlated combo classes (starting with 'prop_nested')
+    // launch in a small-test tier: a much tighter per-ticket cap, a daily
+    // filled-risk budget per class, and a weekly realized-P&L stop-loss
+    // that auto-darks the class at runtime. Existing parlay types are
+    // untouched by construction: all risk caps compose by min() and these
+    // apply only to parlays whose sgpCombo is in experimentalSgpCombos.
+    // A class still ALSO needs its SGP_ALLOWED_COMBOS entry to quote at
+    // all — experimental membership only adds the tighter limits.
+    experimentalSgpCombos: new Set((process.env.SGP_EXPERIMENTAL_COMBOS != null
+      ? process.env.SGP_EXPERIMENTAL_COMBOS
+      : 'prop_nested'
+    ).split(',').map(s => s.trim()).filter(Boolean)),
+    maxRiskSgpExperimental: parseFloat(process.env.MAX_RISK_SGP_EXPERIMENTAL) || 15,
+    sgpExperimentDailyBudget: parseFloat(process.env.SGP_EXPERIMENT_DAILY_BUDGET) || 150,
+    sgpExperimentWeeklyStopLoss: parseFloat(process.env.SGP_EXPERIMENT_WEEKLY_STOP_LOSS) || 300,
+    // Script-aware per-game prop exposure caps (SGP roadmap Stage 0 item 4):
+    // (a) per-(pxEventId, team, side) prop risk — bounds one-directional
+    //     game-script stacking across DIFFERENT players;
+    // (b) total prop risk per game regardless of direction — the blunt
+    //     bound no script mapping can evade.
+    maxPropTeamSideRisk: parseFloat(process.env.MAX_PROP_TEAM_SIDE_RISK) || 300,
+    maxPropRiskPerGame: parseFloat(process.env.MAX_PROP_RISK_PER_GAME) || 600,
     // Multiplier applied to per-leg effective vig when pricing an SGP.
     // 2.0 = double the normal vig on each leg of the SGP. Tunable while
     // we gather acceptance + ROI data on re-enabled SGPs.

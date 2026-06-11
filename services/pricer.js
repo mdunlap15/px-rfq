@@ -2281,8 +2281,13 @@ function priceParlay(legs, opts = {}) {
     return { line_id: leg.lineId, odds: decimalToAmerican(1 / legImplied) };
   });
 
-  // valid_until in nanoseconds
-  const validUntil = Math.floor((Date.now() / 1000 + config.pricing.offerValidSeconds) * 1e9);
+  // valid_until in nanoseconds. Prop-containing parlays get the shorter
+  // validity window (default 30s vs 60s) — prop prices move on lineup/usage
+  // news and a long-lived quote is free option time for the bettor.
+  const offerValidSecs = parlayHasProp
+    ? (config.pricing.offerValidSecondsProp || config.pricing.offerValidSeconds)
+    : config.pricing.offerValidSeconds;
+  const validUntil = Math.floor((Date.now() / 1000 + offerValidSecs) * 1e9);
 
   // Compose phase-level durations for latency instrumentation. Rounded
   // to 0.01ms — sub-microsecond noise isn't useful here.
@@ -2413,6 +2418,10 @@ function priceParlay(legs, opts = {}) {
       _timings,
       abArm,
       v2Used,
+      // Quote timestamp — consumed by validateForConfirmation's bounded
+      // fail-open (a reprice failure only rides the original quote when the
+      // quote is younger than the staleness budget for its leg types).
+      quotedAtMs: Date.now(),
       _v2Shadow: _v2Shadow ? {
         v1American: _v2Shadow.v1.offeredAmericanOdds,
         v2American: _v2Shadow.v2.offeredAmericanOdds,
@@ -2903,14 +2912,16 @@ function shouldDecline(legs, parlayId) {
           };
         }
       }
-      // (c) Stale prop data (>15 min old).
-      const STALE_MS = 15 * 60 * 1000;
+      // (c) Stale prop data. Configurable via STALE_PROP_SECONDS (default
+      // 420s — see config.js for the seed-snapshot arithmetic that floors
+      // the safe value; ships as a package with the TOA prop cadence cut).
+      const STALE_MS = (config.pricing.stalePropSeconds || 420) * 1000;
       if (lineInfo.propFetchedAt && (Date.now() - lineInfo.propFetchedAt) > STALE_MS) {
-        const ageMin = Math.round((Date.now() - lineInfo.propFetchedAt) / 60000);
+        const ageMin = Math.round((Date.now() - lineInfo.propFetchedAt) / 6000) / 10;
         return {
           declined: true,
           reason: 'prop_stale',
-          detail: `${playerLabel} ${propLabel} ${lineInfo.line}: prop data ${ageMin} min old (>15 min)`,
+          detail: `${playerLabel} ${propLabel} ${lineInfo.line}: prop data ${ageMin} min old (>${Math.round(STALE_MS / 60000 * 10) / 10} min)`,
         };
       }
     }
@@ -3355,29 +3366,47 @@ async function validateForConfirmation(parlayId, originalMeta) {
   const legs = originalMeta.legs.map(l => l.lineId);
   const currentPricing = await priceParlay(legs);
   if (!currentPricing) {
-    // Could not reprice. Common cause: line-index churn between quote and
-    // confirm — a leg's lineId dropped out of the index because the next
-    // refresh found it momentarily below the minBooks gate (especially for
-    // prop legs with thin TOA coverage). The leg lookup at priceParlay-
-    // time now returns null and we decline.
+    // Could not reprice. Common benign cause: line-index churn between
+    // quote and confirm — a leg's lineId dropped out of the index because
+    // the next refresh found it momentarily below the minBooks gate
+    // (especially prop legs with thin TOA coverage). Walking away in that
+    // case cost us won auctions (2026-05-12: a 4-leg RBI parlay was quoted,
+    // won, then walked away from 3 times in 44 seconds), so we accept on
+    // the original quote for it.
     //
-    // BEFORE this fix we rejected confirmations in this case, walking
-    // away from auctions we had already won on price. PX then matched
-    // to the next-best SP. Diagnosed 2026-05-12 after a 4-hour fill
-    // drought: a 4-leg RBI prop parlay was quoted, won, then walked
-    // away from 3 times in 44 seconds because one of its prop legs
-    // churned out of the index.
-    //
-    // The fix: when we can't reprice, ACCEPT the parlay based on the
-    // original quote. Drift check is best-effort — if we can't reprice,
-    // honor our original quoted price rather than walking away. We
-    // already committed by quoting; the bettor and PX trusted our
-    // number; refusing now is worse than the missed drift coverage.
+    // But the original fix was UNCONDITIONAL accept — which is also a
+    // ride-the-stale-quote channel: ANY reprice failure (stale odds, event
+    // started, lineup-flipped pricing failures) got accepted at the original
+    // number with no drift coverage (SGP roadmap Stage 0, attack 2A).
+    // Now cause-and-time-bounded: accept ONLY when
+    //   (a) the failure is transient index churn ('unknown line' — the leg
+    //       priced fine at quote time and dropped from the index), AND
+    //   (b) the quote is younger than the staleness budget for its leg mix
+    //       (props: stalePropSeconds; team-only: stalePriceMinutes).
+    // Every other reprice failure fails CLOSED (reject).
     const lastFailure = priceParlay._lastFailure || null;
-    log.warn('Pricing', `Could not reprice at confirm — accepting based on original quote. Last priceParlay failure: ${lastFailure ? JSON.stringify(lastFailure).substring(0, 200) : 'unknown'}`);
+    const failReason = lastFailure && lastFailure.reason;
+    const isIndexChurn = failReason === 'unknown line';
+    const hasPropLeg = (originalMeta.legs || []).some(l => /^player_/.test(l.market || l.marketType || ''));
+    const budgetMs = hasPropLeg
+      ? (config.pricing.stalePropSeconds || 420) * 1000
+      : (config.pricing.stalePriceMinutes || 15) * 60 * 1000;
+    // Quotes from before this deploy carry no quotedAtMs — treat as within
+    // budget (offer validity already bounds their age to ≤60s).
+    const quoteAgeMs = originalMeta.quotedAtMs ? (Date.now() - originalMeta.quotedAtMs) : null;
+    const withinBudget = quoteAgeMs == null || quoteAgeMs <= budgetMs;
+    if (isIndexChurn && withinBudget) {
+      log.warn('Pricing', `Could not reprice at confirm (index churn) — accepting on original quote (age ${quoteAgeMs == null ? 'unknown' : Math.round(quoteAgeMs / 1000) + 's'})`);
+      return {
+        valid: true,
+        reason: 'reprice unavailable (index churn); honoring original quote',
+        currentPricing: null,
+      };
+    }
+    log.warn('Pricing', `Could not reprice at confirm — REJECTING (failure=${failReason || 'unknown'}, churn=${isIndexChurn}, quoteAge=${quoteAgeMs == null ? '?' : Math.round(quoteAgeMs / 1000) + 's'}, budget=${Math.round(budgetMs / 1000)}s)`);
     return {
-      valid: true,
-      reason: 'reprice unavailable; honoring original quote',
+      valid: false,
+      reason: `reprice failed (${failReason || 'unknown'}) — fail closed`,
       currentPricing: null,
     };
   }

@@ -1735,19 +1735,34 @@ async function handleConfirm(data) {
     const origLegs = originalOrder.legs || originalOrder.meta?.legs || [];
     const legsForCheck = origLegs.map(l => ({ ...l, lineInfo: l, team: l.team || l.teamName, fairProb: l.fairProb }));
 
-    // Series-containing parlays get a tighter per-parlay cap — mirrors
-    // what we set on the offer's max_risk in priceParlay so PX shouldn't
-    // confirm a stake above this, but re-check defensively in case of
-    // race / sandbox permissiveness.
+    // Per-parlay caps, mirrored from priceParlay's candidateCaps logic so
+    // the confirm path enforces exactly what the offer's max_risk promised.
+    // PX has documentedly ignored offer-level max_risk before (a $2,447
+    // order confirmed against max_risk=500) — this re-check is the only
+    // enforcement we fully control. Smallest applicable cap wins, same as
+    // the offer side: series cap, prop cap ($50), and the experimental-SGP
+    // tier cap for combos under small-test rollout (SGP roadmap Stage 0).
     const parlayHasSeries = legsForCheck.some(l =>
       typeof (l.market || l.marketType) === 'string' &&
       (l.market || l.marketType).startsWith('series_')
     );
-    const maxRisk = parlayHasSeries
-      ? (config.pricing.maxSeriesRiskPerParlay || 500)
-      : config.pricing.maxRiskPerParlay;
+    const parlayHasPropLeg = legsForCheck.some(l =>
+      /^player_/.test(String(l.market || l.marketType || ''))
+    );
+    const confirmCaps = [config.pricing.maxRiskPerParlay];
+    if (parlayHasSeries) confirmCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
+    if (parlayHasPropLeg) confirmCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
+    const metaCombo = originalOrder.meta && originalOrder.meta.sgpCombo;
+    const isExperimentalCombo = metaCombo
+      && config.pricing.experimentalSgpCombos
+      && config.pricing.experimentalSgpCombos.has(metaCombo);
+    if (isExperimentalCombo) confirmCaps.push(config.pricing.maxRiskSgpExperimental || 15);
+    const maxRisk = Math.min(...confirmCaps.filter(c => c > 0));
     if (maxRisk > 0 && ourRisk > maxRisk) {
-      const capLabel = parlayHasSeries ? 'series per-parlay cap' : 'per-parlay risk limit';
+      const capLabel = isExperimentalCombo ? 'experimental SGP cap'
+        : parlayHasPropLeg ? 'prop per-parlay cap'
+        : parlayHasSeries ? 'series per-parlay cap'
+        : 'per-parlay risk limit';
       log.warn('Confirm', `Rejecting: our risk $${ourRisk.toFixed(2)} exceeds ${capLabel} $${maxRisk.toFixed(0)} (stake=$${confirmedStake}, odds=${confirmedOdds})`);
       orderTracker.recordRejection(parlayId, `risk $${ourRisk.toFixed(0)} > max $${maxRisk}`);
       orderTracker.recordExposureRejection(parlayId, ourRisk, capLabel, [{ team: 'parlay-cap', wouldBe: ourRisk, limit: maxRisk }]);
