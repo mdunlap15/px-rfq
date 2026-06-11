@@ -101,6 +101,22 @@ If a username appears in both lists, `AUTH_VIEWERS` wins (more restrictive); a w
 
 - **SharpAPI** (`api.sharpapi.io`): Primary source for NBA, MLB, NHL, tennis, soccer. Free tier covers DraftKings + FanDuel
 - **The Odds API** (`api.the-odds-api.com`): Fallback for NCAAB. Also used on-demand for alternate spread/total lines (Pinnacle, DK, FD)
+- **DK World Cup props scraper** (`scripts/dk-wc-props.js`): NEITHER API above carries
+  DraftKings for soccer player props (shots/SoT/goalscorer/assists — BetRivers/FanDuel only,
+  and they diverge badly from DK). This scraper pulls them straight off the DK site:
+  `node scripts/dk-wc-props.js <away>-vs-<home>/<eventId> [outFile]` → JSON
+  `{goalscorer:[{player,seo,odds}], sot:[{player,seo,one,two}], assists:[{player,seo,odds}]}`.
+  Find event slugs/ids with `scripts/_dk_find_events.js` (lists `/event/...` links from DK's
+  `world-cup-2026` league page). How it works: DK's JSON API is Akamai-gated (403 to vanilla
+  clients) and CORS-locked, so headless Puppeteer loads the event page to pass the JS
+  challenge, then passively intercepts the `eventSubcategory/v1/markets` XHRs the SPA fires;
+  prop tabs lazy-load, so it clicks each subcategory `<h2>` by exact title (clicking the
+  container div does nothing). Subcategory ids (per-league, may rotate — re-recon if a market
+  comes back empty): goalscorer 16604, SoT 16861, shots 16868, assists 16863. Odds are
+  American strings normalized to ASCII (DK serves U+2212 minus); `seo` carries the accented
+  real name (e.g. "Vinícius Júnior") — use it for name-matching to PX. Ground-truth validated
+  2026-06-11: 254/256 exact vs hand-typed DK boards (the 2 diffs were live line movement).
+  Used by the WC NO-posting routine (anytime goalscorer / 1+ & 2+ SoT / 1+ assists mirrors).
 
 ## Team Name Matching (line-manager.js)
 
