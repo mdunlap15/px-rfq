@@ -44,7 +44,7 @@ async function login() {
   }
 
   log.info('PX-Auth', 'Logging in to ProphetX...');
-  const resp = await fetch(`${config.px.baseUrl}/partner/auth/login`, {
+  const resp = await pxFetchWithTimeout(`${config.px.baseUrl}/partner/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({
@@ -84,7 +84,7 @@ async function refreshSession() {
   if (!tokenCache.refreshToken) return null;
 
   log.debug('PX-Auth', 'Refreshing session...');
-  const resp = await fetch(`${config.px.baseUrl}/partner/auth/refresh`, {
+  const resp = await pxFetchWithTimeout(`${config.px.baseUrl}/partner/auth/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ refresh_token: tokenCache.refreshToken }),
@@ -113,6 +113,27 @@ function invalidateToken() {
 // GENERIC REQUEST WRAPPER
 // ---------------------------------------------------------------------------
 
+// Hard request timeout for ALL PX REST calls — no PX request may hang the event
+// loop indefinitely. 2026-06-10 OUTAGE: an un-timed-out orders fetch on the
+// confirm hot path hung every confirm for ~2h with no error/reject. This is the
+// systemic backstop (the confirm-path lookup also has a tighter 800ms cap).
+// AbortController works with both global fetch and node-fetch.
+const PX_REQUEST_TIMEOUT_MS = parseInt(process.env.PX_REQUEST_TIMEOUT_MS) || 10000;
+async function pxFetchWithTimeout(url, options) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), PX_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: ac.signal }));
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || e.type === 'aborted')) {
+      throw new Error(`PX request timeout after ${PX_REQUEST_TIMEOUT_MS}ms: ${(options && options.method) || 'GET'} ${url}`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function pxFetch(endpoint, method = 'GET', body = null, useBaseUrl = true) {
   const token = await login();
   const url = useBaseUrl ? `${config.px.baseUrl}${endpoint}` : endpoint;
@@ -129,7 +150,7 @@ async function pxFetch(endpoint, method = 'GET', body = null, useBaseUrl = true)
     options.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, options);
+  const resp = await pxFetchWithTimeout(url, options);
 
   if (resp.status === 401) {
     // Token expired — try to get a fresh one and retry ONCE.
@@ -152,7 +173,7 @@ async function pxFetch(endpoint, method = 'GET', body = null, useBaseUrl = true)
       }
     }
     options.headers['Authorization'] = `Bearer ${newToken}`;
-    const retryResp = await fetch(url, options);
+    const retryResp = await pxFetchWithTimeout(url, options);
     if (!retryResp.ok) {
       const text = await retryResp.text();
       throw new Error(`ProphetX API ${retryResp.status} on ${method} ${endpoint} (retry): ${text}`);
