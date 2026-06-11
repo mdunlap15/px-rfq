@@ -2680,9 +2680,6 @@ function shouldDecline(legs, parlayId) {
   // "two legs on the same pitcher" misnames the actual problem and would
   // also approve the parlay if BetRivers happened to be FD/DK.
   //
-  // Only handles the same-pitcher case here; same-game correlation rule
-  // (d) requires the full carve-out logic and stays in its post-loop
-  // position so we don't double-implement the K+ML SGP allowance.
   // COMBINED prop-correlation pre-pass. Single iteration over legs
   // produces:
   //   - same-player detection (two prop legs on the same player, any
@@ -2690,6 +2687,16 @@ function shouldDecline(legs, parlayId) {
   //     which only handled K-prop pairs)
   //   - same-game prop+anything block (any prop leg + any same-game
   //     leg in same parlay — covers prop+ML/spread/total AND prop+prop)
+  //
+  // K-PROP EXCEPTION to the same-game block: event groups whose prop
+  // legs are ALL player_strikeouts defer to same-game correlation rule
+  // (d) in its post-loop position — that rule carries the full
+  // operator-approved (2026-04-27) SGP carve-outs (2-leg K-prop +
+  // same-team ML, opposing-pitcher K-prop + K-prop) and we must not
+  // double-implement the allowance here. K-prop combos matching no
+  // carve-out still decline there with the same reason. The same-player
+  // rule above is NOT exempted — two legs on one pitcher decline in the
+  // pre-pass regardless of stat or market type.
   //
   // Performance note: was two separate iterations before — combined
   // here so we walk the legs array once. Also skips the heavier
@@ -2780,6 +2787,15 @@ function shouldDecline(legs, parlayId) {
     if (anyPropLeg) {
       for (const [eid, group] of Object.entries(legsByEvent)) {
         if (group.props.length > 0 && (group.props.length + group.others.length) > 1) {
+          // K-PROP EXEMPTION (regression fix 2026-06-11): when every
+          // prop leg in the group is a K-prop, fall through to the M3
+          // post-loop rule (d), which implements the operator-approved
+          // 2026-04-27 carve-outs (sgpKpropMlSameTeam, sgpKpropOpposing).
+          // The Phase-2 same-game block (commit 4564859) had silently
+          // made those carve-outs unreachable. Non-carve-out K-prop
+          // combos (K + total, K + run-line, K + opposite-team ML) are
+          // still declined by rule (d) with this same reason.
+          if (group.props.every(li => li.marketType === 'player_strikeouts')) continue;
           const propLabels = group.props.map(li =>
             `${li.playerName || li.teamName || '?'} ${li.propType || li.marketType} ${li.selection || ''} ${li.line ?? ''}`.trim());
           const otherLabels = group.others.map(li =>
@@ -3000,6 +3016,17 @@ function shouldDecline(legs, parlayId) {
       // No carve-out applied — decline. Show first same-game-other leg
       // in the detail for diagnostic clarity.
       const sample = sameGameOthers[0];
+      // SGP Phase-0 shadow log — parity with the pre-pass logger, since
+      // K-prop same-game groups now reach this point instead of being
+      // declined (and logged) up there. Fire-and-forget.
+      try {
+        const evLegs = [propLeg, ...sameGameOthers].map(l => l.lineInfo);
+        require('./sgp-audit').logSgpDecline(
+          parlayId, eid,
+          evLegs.filter(li => /^player_/.test(li.marketType || '')),
+          evLegs.filter(li => !/^player_/.test(li.marketType || ''))
+        );
+      } catch (_) { /* defensive — observability must never break pricing */ }
       return {
         declined: true,
         reason: 'prop_correlation_same_game',
