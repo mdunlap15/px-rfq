@@ -59,6 +59,14 @@ function extractPlayerNameFromPropMarket(marketName) {
     /\s+(total\s+)?made\s+(three[\s-]*pointers?|threes?|3[\s-]*pointers?|3[\s-]*pt[s]?)$/i,
     /\s+(three[\s-]*pointers?|threes?|3[\s-]*pointers?)\s+made$/i,
     /\s+(total\s+)?(three[\s-]*pointers?|threes?|3[\s-]*pointers?|3[\s-]*pt[s]?)$/i,
+    // ---- Soccer (World Cup props; PX phrasing) ----
+    // Full phrases BEFORE the bare single-stat patterns below, otherwise the
+    // bare pattern shaves only the tail ("<Player> To Give" / "<Player> To
+    // Have At Least 1 Shot") and player matching fails.
+    /\s+to\s+score\s+or\s+give\s+(an?\s+)?assists?$/i,
+    /\s+to\s+give\s+(an?\s+)?assists?$/i,
+    /\s+to\s+have\s+at\s+least\s+\d+\s+shots?(\s+on\s+target)?$/i,
+    /\s+(total\s+)?shots?\s+on\s+target$/i,
     // Single stats
     /\s+(total\s+)?points?$/i,
     /\s+(total\s+)?rebounds?$/i,

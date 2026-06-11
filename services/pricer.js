@@ -790,35 +790,66 @@ function priceParlay(legs, opts = {}) {
       return null;
     }
 
-    // Check if prices are stale for this sport. Uses per-sport threshold:
-    // MMA/boxing/NFL have tighter windows because they move on news;
-    // NCAAB/tennis have looser windows because they only refresh on full cycles.
-    if (isStaleCached(lineInfo.sport)) {
-      const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
-      const threshold = oddsFeed.getStaleThreshold(lineInfo.sport);
-      log.debug('Pricing', `Declined: stale prices for ${lineInfo.sport} (${ageMin}min old, threshold ${threshold}m)`);
-      priceParlay._lastFailure = {
-        reason: 'stale odds',
-        detail: `${lineInfo.sport} odds ${ageMin}m old (threshold ${threshold}m)`,
-        blockerLeg: legDescriptor,
-      };
-      return null;
-    }
+    // One-sided DK-scraper props (WC soccer goalscorer/SoT/assists): the
+    // price comes from the decoupled DK scrape, not the odds feed, so the
+    // sport-level odds-cache age is the wrong gate (a soccer-feed hiccup
+    // would needlessly kill these; a fresh soccer feed wouldn't protect
+    // them). Enforce THEIR freshness source instead — same 15-min bound as
+    // shouldDecline's prop_stale gate, re-checked here because
+    // validateForConfirmation calls priceParlay directly (no shouldDecline),
+    // so this is what keeps the CONFIRM path fail-closed on scrape age.
+    // Mirrors the pre-game tightening below: lineups drop ~1h before kickoff
+    // and DK reprices goalscorers hard on them, so within 30 min of start
+    // require a ≤2-min scrape (run the worker with a tight --loop to quote
+    // through that window; otherwise quoting just stops, by design).
+    const isScrapedOneSidedProp = lineInfo.propSource === 'dk-scraper-one-sided'
+      && lineInfo.bookPriceOverride != null
+      && lineInfo.sport === 'soccer';
+    if (isScrapedOneSidedProp) {
+      const scrapeAgeMs = lineInfo.propFetchedAt ? (nowMs - lineInfo.propFetchedAt) : Infinity;
+      const inPreGame = startMs != null && (startMs - nowMs) <= 30 * 60 * 1000;
+      const boundMs = inPreGame ? 2 * 60 * 1000 : 15 * 60 * 1000;
+      if (scrapeAgeMs > boundMs) {
+        const ageMin = Number.isFinite(scrapeAgeMs) ? Math.round(scrapeAgeMs / 6000) / 10 : null;
+        log.debug('Pricing', `Declined: stale DK scrape for ${legLabel} (${ageMin == null ? 'missing' : ageMin + 'm'}, limit ${boundMs / 60000}m${inPreGame ? ' pre-game' : ''})`);
+        priceParlay._lastFailure = {
+          reason: inPreGame ? 'stale odds (pre-game)' : 'stale odds',
+          detail: `${legLabel} DK scrape ${ageMin == null ? 'missing' : ageMin + 'm old'} (limit ${boundMs / 60000}m${inPreGame ? ', pre-game' : ''})`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
+    } else {
+      // Check if prices are stale for this sport. Uses per-sport threshold:
+      // MMA/boxing/NFL have tighter windows because they move on news;
+      // NCAAB/tennis have looser windows because they only refresh on full cycles.
+      if (isStaleCached(lineInfo.sport)) {
+        const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
+        const threshold = oddsFeed.getStaleThreshold(lineInfo.sport);
+        log.debug('Pricing', `Declined: stale prices for ${lineInfo.sport} (${ageMin}min old, threshold ${threshold}m)`);
+        priceParlay._lastFailure = {
+          reason: 'stale odds',
+          detail: `${lineInfo.sport} odds ${ageMin}m old (threshold ${threshold}m)`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
 
-    // Pre-game closing-line guard: within 30 min of tip-off, sportsbooks
-    // move the line hard on late news. Require much fresher cache (≤ 2 min)
-    // for events in the final pre-game window. Catches scenarios where the
-    // sport-level cache passes isStale but the line has moved since refresh
-    // (this is how the Rockies +190/+194 stale FD/DK quote slipped through).
-    if (oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
-      const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
-      log.info('Pricing', `Declined pre-game: ${legLabel} starts soon, cache ${ageMin}m old (limit 2m)`);
-      priceParlay._lastFailure = {
-        reason: 'stale odds (pre-game)',
-        detail: `${legLabel} starts within 30m, ${lineInfo.sport} cache ${ageMin}m old (pre-game limit 2m)`,
-        blockerLeg: legDescriptor,
-      };
-      return null;
+      // Pre-game closing-line guard: within 30 min of tip-off, sportsbooks
+      // move the line hard on late news. Require much fresher cache (≤ 2 min)
+      // for events in the final pre-game window. Catches scenarios where the
+      // sport-level cache passes isStale but the line has moved since refresh
+      // (this is how the Rockies +190/+194 stale FD/DK quote slipped through).
+      if (oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
+        const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
+        log.info('Pricing', `Declined pre-game: ${legLabel} starts soon, cache ${ageMin}m old (limit 2m)`);
+        priceParlay._lastFailure = {
+          reason: 'stale odds (pre-game)',
+          detail: `${legLabel} starts within 30m, ${lineInfo.sport} cache ${ageMin}m old (pre-game limit 2m)`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
     }
 
     // Lineup-change guard: if the MLB starting pitcher or NHL starting goalie

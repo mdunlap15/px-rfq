@@ -186,6 +186,17 @@ async function startup() {
 
   // Step 3: Seed lines and register with PX
   log.info('Startup', '3/5 Seeding lines and registering with ProphetX...');
+  // WC player-prop cache must load BEFORE the seed so _seedWorldCupProps
+  // sees the scraped DK prices on the first pass (startPolling kicks off an
+  // immediate refresh and a recurring poll; await the first load so the
+  // seed doesn't race it).
+  try {
+    const wcProps = require('./services/wc-player-props');
+    await wcProps.refresh();
+    wcProps.startPolling();
+  } catch (err) {
+    log.warn('Startup', `    WC prop cache load failed (non-fatal): ${err.message}`);
+  }
   try {
     const seedStats = await lineManager.seedAllLines();
     log.info('Startup', `    ✓ ${seedStats.registeredLines} lines registered (${seedStats.matchedLines} matched of ${seedStats.totalLines} parsed)`);
@@ -2739,6 +2750,25 @@ function startStatusServer() {
   // recent conversion; `recent` is the per-event tail.
   app.get('/confirm-activity', (req, res) => {
     res.json(websocket.getConfirmActivity());
+  });
+
+  // World Cup player-prop pipeline health: DK scrape cache freshness +
+  // how many WC prop lines are registered, by market family. First stop
+  // when WC props aren't quoting — newestScrapeAgoMin > 15 means the
+  // decoupled worker (scripts/dk-wc-props-worker.js --loop) isn't running
+  // and pricer's prop_stale gate is declining everything (by design).
+  app.get('/wc-props', (req, res) => {
+    const wcProps = require('./services/wc-player-props');
+    const idx = lineManager.__debugGetLineIndex();
+    const registered = {};
+    let registeredTotal = 0;
+    for (const info of Object.values(idx)) {
+      if (info && info.propSource === 'dk-scraper-one-sided' && info.sport === 'soccer' && info.propType) {
+        registered[info.propType] = (registered[info.propType] || 0) + 1;
+        registeredTotal++;
+      }
+    }
+    res.json({ cache: wcProps.getStatus(), registeredTotal, registeredByMarket: registered });
   });
 
   // Long-window confirm-time rejection report. Queries parlay_orders
