@@ -37,15 +37,20 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const norm = (s) => (s == null ? s : String(s).replace(/−/g, '-')); // DK minus -> ASCII
 
 function parseGoalscorer(doc) {
+  // The goalscorer subcategory carries three markets: 1st / Anytime / 2+.
+  // Emit anytime and 2+ separately (1st is excluded on purpose).
   const mkts = {};
   for (const m of doc.markets) mkts[m.id] = m;
-  const out = [];
+  const anytime = [], twoPlus = [];
   for (const s of doc.selections) {
     const mk = mkts[s.marketId];
-    if (!mk || (mk.marketType && mk.marketType.name) !== 'Anytime Goalscorer') continue;
-    out.push({ player: s.label, seo: ((s.participants || [{}])[0].seoIdentifier || s.label).trim(), odds: norm(s.displayOdds && s.displayOdds.american) });
+    if (!mk) continue;
+    const mtype = (mk.marketType && mk.marketType.name) || '';
+    const row = { player: s.label, seo: ((s.participants || [{}])[0].seoIdentifier || s.label).trim(), odds: norm(s.displayOdds && s.displayOdds.american) };
+    if (mtype === 'Anytime Goalscorer') anytime.push(row);
+    else if (/2 or More Goals/i.test(mtype)) twoPlus.push(row);
   }
-  return out;
+  return { anytime, twoPlus };
 }
 function parseShotsOnTarget(doc) {
   const mkts = {};
@@ -126,12 +131,15 @@ async function scrapeEvent(slugId) {
       await new Promise((r) => setTimeout(r, 4000));
       if (!bodies[sc.id]) console.error('WARN: no body for ' + sc.key + ' (clicked=' + clicked + ')');
     }
-    const result = { eventId, slug: slugId, scrapedKeys: Object.keys(bodies) };
+    const result = { eventId, slug: slugId, scrapedKeys: Object.keys(bodies), goals2plus: [] };
     for (const sc of SUBCATS) {
       if (!bodies[sc.id]) { result[sc.key] = []; continue; }
       const doc = JSON.parse(bodies[sc.id]);
-      if (sc.key === 'goalscorer') result.goalscorer = parseGoalscorer(doc);
-      else if (sc.key === 'sot') result.sot = parseShotsOnTarget(doc);
+      if (sc.key === 'goalscorer') {
+        const g = parseGoalscorer(doc);
+        result.goalscorer = g.anytime;
+        result.goals2plus = g.twoPlus;
+      } else if (sc.key === 'sot') result.sot = parseShotsOnTarget(doc);
       else if (sc.key === 'assists') result.assists = parseAssists(doc);
       // keep raw for debugging assists schema this first run
       if (process.env.DK_RAW) fs.writeFileSync('C:/Users/mdunl/dk_raw_' + sc.key + '.json', bodies[sc.id]);
@@ -148,7 +156,7 @@ if (require.main === module) {
   if (!slugId) { console.error('usage: node dk-wc-props.js <slug/eventId> [outFile]'); process.exit(1); }
   scrapeEvent(slugId).then((r) => {
     console.log('event', r.eventId, '| subs:', r.scrapedKeys.join(','));
-    console.log('  goalscorer:', r.goalscorer.length, '| sot:', r.sot.length, '| assists:', r.assists.length);
+    console.log('  goalscorer:', r.goalscorer.length, '| goals2plus:', r.goals2plus.length, '| sot:', r.sot.length, '| assists:', r.assists.length);
     if (out) { fs.writeFileSync(out, JSON.stringify(r, null, 1)); console.log('  wrote', out); }
     else console.log(JSON.stringify(r, null, 1).substring(0, 1200));
   }).catch((e) => { console.error('FATAL', e.message); process.exit(1); });
