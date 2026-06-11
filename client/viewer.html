@@ -12307,10 +12307,11 @@
     html += th('starts', 'Starts', 'left');
     html += th('fair', 'Fair %', 'right', 'De-vigged consensus fair probability for this selection.');
     html += th('my', 'My Odds', 'right', 'American odds we would quote as a 1-leg parlay. Applies sport vig + favorite ramp + floors.');
-    html += th('pin', '<span style="color:var(--purple);">Pin</span>', 'right', 'Pinnacle raw American odds (Sharp-tier only — usually blank on Hobby plan).');
-    html += th('fd', '<span style="color:var(--blue);">FD</span>', 'right', 'FanDuel raw American odds.');
-    html += th('dk', '<span style="color:var(--green);">DK</span>', 'right', 'DraftKings raw American odds.');
-    html += th('cons', 'Cons', 'right', 'Consensus American odds — average of Pin / FD / DK implied probs, converted back to American.');
+    const dnbTip = ' Soccer moneylines: shown as DNB-equivalent (3-way price with draw dropped, home/away renormalized) because PX soccer ML is draw-no-bet.';
+    html += th('pin', '<span style="color:var(--purple);">Pin</span>', 'right', 'Pinnacle raw American odds (Sharp-tier only — usually blank on Hobby plan).' + dnbTip);
+    html += th('fd', '<span style="color:var(--blue);">FD</span>', 'right', 'FanDuel raw American odds.' + dnbTip);
+    html += th('dk', '<span style="color:var(--green);">DK</span>', 'right', 'DraftKings raw American odds.' + dnbTip);
+    html += th('cons', 'Cons', 'right', 'Consensus American odds — average of Pin / FD / DK implied probs, converted back to American.' + dnbTip);
     html += th('diff', 'vs Cons', 'right', 'My implied prob minus consensus implied prob, in pp. Positive = I\'m tighter than consensus (worse for bettor). Negative = looser.');
     html += '</tr>';
 
@@ -12350,6 +12351,12 @@
         ? ' border-left:3px solid var(--red); opacity:0.65; text-decoration:line-through;'
         : '';
       const rowStyle = 'cursor:pointer;' + (expanded ? ' background:var(--surface2);' : '') + disabledRowStyle;
+      // Soccer ML rows: server converted the book 3-way prices to
+      // DNB-equivalent (draw dropped, home/away renormalized) so they
+      // compare apples-to-apples with our draw-no-bet quote. Flag the
+      // cells so the viewer knows these aren't the raw board prices.
+      const dnbTitleAttr = r.booksDNB ? ' title="DNB-equivalent: book 3-way price with draw dropped, home/away renormalized (PX soccer ML is draw-no-bet)"' : '';
+      const dnbMark = (r.booksDNB && r.consensusAmerican != null) ? '<span style="color:var(--text3); font-size:9px;">2w </span>' : '';
       html += '<tr onclick="window.toggleLinesDrillDown(\'' + r.lineId + '\')" style="' + rowStyle + '">'
         + '<td style="padding:4px 8px;">' + escapeHtml(sportLbl) + '</td>'
         + '<td style="padding:4px 8px; font-family:monospace; color:var(--text2);">' + escapeHtml(r.marketType || '-') + '</td>'
@@ -12359,10 +12366,10 @@
         + '<td style="padding:4px 8px; color:var(--text3); font-size:11px;">' + starts + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (missing ? 'var(--text3)' : 'var(--text2)') + ';">' + fairPct + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (missing ? 'var(--text3)' : 'var(--text)') + '; font-weight:600;">' + myAm + '</td>'
-        + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.pinnacleOdds==null?'var(--text3)':'var(--purple)') + ';">' + pinAm + '</td>'
-        + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.fanduelOdds==null?'var(--text3)':'var(--blue)') + ';">' + fdAm + '</td>'
-        + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.draftkingsOdds==null?'var(--text3)':'var(--green)') + ';">' + dkAm + '</td>'
-        + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.consensusAmerican==null?'var(--text3)':'var(--text2)') + ';">' + consAm + '</td>'
+        + '<td' + dnbTitleAttr + ' style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.pinnacleOdds==null?'var(--text3)':'var(--purple)') + ';">' + pinAm + '</td>'
+        + '<td' + dnbTitleAttr + ' style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.fanduelOdds==null?'var(--text3)':'var(--blue)') + ';">' + fdAm + '</td>'
+        + '<td' + dnbTitleAttr + ' style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.draftkingsOdds==null?'var(--text3)':'var(--green)') + ';">' + dkAm + '</td>'
+        + '<td' + dnbTitleAttr + ' style="padding:4px 8px; text-align:right; font-family:monospace; color:' + (r.consensusAmerican==null?'var(--text3)':'var(--text2)') + ';">' + dnbMark + consAm + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace; color:' + diffColor + '; font-weight:500;">' + diffStr + '</td>'
         + '</tr>';
       if (expanded) {
@@ -12415,12 +12422,16 @@
           const imp = _amOddsToImplied(am);
           return kv(label + ' odds', (am >= 0 ? '+' : '') + am + '  (implied ' + (imp * 100).toFixed(1) + '%)');
         };
-        html += bookRow('Pinnacle', r.pinnacleOdds);
-        html += bookRow('FanDuel', r.fanduelOdds);
-        html += bookRow('DraftKings', r.draftkingsOdds);
+        const bookLbl = r.booksDNB ? ' (DNB-equiv)' : '';
+        html += bookRow('Pinnacle' + bookLbl, r.pinnacleOdds);
+        html += bookRow('FanDuel' + bookLbl, r.fanduelOdds);
+        html += bookRow('DraftKings' + bookLbl, r.draftkingsOdds);
         if (r.consensusAmerican != null) {
           const consImp = _amOddsToImplied(r.consensusAmerican);
-          html += kv('Consensus (Pin/FD/DK)', (r.consensusAmerican >= 0 ? '+' : '') + r.consensusAmerican + '  (implied ' + (consImp * 100).toFixed(1) + '%)');
+          html += kv('Consensus (Pin/FD/DK)' + bookLbl, (r.consensusAmerican >= 0 ? '+' : '') + r.consensusAmerican + '  (implied ' + (consImp * 100).toFixed(1) + '%)');
+        }
+        if (r.booksDNB) {
+          html += kv('book odds basis', 'DNB-equivalent — book 3-way moneyline with draw dropped, home/away renormalized to match PX draw-no-bet semantics');
         }
         html += '</div></td></tr>';
       }

@@ -11080,17 +11080,73 @@ function startStatusServer() {
 
       // Consensus = average implied prob across Pin / FD / DK (exclude Kalshi).
       // Convert back to American odds for display. Diff vs my odds is in pp.
-      const consBooks = ['pinnacle', 'fanduel', 'draftkings']
-        .map(b => bookOdds[b])
-        .filter(o => o != null && Number.isFinite(o));
-      let consensusAmerican = null, consensusImplied = null;
-      if (consBooks.length > 0) {
-        const implied = consBooks.map(o => (o >= 0 ? 100 / (o + 100) : -o / (-o + 100)));
-        consensusImplied = implied.reduce((a, b) => a + b, 0) / implied.length;
-        if (consensusImplied > 0 && consensusImplied < 1) {
-          consensusAmerican = pricer.decimalToAmerican(1 / consensusImplied);
+      const consensusFrom = (odds) => {
+        const books = ['pinnacle', 'fanduel', 'draftkings']
+          .map(b => odds[b])
+          .filter(o => o != null && Number.isFinite(o));
+        let american = null, implied = null;
+        if (books.length > 0) {
+          const probs = books.map(o => (o >= 0 ? 100 / (o + 100) : -o / (-o + 100)));
+          implied = probs.reduce((a, b) => a + b, 0) / probs.length;
+          if (implied > 0 && implied < 1) {
+            american = pricer.decimalToAmerican(1 / implied);
+          }
         }
-      }
+        return { american, implied };
+      };
+      // Clamp input for computeSingleLegQuote must mirror the RFQ path's
+      // getConsensusImplied, which averages RAW book odds — so compute it
+      // before any DNB display conversion below, else the My Odds preview
+      // diverges from what priceParlay actually offers.
+      const clampConsensusImplied = consensusFrom(bookOdds).implied;
+
+      // ProphetX soccer moneylines are 2-way Draw No Bet (draw refunds),
+      // but the book h2h prices above are 3-way (draw loses), so the raw
+      // numbers aren't comparable to our DNB quote — correctly-priced
+      // soccer favorites showed bogus +15-17pp vsCons (2026-06-11: our
+      // Mexico -717 sat inside PX's own -680..-720 order book while DK's
+      // 3-way read -230). Convert each book's 3-way price to its DNB
+      // equivalent for display + the vsCons comparison: drop the draw and
+      // renormalize, p_dnb = p_team / (p_home + p_away) — the same math
+      // the pricing pipeline applies internally (pricer.js soccer-h2h DNB
+      // block, odds-feed getDNBFairProb). Widened beyond info.isDNB the
+      // same way the pricer widens: PX labels some soccer moneylines
+      // without the "2 Way"/"DNB" tokens the line-manager regex needs,
+      // but the bet semantics are still DNB. A book missing the opposite
+      // side is nulled rather than left raw — a 3-way price on a DNB row
+      // is exactly the misleading display this removes.
+      let booksDNB = false;
+      try {
+        const oaSport = info.oddsApiSport || info.sport;
+        const oaMarket = info.oddsApiMarket || info.marketType;
+        const sel = info.oddsApiSelection || info.selection;
+        const isSoccerH2h = oaMarket === 'h2h'
+          && typeof oaSport === 'string' && oaSport.startsWith('soccer');
+        if ((info.isDNB || isSoccerH2h) && oaMarket === 'h2h'
+            && (sel === 'home' || sel === 'away')) {
+          const oppSel = sel === 'home' ? 'away' : 'home';
+          const toDNB = (sameAm, oppAm) => {
+            if (sameAm == null || oppAm == null) return null;
+            const pSame = oddsFeed.americanToImpliedProb(sameAm);
+            const pOpp = oddsFeed.americanToImpliedProb(oppAm);
+            const pDnb = (pSame + pOpp) > 0 ? pSame / (pSame + pOpp) : null;
+            return (pDnb > 0 && pDnb < 1) ? pricer.decimalToAmerican(1 / pDnb) : null;
+          };
+          bookOdds = {
+            pinnacle: toDNB(bookOdds.pinnacle,
+              oddsFeed.getPinnacleOdds(oaSport, info.homeTeam, info.awayTeam, 'h2h', oppSel, info.startTime, null)),
+            fanduel: toDNB(bookOdds.fanduel,
+              oddsFeed.getFanDuelOdds(oaSport, info.homeTeam, info.awayTeam, 'h2h', oppSel, info.startTime, null)),
+            draftkings: toDNB(bookOdds.draftkings,
+              oddsFeed.getDraftKingsOdds(oaSport, info.homeTeam, info.awayTeam, 'h2h', oppSel, info.startTime, null)),
+            kalshi: toDNB(bookOdds.kalshi,
+              oddsFeed.getKalshiOdds(oaSport, info.homeTeam, info.awayTeam, 'h2h', oppSel, info.startTime, null)),
+          };
+          booksDNB = true;
+        }
+      } catch (_) { /* ignore — bookOdds stays raw, booksDNB stays false */ }
+
+      const { american: consensusAmerican, implied: consensusImplied } = consensusFrom(bookOdds);
 
       let quote = null;
       let modelQuote = null; // pre-override quote for display when an override is in force
@@ -11101,7 +11157,7 @@ function startStatusServer() {
           americanOdds: pricer.decimalToAmerican(1 / bookPriceOverride),
         };
       } else if (fairProb != null && fairProb > 0 && fairProb < 1) {
-        quote = pricer.computeSingleLegQuote(fairProb, info.sport, info.marketType, consensusImplied);
+        quote = pricer.computeSingleLegQuote(fairProb, info.sport, info.marketType, clampConsensusImplied);
       }
       // Manual operator override — replaces myOddsAmerican with a fixed
       // price. Save the model quote first so the UI can show "was N → now M".
@@ -11151,6 +11207,11 @@ function startStatusServer() {
         oddsApiMarket: info.oddsApiMarket || null,
         oddsApiSelection: info.oddsApiSelection || null,
         isDNB: !!info.isDNB,
+        // True when the book odds / consensus above were converted from
+        // 3-way to DNB-equivalent (soccer moneylines). Lets the client
+        // label the Pin/FD/DK/Cons cells so the operator knows they're
+        // not the raw 3-way board prices.
+        booksDNB,
         // Operator-disabled flags. lineDisabled = this specific lineId is
         // blocklisted; eventDisabled = the entire pxEventId is blocklisted
         // (cascades to every line under it). The pricer treats either as
