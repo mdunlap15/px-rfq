@@ -8369,10 +8369,12 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   if (!std || !Array.isArray(std.matchedRows) || std.matchedRows.length === 0) {
     return { error: 'no_one_sided_data', stages: (std && std.stages) || [] };
   }
-  // Collect over-side implied probs per book.
+  // Collect over-side implied probs per book. Anytime markets (soccer
+  // player_goal_scorer_anytime / player_assists variants) post the backed
+  // side as "Yes" instead of "Over" — same semantics, accept both.
   const overByBook = {};
   for (const m of std.matchedRows) {
-    if (/over/i.test(m.side) && overByBook[m.book] == null) {
+    if (/over|yes/i.test(m.side) && overByBook[m.book] == null) {
       const p = americanToImpliedProb(m.price);
       if (p != null && p > 0 && p < 1) overByBook[m.book] = p;
     }

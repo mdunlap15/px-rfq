@@ -60,6 +60,40 @@ const _MLB_PROP_TO_TOA_MARKET = {
   hitter_total_bases: 'batter_total_bases',
   hitter_rbi_runs: 'batter_rbis',
 };
+// World Cup / international soccer player props. PX posts these as
+// one-sided YES/NO markets ("<Player> To Score a Goal", "<Player> To Have
+// At Least 1/2 Shot(s) On Target", "<Player> To Give Assist"). TOA carries
+// them under the dedicated tournament key (FD/DK/BetRivers coverage
+// verified live 2026-06-11) even though our soccer EVENTS match under the
+// generic SharpAPI 'soccer' key — so prop lookups pass _SOCCER_PROP_TOA_SPORT
+// explicitly. The classifier also derives the TOA line: anytime markets are
+// Over 0.5; "At Least N SoT" = Over N-0.5.
+const _SOCCER_PROP_TO_TOA_MARKET = {
+  goalscorer: 'player_goal_scorer_anytime',
+  sot_1: 'player_shots_on_target',
+  sot_2: 'player_shots_on_target',
+  assists: 'player_assists',
+};
+const _SOCCER_PROP_TOA_SPORT = 'soccer_fifa_world_cup';
+// `line` is what we register on the lineInfo (0.5 = anytime semantics);
+// `toaLine` is what the TOA outcome filter needs: anytime markets
+// (goal_scorer_anytime, assists) carry NO point on their outcomes, so the
+// query must pass null or the point check matches nothing. SoT outcomes
+// genuinely carry points (0.5 / 1.5 / 2.5).
+function _classifySoccerProp(marketName) {
+  const n = String(marketName || '');
+  if (/\bto score a goal$/i.test(n)) return { propType: 'goalscorer', line: 0.5, toaLine: null };
+  const m = /\bto have at least (\d+) shots? on target$/i.exec(n);
+  if (m) {
+    const k = Number(m[1]);
+    return (k === 1 || k === 2) ? { propType: 'sot_' + k, line: k - 0.5, toaLine: k - 0.5 } : null;
+  }
+  if (/\bto give (?:an? )?assist$/i.test(n)) return { propType: 'assists', line: 0.5, toaLine: null };
+  // Deliberately unmatched: "To Score Or Give Assist" (no book source),
+  // "To Have At Least N Shot(s)" without "On Target" (total shots — books
+  // don't post it).
+  return null;
+}
 const log = require('./logger');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
@@ -1380,6 +1414,10 @@ async function seedAllLines() {
           if (!market || !market.name) continue;
           let propType = null;
           let toaMarketKey = null;
+          // Soccer props need extra context the other sports don't: the
+          // classifier-derived TOA line (PX posts them lineless as YES/NO)
+          // and the dedicated TOA sport key for lookups.
+          let soccerProp = null;
           if (ws) {
             if (sportKey.includes('basketball')) {
               propType = ws._classifyNbaProp(market.name);
@@ -1390,6 +1428,12 @@ async function seedAllLines() {
             } else if (sportKey === 'baseball_mlb') {
               propType = ws._classifyMlbProp(market.name);
               toaMarketKey = _MLB_PROP_TO_TOA_MARKET[propType];
+            } else if (sportKey === 'soccer' || sportKey.startsWith('soccer_')) {
+              soccerProp = _classifySoccerProp(market.name);
+              if (soccerProp) {
+                propType = soccerProp.propType;
+                toaMarketKey = _SOCCER_PROP_TO_TOA_MARKET[propType];
+              }
             }
           }
           if (!propType || !toaMarketKey) continue;
@@ -1401,6 +1445,18 @@ async function seedAllLines() {
           let parsedProp = [];
           try { parsedProp = px.parseMarketSelections(market) || []; } catch { continue; }
           if (parsedProp.length === 0) continue;
+
+          // Soccer props post as YES/NO with no line on PX. Register the
+          // YES side only, mapped to over at the classifier-derived TOA
+          // line (anytime = 0.5, "At Least 2 SoT" = 1.5). The NO side of a
+          // one-sided vigged market is +EV for the bettor by construction —
+          // leave those line_ids unknown so they decline.
+          if (soccerProp) {
+            parsedProp = parsedProp
+              .filter(s => String(s.outcomeName || s.teamName || '').toUpperCase() === 'YES')
+              .map(s => Object.assign({}, s, { selection: 'over', line: soccerProp.line }));
+            if (parsedProp.length === 0) continue;
+          }
 
           // Group selections by line value. Each distinct line gets its
           // OWN TOA lookup + DK-scraper fallback + minBooks gate so the
@@ -1430,12 +1486,15 @@ async function seedAllLines() {
           }
 
           for (const [thisLine, sels] of byLine) {
+            // Soccer anytime markets must query TOA with line=null (their
+            // outcomes carry no point); SoT queries its real point.
+            const toaQueryLine = soccerProp ? soccerProp.toaLine : thisLine;
             let lookup = null;
             try {
               lookup = await oddsFeed.lookupTheOddsApiPlayerProp(
-                sportKey, toaMarketKey,
+                soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey, toaMarketKey,
                 { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
-                playerName, thisLine,
+                playerName, toaQueryLine,
               );
             } catch (err) {
               log.debug('Lines', `Pre-seed prop lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
@@ -1457,7 +1516,10 @@ async function seedAllLines() {
               || lookup.fairProbUnder == null
               || ((lookup.booksWithBothSides || 0) < minBooks
                   && !((lookup.books || []).some(b => trustedSet.includes(String(b).toLowerCase()))));
-            if (toaInsufficient) {
+            // Soccer skips the DK pair-scraper fallback — there's no DK soccer
+            // prop scrape config, and these markets are one-sided anyway
+            // (handled by the TOA one-sided path below).
+            if (toaInsufficient && !soccerProp) {
               try {
                 const dk = require('./dk-scraper');
                 if (typeof dk.fetchDkPlayerProps === 'function') {
@@ -1500,8 +1562,11 @@ async function seedAllLines() {
             //
             // Hitter-binary only — over/under props (NBA points, NHL shots,
             // MLB strikeouts) still require a true 2-sided pair.
-            const oneSidedEligible = sportKey === 'baseball_mlb'
-              && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType);
+            const oneSidedEligible = (sportKey === 'baseball_mlb'
+              && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType))
+              // Soccer goalscorer/SoT/assists are one-sided by construction
+              // (books post only the YES/over side).
+              || !!soccerProp;
             let oneSidedHit = null;       // { source, impliedOver, books[], fetchedAt }
             if (oneSidedEligible) {
               const lookupHasDk = lookup && Array.isArray(lookup.books)
@@ -1511,9 +1576,9 @@ async function seedAllLines() {
                 // Try TOA one-sided first (multi-book).
                 try {
                   const toaOs = await oddsFeed.lookupTheOddsApiPlayerPropOneSided(
-                    sportKey, toaMarketKey,
+                    soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey, toaMarketKey,
                     { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
-                    playerName, thisLine,
+                    playerName, toaQueryLine,
                   );
                   if (toaOs && toaOs.fairProbOver != null && toaOs.oneSidedSource === 'toa-one-sided') {
                     oneSidedHit = {
@@ -1528,7 +1593,8 @@ async function seedAllLines() {
                   log.debug('Lines', `TOA one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
                 }
                 // Fall back to DK scraper if TOA one-sided didn't return.
-                if (!oneSidedHit) {
+                // (MLB only — there's no DK soccer prop scrape.)
+                if (!oneSidedHit && !soccerProp) {
                   try {
                     const dk = require('./dk-scraper');
                     if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
@@ -1563,10 +1629,16 @@ async function seedAllLines() {
               // real DK number (scraper) as the basis; fall back to the raw
               // posted consensus the one-sided source already returned. HR only.
               let overBookPriceOverride = null;
-              if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs') {
+              // Soccer one-sided props use the same operator-approved
+              // book-mirror as MLB hitter binaries: quote the books' RAW
+              // posted consensus minus the sweetener, inheriting their
+              // (large) goalscorer margin instead of guessing a one-sided
+              // de-vig. Multi-book TOA raw average is the basis — no DK
+              // preference step (no DK soccer scrape exists).
+              if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs' || soccerProp) {
                 let mirrorRawOver = oneSidedHit.rawImpliedOver;
                 let mirrorSource = oneSidedHit.source;
-                if (oneSidedHit.source !== 'dk-scraper-one-sided') {
+                if (!soccerProp && oneSidedHit.source !== 'dk-scraper-one-sided') {
                   try {
                     const dk = require('./dk-scraper');
                     if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
@@ -1598,7 +1670,9 @@ async function seedAllLines() {
                   line: sel.line,
                   homeTeam: matchedHome,
                   awayTeam: matchedAway,
-                  oddsApiSport: sportKey,
+                  // Soccer props resolve against the dedicated TOA tournament
+                  // key even though the event matched under generic 'soccer'.
+                  oddsApiSport: soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey,
                   oddsApiMarket: toaMarketKey,
                   oddsApiSelection: sel.selection,
                   startTime: event.scheduled || null,
@@ -1679,19 +1753,6 @@ async function seedAllLines() {
     }
   }
 
-  // World Cup soccer player props (goalscorer / SoT / assists) — separate
-  // registration path because WC matches have no odds-feed event to match
-  // (prices come from the decoupled DK scrape cache instead). Runs inside
-  // seedAllLines so entries land in the staging index (atomic swap below),
-  // get registered with PX in 6b, and persist via saveLineCache like
-  // everything else.
-  try {
-    const wcRegistered = await _seedWorldCupProps();
-    totalLines += wcRegistered;
-    matchedLines += wcRegistered;
-  } catch (err) {
-    log.warn('Lines', `WC player-prop seed error (non-fatal): ${err.message}`);
-  }
 
   // 6a. Atomic build-then-swap. If we built into staging objects this run
   // (warm refresh: _seedIndexTarget is set), replace the live lineIndex /
@@ -1754,125 +1815,6 @@ async function seedAllLines() {
 }
 
 // ---------------------------------------------------------------------------
-// WORLD CUP SOCCER PLAYER PROPS
-// ---------------------------------------------------------------------------
-// Registers per-player YES lines (goalscorer / shots-on-target 1+/2+ /
-// assists) for PX World Cup matches, priced from the decoupled DraftKings
-// scrape cache (services/wc-player-props.js ← scripts/dk-wc-props-worker.js
-// → Supabase wc_player_props).
-//
-// Design constraints:
-//  - YES side ONLY. DK posts a single price per player; quoting the NO
-//    complement of a heavily-vigged one-sided price hands the bettor +EV.
-//    NO line_ids stay unregistered and decline as unknown legs.
-//  - marketType 'player_<family>' so EVERY existing prop restriction applies
-//    automatically: same-player block, same-game block, prop parlay risk cap,
-//    per-player exposure caps, the 15-min prop_stale gate (propFetchedAt =
-//    DK scrape time), and the one-sided min-books carve-out (propSource
-//    'dk-scraper-one-sided').
-//  - Pricing mirrors the operator-approved MLB-HR book-mirror:
-//    bookPriceOverride = DK raw implied × (1 − propBookMirrorSweetener),
-//    bypassing de-vig+vig so we inherit DK's margin minus the sweetener.
-const _WC_PROP_FAMILIES = [
-  { family: 'goalscorer', re: /^(.+?)\s+To Score a Goal$/i },
-  { family: 'sot_1',      re: /^(.+?)\s+To Have At Least 1 Shot On Target$/i },
-  { family: 'sot_2',      re: /^(.+?)\s+To Have At Least 2 Shots On Target$/i },
-  // "$" anchor keeps "To Score Or Give Assist" (no DK source) out: it lacks
-  // the literal "To Give Assist" tail.
-  { family: 'assists',    re: /^(.+?)\s+To Give (?:an?\s+)?Assist$/i },
-];
-
-async function _seedWorldCupProps() {
-  if (String(process.env.WC_PROPS_ENABLED || 'true').toLowerCase() === 'false') return 0;
-  const wcProps = require('./wc-player-props');
-  const cachedEventIds = new Set(wcProps.getEventIds().map(Number));
-  if (cachedEventIds.size === 0) return 0;
-
-  const tournamentIds = (process.env.WC_TOURNAMENT_IDS || '53')
-    .split(',').map(s => Number(s.trim())).filter(Boolean);
-  const sweet = (config.pricing && config.pricing.propBookMirrorSweetener != null)
-    ? config.pricing.propBookMirrorSweetener : 0.005;
-  let registered = 0;
-
-  for (const tid of tournamentIds) {
-    let evs = [];
-    try { evs = await px.fetchAffiliateSportEvents({ tournamentId: tid }); }
-    catch (err) { log.warn('Lines', `WC props: tournament ${tid} events fetch failed: ${err.message}`); continue; }
-    const arr = Array.isArray(evs) ? evs : (evs && (evs.data || evs.sport_events || evs.events)) || [];
-
-    for (const ev of arr) {
-      const eid = Number(ev.event_id || ev.id);
-      if (!eid || !cachedEventIds.has(eid)) continue; // no scraped props for this match
-      const scheduled = ev.scheduled || ev.start_time || null;
-      if (scheduled && new Date(scheduled).getTime() <= Date.now()) continue; // already started
-      // PX names matches "Away at Home"
-      const nameParts = String(ev.name || '').split(/\s+(?:at|vs\.?|@)\s+/i);
-      const awayTeam = nameParts.length >= 2 ? nameParts[0].trim() : null;
-      const homeTeam = nameParts.length >= 2 ? nameParts[1].trim() : null;
-
-      let markets = [];
-      try {
-        const mk = await px.fetchMarkets(eid);
-        markets = Array.isArray(mk) ? mk : (mk && (mk.markets || mk.data)) || [];
-      } catch (err) {
-        log.warn('Lines', `WC props: fetchMarkets(${eid}) failed: ${err.message}`);
-        continue;
-      }
-
-      for (const market of markets) {
-        const mname = market.name || '';
-        let family = null, playerName = null;
-        for (const f of _WC_PROP_FAMILIES) {
-          const m = f.re.exec(mname);
-          if (m) { family = f.family; playerName = m[1].trim(); break; }
-        }
-        if (!family || !playerName) continue;
-        const hit = wcProps.lookup(eid, playerName, family);
-        // No DK price, or no scrape timestamp to drive the freshness gate —
-        // don't register (fail closed; the leg declines as unknown).
-        if (!hit || !hit.scrapedAtMs) continue;
-
-        let sels = [];
-        try { sels = px.parseMarketSelections(market) || []; } catch (_) { continue; }
-        const yes = sels.find(s => String(s.outcomeName || s.teamName || '').toUpperCase() === 'YES');
-        if (!yes || !yes.lineId) continue;
-
-        const raw = hit.impliedProb;
-        const override = Math.max(0.005, Math.min(0.98, raw * (1 - sweet)));
-        _setSeedLine(yes.lineId, {
-          sport: 'soccer',
-          pxEventId: eid,
-          pxEventName: ev.name,
-          marketType: 'player_' + family,
-          marketName: mname,
-          selection: 'over', // YES — the side DK prices and bettors back
-          teamName: playerName,
-          line: null,
-          homeTeam,
-          awayTeam,
-          oddsApiSport: 'soccer',
-          startTime: scheduled,
-          playerName,
-          propType: family,
-          fairProb: raw,       // raw DK implied — drives EV/risk bookkeeping
-          fairProbOver: raw,
-          fairProbUnder: 1 - raw,
-          booksWithBothSides: 0,
-          bookPriceOverride: override,
-          propBooks: ['draftkings'],
-          propSource: 'dk-scraper-one-sided',
-          propFetchedAt: hit.scrapedAtMs,
-        });
-        registered++;
-      }
-      await new Promise(r => setTimeout(r, 100)); // same PX pacing as main seed
-    }
-  }
-  if (registered > 0) log.info('Lines', `WC player props: registered ${registered} YES lines from DK scrape cache`);
-  return registered;
-}
-
-// ---------------------------------------------------------------------------
 // LOOKUPS
 // ---------------------------------------------------------------------------
 
@@ -1889,28 +1831,6 @@ function lookupLine(lineId) {
   // `NaN` = invalid, number = valid ms.
   if (info.startTimeMs === undefined) {
     info.startTimeMs = info.startTime ? Date.parse(info.startTime) : null;
-  }
-  // WC soccer props: live-sync price + freshness from the DK scrape cache.
-  // Registration snapshots propFetchedAt at seed time, but seeds can be far
-  // apart — without this, a fresh worker scrape wouldn't reach the lineInfo
-  // until the next re-seed and pricer's 15-min prop_stale gate would decline
-  // everything in between. Sync cost is one Map get; if the player vanished
-  // from the cache (DK pulled the price / scratch), the old propFetchedAt is
-  // kept and the prop_stale gate fails the leg closed within 15 min.
-  if (info.propSource === 'dk-scraper-one-sided' && info.sport === 'soccer' && info.propType) {
-    try {
-      const wcProps = require('./wc-player-props');
-      const hit = wcProps.lookup(info.pxEventId, info.playerName, info.propType);
-      if (hit && hit.scrapedAtMs && hit.scrapedAtMs > (info.propFetchedAt || 0)) {
-        const sweet = (config.pricing && config.pricing.propBookMirrorSweetener != null)
-          ? config.pricing.propBookMirrorSweetener : 0.005;
-        info.fairProb = hit.impliedProb;
-        info.fairProbOver = hit.impliedProb;
-        info.fairProbUnder = 1 - hit.impliedProb;
-        info.bookPriceOverride = Math.max(0.005, Math.min(0.98, hit.impliedProb * (1 - sweet)));
-        info.propFetchedAt = hit.scrapedAtMs;
-      }
-    } catch (_) { /* cache unavailable — stale gate covers it */ }
   }
   return info;
 }
@@ -3405,7 +3325,6 @@ module.exports = {
   lookupLine,
   lookupLineAsync,
   __debugGetLineIndex,
-  _seedWorldCupProps, // exposed for standalone smoke-testing (no PX registration side effects)
   resolveUnknownLine,
   getResolveFailure: _getResolveFailure,
   getResolveFailuresSnapshot: () => Array.from(_failuresByLineId.entries()),

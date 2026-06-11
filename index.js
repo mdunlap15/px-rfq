@@ -186,17 +186,6 @@ async function startup() {
 
   // Step 3: Seed lines and register with PX
   log.info('Startup', '3/5 Seeding lines and registering with ProphetX...');
-  // WC player-prop cache must load BEFORE the seed so _seedWorldCupProps
-  // sees the scraped DK prices on the first pass (startPolling kicks off an
-  // immediate refresh and a recurring poll; await the first load so the
-  // seed doesn't race it).
-  try {
-    const wcProps = require('./services/wc-player-props');
-    await wcProps.refresh();
-    wcProps.startPolling();
-  } catch (err) {
-    log.warn('Startup', `    WC prop cache load failed (non-fatal): ${err.message}`);
-  }
   try {
     const seedStats = await lineManager.seedAllLines();
     log.info('Startup', `    ✓ ${seedStats.registeredLines} lines registered (${seedStats.matchedLines} matched of ${seedStats.totalLines} parsed)`);
@@ -2752,45 +2741,32 @@ function startStatusServer() {
     res.json(websocket.getConfirmActivity());
   });
 
-  // World Cup player-prop pipeline health: DK scrape cache freshness +
-  // how many WC prop lines are registered, by market family. First stop
-  // when WC props aren't quoting — newestScrapeAgoMin > 15 means the
-  // decoupled worker (scripts/dk-wc-props-worker.js --loop) isn't running
-  // and pricer's prop_stale gate is declining everything (by design).
+  // World Cup soccer player-prop visibility: how many soccer prop lines are
+  // registered, by market family, with price-source and freshness summary.
+  // These register through the standard TOA prop pre-seed (same path as
+  // NBA/NHL/MLB props) — requires soccer.* entries in PROP_LAUNCH_ALLOWLIST.
   app.get('/wc-props', (req, res) => {
-    const wcProps = require('./services/wc-player-props');
     const idx = lineManager.__debugGetLineIndex();
     const registered = {};
+    const bySource = {};
     let registeredTotal = 0;
+    let newestFetch = null;
     for (const info of Object.values(idx)) {
-      if (info && info.propSource === 'dk-scraper-one-sided' && info.sport === 'soccer' && info.propType) {
-        registered[info.propType] = (registered[info.propType] || 0) + 1;
-        registeredTotal++;
-      }
+      if (!info || !info.propType) continue;
+      if (!(info.sport === 'soccer' || String(info.sport || '').startsWith('soccer_'))) continue;
+      if (!/^player_/.test(info.marketType || '')) continue;
+      registered[info.propType] = (registered[info.propType] || 0) + 1;
+      bySource[info.propSource || '?'] = (bySource[info.propSource || '?'] || 0) + 1;
+      if (info.propFetchedAt && (newestFetch == null || info.propFetchedAt > newestFetch)) newestFetch = info.propFetchedAt;
+      registeredTotal++;
     }
-    res.json({ cache: wcProps.getStatus(), registeredTotal, registeredByMarket: registered });
-  });
-
-  // Manual WC prop re-seed. Runs ONLY the WC registration step (seconds, vs
-  // the 90s full /refresh-lines) and — critically — returns the error message
-  // inline, since registration failures inside seedAllLines are swallowed
-  // into Railway logs. Newly registered line_ids are pushed to PX so RFQs
-  // can arrive without waiting for the next full seed.
-  app.post('/wc-props/seed', async (req, res) => {
-    try {
-      const before = new Set(Object.keys(lineManager.__debugGetLineIndex()));
-      const registered = await lineManager._seedWorldCupProps();
-      const idx = lineManager.__debugGetLineIndex();
-      const newIds = Object.keys(idx).filter(id => !before.has(id) && idx[id]
-        && idx[id].propSource === 'dk-scraper-one-sided' && idx[id].sport === 'soccer');
-      if (newIds.length > 0) {
-        try { await px.registerSupportedLines(newIds); }
-        catch (e) { return res.json({ ok: false, registered, pxRegisterError: e.message }); }
-      }
-      res.json({ ok: true, registered, newLineIds: newIds.length });
-    } catch (err) {
-      res.json({ ok: false, error: err.message, stack: (err.stack || '').split('\n').slice(0, 4) });
-    }
+    res.json({
+      registeredTotal,
+      registeredByMarket: registered,
+      bySource,
+      newestPropFetchAgoMin: newestFetch ? Math.round((Date.now() - newestFetch) / 60000) : null,
+      allowlist: [...(config.pricing.propLaunchAllowlist || new Set())].filter(k => k.startsWith('soccer')),
+    });
   });
 
   // Long-window confirm-time rejection report. Queries parlay_orders
