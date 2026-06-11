@@ -2771,6 +2771,28 @@ function startStatusServer() {
     res.json({ cache: wcProps.getStatus(), registeredTotal, registeredByMarket: registered });
   });
 
+  // Manual WC prop re-seed. Runs ONLY the WC registration step (seconds, vs
+  // the 90s full /refresh-lines) and — critically — returns the error message
+  // inline, since registration failures inside seedAllLines are swallowed
+  // into Railway logs. Newly registered line_ids are pushed to PX so RFQs
+  // can arrive without waiting for the next full seed.
+  app.post('/wc-props/seed', async (req, res) => {
+    try {
+      const before = new Set(Object.keys(lineManager.__debugGetLineIndex()));
+      const registered = await lineManager._seedWorldCupProps();
+      const idx = lineManager.__debugGetLineIndex();
+      const newIds = Object.keys(idx).filter(id => !before.has(id) && idx[id]
+        && idx[id].propSource === 'dk-scraper-one-sided' && idx[id].sport === 'soccer');
+      if (newIds.length > 0) {
+        try { await px.registerSupportedLines(newIds); }
+        catch (e) { return res.json({ ok: false, registered, pxRegisterError: e.message }); }
+      }
+      res.json({ ok: true, registered, newLineIds: newIds.length });
+    } catch (err) {
+      res.json({ ok: false, error: err.message, stack: (err.stack || '').split('\n').slice(0, 4) });
+    }
+  });
+
   // Long-window confirm-time rejection report. Queries parlay_orders
   // directly (unlimited by the in-memory rejectStats.recent[100] buffer)
   // so the operator can see rejection patterns across days or weeks

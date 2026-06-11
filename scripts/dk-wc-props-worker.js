@@ -80,11 +80,16 @@ async function fetchPxWcEvents() {
       const id = ev.event_id || ev.id;
       const teams = pxTeams(ev);
       if (!id || teams.length < 2) continue;
+      const commence = ev.scheduled || ev.start_time || ev.commence_time || ev.start || null;
+      // Skip in-play matches: DK switches their pages to LIVE prices, which
+      // must never enter the pre-game prop cache (the live service declines
+      // started events anyway, but don't even scrape them).
+      if (commence && new Date(commence).getTime() <= Date.now()) continue;
       out.push({
         pxEventId: Number(id),
         teams,
         label: ev.name || ev.display_name || teams.join(' vs '),
-        commence: ev.scheduled || ev.start_time || ev.commence_time || ev.start || null,
+        commence,
       });
     }
   }
@@ -189,28 +194,54 @@ async function main() {
   }
   console.log(`[wc-worker] matched ${matched}/${pxEvents.length} (unmatched ${unmatched}); ${allRows.length} prop rows`);
 
+  // Soonest upcoming kickoff among the matches we actually scraped — drives
+  // the adaptive loop interval (tighten ahead of kickoff so the live
+  // service's 2-min pre-game scrape-age bound stays satisfiable).
+  let soonestCommenceMs = null;
+  for (const pxEv of pxEvents) {
+    const t = pxEv.commence ? new Date(pxEv.commence).getTime() : null;
+    if (t && t > Date.now() && (soonestCommenceMs == null || t < soonestCommenceMs)) soonestCommenceMs = t;
+  }
+
   if (DRY) {
     console.log('[wc-worker] --dry: not writing. Sample rows:');
     allRows.slice(0, 8).forEach(r => console.log('   ', JSON.stringify(r)));
-    return;
+    return { rows: allRows.length, soonestCommenceMs };
   }
-  if (!allRows.length) { console.log('[wc-worker] no rows to write'); return; }
+  if (!allRows.length) { console.log('[wc-worker] no rows to write'); return { rows: 0, soonestCommenceMs }; }
   await upsert(allRows);
   console.log(`[wc-worker] upserted ${allRows.length} rows into wc_player_props`);
+  return { rows: allRows.length, soonestCommenceMs };
 }
 
 if (require.main === module) {
-  // --loop [minutes]: run forever, re-scraping every N minutes (default 10).
-  // The live service's prop_stale gate declines any prop whose scrape is
-  // older than 15 min, so 10-min loops keep quotes continuously alive;
-  // stopping the loop fail-safes quoting off within 15 min.
+  // --loop [minutes]: run forever, re-scraping every N minutes (default
+  // WC_SCRAPE_LOOP_MINUTES or 10). The live service's prop_stale gate
+  // declines any prop whose scrape is older than 15 min (2 min within 30 min
+  // of kickoff), so the loop keeps quotes continuously alive; stopping it
+  // fail-safes quoting off within 15 min.
+  //
+  // ADAPTIVE: when any scraped match kicks off within 45 min, the interval
+  // self-tightens to 2 min so the live service's pre-game 2-min scrape-age
+  // bound stays satisfiable — no manual switching. setTimeout chain (not
+  // setInterval) so a slow scrape pass can never overlap the next one.
   const loopIdx = process.argv.indexOf('--loop');
   if (loopIdx !== -1) {
-    const mins = Number(process.argv[loopIdx + 1]) || 10;
-    console.log(`[wc-worker] loop mode: every ${mins} min (Ctrl+C to stop; quoting auto-stops ≤15 min after)`);
-    const runOnce = () => main().catch(e => console.error('[wc-worker] run failed (will retry next loop):', e.message));
-    runOnce();
-    setInterval(runOnce, mins * 60 * 1000);
+    const baseMins = Number(process.argv[loopIdx + 1]) || Number(process.env.WC_SCRAPE_LOOP_MINUTES) || 10;
+    const PREKICK_WINDOW_MS = 45 * 60 * 1000;
+    const PREKICK_MINS = 2;
+    console.log(`[wc-worker] loop mode: every ${baseMins} min, auto-tightens to ${PREKICK_MINS} min within 45 min of kickoff (Ctrl+C to stop; quoting auto-stops ≤15 min after)`);
+    const loopOnce = async () => {
+      let result = null;
+      try { result = await main(); }
+      catch (e) { console.error('[wc-worker] run failed (will retry next loop):', e.message); }
+      const soon = result && result.soonestCommenceMs;
+      const inPreKick = soon != null && (soon - Date.now()) <= PREKICK_WINDOW_MS;
+      const nextMins = inPreKick ? Math.min(PREKICK_MINS, baseMins) : baseMins;
+      console.log(`[wc-worker] next run in ${nextMins} min${inPreKick ? ` (kickoff in ${Math.max(0, Math.round((soon - Date.now()) / 60000))} min — tightened)` : ''}`);
+      setTimeout(loopOnce, nextMins * 60 * 1000);
+    };
+    loopOnce();
   } else {
     main().then(() => process.exit(0)).catch(e => { console.error('[wc-worker] FATAL', e.message); process.exit(1); });
   }
