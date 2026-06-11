@@ -1646,7 +1646,15 @@ async function handleConfirm(data) {
       // to block and we don't already know who this counterparty is.
       if (!blockedCid && typeof blocklist.list === 'function' && blocklist.list().length > 0) {
         try {
-          const liveOrder = await px.fetchOrderByUuid(orderUuid);
+          // Bounded — must NEVER hang the confirm hot path. If PX's orders
+          // endpoint is slow/unresponsive, give up fast and proceed without the
+          // live creator (the RFQ-time gate covers the common case). 2026-06-10:
+          // an UNBOUNDED fetch here hung EVERY confirm for ~2h when the PX
+          // orders endpoint degraded — zero fills, no rejects, no errors logged.
+          const liveOrder = await Promise.race([
+            px.fetchOrderByUuid(orderUuid),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('creator-lookup timeout (800ms)')), 800)),
+          ]);
           const liveCid = liveOrder && liveOrder.creator_id;
           if (liveCid) {
             blockedCid = liveCid;
