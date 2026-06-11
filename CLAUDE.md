@@ -43,8 +43,11 @@ client/
 | `THE_ODDS_API_KEY` | No | The Odds API key (fallback for NCAAB, alt lines from Pinnacle) |
 | `SUPABASE_URL` | No | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | No | Supabase service role key |
-| `DEFAULT_VIG` | No | Default: 0.001 (0.1%) |
+| `DEFAULT_VIG` | No | Default: 0.015 (1.5% per leg) |
+| `VIG_BY_SPORT` | No | JSON map of per-sport base vig overriding `DEFAULT_VIG` (e.g. `{"soccer":0.03}`) |
+| `PROP_LAUNCH_ALLOWLIST` | No | Comma-separated `<sport>.<propType>` keys that may quote (e.g. `baseball_mlb.hitter_hr,soccer.goalscorer`). Props not listed never register. |
 | `MAX_RISK_PER_PARLAY` | No | Default: 500 |
+| `MAX_RISK_PER_PARLAY_WITH_PROP` | No | Default: 50. Cap for any parlay containing a player-prop leg. |
 | `MAX_EXPOSURE_PER_TEAM` | No | Default: 50 |
 | `MAX_LEGS` | No | Default: 8 |
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
@@ -141,12 +144,20 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/reconnect` | POST | Force WebSocket reconnect |
 | `/odds-events` | GET | Debug: cached odds events |
 | `/lines` | GET | Debug: registered line index |
+| `/confirm-activity` | GET | Confirm→fill conversion health. **First stop on any fill-drought**: `error` bucket > 0 = confirms throwing in the handler; `received` flat = channel/volume. |
+| `/recent-rejects` | GET | Last ~100 confirm-time rejections with reasons |
+| `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 
 ## Database (Supabase)
 
 - **parlay_orders**: Our quotes, confirmations, settlements, P&L
 - **matched_parlays**: All matched parlays across all SPs (market intelligence)
 - Upserts on `parlay_id` for orders
+
+## Soccer Specifics
+
+- **PX soccer moneylines are 2-way draw-no-bet** ("Moneyline (2 Way)" — draw refunds). Sportsbooks post soccer ML as 3-way (draw loses) — a **different product**. Our DNB quotes correctly sum to ~100% across the two teams and look "narrow" next to 3-way book prices; PX's separate "<Team> to Win (90 Min)" YES/NO markets are the 3-way equivalents. Verified 2026-06-11: our quotes sat inside PX's own DNB order book while DK/FD 3-way prices differed by 100+ points.
+- **World Cup player props** (anytime goalscorer, shots-on-target 1+/2+, assists): PX posts them as lineless YES/NO markets ("<Player> To Score a Goal", "<Player> To Have At Least 1 Shot On Target", "<Player> To Give Assist"). They register through the standard TOA prop pre-seed (line-manager `_classifySoccerProp`) against TOA's `soccer_fifa_world_cup` key (FD/DK/BetRivers), **YES side only**, priced book-mirror (raw posted consensus × (1 − `PROP_BOOK_MIRROR_SWEETENER`)). Launch-gated by `PROP_LAUNCH_ALLOWLIST` keys `soccer.goalscorer`, `soccer.sot_1`, `soccer.sot_2`, `soccer.assists`. TOA anytime outcomes carry **no point** and use side name **"Yes"** (not "Over").
 
 ## Key Gotchas
 
@@ -156,7 +167,7 @@ PX and odds APIs use different team names. Matching strategies (in order):
 - **callback_url is absolute**: `submitOffer` and `confirmOrder` use the callback URL from the RFQ directly (not relative to baseUrl).
 - **Both channels are private-prefixed**: PX WebSocket channels are both `private-*` — the broadcast one has "broadcast" in the name.
 - **Back-to-back/doubleheader matching**: Odds cache stores arrays per team pair, matched by closest `commenceTime` to handle same-day series.
-- **Full-game only**: Line manager filters out first half, quarter, period, inning, player props — only registers full-game moneyline/spread/total.
+- **Team markets are full-game only** (plus MLB F5 / NBA first-half carve-outs): the main-market filter drops quarter/period/inning markets. **Player props register separately** via the pre-seed prop pass (allowlist-gated per `PROP_LAUNCH_ALLOWLIST`) — MLB hitter/K props, NBA/WNBA points/rebounds/assists/threes, NHL points/assists/SOG, soccer WC goalscorer/SoT/assists.
 - **max_risk enforcement**: PX sandbox may not enforce max_risk limits. A $2,447 order was confirmed despite max_risk=500. Open question for Alec (PX contact).
 
 ## Conventions

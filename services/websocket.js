@@ -332,6 +332,36 @@ function classifyNhlProp(marketName) {
 }
 // (exported via module.exports block at end of file as _classifyNhlProp)
 
+// Soccer player-prop sub-classifier. Mirrors the MLB/NBA/NHL classifiers so
+// the decline rollup (recordDecline.byPropType) and the [propType:X] tag in
+// unknown_details capture World Cup prop volume by market type — visible in
+// /prop-opportunity and decline stats even before (or beyond what) the
+// PROP_LAUNCH_ALLOWLIST quotes.
+//
+// Returns one of:
+//   'goalscorer'           — "<P> To Score a Goal" (quotable: soccer.goalscorer)
+//   'shots_on_target'      — "At Least N Shot(s) On Target" (quotable: sot_1/sot_2)
+//   'shots'                — "At Least N Shot(s)" total shots (NOT quotable — no book source)
+//   'assists'              — "To Give Assist" (quotable: soccer.assists)
+//   'score_or_assist'      — combo market (NOT quotable — no book source)
+//   'other_soccer_prop'    — couldn't classify
+//   null                   — input wasn't a market name
+//
+// Ordering matters: "Shots On Target" before bare "Shot(s)"; the combo
+// before goalscorer/assists so "To Score Or Give Assist" doesn't partial-
+// match either single-stat bucket.
+function classifySoccerProp(marketName) {
+  if (!marketName) return null;
+  const n = String(marketName).toLowerCase();
+  if (/to score or give (an? )?assist/.test(n)) return 'score_or_assist';
+  if (/to have at least \d+ shots? on target/.test(n)) return 'shots_on_target';
+  if (/to have at least \d+ shots?\b/.test(n)) return 'shots';
+  if (/to score (a )?goal/.test(n)) return 'goalscorer';
+  if (/to give (an? )?assist/.test(n)) return 'assists';
+  return 'other_soccer_prop';
+}
+// (exported via module.exports block at end of file as _classifySoccerProp)
+
 // ---------------------------------------------------------------------------
 // STATE
 // ---------------------------------------------------------------------------
@@ -1129,6 +1159,8 @@ async function handleRFQ(data) {
               propType = classifyNbaProp(propMarketName);
             } else if (eventSport.includes('hockey')) {
               propType = classifyNhlProp(propMarketName);
+            } else if (eventSport.includes('soccer')) {
+              propType = classifySoccerProp(propMarketName);
             }
           }
           const propTag = propType ? ` [propType:${propType}]` : '';
@@ -2756,5 +2788,6 @@ module.exports = {
   _classifyMlbProp: classifyMlbProp, // exposed for /prop-opportunity sanity testing
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing
+  _classifySoccerProp: classifySoccerProp, // exposed for /prop-opportunity sanity testing
   _extractPlayerNameFromPropMarket: extractPlayerNameFromPropMarket, // exposed for line-manager Phase-2 prop bridge
 };
