@@ -1870,6 +1870,42 @@ async function handleConfirm(data) {
       return;
     }
 
+    // Script-aware prop game caps + experimental-combo tier re-check (SGP
+    // roadmap Stage 0). Quote-time checks ran against worst-case risk;
+    // re-check here with the ACTUAL confirmed stake — and the experiment
+    // budget/auto-dark state may have moved since the quote (another fill
+    // landed, a stop-loss tripped). Fail closed for experimental combos if
+    // the guard itself errors.
+    if (parlayHasPropLeg) {
+      try {
+        const sgpGuard = require('./sgp-guard');
+        const gameCapCheck = sgpGuard.checkPropGameCaps(legsForCheck, ourRisk);
+        if (!gameCapCheck.allowed) {
+          log.warn('Confirm', `Rejecting: ${gameCapCheck.reason}`);
+          orderTracker.recordRejection(parlayId, gameCapCheck.reason);
+          orderTracker.recordExposureRejection(parlayId, ourRisk, 'prop game exposure limit', [{
+            team: gameCapCheck.scope, wouldBe: gameCapCheck.wouldBe, limit: gameCapCheck.limit,
+          }]);
+          if (callbackUrl) await px.confirmOrder(callbackUrl, orderUuid, 'reject');
+          return;
+        }
+        const expCheck = sgpGuard.checkExperiment(metaCombo, ourRisk);
+        if (!expCheck.allowed) {
+          log.warn('Confirm', `Rejecting: ${expCheck.reason}`);
+          orderTracker.recordRejection(parlayId, expCheck.reason);
+          if (callbackUrl) await px.confirmOrder(callbackUrl, orderUuid, 'reject');
+          return;
+        }
+      } catch (err) {
+        log.warn('Confirm', `sgp-guard re-check errored: ${err.message}`);
+        if (isExperimentalCombo) {
+          orderTracker.recordRejection(parlayId, `sgp-guard unavailable — fail closed (${err.message})`);
+          if (callbackUrl) await px.confirmOrder(callbackUrl, orderUuid, 'reject');
+          return;
+        }
+      }
+    }
+
     // Series gross-exposure re-check. Same rationale as the team check:
     // a race between quote and confirm could push a series event over
     // the $1K cap. Uses actual ourRisk now that the stake is known.
@@ -1957,6 +1993,13 @@ async function handleConfirm(data) {
 
       // POST succeeded — now safe to record confirmation locally.
       orderTracker.recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake);
+
+      // Feed the SGP guard ledgers (prop game-script risk + experimental
+      // combo daily budget). Best-effort — never blocks the fill.
+      try {
+        const order = orderTracker.findByParlayId(parlayId);
+        if (order) require('./sgp-guard').recordFill(order);
+      } catch (e) { log.debug('SGP-Guard', `recordFill skipped: ${e.message}`); }
 
       // Send push notification to mobile app
       try {

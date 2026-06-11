@@ -125,6 +125,13 @@ async function startup() {
     } catch (err) {
       log.warn('Startup', `    ⚠ DB load failed: ${err.message}`);
     }
+    // Rebuild the SGP guard ledgers (prop game-script risk, experimental
+    // combo daily budgets, auto-dark state) from the orders just loaded.
+    try {
+      await require('./services/sgp-guard').rebuild(orderTracker.getRecentOrders(3000));
+    } catch (err) {
+      log.warn('Startup', `    ⚠ sgp-guard rebuild failed: ${err.message}`);
+    }
     // Kick off the persistent 7-day Declines + Missed Volume rollup
     // refresher. Reads `declines` + `matched_parlays` from Supabase every
     // 60s so the totals survive Railway restarts. Fire-and-forget.

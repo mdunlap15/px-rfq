@@ -3345,6 +3345,49 @@ function shouldDecline(legs, parlayId) {
         estPayout: propParlayCap,
       };
     }
+
+    // Script-aware prop game caps (SGP roadmap Stage 0 / attack 3B):
+    // per-(game, side) and total-per-game prop risk. The per-player cap
+    // above can't see N tickets on N different players long the same game
+    // script; these can. Worst-case charge = this parlay's per-parlay cap
+    // (the experimental tier cap if the combo is experimental).
+    try {
+      const sgpGuard = require('./sgp-guard');
+      const expCombo = sgpGuard.isExperimental(sgpCombo);
+      const addRisk = expCombo
+        ? (config.pricing.maxRiskSgpExperimental || 15)
+        : propParlayCap;
+      const gameCapCheck = sgpGuard.checkPropGameCaps(resolvedLegs, addRisk);
+      if (!gameCapCheck.allowed) {
+        log.info('Pricing', `Prop game cap: ${gameCapCheck.reason}`);
+        return {
+          declined: true,
+          reason: 'prop game exposure limit',
+          detail: gameCapCheck.reason,
+          violations: [{ team: gameCapCheck.scope, wouldBe: gameCapCheck.wouldBe, limit: gameCapCheck.limit }],
+          estPayout: addRisk,
+        };
+      }
+      // Experimental-combo tier: daily filled-risk budget + auto-dark
+      // stop-loss. Only fires for combos in SGP_EXPERIMENTAL_COMBOS.
+      const expCheck = sgpGuard.checkExperiment(sgpCombo, addRisk);
+      if (!expCheck.allowed) {
+        log.info('Pricing', `SGP experiment gate: ${expCheck.reason}`);
+        return {
+          declined: true,
+          reason: 'sgp_experiment_limit',
+          detail: expCheck.reason,
+        };
+      }
+    } catch (err) {
+      // Guard must never crash pricing — but it also must not silently
+      // disappear: fail CLOSED for experimental combos, open for the rest
+      // (established caps still protect them).
+      log.warn('Pricing', `sgp-guard check errored: ${err.message}`);
+      if (sgpCombo && config.pricing.experimentalSgpCombos && config.pricing.experimentalSgpCombos.has(sgpCombo)) {
+        return { declined: true, reason: 'sgp_experiment_limit', detail: `guard unavailable (${err.message}) — fail closed for experimental combo` };
+      }
+    }
   }
 
   // On success, surface the resolved lineInfos keyed by lineId so the caller

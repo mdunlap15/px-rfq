@@ -1323,6 +1323,11 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
       stats.runningPnL += order.pnl;
     }
 
+    // SGP experiment stop-loss feed: settled experimental-combo parlays
+    // update the rolling-week P&L; a breach auto-darks the class. Lazy
+    // require avoids a circular dep; best-effort by design.
+    try { require('./sgp-guard').recordSettlement(order); } catch (_) { /* never break settlement */ }
+
     // CLV capture: for each leg, look up the closing line snapshot captured
     // when the event started. Compute the closing implied prob per leg and
     // the parlay-level closing implied prob. Store on the order so the
