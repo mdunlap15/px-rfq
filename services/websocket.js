@@ -1596,14 +1596,18 @@ async function handleConfirm(data) {
   // blocked creators — never looks like a stalled channel.
   _lastConfirmEventAt = Date.now();
   _offersSinceConfirmEvent = 0;
+  _confirmCounts.received++;
+  // Confirmation data is nested under data.payload. These are HOISTED above
+  // the try (and so out of it) on purpose: the fail-closed catch at the bottom
+  // needs parlayId/orderUuid/callbackUrl/stake to reject back to PX. A throw in
+  // the pre-accept logic must NEVER leave the offer hanging with no response.
+  const payload = (data && (data.payload || data)) || {};
+  const parlayId = payload.parlay_id || payload.parlayId;
+  const orderUuid = payload.order_uuid || payload.orderUuid;
+  const callbackUrl = payload.callback_url || payload.callbackUrl;
+  const confirmedStake = payload.stake || payload.confirmed_stake;
   try {
-    // Confirmation data is nested under data.payload
-    const payload = data.payload || data;
-    const parlayId = payload.parlay_id || payload.parlayId;
-    const orderUuid = payload.order_uuid || payload.orderUuid;
-    const callbackUrl = payload.callback_url || payload.callbackUrl;
     const confirmedOdds = payload.odds || payload.confirmed_odds;
-    const confirmedStake = payload.stake || payload.confirmed_stake;
 
     log.info('Confirm', `Received: parlay=${parlayId}, order=${orderUuid}, odds=${confirmedOdds}, stake=$${confirmedStake}`);
     log.info('Confirm', `FULL PAYLOAD: ${JSON.stringify(payload)}`);
@@ -1630,6 +1634,7 @@ async function handleConfirm(data) {
     const originalOrder = orderTracker.findByParlayId(parlayId);
     if (!originalOrder) {
       log.warn('Confirm', `No quote found for parlay ${parlayId} — rejecting`);
+      _recordConfirmOutcome(parlayId, 'noQuote', 'no quote found', confirmedStake);
       if (callbackUrl) {
         await px.confirmOrder(callbackUrl, orderUuid, 'reject');
       }
@@ -1883,6 +1888,7 @@ async function handleConfirm(data) {
         // or marks rejected (via recordRejection). 3s delay gives PX time
         // to finalize if the failure came after their commit.
         log.warn('Confirm', `Accept POST errored for ${parlayId}: ${acceptErr.message} — will verify via PX REST in 3s`);
+        _recordConfirmOutcome(parlayId, 'acceptUnknown', acceptErr.message, confirmedStake);
         orderTracker.markAcceptUnknown(parlayId, orderUuid, confirmedOdds, confirmedStake, acceptErr.message);
         setTimeout(() => {
           verifyAcceptUnknown(parlayId, orderUuid, confirmedOdds, confirmedStake).catch(err =>
@@ -1892,6 +1898,7 @@ async function handleConfirm(data) {
         return;
       }
       log.info('Confirm', `Accepted: order=${orderUuid}`);
+      _recordConfirmOutcome(parlayId, 'accepted', null, confirmedStake);
 
       // POST succeeded — now safe to record confirmation locally.
       orderTracker.recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake);
@@ -1910,7 +1917,24 @@ async function handleConfirm(data) {
       orderTracker.recordRejection(parlayId, 'no-callback-url');
     }
   } catch (err) {
-    log.error('Confirm', `Error handling confirmation: ${err.message}`);
+    // SILENT-DROP GUARD — fail closed. Any throw in the pre-accept logic
+    // (validation, exposure checks, building priceProbability, etc.) used to
+    // land here and be swallowed: NO accept, NO reject, NO record. The
+    // bettor's offer hung to timeout and we had zero trace — the exact
+    // "confirms arrive but never fill" symptom, undetectable after the fact.
+    // (The accept-POST itself can't reach here — it has its own try that
+    // routes failures to verifyAcceptUnknown — so a reject is always safe.)
+    // Now: reject back to PX so the offer resolves, record it, and count it
+    // in the error bucket so the conversion watchdog (and /confirm-activity)
+    // surface it immediately.
+    log.error('Confirm', `Handler threw for parlay=${parlayId}: ${err.message}`, err.stack || '');
+    _recordConfirmOutcome(parlayId, 'error', err.message, confirmedStake);
+    try {
+      if (callbackUrl) await px.confirmOrder(callbackUrl, orderUuid, 'reject');
+      orderTracker.recordRejection(parlayId, `confirm-handler-error: ${err.message}`);
+    } catch (e2) {
+      log.warn('Confirm', `error-path reject POST failed for parlay=${parlayId}: ${e2.message}`);
+    }
   }
 }
 
@@ -2196,6 +2220,48 @@ const _confirmStallMinOffers = Number(process.env.WS_CONFIRM_STALL_MIN_OFFERS) |
 let _lastConfirmEventAt = Date.now();
 let _offersSinceConfirmEvent = 0;
 
+// Confirm-outcome telemetry. Every price.confirm.new is tallied by outcome so
+// confirm→fill conversion is OBSERVABLE in real time (GET /confirm-activity)
+// instead of inferred from the DB after the fact. The 'error' bucket is the
+// critical one: it counts confirms that threw in the handler — the silent
+// non-fill class that previously left no trace anywhere. 'received' is the
+// total; rejected is derived (received - the rest) since reject reasons already
+// live in /recent-rejects.
+const _confirmCounts = { received: 0, accepted: 0, acceptUnknown: 0, error: 0, noQuote: 0 };
+const _confirmLog = [];
+const _CONFIRM_LOG_MAX = 200;
+let _confirmErrorsSeen = 0; // snapshot for the conversion watchdog (Edit G)
+function _recordConfirmOutcome(parlayId, outcome, reason, stake) {
+  if (_confirmCounts[outcome] != null) _confirmCounts[outcome]++;
+  _confirmLog.push({
+    t: Date.now(),
+    parlayId: parlayId ? String(parlayId).substring(0, 12) : null,
+    outcome,
+    reason: reason || null,
+    stake: stake != null ? stake : null,
+  });
+  if (_confirmLog.length > _CONFIRM_LOG_MAX) _confirmLog.shift();
+}
+function getConfirmActivity() {
+  const now = Date.now();
+  const windowCounts = (mins) => {
+    const cut = now - mins * 60000;
+    return _confirmLog.reduce((a, e) => {
+      if (e.t >= cut) a[e.outcome] = (a[e.outcome] || 0) + 1;
+      return a;
+    }, {});
+  };
+  const c = _confirmCounts;
+  const derivedRejected = Math.max(0, c.received - c.accepted - c.acceptUnknown - c.error - c.noQuote);
+  return {
+    sinceBoot: { ...c, rejectedDerived: derivedRejected },
+    last15min: windowCounts(15),
+    last60min: windowCounts(60),
+    lastConfirmEventAgoSec: Math.round((now - _lastConfirmEventAt) / 1000),
+    recent: _confirmLog.slice(-50).reverse().map(e => ({ ...e, agoSec: Math.round((now - e.t) / 1000) })),
+  };
+}
+
 async function _watchdogReconnect(reason) {
   if (_watchdogReconnecting) return;
   // Cooldown — don't fire more than once per 2 min, even if reconnect
@@ -2245,6 +2311,18 @@ function startHealthCheckMonitor() {
         _watchdogReconnect(`confirm-stall: ${_offersSinceConfirmEvent} offers submitted, no confirm event in ${Math.round(confirmAgeMs / 60000)}min`)
           .catch(() => { /* logged inside */ });
       }
+    }
+    // Confirm-CONVERSION alarm. The stall watchdog above only sees the case
+    // where confirm events STOP. It is blind to the more insidious case where
+    // confirms keep ARRIVING but throw in the handler (so _lastConfirmEventAt
+    // stays fresh) — confirms that never become fills. The fail-closed catch
+    // now rejects + counts those in the error bucket; here we shout the moment
+    // any new ones appear so a silent non-fill drought can't go unnoticed.
+    if (_confirmCounts.error > _confirmErrorsSeen) {
+      const delta = _confirmCounts.error - _confirmErrorsSeen;
+      _confirmErrorsSeen = _confirmCounts.error;
+      log.error('WS-Watchdog', `CONFIRM-CONVERSION ALARM: ${delta} confirm handler-error(s) in last 60s (total ${_confirmCounts.error}) — confirms arriving but failing to convert. See /confirm-activity.`);
+      try { require('./push').notifyConnectionState('confirm-error', `${delta} confirm handler-error(s) — see /confirm-activity`); } catch (_) {}
     }
   }, 60_000);
   log.info('WS-Watchdog', _watchdogEnabled
@@ -2666,6 +2744,7 @@ module.exports = {
   wasRfqReceived,
   getReceivedRfqStats,
   getQuoteCoverageStats,
+  getConfirmActivity,
   _classifyMlbProp: classifyMlbProp, // exposed for /prop-opportunity sanity testing
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing

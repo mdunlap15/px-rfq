@@ -2731,6 +2731,16 @@ function startStatusServer() {
     res.json({ rejects: orderTracker.getRecentRejects(limit) });
   });
 
+  // Confirm→fill conversion health. Answers "are confirms arriving but not
+  // filling, and why?" in real time. Buckets every price.confirm.new by
+  // outcome (accepted / acceptUnknown / error / noQuote, rejected derived).
+  // The `error` bucket is the canary: a non-zero value means confirms threw in
+  // the handler — the formerly-silent non-fill class. last15min/last60min show
+  // recent conversion; `recent` is the per-event tail.
+  app.get('/confirm-activity', (req, res) => {
+    res.json(websocket.getConfirmActivity());
+  });
+
   // Long-window confirm-time rejection report. Queries parlay_orders
   // directly (unlimited by the in-memory rejectStats.recent[100] buffer)
   // so the operator can see rejection patterns across days or weeks
