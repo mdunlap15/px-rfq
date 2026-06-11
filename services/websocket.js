@@ -1537,6 +1537,7 @@ async function handleRFQ(data) {
       const elapsed = elapsedMs();
       stageTimings.submit = elapsed;
       rfqStages.submitted++;
+      _offersSinceConfirmEvent++; // confirm-stall watchdog: offers since last confirm event
       // Defer all post-submit bookkeeping to setImmediate. These calls
       // don't affect the offer itself or subsequent RFQ eligibility; they
       // only feed analytics/logging/db. Running them inline was stealing
@@ -1590,6 +1591,11 @@ async function handleRFQ(data) {
  * Handle confirmation request (price.confirm.new).
  */
 async function handleConfirm(data) {
+  // Confirm-stall watchdog: a confirm event arrived → the private channel is
+  // alive. Reset on the EVENT (not on a fill) so that rejecting confirms — e.g.
+  // blocked creators — never looks like a stalled channel.
+  _lastConfirmEventAt = Date.now();
+  _offersSinceConfirmEvent = 0;
   try {
     // Confirmation data is nested under data.payload
     const payload = data.payload || data;
@@ -2179,6 +2185,17 @@ const _watchdogStaleMs = (Number(process.env.WS_WATCHDOG_STALE_MINUTES) || 3) * 
 let _watchdogReconnecting = false;
 let _watchdogLastFireAt = 0;
 
+// Confirm-channel stall watchdog. The PRIVATE channel can silently stop
+// delivering price.confirm.new while the socket stays "healthy" (pongs keep
+// arriving, lastHealthCheck stays fresh) — so the health watchdog above misses
+// it and fills just stop with no error (2026-06-10 & 2026-06-11 outages, both
+// recovered by a manual /reconnect). Detect: we're actively submitting offers
+// but have seen ZERO confirm events in N minutes → channel dead → reconnect.
+const _confirmStallMs = (Number(process.env.WS_CONFIRM_STALL_MINUTES) || 12) * 60 * 1000;
+const _confirmStallMinOffers = Number(process.env.WS_CONFIRM_STALL_MIN_OFFERS) || 40;
+let _lastConfirmEventAt = Date.now();
+let _offersSinceConfirmEvent = 0;
+
 async function _watchdogReconnect(reason) {
   if (_watchdogReconnecting) return;
   // Cooldown — don't fire more than once per 2 min, even if reconnect
@@ -2190,6 +2207,8 @@ async function _watchdogReconnect(reason) {
   // Seed lastHealthCheck so we don't immediately re-fire during the
   // handshake (the cooldown above is belt; this is suspenders).
   lastHealthCheck = Date.now();
+  _lastConfirmEventAt = Date.now();  // fresh confirm-stall window post-reconnect
+  _offersSinceConfirmEvent = 0;
   try {
     try { require('./push').notifyConnectionState('zombie', `Watchdog auto-reconnect: ${reason}`); } catch (_) {}
     try { px.clearCooldown && px.clearCooldown(); } catch (_) {}
@@ -2215,6 +2234,17 @@ function startHealthCheckMonitor() {
     if (_watchdogEnabled && ageMs > _watchdogStaleMs) {
       _watchdogReconnect(`lastHealthCheck stale ${Math.round(ageMs / 1000)}s (threshold ${Math.round(_watchdogStaleMs / 1000)}s)`)
         .catch(() => { /* logged inside */ });
+    }
+    // Confirm-channel stall: socket healthy but the private channel stopped
+    // delivering confirms while we keep submitting → reconnect to re-subscribe.
+    // Gated on active submitting (min-offers) so a genuinely quiet period never
+    // triggers a needless reconnect.
+    if (_watchdogEnabled && !paused && connectionState === 'connected') {
+      const confirmAgeMs = Date.now() - _lastConfirmEventAt;
+      if (confirmAgeMs > _confirmStallMs && _offersSinceConfirmEvent >= _confirmStallMinOffers) {
+        _watchdogReconnect(`confirm-stall: ${_offersSinceConfirmEvent} offers submitted, no confirm event in ${Math.round(confirmAgeMs / 60000)}min`)
+          .catch(() => { /* logged inside */ });
+      }
     }
   }, 60_000);
   log.info('WS-Watchdog', _watchdogEnabled
