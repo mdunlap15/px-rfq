@@ -1713,6 +1713,12 @@ async function seedAllLines() {
             // of time. Each sel.lineId in `sels` is unique (PX uses one
             // lineId per (line, side) pair).
             for (const sel of sels) {
+              // HR unders are NEVER offered (operator 2026-06-12) — not even
+              // when a book genuinely posts both sides (~20 players/slate
+              // carry real two-sided HR data and slipped past the one-sided-
+              // path removal). 'No HR' flow self-selects sharp regardless of
+              // the price basis.
+              if (propType === 'hitter_hr' && sel.selection === 'under') continue;
               const fairProb = sel.selection === 'over' ? lookup.fairProbOver : lookup.fairProbUnder;
               _setSeedLine(sel.lineId, {
                 sport: sportKey,
