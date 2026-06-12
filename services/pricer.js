@@ -805,6 +805,28 @@ function priceParlay(legs, opts = {}) {
       return null;
     }
 
+    // Prop-leg freshness (SGP roadmap Stage 0): mirrors shouldDecline's
+    // prop_stale gate. Load-bearing at CONFIRM time — validateForConfirmation
+    // calls priceParlay directly (no shouldDecline), and without this a
+    // stale prop reprices against its own stale fairProb, shows zero drift,
+    // and gets accepted. With it, the reprice fails with a non-churn reason
+    // and the bounded fail-open rejects. Quote path unaffected (shouldDecline
+    // already declined stale props before priceParlay runs).
+    if (/^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt) {
+      const propAgeMs = nowMs - lineInfo.propFetchedAt;
+      const propStaleMs = (config.pricing.stalePropSeconds || 420) * 1000;
+      if (propAgeMs > propStaleMs) {
+        const ageMin = Math.round(propAgeMs / 6000) / 10;
+        log.debug('Pricing', `Declined: stale prop data for ${legLabel} (${ageMin} min old)`);
+        priceParlay._lastFailure = {
+          reason: 'prop stale',
+          detail: `${legLabel} prop data ${ageMin} min old (>${Math.round(propStaleMs / 60000 * 10) / 10} min)`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
+    }
+
     // Pre-game closing-line guard: within 30 min of tip-off, sportsbooks
     // move the line hard on late news. Require much fresher cache (≤ 2 min)
     // for events in the final pre-game window. Catches scenarios where the
