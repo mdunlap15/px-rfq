@@ -2416,8 +2416,22 @@ async function _watchdogReconnect(reason) {
 function startHealthCheckMonitor() {
   if (healthCheckTimer) clearInterval(healthCheckTimer);
 
+  const monitorStartedAt = Date.now();
   healthCheckTimer = setInterval(() => {
-    if (!lastHealthCheck) return; // never seen a health event yet
+    if (!lastHealthCheck) {
+      // NEVER-CONNECTED guard (found 2026-06-12: a boot-race left the WS
+      // 'disconnected' with reconnectAttempts=0 and the book dark until a
+      // manual /reconnect). The initial connect has no retry of its own,
+      // and this early-return meant the watchdog could not see the failure
+      // because no health event ever arrives on a socket that never opened.
+      // After 3 minutes of never-connected, force the watchdog.
+      if (_watchdogEnabled && connectionState !== 'connected'
+          && Date.now() - monitorStartedAt > 3 * 60 * 1000) {
+        _watchdogReconnect('never connected since boot (initial WS connect failed)')
+          .catch(() => { /* logged inside */ });
+      }
+      return;
+    }
     const ageMs = Date.now() - lastHealthCheck;
     if (ageMs > 60_000) {
       log.warn('WS', `No health check received in ${Math.round(ageMs / 1000)}s — connection may be stale`);
