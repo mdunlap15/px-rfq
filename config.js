@@ -864,8 +864,16 @@ const config = {
     // all — experimental membership only adds the tighter limits.
     experimentalSgpCombos: new Set((process.env.SGP_EXPERIMENTAL_COMBOS != null
       ? process.env.SGP_EXPERIMENTAL_COMBOS
-      : 'prop_nested'
+      : 'prop_nested,prop_prop_xteam'
     ).split(',').map(s => s.trim()).filter(Boolean)),
+    // Stage 2 cross-team prop pairs: additive band-top dependence charge.
+    // q_fair = min(p1·p2 + φ·√(p1q1·p2q2), min(p1,p2)) with φ at the TOP of
+    // the structurally-plausible band for cross-team binaries (shared park/
+    // weather/pace common factor). Band-top is the no-regret price: a fully
+    // informed counterparty faces ≤0 EV anywhere in φ∈[0,φmax]; the cost is
+    // fill rate on genuinely-independent pairs, not EV. Lower only with
+    // oracle/CLV evidence, never raise on a hunch.
+    sgpPropXTeamPhiMax: parseFloat(process.env.SGP_PROP_XTEAM_PHI_MAX) || 0.15,
     maxRiskSgpExperimental: parseFloat(process.env.MAX_RISK_SGP_EXPERIMENTAL) || 15,
     sgpExperimentDailyBudget: parseFloat(process.env.SGP_EXPERIMENT_DAILY_BUDGET) || 150,
     sgpExperimentWeeklyStopLoss: parseFloat(process.env.SGP_EXPERIMENT_WEEKLY_STOP_LOSS) || 300,

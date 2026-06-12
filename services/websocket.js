@@ -1775,7 +1775,8 @@ async function handleConfirm(data) {
     const _exp = config.pricing.experimentalSgpCombos;
     const isExperimentalCombo = !!_exp && (
       (metaCombo && _exp.has(metaCombo)) ||
-      ((originalOrder.meta && originalOrder.meta.nestedPairs > 0) && _exp.has('prop_nested'))
+      ((originalOrder.meta && originalOrder.meta.nestedPairs > 0) && _exp.has('prop_nested')) ||
+      ((originalOrder.meta && originalOrder.meta.xteamPairs > 0) && _exp.has('prop_prop_xteam'))
     );
     if (isExperimentalCombo) confirmCaps.push(config.pricing.maxRiskSgpExperimental || 15);
     const maxRisk = Math.min(...confirmCaps.filter(c => c > 0));

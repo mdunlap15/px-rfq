@@ -161,6 +161,62 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
     check('SoT2+SoT1 unaffected by the GS gate', !sotLadder.declined && sotLadder.sgpCombo === 'prop_nested', sotLadder.declined ? sotLadder.reason : 'combo=' + sotLadder.sgpCombo);
     process.env.SGP_NESTED_SOCCER_GS_SOT = 'true';
 
+    // --- Stage 2: cross-team pairs (prop_prop_xteam) ---
+    const xteamOn = (config.pricing.sgpAllowedCombos || []).includes('prop_prop_xteam');
+    if (xteamOn) {
+      console.log('--- stage 2: cross-team pairs ---');
+      const roster = require('../services/roster');
+      roster.__setTestMap('baseball_mlb', [
+        ['Aaron Judge', 'Mockico Reds'],   // home side below
+        ['Bobby Witt Jr.', 'Testland Blues'], // away side
+        ['Giancarlo Stanton', 'Mockico Reds'], // same team as Judge
+      ]);
+      const mkX = (id, player, implied) => { mk(id, { sport: 'baseball_mlb', eventId: 9, player, propType: 'hitter_hr', implied, line: 0.5 });
+        idx[id].homeTeam = 'Mockico Reds'; idx[id].awayTeam = 'Testland Blues'; };
+      mkX('xj', 'Aaron Judge', 0.20);
+      mkX('xw', 'Bobby Witt Jr.', 0.10);
+      mkX('xs', 'Giancarlo Stanton', 0.12);
+      mk('xu', { sport: 'baseball_mlb', eventId: 9, player: 'Unknown Rookie', propType: 'hitter_hr', implied: 0.08, line: 0.5 });
+      idx['xu'].homeTeam = 'Mockico Reds'; idx['xu'].awayTeam = 'Testland Blues';
+
+      const xOk = dc(['xj', 'xw']);
+      check('cross-team HR+HR allowed', !xOk.declined && xOk.sgpCombo === 'prop_prop_xteam', xOk.declined ? xOk.reason : 'combo=' + xOk.sgpCombo);
+      const xSame = dc(['xj', 'xs']);
+      check('SAME-team HR+HR still declined (Stage 3)', xSame.declined === true, xSame.reason);
+      const xUnk = dc(['xj', 'xu']);
+      check('unresolved player fails closed', xUnk.declined === true, xUnk.reason);
+
+      if (!xOk.declined) {
+        // Price a favorites-style pair (hits 1+ shapes): the 20%/10% HR pair
+        // correctly hits the book's global +1500 max-odds cap — deep HR+HR
+        // longshots stay cap-bound by existing policy.
+        const mkH = (id, player, implied) => { mk(id, { sport: 'baseball_mlb', eventId: 9, player, propType: 'hitter_hits', implied, line: 0.5 });
+          idx[id].homeTeam = 'Mockico Reds'; idx[id].awayTeam = 'Testland Blues'; };
+        mkH('xh1', 'Aaron Judge', 0.65);
+        mkH('xh2', 'Bobby Witt Jr.', 0.60);
+        const xh = dc(['xh1', 'xh2']);
+        const px2 = xh.declined ? null : await pricer.priceParlay([{ line_id: 'xh1' }, { line_id: 'xh2' }], { resolvedLineInfos: xh.resolvedLineInfos, sgpCombo: xh.sgpCombo, parlayId: 't' });
+        if (px2) {
+          // band-top: joint = min(0.39 + 0.15*sqrt(.65*.35*.6*.4), 0.60) ≈ 0.4250
+          const expect = 0.65 * 0.6 + 0.15 * Math.sqrt(0.65 * 0.35 * 0.6 * 0.4);
+          check('band-top fair ≈ ' + expect.toFixed(4), Math.abs(px2.meta.fairParlayProb - expect) < 0.001, String(px2.meta.fairParlayProb));
+          check('xteamPairs stamped', px2.meta.xteamPairs === 1);
+          check('experimental cap binds (xteam)', px2.offer.max_risk <= (config.pricing.maxRiskSgpExperimental || 15), String(px2.offer.max_risk));
+          const px2c = await pricer.priceParlay([{ line_id: 'xh1' }, { line_id: 'xh2' }]); // confirm path: no opts
+          check('xteam confirm symmetry', px2c && px2c.meta.fairParlayProb === px2.meta.fairParlayProb);
+          // Fréchet cap case: two heavy favorites where naive+lift exceeds min(p1,p2)
+          mkX('xf1', 'Aaron Judge', 0.92); mkX('xf2', 'Bobby Witt Jr.', 0.93);
+          const xf = dc(['xf1', 'xf2']);
+          if (!xf.declined) {
+            const pf = await pricer.priceParlay([{ line_id: 'xf1' }, { line_id: 'xf2' }], { resolvedLineInfos: xf.resolvedLineInfos, sgpCombo: xf.sgpCombo, parlayId: 't' });
+            check('Fréchet cap binds at min(p1,p2)', pf === null || pf.meta.fairParlayProb <= 0.92 + 1e-9, pf ? String(pf.meta.fairParlayProb) : 'null(negative-odds decline ok)');
+          } else { check('Fréchet cap case reachable', false, xf.reason); }
+        } else {
+          check('xteam pair priced', false, JSON.stringify(pricer.priceParlay._lastFailure || {}).substring(0, 100));
+        }
+      }
+    }
+
     // --- 3. experiment ledger + game caps (unit-level) ---
     console.log('--- sgp-guard ---');
     await sgpGuard.rebuild([]); // clean slate

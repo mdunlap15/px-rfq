@@ -1453,6 +1453,47 @@ function priceParlay(legs, opts = {}) {
     }
   }
 
+  // ---- CROSS-TEAM PAIR DETECTION (SGP roadmap Stage 2) ----
+  // Re-derived from LEG SHAPE (roster-resolved sides, never opts) so the
+  // confirm-path reprice computes the identical fair prob. Additive
+  // band-top: jointFair = min(p1·p2 + φmax·√(p1q1·p2q2), min(p1,p2)).
+  // Additive because correlation lift is additive in probability — a flat
+  // multiplicative boost undercovers low-probability pairs (MLB HR+HR, the
+  // #1 demand shape) by >10×. Band-top because selection pins realized
+  // dependence at the top of the band: sharps request the linked pairs, so
+  // φmax is the no-regret price under a public pricing grid.
+  // Expressed as a single multiplier folded into fairParlayProb AND
+  // sgpFairMultiplier; standard doubled SGP leg vig stays ON (the roadmap's
+  // 6%/leg). Book-mirror legs come out slightly MORE conservative (their
+  // offered contribution carries the book margin too) — acceptable
+  // direction for a small-test class.
+  let xteamFairMultiplier = 1;
+  let xteamPairCount = 0;
+  if (isSGPParlay) {
+    const usedX = new Set();
+    for (let i = 0; i < pricedLegs.length; i++) {
+      if (usedX.has(i)) continue;
+      for (let j = i + 1; j < pricedLegs.length; j++) {
+        if (usedX.has(j)) continue;
+        if (!matchXTeamPair(pricedLegs[i].lineInfo, pricedLegs[j].lineInfo)) continue;
+        const p1 = pricedLegs[i].fairProb, p2 = pricedLegs[j].fairProb;
+        if (!(p1 > 0 && p1 < 1 && p2 > 0 && p2 < 1)) continue;
+        const phi = Math.max(0, config.pricing.sgpPropXTeamPhiMax || 0.15);
+        const naive = p1 * p2;
+        const jointFair = Math.min(naive + phi * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
+        if (jointFair > naive) xteamFairMultiplier *= jointFair / naive;
+        xteamPairCount++;
+        usedX.add(i); usedX.add(j);
+        break;
+      }
+    }
+    if (xteamFairMultiplier !== 1) {
+      const before = fairParlayProb;
+      fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * xteamFairMultiplier));
+      log.debug('Pricing', `XTeam band-top lift (${xteamPairCount} pair${xteamPairCount > 1 ? 's' : ''}) — fair ${(before * 100).toFixed(2)}% × ${xteamFairMultiplier.toFixed(4)} = ${(fairParlayProb * 100).toFixed(2)}%`);
+    }
+  }
+
   // SGP vig-multiplier suppression:
   // - prop_nested pairs price EXACTLY (joint = strong leg) — the doubled
   //   SGP vig exists to cover correlation UNCERTAINTY, of which these have
@@ -1463,6 +1504,8 @@ function priceParlay(legs, opts = {}) {
   //   opposing-pitcher Ks share umpire zone, park K-factor, and weather —
   //   the same common factors the SGP vig is there to cover. Leaving a
   //   known-looser carve-out live hands attackers a preferred template.
+  //   (xteam pairs likewise keep the doubled vig — band-top covers the
+  //   dependence, vig covers the rest.)
   const skipSgpVig = nestedPairCount > 0;
   const sgpVigMult = (isSGPParlay && !skipSgpVig)
     ? Math.max(1, config.pricing.sgpVigMultiplier || 1)
@@ -1828,7 +1871,8 @@ function priceParlay(legs, opts = {}) {
   const sgpFairMultiplier =
     (isKpropMlSameTeamSGP ? (1 + (config.pricing.sgpPropMlCorrBoost || 0)) : 1) *
     sgpCorrelationFactor *
-    nestedOfferedMultiplier;
+    nestedOfferedMultiplier *
+    xteamFairMultiplier;
   const vigFair = vigLegs.reduce((p, l) => p * l.fairProb, 1) * sgpFairMultiplier;
 
   // ---------------------------------------------------------------------
@@ -2314,7 +2358,8 @@ function priceParlay(legs, opts = {}) {
   const _expCombos = config.pricing.experimentalSgpCombos;
   const _isExperimentalParlay = !!_expCombos && (
     (opts.sgpCombo && _expCombos.has(opts.sgpCombo)) ||
-    (nestedPairCount > 0 && _expCombos.has('prop_nested'))
+    (nestedPairCount > 0 && _expCombos.has('prop_nested')) ||
+    (xteamPairCount > 0 && _expCombos.has('prop_prop_xteam'))
   );
   if (_isExperimentalParlay) {
     candidateCaps.push(config.pricing.maxRiskSgpExperimental || 15);
@@ -2654,6 +2699,9 @@ function priceParlay(legs, opts = {}) {
       // joint was collapsed to the strong leg(s) — exact pricing.
       nestedPairs: nestedPairCount || 0,
       nestedFairMultiplier: nestedFairMultiplier !== 1 ? Math.round(nestedFairMultiplier * 10000) / 10000 : 1,
+      // Cross-team pair band-top lift (Stage 2) — shape-detected.
+      xteamPairs: xteamPairCount || 0,
+      xteamFairMultiplier: xteamFairMultiplier !== 1 ? Math.round(xteamFairMultiplier * 10000) / 10000 : 1,
       // Correlation adjustment applied to the joint fair prob for this SGP
       // before vig. Null if not an SGP or not a recognized combo. Stored
       // so /sgp-stats + order audits can split acceptance + ROI by
@@ -2831,6 +2879,42 @@ function matchNestedPair(a, b) {
 
 function _nestedCombosAllowed() {
   return (config.pricing.sgpAllowedCombos || []).includes('prop_nested');
+}
+
+// ---------------------------------------------------------------------------
+// CROSS-TEAM PROP PAIRS (SGP roadmap Stage 2 — 'prop_prop_xteam')
+// ---------------------------------------------------------------------------
+// Two prop legs, same game, DIFFERENT players on OPPOSITE teams (NBA pts-over
+// A-team + pts-over B-team; MLB cross-team HR+HR / hits+hits — the #1
+// declined-and-competitor-filled shape). Identity comes from the roster
+// service and FAILS CLOSED: unknown player, ambiguous name, or unresolvable
+// side ⇒ no match ⇒ the same-game block declines as before. Same-TEAM pairs
+// (strongest dependence — shared park AND pitcher) stay blocked until the
+// Stage-3 oracle confirms their band.
+const _XTEAM_ROSTER_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'basketball_wnba']);
+
+function matchXTeamPair(a, b) {
+  if (!a || !b) return null;
+  if (!/^player_/.test(a.marketType || '') || !/^player_/.test(b.marketType || '')) return null;
+  if (!a.pxEventId || a.pxEventId !== b.pxEventId) return null;
+  const sport = a.sport || '';
+  if (sport !== (b.sport || '') || !_XTEAM_ROSTER_SPORTS.has(sport)) return null;
+  const pa = _nestedNormPlayer(a.playerName || a.teamName);
+  const pb = _nestedNormPlayer(b.playerName || b.teamName);
+  if (!pa || !pb || pa === pb) return null; // same player = nested/same-player territory
+  let sideA = null, sideB = null;
+  try {
+    const roster = require('./roster');
+    sideA = roster.getPlayerSide(sport, a.playerName || a.teamName, a.homeTeam, a.awayTeam);
+    sideB = roster.getPlayerSide(sport, b.playerName || b.teamName, b.homeTeam, b.awayTeam);
+  } catch (_) { return null; } // roster unavailable — fail closed
+  if (!sideA || !sideB) return null;   // unresolved identity — fail closed
+  if (sideA === sideB) return null;    // same team — stays blocked (Stage 3)
+  return { sides: [sideA, sideB] };
+}
+
+function _xteamCombosAllowed() {
+  return (config.pricing.sgpAllowedCombos || []).includes('prop_prop_xteam');
 }
 
 function shouldDecline(legs, parlayId) {
@@ -3053,6 +3137,12 @@ function shouldDecline(legs, parlayId) {
           // leg keeps the whole parlay declined here.
           if (group.others.length === 0 && group.props.length === 2
               && _nestedCombosAllowed() && matchNestedPair(group.props[0], group.props[1])) continue;
+          // CROSS-TEAM EXEMPTION (Stage 2): exactly two different-player,
+          // opposite-team prop legs (roster-resolved, fail-closed), no other
+          // same-game legs — falls through to 'prop_prop_xteam' (env-gated)
+          // + additive band-top pricing.
+          if (group.others.length === 0 && group.props.length === 2
+              && _xteamCombosAllowed() && matchXTeamPair(group.props[0], group.props[1])) continue;
           const propLabels = group.props.map(li =>
             `${li.playerName || li.teamName || '?'} ${li.propType || li.marketType} ${li.selection || ''} ${li.line ?? ''}`.trim());
           const otherLabels = group.others.map(li =>
@@ -3333,6 +3423,11 @@ function shouldDecline(legs, parlayId) {
     // goalscorer+SoT pair never falls through to the generic key match.
     if (entries[0].li && entries[1].li && matchNestedPair(entries[0].li, entries[1].li)) {
       return 'prop_nested';
+    }
+    // Cross-team different-player prop pair (Stage 2) — roster-resolved,
+    // fail-closed (unresolved identity returns null ⇒ 'SGP not allowed').
+    if (entries[0].li && entries[1].li && matchXTeamPair(entries[0].li, entries[1].li)) {
+      return 'prop_prop_xteam';
     }
     const markets = entries.map(e => e.market).sort();
     const key = markets.join('_');

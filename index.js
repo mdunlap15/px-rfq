@@ -196,6 +196,12 @@ async function startup() {
 
   // Step 3: Seed lines and register with PX
   log.info('Startup', '3/5 Seeding lines and registering with ProphetX...');
+  // Roster identity service (SGP Stage 2): player→team maps for the
+  // cross-team prop-pair class. Fire-and-forget — xteam pairs fail closed
+  // (decline) until the first refresh lands, which is the right default.
+  try { require('./services/roster').startPolling(); } catch (err) {
+    log.warn('Startup', `    roster service init failed (xteam pairs stay declined): ${err.message}`);
+  }
   try {
     const seedStats = await lineManager.seedAllLines();
     log.info('Startup', `    ✓ ${seedStats.registeredLines} lines registered (${seedStats.matchedLines} matched of ${seedStats.totalLines} parsed)`);
@@ -2760,10 +2766,13 @@ function startStatusServer() {
     try {
       const sgpGuard = require('./services/sgp-guard');
       const status = sgpGuard.getStatus();
+      let roster = null;
+      try { roster = require('./services/roster').getStatus(); } catch (_) {}
       res.json({
         ...status,
         allowedCombos: config.pricing.sgpAllowedCombos || [],
         pxSubmitErrorsByCombo: websocket.getPxSubmitErrorsByCombo(),
+        roster,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
