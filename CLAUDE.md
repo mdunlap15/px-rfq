@@ -120,6 +120,11 @@ If a username appears in both lists, `AUTH_VIEWERS` wins (more restrictive); a w
   real name (e.g. "Vinícius Júnior") — use it for name-matching to PX. Ground-truth validated
   2026-06-11: 254/256 exact vs hand-typed DK boards (the 2 diffs were live line movement).
   Used by the WC NO-posting routine (anytime goalscorer / 1+ & 2+ SoT / 1+ assists mirrors).
+- **DK golf outrights scraper** (`scripts/dk-golf-outrights.js`): same Puppeteer/intercept
+  technique for golf. Golf tournaments are DK **leagues** (`/leagues/golf/<slug>`), not events;
+  the league page's default load fires one `league/leagueSubcategory/v1/markets` XHR carrying
+  all three outright boards. `node scripts/dk-golf-outrights.js rbc-canadian-open [out.json]`
+  → `{winner,top5,top10}` as `{player,odds}` ("(Including Ties)" variants, ASCII-normalized).
 
 ## Team Name Matching (line-manager.js)
 
