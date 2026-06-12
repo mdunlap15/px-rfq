@@ -873,7 +873,9 @@ const config = {
     // informed counterparty faces ≤0 EV anywhere in φ∈[0,φmax]; the cost is
     // fill rate on genuinely-independent pairs, not EV. Lower only with
     // oracle/CLV evidence, never raise on a hunch.
-    sgpPropXTeamPhiMax: parseFloat(process.env.SGP_PROP_XTEAM_PHI_MAX) || 0.15,
+    sgpPropXTeamPhiMax: Number.isFinite(parseFloat(process.env.SGP_PROP_XTEAM_PHI_MAX))
+      ? parseFloat(process.env.SGP_PROP_XTEAM_PHI_MAX)
+      : 0.15,
     maxRiskSgpExperimental: parseFloat(process.env.MAX_RISK_SGP_EXPERIMENTAL) || 15,
     sgpExperimentDailyBudget: parseFloat(process.env.SGP_EXPERIMENT_DAILY_BUDGET) || 150,
     sgpExperimentWeeklyStopLoss: parseFloat(process.env.SGP_EXPERIMENT_WEEKLY_STOP_LOSS) || 300,

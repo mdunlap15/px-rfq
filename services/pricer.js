@@ -1478,7 +1478,10 @@ function priceParlay(legs, opts = {}) {
         if (!matchXTeamPair(pricedLegs[i].lineInfo, pricedLegs[j].lineInfo)) continue;
         const p1 = pricedLegs[i].fairProb, p2 = pricedLegs[j].fairProb;
         if (!(p1 > 0 && p1 < 1 && p2 > 0 && p2 < 1)) continue;
-        const phi = Math.max(0, config.pricing.sgpPropXTeamPhiMax || 0.15);
+        // Number.isFinite (not ||): an explicit SGP_PROP_XTEAM_PHI_MAX=0
+        // must mean zero lift, not re-default to 0.15 (review fix).
+        const phiRaw = config.pricing.sgpPropXTeamPhiMax;
+        const phi = Math.max(0, Number.isFinite(phiRaw) ? phiRaw : 0.15);
         const naive = p1 * p2;
         const jointFair = Math.min(naive + phi * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
         if (jointFair > naive) xteamFairMultiplier *= jointFair / naive;
@@ -2896,6 +2899,16 @@ const _XTEAM_ROSTER_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'basketb
 function matchXTeamPair(a, b) {
   if (!a || !b) return null;
   if (!/^player_/.test(a.marketType || '') || !/^player_/.test(b.marketType || '')) return null;
+  // K-props NEVER enter the xteam class (review fix — HIGH): opposing-
+  // pitcher K+K pairs are player_* legs on opposite MLB teams, so without
+  // this exclusion they'd classify as 'prop_prop_xteam' the moment the
+  // roster loads — silently DECLINING the live operator-approved
+  // kprop_kprop carve-out under the default env (combo dark), repricing
+  // in-flight confirms with a one-sided lift (drift rejects), and
+  // misledgering the experiment budget when enabled. K pairs keep their
+  // dedicated carve-out path (rule (d) + the kprop_kprop key) exactly
+  // as before, deterministically, roster or no roster.
+  if (a.marketType === 'player_strikeouts' || b.marketType === 'player_strikeouts') return null;
   if (!a.pxEventId || a.pxEventId !== b.pxEventId) return null;
   const sport = a.sport || '';
   if (sport !== (b.sport || '') || !_XTEAM_ROSTER_SPORTS.has(sport)) return null;

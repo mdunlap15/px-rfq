@@ -2,14 +2,15 @@
  * SGP Stage 0+1 test suite — gates, exact pricing, confirm symmetry,
  * experiment tier, prop game caps, bounded confirm fail-open.
  *
- * Run: SGP_ALLOWED_COMBOS="spread_total,prop_nested" node scripts/test_sgp_stage01.js
- * (run again WITHOUT prop_nested in SGP_ALLOWED_COMBOS to verify dark mode)
+ * Run (full): SGP_ALLOWED_COMBOS="spread_total,prop_nested,prop_prop_xteam" node scripts/test_sgp_stage01.js
+ * Run (dark): SGP_ALLOWED_COMBOS="spread_total" node scripts/test_sgp_stage01.js
+ * The Stage 2 block prints a loud warning if skipped by the env.
  *
  * Local-only: injects synthetic lineInfos via __debugGetLineIndex and stubs
  * the sport-level odds staleness (no odds cache locally). Never touches PX
  * or Supabase writes.
  */
-process.env.SGP_EXPERIMENTAL_COMBOS = process.env.SGP_EXPERIMENTAL_COMBOS || 'prop_nested';
+process.env.SGP_EXPERIMENTAL_COMBOS = process.env.SGP_EXPERIMENTAL_COMBOS || 'prop_nested,prop_prop_xteam';
 // GS⇒SoT1 is settlement-verification-gated (cross-feed grading) — enable for
 // the rule-logic tests; a dedicated case below verifies default-off.
 process.env.SGP_NESTED_SOCCER_GS_SOT = 'true';
@@ -163,6 +164,9 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
 
     // --- Stage 2: cross-team pairs (prop_prop_xteam) ---
     const xteamOn = (config.pricing.sgpAllowedCombos || []).includes('prop_prop_xteam');
+    if (!xteamOn) {
+      console.log('\n!!! STAGE 2 BLOCK SKIPPED — add prop_prop_xteam to SGP_ALLOWED_COMBOS for full coverage !!!\n');
+    }
     if (xteamOn) {
       console.log('--- stage 2: cross-team pairs ---');
       const roster = require('../services/roster');
@@ -186,6 +190,34 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
       const xUnk = dc(['xj', 'xu']);
       check('unresolved player fails closed', xUnk.declined === true, xUnk.reason);
 
+      // DARK-MODE xteam: with the combo removed from the allowed list, the
+      // same pair must decline (review fix — no dark coverage existed).
+      const savedCombos = config.pricing.sgpAllowedCombos;
+      config.pricing.sgpAllowedCombos = savedCombos.filter(c => c !== 'prop_prop_xteam');
+      const xDark = dc(['xj', 'xw']);
+      check('xteam declines when combo dark', xDark.declined === true, xDark.reason);
+      config.pricing.sgpAllowedCombos = savedCombos;
+
+      // KPROP NON-HIJACK regression (review fix — HIGH): opposing-pitcher
+      // K+K pairs are player_* legs on opposite roster teams; they must
+      // STILL classify kprop_kprop (auto-allowed carve-out), never
+      // prop_prop_xteam, and must take no band-top lift.
+      roster.__setTestMap('baseball_mlb', [
+        ['Aaron Judge', 'Mockico Reds'], ['Bobby Witt Jr.', 'Testland Blues'],
+        ['Giancarlo Stanton', 'Mockico Reds'],
+        ['Pitcher Home', 'Mockico Reds'], ['Pitcher Away', 'Testland Blues'],
+      ]);
+      const mkK = (id, player, implied, line) => { mk(id, { sport: 'baseball_mlb', eventId: 9, player, propType: 'pitcher_strikeouts', implied, line, marketType: 'player_strikeouts' });
+        idx[id].homeTeam = 'Mockico Reds'; idx[id].awayTeam = 'Testland Blues'; };
+      mkK('kk1', 'Pitcher Home', 0.45, 6.5);
+      mkK('kk2', 'Pitcher Away', 0.55, 5.5);
+      const kk = dc(['kk1', 'kk2']);
+      check('K+K still classifies kprop_kprop (no xteam hijack)', !kk.declined && kk.sgpCombo === 'kprop_kprop', kk.declined ? kk.reason : 'combo=' + kk.sgpCombo);
+      if (!kk.declined) {
+        const pk = await pricer.priceParlay([{ line_id: 'kk1' }, { line_id: 'kk2' }], { resolvedLineInfos: kk.resolvedLineInfos, sgpCombo: kk.sgpCombo, parlayId: 't' });
+        check('K+K takes NO band-top lift', pk && pk.meta.xteamPairs === 0 && Math.abs(pk.meta.fairParlayProb - 0.45 * 0.55) < 1e-9, pk ? `fair=${pk.meta.fairParlayProb} xteamPairs=${pk.meta.xteamPairs}` : 'null');
+      }
+
       if (!xOk.declined) {
         // Price a favorites-style pair (hits 1+ shapes): the 20%/10% HR pair
         // correctly hits the book's global +1500 max-odds cap — deep HR+HR
@@ -201,15 +233,24 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
           const expect = 0.65 * 0.6 + 0.15 * Math.sqrt(0.65 * 0.35 * 0.6 * 0.4);
           check('band-top fair ≈ ' + expect.toFixed(4), Math.abs(px2.meta.fairParlayProb - expect) < 0.001, String(px2.meta.fairParlayProb));
           check('xteamPairs stamped', px2.meta.xteamPairs === 1);
-          check('experimental cap binds (xteam)', px2.offer.max_risk <= (config.pricing.maxRiskSgpExperimental || 15), String(px2.offer.max_risk));
+          // MEANINGFUL cap assertion (review fix: ≤15 was vacuously satisfied
+          // by the local .env MAX_RISK_PER_PARLAY=10): force the other caps
+          // wide so only the experimental tier can produce 15.
+          const savedCaps = [config.pricing.maxRiskPerParlay, config.pricing.maxRiskPerParlayWithProp, config.pricing.maxRiskSgpExperimental];
+          config.pricing.maxRiskPerParlay = 500; config.pricing.maxRiskPerParlayWithProp = 50; config.pricing.maxRiskSgpExperimental = 15;
+          const pxCap = await pricer.priceParlay([{ line_id: 'xh1' }, { line_id: 'xh2' }], { resolvedLineInfos: xh.resolvedLineInfos, sgpCombo: xh.sgpCombo, parlayId: 't' });
+          check('experimental cap EXACTLY 15 (others widened)', pxCap && pxCap.offer.max_risk === 15, pxCap ? String(pxCap.offer.max_risk) : 'null');
+          [config.pricing.maxRiskPerParlay, config.pricing.maxRiskPerParlayWithProp, config.pricing.maxRiskSgpExperimental] = savedCaps;
           const px2c = await pricer.priceParlay([{ line_id: 'xh1' }, { line_id: 'xh2' }]); // confirm path: no opts
           check('xteam confirm symmetry', px2c && px2c.meta.fairParlayProb === px2.meta.fairParlayProb);
-          // Fréchet cap case: two heavy favorites where naive+lift exceeds min(p1,p2)
-          mkX('xf1', 'Aaron Judge', 0.92); mkX('xf2', 'Bobby Witt Jr.', 0.93);
+          // Fréchet cap — BINDING case (review fix: 0.92/0.93 never binds;
+          // the cap needs asymmetry): 0.10/0.95 → naive 0.095 + lift 0.0098
+          // = 0.1048 > min = 0.10 → jointFair must equal 0.10 exactly.
+          mkX('xf1', 'Aaron Judge', 0.10); mkX('xf2', 'Bobby Witt Jr.', 0.95);
           const xf = dc(['xf1', 'xf2']);
           if (!xf.declined) {
             const pf = await pricer.priceParlay([{ line_id: 'xf1' }, { line_id: 'xf2' }], { resolvedLineInfos: xf.resolvedLineInfos, sgpCombo: xf.sgpCombo, parlayId: 't' });
-            check('Fréchet cap binds at min(p1,p2)', pf === null || pf.meta.fairParlayProb <= 0.92 + 1e-9, pf ? String(pf.meta.fairParlayProb) : 'null(negative-odds decline ok)');
+            check('Fréchet cap binds EXACTLY at min(p1,p2)=0.10', pf != null && Math.abs(pf.meta.fairParlayProb - 0.10) < 1e-9, pf ? String(pf.meta.fairParlayProb) : 'null — must price, not decline');
           } else { check('Fréchet cap case reachable', false, xf.reason); }
         } else {
           check('xteam pair priced', false, JSON.stringify(pricer.priceParlay._lastFailure || {}).substring(0, 100));
