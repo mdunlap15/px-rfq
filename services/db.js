@@ -839,12 +839,18 @@ async function getDailyPnL(days = 30, opts = {}) {
     }
     if (rows.length === 0) return [];
 
-    // Group by date (YYYY-MM-DD in local timezone) using the selected column.
+    // Group by ET day (YYYY-MM-DD, America/New_York) using the selected
+    // column. Was server-local (= UTC on Railway), which split the
+    // operator's evening into "tomorrow": an 11:02pm ET settlement is
+    // 3:02am UTC next day, so rows displayed with ET times grouped under
+    // a date the operator hadn't reached yet (reported 2026-06-11). The
+    // dashboard's quote-side bucketing (etDayKey) was already ET —
+    // settled-side now matches.
     const byDay = {};
     for (const row of rows) {
       const bucketTs = row[groupBy];
       if (!bucketTs) continue;
-      const day = new Date(bucketTs).toLocaleDateString('en-CA'); // YYYY-MM-DD
+      const day = new Date(bucketTs).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); // YYYY-MM-DD (ET)
       if (!byDay[day]) byDay[day] = { date: day, pnl: 0, wins: 0, losses: 0, pushes: 0, risk: 0, fills: 0 };
       const d = byDay[day];
       d.pnl += (row.pnl || 0);

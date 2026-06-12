@@ -4045,10 +4045,17 @@ function startStatusServer() {
     const groupBy = req.query.groupBy === 'settled_at' ? 'settled_at' : 'quoted_at';
     const status = req.query.status || null;
     const maxRows = Math.min(parseInt(req.query.maxRows) || 10000, 50000);
-    // Date-only inputs become full-day ISO ranges. "to" gets a 23:59:59.999
-    // end so a same-day request (from=to=2026-04-18) spans the full day.
-    const fromIso = from.length === 10 ? `${from}T00:00:00.000Z` : from;
-    const toIso = to.length === 10 ? `${to}T23:59:59.999Z` : to;
+    // Date-only inputs become full ET-day ISO ranges (was UTC days, which
+    // disagreed with the dashboard's ET day buckets — an 11pm ET settlement
+    // expanded under the wrong date). DST-aware: probe the ET hour at noon
+    // UTC of that date to get the live offset (4 in EDT, 5 in EST).
+    const etDayStartMs = (day) => {
+      const probe = new Date(`${day}T12:00:00Z`);
+      const etHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(probe));
+      return new Date(`${day}T00:00:00Z`).getTime() + (12 - etHour) * 3600 * 1000;
+    };
+    const fromIso = from.length === 10 ? new Date(etDayStartMs(from)).toISOString() : from;
+    const toIso = to.length === 10 ? new Date(etDayStartMs(to) + 24 * 3600 * 1000 - 1).toISOString() : to;
     try {
       const rows = await db.loadOrdersInDateRange(fromIso, toIso, { groupBy, status, maxRows });
       res.json({
