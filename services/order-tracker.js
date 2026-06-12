@@ -1076,6 +1076,14 @@ function importPxBookedOrder(parlayId, orderUuid, confirmedStake, confirmedOdds)
     log.warn('Repair', `addExposure failed for ${parlayId}: ${err.message}`);
   }
 
+  // SGP guard ledgers (review fix): accept-unknown→verified imports and
+  // reconcile promotions previously bypassed recordFill, undercounting the
+  // prop game-script caps and experimental daily budget until next boot.
+  // Safe here: this path only runs on an actual promotion to confirmed
+  // (already-confirmed/settled returned early above), so no double-count
+  // with handleConfirm's hook.
+  try { require('./sgp-guard').recordFill(order); } catch (_) { /* best-effort */ }
+
   // Persist. Fire-and-forget; failures are logged but don't block.
   db.saveOrder(order).catch(err => log.warn('Repair', `saveOrder failed for ${parlayId}: ${err.message}`));
 

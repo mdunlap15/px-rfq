@@ -127,10 +127,13 @@ async function startup() {
     }
     // Rebuild the SGP guard ledgers (prop game-script risk, experimental
     // combo daily budgets, auto-dark state) from the orders just loaded.
+    // A rebuild failure fails CLOSED for experimental combos (a stop-lossed
+    // class must not resurrect because boot-time state was unavailable).
     try {
       await require('./services/sgp-guard').rebuild(orderTracker.getRecentOrders(3000));
     } catch (err) {
-      log.warn('Startup', `    ⚠ sgp-guard rebuild failed: ${err.message}`);
+      log.error('Startup', `    ✗ sgp-guard rebuild failed — failing closed: ${err.message}`);
+      try { require('./services/sgp-guard').failClosed('boot rebuild threw'); } catch (_) {}
     }
     // Kick off the persistent 7-day Declines + Missed Volume rollup
     // refresher. Reads `declines` + `matched_parlays` from Supabase every

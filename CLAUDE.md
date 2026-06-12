@@ -51,7 +51,7 @@ client/
 | `MAX_EXPOSURE_PER_TEAM` | No | Default: 50 |
 | `MAX_LEGS` | No | Default: 8 |
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
-| `REFRESH_INTERVAL_MINUTES` | No | Default: 2 |
+| `REFRESH_INTERVAL_MINUTES` | No | Default: 10 (code default — production Railway sets 2) |
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
 | `LOG_LEVEL` | No | Default: `info` |
 | `AUTH_USERNAME` | No | Default: `mike`. Admin username for HTTP Basic Auth. |

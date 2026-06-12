@@ -17,6 +17,10 @@ const db = require('../services/db');
 const _kv = {};
 db.saveKV = async (k, v) => { _kv[k] = v; };
 db.loadKV = async (k) => _kv[k] || null;
+// shouldDecline fire-and-forgets sgp_audit rows on same-player / SGP-not-
+// allowed declines — stub so synthetic test shapes never pollute the
+// production demand-counting table when SGP_SHADOW_LOGGING is on.
+db.saveSgpAudit = async () => {};
 const lineManager = require('../services/line-manager');
 const oddsFeed = require('../services/odds-feed');
 oddsFeed.isStale = () => false;
@@ -128,13 +132,22 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
       config.pricing.parlayLevelVig = mode;
       const pv = await price(['gs_ov', 'sot1_ov']);
       const offered = pv.priced ? (pv.priced.offer.odds > 0 ? 100 / (pv.priced.offer.odds + 100) : -pv.priced.offer.odds / (-pv.priced.offer.odds + 100)) : null;
-      // joint must be ≈ strong mirror (0.42-ish scaled by 1/p_weak_fair ≈ ×1.06),
-      // NEVER the naive product of mirrors (0.42×0.83 = 0.349)
-      check(`all-override nested NOT naive product (parlayLevelVig=${mode})`,
-        offered != null && offered > 0.40,
-        offered != null ? (offered * 100).toFixed(1) + '%' : 'null');
+      // EXACT (review fix): the offered-side multiplier divides out the weak
+      // leg's OVERRIDE contribution, so the pair prices at mirror(strong) =
+      // 0.42 exactly (±1 American tick of rounding), never the naive product
+      // of mirrors (0.42×0.83 = 0.349) and not 0.42×(1−s)(1+overround).
+      check(`all-override nested EXACT mirror(strong) (parlayLevelVig=${mode})`,
+        offered != null && Math.abs(offered - 0.42) < 0.005,
+        offered != null ? (offered * 100).toFixed(2) + '% vs 42.00%' : 'null');
     }
     config.pricing.parlayLevelVig = false;
+
+    // RBI/Runs conflation (review fix): hitter_rbi_runs maps BOTH RBIs and
+    // Runs Scored, so a same-player "ladder" there is NOT an implication.
+    mk('rbi15', { sport: 'baseball_mlb', eventId: 8, player: 'Liner Upper', propType: 'hitter_rbi_runs', implied: 0.18, line: 1.5 });
+    mk('rbi05', { sport: 'baseball_mlb', eventId: 8, player: 'Liner Upper', propType: 'hitter_rbi_runs', implied: 0.55, line: 0.5 });
+    const rbiLadder = dc(['rbi15', 'rbi05']);
+    check('hitter_rbi_runs ladder excluded (conflated stat)', rbiLadder.declined === true, rbiLadder.reason);
 
     // --- 3. experiment ledger + game caps (unit-level) ---
     console.log('--- sgp-guard ---');

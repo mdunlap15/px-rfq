@@ -555,14 +555,18 @@ const config = {
     // time on a prop quote is a pick-off window. (SGP roadmap Stage 0.)
     offerValidSecondsProp: parseInt(process.env.OFFER_VALID_SECONDS_PROP) || 30,
     // Prop-leg staleness gate (replaces the hardcoded 15-min STALE_MS in
-    // pricer's prop_stale check). Arithmetic behind the default:
-    // lineInfo.propFetchedAt is a SEED-TIME snapshot of the TOA prop-cache
-    // fetch time, so worst-case age on perfectly healthy plumbing =
-    // TOA_PROP_TTL (150s) + line-refresh interval (120s) + seed duration
-    // (~90s) ≈ 360s. 420s = that + headroom; anything below ~360s declines
-    // healthy RFQs. Ships as a package with the TOA prop cadence cut
-    // (TOA_PROP_TTL_SECONDS=150 / TOA_PROP_REFRESH_AHEAD_SECONDS=90).
-    stalePropSeconds: parseInt(process.env.STALE_PROP_SECONDS) || 420,
+    // pricer's prop_stale check). DEFAULT PRESERVES the old 900s behavior —
+    // adversarial review caught that a tighter default is incoherent with
+    // the SHIPPED cadence defaults (TOA prop TTL 300s, refresh-ahead 180s,
+    // line-refresh interval default 10 min): lineInfo.propFetchedAt is a
+    // SEED-TIME snapshot, so worst-case healthy age = TTL + refresh
+    // interval + seed duration, which exceeds any tight gate on defaults —
+    // mass prop_stale declines AND fail-closed confirm walk-aways.
+    // Tighten ONLY as a package via Railway env:
+    //   STALE_PROP_SECONDS=420 + TOA_PROP_TTL_SECONDS=150 +
+    //   TOA_PROP_REFRESH_AHEAD_SECONDS=90 + REFRESH_INTERVAL_MINUTES=2
+    // (gate must exceed TTL + refresh interval + ~90s seed, with headroom).
+    stalePropSeconds: parseInt(process.env.STALE_PROP_SECONDS) || 900,
     maxExposurePerTeam: parseFloat(process.env.MAX_EXPOSURE_PER_TEAM) || 5000,
     // Raw vs probability-weighted per-team exposure measurement (PRIMARY cap).
     //

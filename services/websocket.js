@@ -1766,9 +1766,17 @@ async function handleConfirm(data) {
     if (parlayHasSeries) confirmCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
     if (parlayHasPropLeg) confirmCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
     const metaCombo = originalOrder.meta && originalOrder.meta.sgpCombo;
-    const isExperimentalCombo = metaCombo
-      && config.pricing.experimentalSgpCombos
-      && config.pricing.experimentalSgpCombos.has(metaCombo);
+    // Mirrors the offer side exactly (review fix): shape identifies the
+    // class (meta.nestedPairs stamped by priceParlay — immune to combo-
+    // classification gaps on imported orders), membership in the
+    // experimental set decides whether that class is still small-test
+    // capped. Removing a class from SGP_EXPERIMENTAL_COMBOS graduates both
+    // sides together.
+    const _exp = config.pricing.experimentalSgpCombos;
+    const isExperimentalCombo = !!_exp && (
+      (metaCombo && _exp.has(metaCombo)) ||
+      ((originalOrder.meta && originalOrder.meta.nestedPairs > 0) && _exp.has('prop_nested'))
+    );
     if (isExperimentalCombo) confirmCaps.push(config.pricing.maxRiskSgpExperimental || 15);
     const maxRisk = Math.min(...confirmCaps.filter(c => c > 0));
     if (maxRisk > 0 && ourRisk > maxRisk) {

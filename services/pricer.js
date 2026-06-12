@@ -1404,7 +1404,16 @@ function priceParlay(legs, opts = {}) {
   // pair, the exact joint is P(strong leg): expressed as a fair multiplier
   // of 1/p_weak, applied to fairParlayProb below and folded into
   // sgpFairMultiplier so vigFair + per-leg alignment mirror it.
+  // TWO multipliers per pair (adversarial-review fix): the FAIR side always
+  // divides out the weak leg's fairProb (joint fair = P(strong) exactly).
+  // The OFFERED side must divide out the weak leg's actual contribution to
+  // the offered product — bookPriceOverride when the leg is a book-mirror
+  // leg (WC props, MLB HR binaries), else fairProb. Without the split, a
+  // both-override pair priced at override_strong × (1−sweetener)(1+overround)
+  // ≈ 7% short of the intended exact mirror(strong) — conservative, but not
+  // the advertised exact price, and dependent on unrelated env knobs.
   let nestedFairMultiplier = 1;
+  let nestedOfferedMultiplier = 1;
   let nestedPairCount = 0;
   if (isSGPParlay) {
     const usedIdx = new Set();
@@ -1430,8 +1439,12 @@ function priceParlay(legs, opts = {}) {
           };
           return null;
         }
-        if (weakLeg.fairProb > 0 && weakLeg.fairProb < 1) {
+        const weakOfferedContribution = (weakLeg.bookPriceOverride != null && weakLeg.bookPriceOverride > 0 && weakLeg.bookPriceOverride < 1)
+          ? weakLeg.bookPriceOverride
+          : weakLeg.fairProb;
+        if (weakLeg.fairProb > 0 && weakLeg.fairProb < 1 && weakOfferedContribution > 0 && weakOfferedContribution < 1) {
           nestedFairMultiplier *= 1 / weakLeg.fairProb;
+          nestedOfferedMultiplier *= 1 / weakOfferedContribution;
           nestedPairCount++;
           usedIdx.add(i); usedIdx.add(j);
           break;
@@ -1806,10 +1819,16 @@ function priceParlay(legs, opts = {}) {
   // SP edge per ticket). Verified against MTL ML + MTL@BUF U5.5 SGP on
   // 2026-05-06: pre-fix our offered came out +370 vs Fair +332 (-8% theo
   // edge); post-fix offered tracks Fair × (1 - vig).
+  // NOTE: the nested factor here is the OFFERED-side one (divides out the
+  // weak leg's actual contribution to the offered product — its
+  // bookPriceOverride when it's a mirror leg, else its fairProb). The
+  // FAIR-side factor (always 1/fairProb) was applied to fairParlayProb
+  // above. sgpFairMultiplier feeds only offered-price computations
+  // (vigFair, per-leg alignment, the all-override branch).
   const sgpFairMultiplier =
     (isKpropMlSameTeamSGP ? (1 + (config.pricing.sgpPropMlCorrBoost || 0)) : 1) *
     sgpCorrelationFactor *
-    nestedFairMultiplier;
+    nestedOfferedMultiplier;
   const vigFair = vigLegs.reduce((p, l) => p * l.fairProb, 1) * sgpFairMultiplier;
 
   // ---------------------------------------------------------------------
@@ -2286,11 +2305,18 @@ function priceParlay(legs, opts = {}) {
   if (parlayHasSeries) candidateCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
   if (parlayHasProp) candidateCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
   // Experimental-SGP tier (SGP roadmap): combos under small-test rollout get
-  // a much tighter per-ticket cap. Keyed on shape-detected nested pairs OR
-  // the classified combo, so the cap applies even if classification is
-  // bypassed. min() with the caps above — existing parlay types unaffected.
+  // a much tighter per-ticket cap. Shape identifies the CLASS (nested pairs
+  // → 'prop_nested', immune to classification gaps); membership in
+  // SGP_EXPERIMENTAL_COMBOS decides whether that class is still in the
+  // small-test tier — so removing a class from the experimental set
+  // graduates its cap without code changes. min() with the caps above —
+  // existing parlay types unaffected.
   const _expCombos = config.pricing.experimentalSgpCombos;
-  if ((nestedPairCount > 0) || (opts.sgpCombo && _expCombos && _expCombos.has(opts.sgpCombo))) {
+  const _isExperimentalParlay = !!_expCombos && (
+    (opts.sgpCombo && _expCombos.has(opts.sgpCombo)) ||
+    (nestedPairCount > 0 && _expCombos.has('prop_nested'))
+  );
+  if (_isExperimentalParlay) {
     candidateCaps.push(config.pricing.maxRiskSgpExperimental || 15);
   }
   const maxRisk = Math.min(...candidateCaps);
@@ -2727,7 +2753,13 @@ function priceParlay(legs, opts = {}) {
 // Launch-gated: pairs only quote when 'prop_nested' is present in
 // SGP_ALLOWED_COMBOS (env, operator-controlled — NOT auto-included).
 // ---------------------------------------------------------------------------
-const _NESTED_LADDER_EXCLUDED_PROPTYPES = new Set(['pitcher_strikeouts']);
+// pitcher_strikeouts: K ladders stay under the same-pitcher rule's territory.
+// hitter_rbi_runs: classifyMlbProp CONFLATES two different stats (RBIs and
+// Runs Scored) into this one propType — a same-player "ladder" could pair
+// RBI Over 1.5 with Runs Over 0.5, which is NOT an implication (review
+// finding). The HR⇒hitter_rbi_runs cross rule at 0.5/0.5 stays valid: a HR
+// credits the batter ≥1 RBI AND ≥1 run, so it implies either reading.
+const _NESTED_LADDER_EXCLUDED_PROPTYPES = new Set(['pitcher_strikeouts', 'hitter_rbi_runs']);
 // Cross-stat implication rules: strong propType ⇒ weak propType, with a
 // line condition (ls = strong leg line, lw = weak leg line; anytime YES
 // markets register at 0.5).
@@ -3650,9 +3682,15 @@ async function validateForConfirmation(parlayId, originalMeta) {
     //   (b) the quote is younger than the staleness budget for its leg mix
     //       (props: stalePropSeconds; team-only: stalePriceMinutes).
     // Every other reprice failure fails CLOSED (reject).
+    // RACE-SAFE churn detection (adversarial-review fix): priceParlay's
+    // _lastFailure static is overwritten by every concurrent RFQ pricing
+    // call, and we just crossed an await — reading it for the accept/reject
+    // DECISION could misclassify under load. Re-derive the churn signal
+    // locally instead: index churn ⇔ a leg that priced at quote time no
+    // longer resolves in the line index. _lastFailure stays log-only.
     const lastFailure = priceParlay._lastFailure || null;
     const failReason = lastFailure && lastFailure.reason;
-    const isIndexChurn = failReason === 'unknown line';
+    const isIndexChurn = legs.some(lid => !lineManager.lookupLine(lid));
     const hasPropLeg = (originalMeta.legs || []).some(l => /^player_/.test(l.market || l.marketType || ''));
     const budgetMs = hasPropLeg
       ? (config.pricing.stalePropSeconds || 420) * 1000

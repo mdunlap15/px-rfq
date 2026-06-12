@@ -51,8 +51,14 @@ let autoDark = new Set();
 const PNL_WINDOW_MS = 7 * 24 * 3600 * 1000;
 
 function _etDay(ts) {
-  const ms = ts ? new Date(ts).getTime() : Date.now();
-  return new Date(ms - 4 * 3600 * 1000).toISOString().substring(0, 10);
+  // DST-aware ET day (review fix: a fixed UTC-4 drifts the daily-budget
+  // boundary to 1am ET during standard time). en-CA gives YYYY-MM-DD.
+  const d = ts ? new Date(ts) : new Date();
+  try {
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  } catch (_) {
+    return new Date(d.getTime() - 4 * 3600 * 1000).toISOString().substring(0, 10);
+  }
 }
 
 // Match order-tracker's game-key convention (checkGameExposure):
@@ -233,11 +239,23 @@ function _persistAutoDark() {
   } catch (_) { /* best-effort */ }
 }
 
-/** Operator lever: clear a combo's dark state (via /sgp-experiments/reset). */
+/** Operator lever: clear a combo's dark state (via /sgp-experiments/reset).
+ * Also clears the combo's rolling P&L window — without that, the next
+ * settlement (even a WIN) re-trips the stop while cumulative week P&L is
+ * still below the threshold, making the lever inert (review fix). The
+ * operator reviewed the breach; the clock restarts. */
 function resetDark(combo) {
   const was = autoDark.delete(combo);
+  comboPnl.delete(combo);
   if (was) _persistAutoDark();
   return was;
+}
+
+/** Fail-closed lever for boot-path failures: dark every experimental combo
+ * (used by index.js when rebuild() itself throws). */
+function failClosed(reason) {
+  autoDark = new Set([...(config.pricing.experimentalSgpCombos || []), ...autoDark]);
+  log.error('SGP-Guard', `failClosed(${reason}): experimental combos darkened — /sgp-experiments/reset to re-enable`);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,8 +304,15 @@ async function rebuild(orders) {
       autoDark = new Set(row.combos);
       if (autoDark.size) log.warn('SGP-Guard', `loaded persisted auto-dark combos: ${[...autoDark].join(', ')}`);
     }
+    // row === null is ambiguous (no key yet vs read failure swallowed by
+    // loadKV) — loadKV warns internally on errors; a fresh deploy has no
+    // key, which is the common benign case. Genuine throw → fail closed.
   } catch (err) {
-    log.warn('SGP-Guard', `auto-dark load failed (treating none dark): ${err.message}`);
+    // FAIL CLOSED (review fix): a stop-lossed combo must not resurrect
+    // because Supabase was unreachable at boot. Dark ALL experimental
+    // combos until an operator reset or a successful future load.
+    autoDark = new Set(config.pricing.experimentalSgpCombos || []);
+    log.error('SGP-Guard', `auto-dark load FAILED — failing closed: all experimental combos darkened until /sgp-experiments/reset (${err.message})`);
   }
   // Re-evaluate stop-losses against rebuilt P&L (covers a breach that
   // happened while we were down).
@@ -334,5 +359,6 @@ module.exports = {
   recordSettlement,
   rebuild,
   resetDark,
+  failClosed,
   getStatus,
 };
