@@ -4140,7 +4140,14 @@ async function refreshLiveOdds(oddsFeed) {
   for (const sport of sports) {
     try {
       // SharpAPI live (best-effort — may return empty for some sports).
-      await oddsFeed.fetchOddsForSport(sport, { live: true }).catch(() => null);
+      // Skipped when no Sharp key exists (SharpAPI-removal audit): for
+      // sports outside LIVE_ODDS_API_SPORTS (soccer, MMA) live fair-prob
+      // tracking is an accepted loss post-cancel — display-only, never a
+      // pricing input. Burning a guaranteed-failing call per cycle just
+      // pollutes logs.
+      if (process.env.SHARP_ODDS_API_KEY) {
+        await oddsFeed.fetchOddsForSport(sport, { live: true }).catch(() => null);
+      }
       // The Odds API live — replaces DK scraper for in-play h2h/spreads/totals.
       if (LIVE_ODDS_API_SPORTS.has(sport)) {
         const result = await oddsFeed.mergeOddsApiLive(sport).catch(err => {

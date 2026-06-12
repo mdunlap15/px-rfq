@@ -356,6 +356,23 @@ function _isToaPrimary(sport) {
   return raw.split(',').map(s => s.trim()).includes(sport);
 }
 
+// TOA quota alarm (SharpAPI-removal audit): once TOA is the only odds
+// source, quota exhaustion = the whole book goes dark (it has already
+// caused one fill drought). Alarm loudly (log.error + push) when remaining
+// credits cross the threshold; once per hour to avoid spam. Wire every
+// x-requests-remaining header read through this.
+const TOA_QUOTA_ALARM_THRESHOLD = parseInt(process.env.TOA_QUOTA_ALARM_THRESHOLD) || 2000000;
+let _toaQuotaAlarmAt = 0;
+function _checkToaQuota(remaining) {
+  const r = Number(remaining);
+  if (!Number.isFinite(r)) return;
+  if (r < TOA_QUOTA_ALARM_THRESHOLD && Date.now() - _toaQuotaAlarmAt > 3600 * 1000) {
+    _toaQuotaAlarmAt = Date.now();
+    log.error('OddsFeed', `TOA QUOTA ALARM: ${r.toLocaleString()} credits remaining (< ${TOA_QUOTA_ALARM_THRESHOLD.toLocaleString()}) — at burn this risks a book-wide dark-out at cycle end`);
+    try { require('./push').notifyConnectionState('toa-quota', `TOA credits low: ${r.toLocaleString()} remaining`); } catch (_) {}
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SHARPAPI CLIENT
 // ---------------------------------------------------------------------------
@@ -992,6 +1009,41 @@ const DK_GAME_LINE_SPORTS = new Set([
   'soccer_brazil_campeonato', 'soccer_mexico_ligamx', 'soccer_usa_nwsl',
 ]);
 
+// MLB probable pitchers via the official MLB Stats API (free, keyless).
+// SharpAPI-removal audit: pitcher identity used to arrive embedded in
+// SharpAPI's team strings; the TOA path carries NO starter info, which
+// would silently disable BOTH the lineup-change decline grace AND
+// getPitcherSide (the kprop_ml same-team SGP carve-out). Active only when
+// SharpAPI isn't feeding lineups (sport flipped to TOA-primary, or no
+// Sharp key at all) so two writers with different name formats can't
+// ping-pong the change-detection grace. NHL goalies remain a known gap
+// post-Sharp (offseason; revisit before October).
+let _mlbPitcherFetchAt = 0;
+async function _refreshMlbProbablePitchers() {
+  if (Date.now() - _mlbPitcherFetchAt < 60 * 1000) return; // ≤1 pull/min
+  _mlbPitcherFetchAt = Date.now();
+  const now = new Date(Date.now() - 4 * 3600 * 1000); // ET-ish window; DST drift only widens it
+  const d1 = now.toISOString().substring(0, 10);
+  const d2 = new Date(now.getTime() + 86400000).toISOString().substring(0, 10);
+  const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${d1}&endDate=${d2}&hydrate=probablePitcher`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`MLB StatsAPI schedule ${resp.status}`);
+  const data = await safeJsonFetch(resp);
+  let updated = 0;
+  for (const day of (data.dates || [])) {
+    for (const g of (day.games || [])) {
+      const home = g.teams && g.teams.home, away = g.teams && g.teams.away;
+      if (!home || !away || !home.team || !away.team || !home.team.name || !away.team.name) continue;
+      const hp = (home.probablePitcher && home.probablePitcher.fullName) || null;
+      const ap = (away.probablePitcher && away.probablePitcher.fullName) || null;
+      if (!hp && !ap) continue;
+      updateLineupState('baseball_mlb', home.team.name, away.team.name, g.gameDate, hp, ap);
+      updated++;
+    }
+  }
+  log.debug('OddsFeed', `MLB probable pitchers from StatsAPI: ${updated} games`);
+}
+
 async function _runPostParseSupplements(sport, parsed) {
   // First-5-Innings markets for MLB (separate from full-game)
   if (sport === 'baseball_mlb') {
@@ -1001,6 +1053,14 @@ async function _runPostParseSupplements(sport, parsed) {
       log.warn('OddsFeed', `MLB F5 supplement failed: ${err.message}`);
     }
     _scheduleSupplementRetry(sport, 'MLB F5', supplementMlbF5Markets, parsed);
+    // Pitcher feed when SharpAPI isn't supplying lineups.
+    if (_isToaPrimary('baseball_mlb') || !process.env.SHARP_ODDS_API_KEY) {
+      try {
+        await _refreshMlbProbablePitchers();
+      } catch (err) {
+        log.warn('OddsFeed', `MLB probable-pitcher refresh failed: ${err.message}`);
+      }
+    }
   }
 
   if (DK_GAME_LINE_SPORTS.has(sport)) {
@@ -1830,6 +1890,7 @@ async function fetchPinnacleRows(sport) {
     }
 
     const remaining = resp.headers.get('x-requests-remaining');
+    _checkToaQuota(remaining);
     const used = resp.headers.get('x-requests-used');
     if (remaining != null) {
       log.info('OddsFeed', `The Odds API usage (supplement): ${used} used, ${remaining} remaining`);
@@ -1945,6 +2006,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
         continue;
       }
       const remaining = resp.headers.get('x-requests-remaining');
+    _checkToaQuota(remaining);
       if (remaining != null) log.debug('OddsFeed', `The Odds API: ${remaining} requests remaining`);
       const events = await safeJsonFetch(resp);
       // Tag each event with its source tournament for traceability.
@@ -2156,6 +2218,7 @@ async function fetchFromTheOddsApi(sport) {
   }
 
   const remaining = resp.headers.get('x-requests-remaining');
+    _checkToaQuota(remaining);
   const used = resp.headers.get('x-requests-used');
   if (remaining != null) {
     log.info('OddsFeed', `The Odds API usage: ${used} used, ${remaining} remaining`);
@@ -3997,6 +4060,7 @@ async function mergeOddsApiLive(sport) {
       return { merged: 0, sport };
     }
     const remaining = resp.headers.get('x-requests-remaining');
+    _checkToaQuota(remaining);
     const used = resp.headers.get('x-requests-used');
     if (remaining != null) log.debug('OddsFeed', `Odds API live usage: ${used} used, ${remaining} remaining`);
     events = await resp.json();
@@ -7004,7 +7068,37 @@ async function refreshAllSportsDelta() {
 }
 
 async function refreshEventsIndex() {
+  const sharpKeyPresent = !!process.env.SHARP_ODDS_API_KEY;
   for (const sport of Object.keys(LEAGUE_MAP)) {
+    // SharpAPI-removal audit: flipped (or keyless) sports build the events
+    // index from TOA's free /events endpoint instead — line-manager's
+    // name-matching keeps working without the Sharp subscription. Generic
+    // 'soccer' has no single TOA key; its events arrive via the curated
+    // dynamic odds fetch and matching falls back to the odds cache itself.
+    if (!sharpKeyPresent || _isToaPrimary(sport)) {
+      try {
+        const entry = ODDS_API_FALLBACK[sport];
+        if (!entry || entry.dynamic || !entry.oddsApiSport) continue; // dynamic/generic — odds-cache matching covers it
+        // _listEventsFromToa takes the INTERNAL key and resolves the TOA
+        // key itself; returns {homeTeam, awayTeam, commenceTime} (no id).
+        const toaEvents = await _listEventsFromToa(sport);
+        if (toaEvents && toaEvents.length) {
+          sharpEventsIndex[sport] = {
+            fetchedAt: Date.now(),
+            events: toaEvents.map(e => ({
+              eventId: null, // TOA events list carries no Sharp-style id; matching is by name+time
+              homeTeam: cleanTeamName(e.homeTeam || ''),
+              awayTeam: cleanTeamName(e.awayTeam || ''),
+              startTime: e.commenceTime,
+            })).filter(e => e.homeTeam && e.awayTeam),
+          };
+          log.info('OddsFeed', `Events index (TOA): ${sharpEventsIndex[sport].events.length} events for ${sport}`);
+        }
+      } catch (err) {
+        log.warn('OddsFeed', `TOA events index failed for ${sport}: ${err.message}`);
+      }
+      continue;
+    }
     try {
       const mapping = LEAGUE_MAP[sport];
       const url = `${config.oddsApi.baseUrl}/events`
