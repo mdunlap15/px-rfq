@@ -95,7 +95,22 @@ function legSnapshot(lineInfo, isProp) {
  * never blocks the RFQ path. Caller passes the parlayId, the offending
  * pxEventId, and the props + others arrays from the SGP-block detection.
  */
-function logSgpDecline(parlayId, pxEventId, props, others) {
+// Content hash for dedup-aware demand counting (SGP roadmap Stage 0):
+// raw decline counts are inflated ~3.5x by bot re-RFQs of identical
+// shapes. Hash the canonical leg tuple so SQL can COUNT(DISTINCT
+// leg_hash) for true unique-shape demand. Requires the leg_hash column
+// (see ops SQL); writes degrade gracefully without it.
+function buildLegHash(props, others) {
+  const all = [...(props || []), ...(others || [])]
+    .map(li => [li.sport, li.marketType, li.propType, li.playerName || li.teamName, li.line, li.selection].join(':'))
+    .sort()
+    .join('|');
+  let h = 0;
+  for (let i = 0; i < all.length; i++) { h = ((h << 5) - h + all.charCodeAt(i)) | 0; }
+  return (h >>> 0).toString(36);
+}
+
+function logSgpDecline(parlayId, pxEventId, props, others, reason) {
   if (!isEnabled()) return;
   if (!parlayId) return; // can't dedupe without a key
   try {
@@ -103,16 +118,23 @@ function logSgpDecline(parlayId, pxEventId, props, others) {
     const otherSnaps = (others || []).map(li => legSnapshot(li, false));
     const row = {
       parlay_id: parlayId,
-      decline_reason: 'prop_correlation_same_game',
+      decline_reason: reason || 'prop_correlation_same_game',
       px_event_id: pxEventId != null ? String(pxEventId) : null,
       leg_count: propSnaps.length + otherSnaps.length,
       prop_count: propSnaps.length,
       other_count: otherSnaps.length,
       combo_signature: buildComboSignature(props || [], others || []),
+      leg_hash: buildLegHash(props, others),
       legs: [...propSnaps, ...otherSnaps],
     };
-    // Async — never await, never block
+    // Async — never await, never block. If the leg_hash column doesn't
+    // exist yet (ops SQL not run), retry once without it so existing
+    // logging keeps flowing.
     db.saveSgpAudit(row).catch(err => {
+      if (/leg_hash|column/i.test(err.message || '')) {
+        const { leg_hash, ...legacy } = row;
+        return db.saveSgpAudit(legacy).catch(() => {});
+      }
       // Silent unless it's a structural failure
       if (!logSgpDecline._warned) {
         log.warn('SGP-Audit', `saveSgpAudit failed (logged once): ${err.message}`);

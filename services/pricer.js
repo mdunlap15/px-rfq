@@ -2920,6 +2920,12 @@ function shouldDecline(legs, parlayId) {
               // fall through — classifySgpCombo tags it 'prop_nested' and
               // priceParlay collapses the pair to the strong leg.
             } else {
+              // Shadow-log same-player declines too (SGP roadmap Stage 0):
+              // this is where future nested-table candidates and the
+              // Stage-4 same-player two-stat demand shows up.
+              try {
+                require('./sgp-audit').logSgpDecline(parlayId, lineInfo.pxEventId, [prev, lineInfo], [], 'prop_correlation_same_player');
+              } catch (_) { /* observability must never break pricing */ }
               return {
                 declined: true,
                 reason: 'prop_correlation_same_player',
@@ -3324,6 +3330,14 @@ function shouldDecline(legs, parlayId) {
     const combo = classifySgpCombo(entries);
     if (!combo || !allowedCombos.has(combo)) {
       log.info('Pricing', `Declined SGP: ${entries.length} legs on ${gameLabel0} (combo=${combo || 'unclassified'}, not in allowed list)`);
+      // Shadow-log with the classified combo in the signature so demand
+      // for not-yet-enabled classes (prop_nested while dark, future
+      // prop_prop_xteam, …) is measurable BEFORE enabling them.
+      try {
+        const propLis = entries.filter(e => /^player_/.test(e.market || '')).map(e => e.li).filter(Boolean);
+        const otherLis = entries.filter(e => !/^player_/.test(e.market || '')).map(e => e.li).filter(Boolean);
+        require('./sgp-audit').logSgpDecline(parlayId, eid, propLis, otherLis, `sgp_not_allowed:${combo || 'unclassified'}`);
+      } catch (_) { /* observability must never break pricing */ }
       return {
         declined: true,
         reason: 'SGP not allowed',

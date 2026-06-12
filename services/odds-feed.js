@@ -7087,6 +7087,22 @@ function captureClosingLines() {
         }
         closingLinesCache[cacheKey] = snap;
         captured++;
+        // Write-through persistence (SGP roadmap Stage 0 item 7): the
+        // in-memory cache is wiped on every deploy, which silently destroys
+        // CLV history — the master adverse-selection instrument for the
+        // SGP rollout. Requires the closing_lines table (ops SQL); fails
+        // silently (warn-once) until it exists. Fire-and-forget.
+        try {
+          const db = require('./db');
+          if (typeof db.saveClosingLine === 'function') {
+            db.saveClosingLine(cacheKey, snap).catch(err => {
+              if (!captureClosingLines._persistWarned) {
+                log.warn('CLV', `closing-line persist failed (logged once — run the closing_lines ops SQL?): ${err.message}`);
+                captureClosingLines._persistWarned = true;
+              }
+            });
+          }
+        } catch (_) { /* persistence must never break capture */ }
       }
     }
   }
@@ -7965,7 +7981,13 @@ function lookupPlayerPointsProp(sport, pxEventInfo, playerName, line) {
 // caching (5min TTL on events list + per-event odds), a typical day's
 // MLB slate uses well under 100 credits — fits comfortably in the free
 // 500/mo tier or the $30/mo 20K-credit tier.
-const TOA_PROP_TTL_MS = 5 * 60 * 1000;
+// Env-tunable (SGP roadmap Stage 0): the prop staleness gate
+// (STALE_PROP_SECONDS, default 420s) and this cadence ship as a package —
+// the gate must exceed TTL + line-refresh interval + seed duration or
+// healthy RFQs decline. Recommended production pair: TTL 150s / refresh-
+// ahead 90s with the 420s gate. Quota: ~2x prop-endpoint credits vs the
+// old 5-min TTL — 22M+ remaining as of 2026-06-11, ample headroom.
+const TOA_PROP_TTL_MS = (parseInt(process.env.TOA_PROP_TTL_SECONDS) || 300) * 1000;
 // Refresh-ahead window: when a cached entry is OLDER than this but
 // still YOUNGER than TOA_PROP_TTL_MS, return the cached value
 // immediately AND fire a background refresh (fire-and-forget). This
@@ -7974,7 +7996,7 @@ const TOA_PROP_TTL_MS = 5 * 60 * 1000;
 // Without this, the prop bridge blocks on a fresh fetch every 5min
 // per (sport, event, market), driving phase-2 P95 to ~40ms and P99
 // past 100ms — measurable in /latency-breakdown.
-const TOA_PROP_REFRESH_AHEAD_MS = 3 * 60 * 1000;
+const TOA_PROP_REFRESH_AHEAD_MS = (parseInt(process.env.TOA_PROP_REFRESH_AHEAD_SECONDS) || 180) * 1000;
 const toaEventsCache = {};   // { sportKey: { fetchedAt, events: [...], refreshing: bool } }
 const toaPropOddsCache = {}; // { `${sport}:${eventId}:${marketKey}`: { fetchedAt, refreshing: bool, ...respBody } }
 // Diagnostics on TOA staleness — incremented every time we serve cached

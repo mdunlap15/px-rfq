@@ -2748,6 +2748,40 @@ function startStatusServer() {
     res.json(websocket.getConfirmActivity());
   });
 
+  // SGP experiment control panel (SGP roadmap Stage 0): per-class status —
+  // dark/live, today's filled risk vs daily budget, rolling-week P&L vs
+  // stop-loss, per-ticket cap, prop game-script exposure ledgers, and
+  // per-combo PX submit-error counters (a PX price-model rejection pattern
+  // must be visible from quote one, not discovered as 'zero demand').
+  app.get('/sgp-experiments', (req, res) => {
+    try {
+      const sgpGuard = require('./services/sgp-guard');
+      const status = sgpGuard.getStatus();
+      res.json({
+        ...status,
+        allowedCombos: config.pricing.sgpAllowedCombos || [],
+        pxSubmitErrorsByCombo: websocket.getPxSubmitErrorsByCombo(),
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // Operator lever: clear a combo's auto-dark state after reviewing the
+  // stop-loss breach. POST /sgp-experiments/reset {combo:"prop_nested"}.
+  app.post('/sgp-experiments/reset', (req, res) => {
+    try {
+      const combo = req.body && req.body.combo;
+      if (!combo) return res.status(400).json({ ok: false, error: 'combo required' });
+      const sgpGuard = require('./services/sgp-guard');
+      const was = sgpGuard.resetDark(combo);
+      log.info('SGP-Guard', `operator reset dark state for '${combo}' (was dark: ${was})`);
+      res.json({ ok: true, combo, wasDark: was });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   // World Cup soccer player-prop visibility: how many soccer prop lines are
   // registered, by market family, with price-source and freshness summary.
   // These register through the standard TOA prop pre-seed (same path as

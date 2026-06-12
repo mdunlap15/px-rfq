@@ -1141,6 +1141,18 @@ async function saveSgpAudit(row) {
         }
         return;
       }
+      // leg_hash column not yet added (scripts/sgp_stage0_ops.sql) — strip
+      // it and retry once so legacy logging keeps flowing.
+      if (/leg_hash/i.test(error.message) && row.leg_hash !== undefined) {
+        if (!saveSgpAudit._hashWarned) {
+          log.warn('DB', 'sgp_audit.leg_hash column missing — run scripts/sgp_stage0_ops.sql to enable dedup-aware demand counting; logging without it');
+          saveSgpAudit._hashWarned = true;
+        }
+        const { leg_hash, ...legacy } = row;
+        const retry = await db.from('sgp_audit').upsert(legacy, { onConflict: 'parlay_id' });
+        if (retry.error) log.warn('DB', `saveSgpAudit retry error: ${retry.error.message}`);
+        return;
+      }
       log.warn('DB', `saveSgpAudit error: ${error.message}`);
     }
   } catch (err) {
@@ -1230,6 +1242,32 @@ async function loadKV(key) {
     log.warn('DB', `loadKV(${key}) exception: ${err.message}`);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// CLOSING LINES (SGP roadmap Stage 0 item 7)
+// ---------------------------------------------------------------------------
+// Write-through persistence for odds-feed's closing-line snapshots — the
+// in-memory cache dies on every deploy, which silently destroys CLV history.
+// Table (see scripts/sgp_stage0_ops.sql):
+//   closing_lines(cache_key text primary key, sport text, home_team text,
+//     away_team text, commence_time timestamptz, captured_at timestamptz,
+//     snapshot jsonb)
+// Errors propagate to the caller (capture logs warn-once until the table
+// exists).
+async function saveClosingLine(cacheKey, snap) {
+  const db = getClient();
+  if (!db) return;
+  const { error } = await db.from('closing_lines').upsert({
+    cache_key: cacheKey,
+    sport: snap.sport || null,
+    home_team: snap.homeTeam || null,
+    away_team: snap.awayTeam || null,
+    commence_time: snap.commenceTime || null,
+    captured_at: snap.capturedAt || new Date().toISOString(),
+    snapshot: snap,
+  });
+  if (error) throw new Error(error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,6 +1473,7 @@ module.exports = {
   loadPropShadowQuotes,
   saveKV,
   loadKV,
+  saveClosingLine,
   saveLineCache,
   loadLineCacheEntry,
   loadLineCacheBulk,
