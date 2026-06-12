@@ -1658,7 +1658,17 @@ async function seedAllLines() {
                 }
               }
               for (const sel of sels) {
-                const fairProb = sel.selection === 'over' ? fairOver : fairUnder;
+                // OVER side ONLY (operator 2026-06-12). One-sided props have
+                // no posted under at any book — the under we used to register
+                // was a derived complement (1 − overround-adjusted over) with
+                // an ASSUMED 8% haircut, the weakest-grounded price in the
+                // book, and its flow self-selects sharp (nobody parlays "no
+                // HR" recreationally). Under line_ids now stay unregistered
+                // and decline as unknown legs — same posture as WC soccer
+                // props (YES only). Two-sided-priced props (real posted
+                // unders) are unaffected: this is the one-sided path only.
+                if (sel.selection !== 'over') continue;
+                const fairProb = fairOver;
                 _setSeedLine(sel.lineId, {
                   sport: sportKey,
                   pxEventId: event.event_id,
@@ -1682,9 +1692,7 @@ async function seedAllLines() {
                   fairProbOver: fairOver,
                   fairProbUnder: fairUnder,
                   booksWithBothSides: 0,
-                  // Book-mirror only on the OVER (the side bettors back); the
-                  // UNDER keeps the de-vig+vig path via fairUnder.
-                  bookPriceOverride: sel.selection === 'over' ? overBookPriceOverride : null,
+                  bookPriceOverride: overBookPriceOverride,
                   propBooks: oneSidedHit.books,
                   propSource: oneSidedHit.source,
                   propFetchedAt: oneSidedHit.fetchedAt || Date.now(),
