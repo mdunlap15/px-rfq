@@ -1885,7 +1885,14 @@ function priceParlay(legs, opts = {}) {
       const viggedPayout = payout * (1 - effectiveVig);
       offeredImpliedProb = (1 / (1 + viggedPayout)) * overrideProduct;
     } else {
-      offeredImpliedProb = overrideProduct;
+      // ALL legs are bookPriceOverride legs (e.g. a nested pair of WC
+      // book-mirror props). The SGP fair multiplier (nested-implication
+      // collapse / correlation boosts) must still apply — without it an
+      // all-override nested pair prices at the naive product of mirrors,
+      // exactly the correlated-gift Stage 1 exists to close. (vigFair
+      // carries the multiplier only when vig legs exist, hence the
+      // explicit application here.)
+      offeredImpliedProb = Math.min(0.99, overrideProduct * sgpFairMultiplier);
     }
     vigMode = 'parlay-level';
     vigRateUsed = effectiveVig;

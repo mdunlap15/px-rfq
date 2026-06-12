@@ -117,6 +117,25 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
       && /nested pair inconsistent/.test((pricer.priceParlay._lastFailure || {}).reason || ''),
       JSON.stringify(pricer.priceParlay._lastFailure || {}).substring(0, 80));
 
+    // --- 2b. all-override nested pair (WC book-mirror legs) in BOTH vig modes ---
+    // Without the parlay-level fix, an all-override nested pair priced at the
+    // naive product of mirrors — the exact correlated gift Stage 1 closes.
+    mk('gs_ov',   { eventId: 7, player: 'Mirror Man', propType: 'goalscorer', implied: 0.40 });
+    mk('sot1_ov', { eventId: 7, player: 'Mirror Man', propType: 'sot_1', implied: 0.78 });
+    idx['gs_ov'].bookPriceOverride = 0.42;   // raw posted × (1-sweetener)
+    idx['sot1_ov'].bookPriceOverride = 0.83;
+    for (const mode of [false, true]) {
+      config.pricing.parlayLevelVig = mode;
+      const pv = await price(['gs_ov', 'sot1_ov']);
+      const offered = pv.priced ? (pv.priced.offer.odds > 0 ? 100 / (pv.priced.offer.odds + 100) : -pv.priced.offer.odds / (-pv.priced.offer.odds + 100)) : null;
+      // joint must be ≈ strong mirror (0.42-ish scaled by 1/p_weak_fair ≈ ×1.06),
+      // NEVER the naive product of mirrors (0.42×0.83 = 0.349)
+      check(`all-override nested NOT naive product (parlayLevelVig=${mode})`,
+        offered != null && offered > 0.40,
+        offered != null ? (offered * 100).toFixed(1) + '%' : 'null');
+    }
+    config.pricing.parlayLevelVig = false;
+
     // --- 3. experiment ledger + game caps (unit-level) ---
     console.log('--- sgp-guard ---');
     await sgpGuard.rebuild([]); // clean slate
