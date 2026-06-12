@@ -10,6 +10,9 @@
  * or Supabase writes.
  */
 process.env.SGP_EXPERIMENTAL_COMBOS = process.env.SGP_EXPERIMENTAL_COMBOS || 'prop_nested';
+// GS⇒SoT1 is settlement-verification-gated (cross-feed grading) — enable for
+// the rule-logic tests; a dedicated case below verifies default-off.
+process.env.SGP_NESTED_SOCCER_GS_SOT = 'true';
 // Stub KV persistence to in-memory BEFORE anything touches the guard —
 // the local .env points at the production Supabase, and an early version
 // of this suite leaked its stop-loss test state into the live kv_store.
@@ -148,6 +151,15 @@ function mk(id, { sport = 'soccer', eventId, player, propType, implied, line = 0
     mk('rbi05', { sport: 'baseball_mlb', eventId: 8, player: 'Liner Upper', propType: 'hitter_rbi_runs', implied: 0.55, line: 0.5 });
     const rbiLadder = dc(['rbi15', 'rbi05']);
     check('hitter_rbi_runs ladder excluded (conflated stat)', rbiLadder.declined === true, rbiLadder.reason);
+
+    // GS⇒SoT1 settlement gate: with the env flag OFF the pair must decline
+    // (cross-feed grading unverified); SoT2⇒SoT1 (same-feed) stays allowed.
+    delete process.env.SGP_NESTED_SOCCER_GS_SOT;
+    const gsGated = dc(['gs', 'sot1']);
+    check('GS+SoT1 declines until settlement-verified (flag off)', gsGated.declined === true, gsGated.reason);
+    const sotLadder = dc(['sot2', 'sot1']);
+    check('SoT2+SoT1 unaffected by the GS gate', !sotLadder.declined && sotLadder.sgpCombo === 'prop_nested', sotLadder.declined ? sotLadder.reason : 'combo=' + sotLadder.sgpCombo);
+    process.env.SGP_NESTED_SOCCER_GS_SOT = 'true';
 
     // --- 3. experiment ledger + game caps (unit-level) ---
     console.log('--- sgp-guard ---');

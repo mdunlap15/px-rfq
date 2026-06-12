@@ -2767,7 +2767,14 @@ const _NESTED_CROSS_RULES = [
   // A goal IS a shot on target (Opta convention; own goals excluded from
   // both player-GS and the scorer's SoT, so the implication is clean).
   // GS does NOT imply SoT 2+ (the goal contributes exactly one SoT).
-  { sport: (s) => s === 'soccer' || s.startsWith('soccer_'), strong: 'goalscorer', weak: 'sot_1', cond: () => true },
+  //
+  // SETTLEMENT-VERIFICATION GATE: this is the only table entry whose
+  // implication crosses two DIFFERENT stat feeds (GS grading vs SoT
+  // grading) — every other rule is same-feed arithmetic. Per the roadmap
+  // ("any pair unverifiable for a grading window stays dark"), it stays
+  // OFF until the operator confirms on one graded match that PX settles
+  // a scorer's SoT 1+ YES (env SGP_NESTED_SOCCER_GS_SOT=true to enable).
+  { sport: (s) => s === 'soccer' || s.startsWith('soccer_'), strong: 'goalscorer', weak: 'sot_1', cond: () => process.env.SGP_NESTED_SOCCER_GS_SOT === 'true' },
   { sport: (s) => s === 'soccer' || s.startsWith('soccer_'), strong: 'sot_2', weak: 'sot_1', cond: () => true },
   // NHL points = goals + assists: N goals (or assists) ⇒ ≥N points.
   { sport: (s) => s === 'icehockey_nhl', strong: 'goals', weak: 'points', cond: (ls, lw) => ls >= lw },
