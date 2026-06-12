@@ -264,7 +264,9 @@ const ODDS_API_FALLBACK = {
     bookmakers: ODDS_API_BOOKMAKERS,
   },
   'soccer_conmebol_libertadores': {
-    oddsApiSport: 'soccer_conmebol_libertadores',
+    // TOA's real key has 'copa' in it — the old value silently 404'd
+    // (SharpAPI-removal audit: one of the two dead soccer keys).
+    oddsApiSport: 'soccer_conmebol_copa_libertadores',
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
@@ -285,20 +287,74 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,outrights',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
-  // MMA moved to SharpAPI (league=ufc) — see LEAGUE_MAP. SharpAPI has 3 books
-  // (Pinnacle + DK + FD) on our tier vs The Odds API's 3, and posts fighters
-  // earlier. Keep entry commented for reference in case of SharpAPI regression.
-  // 'mma_mixed_martial_arts': {
-  //   oddsApiSport: 'mma_mixed_martial_arts',
-  //   markets: 'h2h',
-  //   bookmakers: ODDS_API_BOOKMAKERS,
-  // },
   'boxing_boxing': {
     oddsApiSport: 'boxing_boxing',
     markets: 'h2h',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // -------------------------------------------------------------------------
+  // FLIP-GATED ENTRIES (SharpAPI-removal audit). These sports stay
+  // SharpAPI-primary until listed in the TOA_PRIMARY_SPORTS env var — the
+  // plain ODDS_API_FALLBACK dispatch ignores entries with flipGated:true,
+  // and the TOA-primary block in fetchOddsForSport routes them instead.
+  // Flip one sport at a time (env change = restart), 48h soak each, MLB
+  // last (F5 + pitcher-feed + tightest stale gate).
+  // -------------------------------------------------------------------------
+  'basketball_nba': {
+    oddsApiSport: 'basketball_nba',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+    flipGated: true,
+  },
+  'icehockey_nhl': {
+    oddsApiSport: 'icehockey_nhl',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+    flipGated: true,
+  },
+  'baseball_mlb': {
+    oddsApiSport: 'baseball_mlb',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+    flipGated: true,
+  },
+  // MMA returns to TOA when flipped (it predated the move to SharpAPI).
+  // Long-tail small-card breadth is accepted loss; the DK scraper merge
+  // (mergeDkMmaFights) backstops major cards.
+  'mma_mixed_martial_arts': {
+    oddsApiSport: 'mma_mixed_martial_arts',
+    markets: 'h2h,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+    flipGated: true,
+  },
+  // Generic soccer (incl. World Cup team lines — SharpAPI's single 'soccer'
+  // feed today). Dynamic discovery over TOA's soccer_* keys, CURATED via
+  // TOA_SOCCER_KEYS (uncurated, club season historically exposes ~53 active
+  // keys — a quota footgun). Club leagues with their own dedicated entries
+  // above are excluded here to avoid double-fetching.
+  'soccer': {
+    dynamic: true,
+    sportPrefix: 'soccer_',
+    // Default: World Cup only — MLS/Brazil/Libertadores already fetch via
+    // their own dedicated entries above (the discovery filter excludes
+    // dedicated keys anyway, so listing them here is a harmless no-op).
+    keyAllowlist: () => new Set((process.env.TOA_SOCCER_KEYS
+      || 'soccer_fifa_world_cup')
+      .split(',').map(s => s.trim()).filter(Boolean)),
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+    flipGated: true,
+  },
 };
+
+// SharpAPI-removal flip switch (audit): sports listed here route to TOA
+// ahead of their LEAGUE_MAP SharpAPI path. Flip one sport at a time via
+// Railway env; example full set after migration:
+//   TOA_PRIMARY_SPORTS=basketball_nba,icehockey_nhl,mma_mixed_martial_arts,soccer,baseball_mlb
+function _isToaPrimary(sport) {
+  const raw = process.env.TOA_PRIMARY_SPORTS || '';
+  return raw.split(',').map(s => s.trim()).includes(sport);
+}
 
 // ---------------------------------------------------------------------------
 // SHARPAPI CLIENT
@@ -330,7 +386,24 @@ async function fetchOddsForSport(sport, opts) {
     if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
     log.info('OddsFeed', 'Tennis TOA returned 0 events — falling through to SharpAPI');
     // fall through to SharpAPI path below
-  } else if (ODDS_API_FALLBACK[sport]) {
+  } else if (ODDS_API_FALLBACK[sport] && ODDS_API_FALLBACK[sport].flipGated && _isToaPrimary(sport)) {
+    // SharpAPI-removal flip path (audit): this sport has been switched to
+    // TOA via TOA_PRIMARY_SPORTS. While a Sharp key still exists (the
+    // overlap window), fall through to SharpAPI on TOA failure/empty;
+    // once the key is gone, TOA is authoritative and failures surface to
+    // the normal staleness handling (stale gates decline — fail closed).
+    if (liveMode) return null;
+    try {
+      const toaResult = await fetchFromTheOddsApi(sport);
+      if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
+      if (!process.env.SHARP_ODDS_API_KEY) return toaResult || {};
+      log.warn('OddsFeed', `${sport}: TOA-primary returned 0 events — falling through to SharpAPI (overlap window)`);
+    } catch (err) {
+      if (!process.env.SHARP_ODDS_API_KEY) throw err;
+      log.warn('OddsFeed', `${sport}: TOA-primary fetch failed (${err.message}) — falling through to SharpAPI (overlap window)`);
+    }
+    // fall through to SharpAPI path below
+  } else if (ODDS_API_FALLBACK[sport] && !ODDS_API_FALLBACK[sport].flipGated) {
     if (liveMode) {
       // Live odds for Odds-API-fallback sports not implemented yet
       return null;
@@ -890,8 +963,38 @@ async function fetchOddsForSport(sport, opts) {
     lastDeltaTimestamp[sport] = new Date().toISOString();
   }
 
-  // Supplement with First-5-Innings markets for MLB (separate from full-game)
-  if (!liveMode && sport === 'baseball_mlb') {
+  // Per-sport post-parse supplements (F5 / H1 / team totals / DK backstop).
+  // HOISTED into _runPostParseSupplements (SharpAPI-removal audit): these
+  // used to live only in this Sharp parse branch, so flipping a sport to
+  // TOA-primary silently killed F5/H1/team-total quoting for it.
+  if (!liveMode) {
+    await _runPostParseSupplements(sport, parsed);
+  }
+
+  log.info('OddsFeed', `Cached ${Object.keys(parsed).length} ${liveMode ? 'LIVE ' : ''}events for ${mapping.value}`);
+  return parsed;
+}
+
+// Sub-game + backstop supplements, shared by BOTH parse paths (SharpAPI and
+// fetchFromTheOddsApi). All data here is TOA/DK-sourced already — only the
+// INVOCATION used to be Sharp-branch-only.
+//
+// DK game-line scraper fallback rationale (operator directive 2026-05-03):
+// any time the primary feed returns events lacking proper game-line markets
+// (the Kalshi-only-stub pattern), the DK scraper backstop fills the gap.
+// Sports need a GAME_LINE_CONFIGS entry in dk-scraper.js. NOTE: fill-only —
+// it enriches cached events, it cannot create them.
+const DK_GAME_LINE_SPORTS = new Set([
+  'basketball_nba', 'baseball_mlb', 'icehockey_nhl', 'basketball_wnba', 'tennis',
+  'soccer_epl', 'soccer_spain_la_liga', 'soccer_italy_serie_a',
+  'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_usa_mls',
+  'soccer_uefa_champs_league', 'soccer_uefa_europa_league',
+  'soccer_brazil_campeonato', 'soccer_mexico_ligamx', 'soccer_usa_nwsl',
+]);
+
+async function _runPostParseSupplements(sport, parsed) {
+  // First-5-Innings markets for MLB (separate from full-game)
+  if (sport === 'baseball_mlb') {
     try {
       await supplementMlbF5Markets(parsed);
     } catch (err) {
@@ -900,29 +1003,7 @@ async function fetchOddsForSport(sport, opts) {
     _scheduleSupplementRetry(sport, 'MLB F5', supplementMlbF5Markets, parsed);
   }
 
-  // DK game-line scraper fallback for full-game markets (h2h / spreads /
-  // totals / team_totals). Triggers when the SharpAPI primary feed
-  // returns events that lack proper game-line markets — usually the
-  // Kalshi-only-stub pattern where h2h is the only market and per-book
-  // raw rows are empty. Verified 2026-05-03: tonight's MLB primetime
-  // games (Tampa/Toronto, Detroit/Boston, Seattle/Atlanta, SF/Padres)
-  // had only Kalshi-stub h2h with no spreads/totals while DK had full
-  // pre-game markets posted hours earlier. Operator directive: any time
-  // SharpAPI / TOA don't have lines for markets we typically have, the
-  // scraper backstop fills the gap.
-  //
-  // Sports covered: NBA, MLB, NHL, WNBA, tennis, plus 11 soccer leagues
-  // (3-way moneyline → DNB renormalized inside the scraper). Each has a
-  // GAME_LINE_CONFIGS entry in dk-scraper.js. Easy to extend by adding
-  // more sport keys to that map.
-  const DK_GAME_LINE_SPORTS = new Set([
-    'basketball_nba', 'baseball_mlb', 'icehockey_nhl', 'basketball_wnba', 'tennis',
-    'soccer_epl', 'soccer_spain_la_liga', 'soccer_italy_serie_a',
-    'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_usa_mls',
-    'soccer_uefa_champs_league', 'soccer_uefa_europa_league',
-    'soccer_brazil_campeonato', 'soccer_mexico_ligamx', 'soccer_usa_nwsl',
-  ]);
-  if (!liveMode && DK_GAME_LINE_SPORTS.has(sport)) {
+  if (DK_GAME_LINE_SPORTS.has(sport)) {
     try {
       await _supplementDkGameLines(parsed, sport);
     } catch (err) {
@@ -930,8 +1011,8 @@ async function fetchOddsForSport(sport, opts) {
     }
   }
 
-  // Supplement with 1st-Half markets for NBA (separate from full-game)
-  if (!liveMode && sport === 'basketball_nba') {
+  // 1st-Half markets for NBA (separate from full-game)
+  if (sport === 'basketball_nba') {
     try {
       await supplementNbaH1Markets(parsed);
     } catch (err) {
@@ -940,13 +1021,8 @@ async function fetchOddsForSport(sport, opts) {
     _scheduleSupplementRetry(sport, 'NBA H1', supplementNbaH1Markets, parsed);
   }
 
-  // Supplement with team-total markets for NBA/MLB/NHL. SharpAPI Hobby
-  // plan's team_total market currently returns no data for these leagues,
-  // so we gap-fill from The Odds API on the same refresh cycle (pre-warmed
-  // cache — zero RFQ latency impact, in contrast to on-demand alt-line
-  // fetches). Primary-cycle gap-fill is the general pattern for any
-  // market SharpAPI doesn't surface for us; see also supplementNbaH1Markets.
-  if (!liveMode && ['basketball_nba', 'baseball_mlb', 'icehockey_nhl'].includes(sport)) {
+  // Team totals for NBA/MLB/NHL (gap-fill from TOA on the refresh cycle).
+  if (['basketball_nba', 'baseball_mlb', 'icehockey_nhl'].includes(sport)) {
     try {
       await supplementTeamTotals(parsed, sport);
     } catch (err) {
@@ -954,9 +1030,6 @@ async function fetchOddsForSport(sport, opts) {
     }
     _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
   }
-
-  log.info('OddsFeed', `Cached ${Object.keys(parsed).length} ${liveMode ? 'LIVE ' : ''}events for ${mapping.value}`);
-  return parsed;
 }
 
 // Merge a freshly-supplemented sub-game market (h2h_f5/spreads_f5/
@@ -1829,7 +1902,19 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
   const sportsResp = await fetch(`https://api.the-odds-api.com/v4/sports/?apiKey=${apiKey}`);
   if (!sportsResp.ok) throw new Error(`The Odds API sports list: ${sportsResp.status}`);
   const allSports = await safeJsonFetch(sportsResp);
-  const activeTournaments = allSports.filter(s => s.key.startsWith(fallback.sportPrefix) && s.active);
+  let activeTournaments = allSports.filter(s => s.key.startsWith(fallback.sportPrefix) && s.active);
+  // Optional curation (generic soccer): only fetch allowlisted keys —
+  // uncurated soccer_* can be ~50 keys in club season, a quota footgun.
+  // Keys with their own dedicated ODDS_API_FALLBACK entry are excluded
+  // regardless, to avoid double-fetching into two cache slots.
+  if (typeof fallback.keyAllowlist === 'function') {
+    const allow = fallback.keyAllowlist();
+    activeTournaments = activeTournaments.filter(s => allow.has(s.key));
+    // Keys with their own dedicated (non-gated) ODDS_API_FALLBACK entry are
+    // already fetched into their own cache slot — exclude them here so an
+    // over-broad allowlist can't double-fetch.
+    activeTournaments = activeTournaments.filter(s => !(ODDS_API_FALLBACK[s.key] && !ODDS_API_FALLBACK[s.key].flipGated));
+  }
 
   if (activeTournaments.length === 0) {
     log.warn('OddsFeed', `No active ${sport} tournaments found on The Odds API`);
@@ -2105,16 +2190,24 @@ async function fetchFromTheOddsApi(sport) {
       }
     }
     if (mlPairs.length > 0) {
-      // Exclude Kalshi from averaging input — prediction-market thinness
-      // corrupts consensus. Still populated as a display column below.
-      const avgPairs = excludeKalshiFromConsensus(mlPairs);
+      // PRICING PARITY with the SharpAPI consensus path (SharpAPI-removal
+      // audit): (1) drop high-vig books from the averaging input via
+      // filterSharpBooks — without it a Saba-class feed corrupts the
+      // unweighted mean exactly as it did on the Sharp path pre-filter;
+      // (2) Pinnacle floor on ALL favorites (>=0.50, not 0.65) — the Sharp
+      // path lowered this after the Padres-at-60% Saba-pollution incident.
+      // Kalshi excluded from averaging; display columns keep every book.
+      const avgPairs = filterSharpBooks(
+        excludeKalshiFromConsensus(mlPairs),
+        bp => [bp.home.odds_probability, bp.away.odds_probability],
+        'toa-moneyline'
+      );
       const fairHome = [], fairAway = [];
       for (const p of avgPairs) {
         const [fh, fa] = deVig2Way(p.home.odds_probability, p.away.odds_probability);
         fairHome.push(fh);
         fairAway.push(fa);
       }
-      // Pinnacle floor only on heavy favorites (>65%) where de-vig over-corrects.
       // Use de-vigged Pinnacle (not raw implied) to avoid double-vig.
       // Kalshi NOT used as fallback floor — operator intent: reference only.
       const pinPair = mlPairs.find(p => p.book === 'pinnacle');
@@ -2123,8 +2216,8 @@ async function fetchFromTheOddsApi(sport) {
       const dvH = avg(fairHome), dvA = avg(fairAway);
       const flrH = pinPair ? pinFairH : 0;
       const flrA = pinPair ? pinFairA : 0;
-      const maxHome = dvH >= 0.65 ? Math.max(dvH, flrH) : dvH;
-      const maxAway = dvA >= 0.65 ? Math.max(dvA, flrA) : dvA;
+      const maxHome = dvH >= 0.50 ? Math.max(dvH, flrH) : dvH;
+      const maxAway = dvA >= 0.50 ? Math.max(dvA, flrA) : dvA;
       // Find named books for per-book display columns (previously unpopulated
       // in this fallback path — dashboard book columns were always blank).
       const findBook = (name) => mlPairs.find(p => p.book === name);
@@ -2159,7 +2252,13 @@ async function fetchFromTheOddsApi(sport) {
       }
     }
     if (spreadPairs.length > 0) {
-      const avgSpreadPairs = excludeKalshiFromConsensus(spreadPairs);
+      // Pricing parity with the Sharp path: vig filter + 0.50 Pin floor
+      // (see the moneyline block above for rationale).
+      const avgSpreadPairs = filterSharpBooks(
+        excludeKalshiFromConsensus(spreadPairs),
+        bp => [bp.home.odds_probability, bp.away.odds_probability],
+        'toa-spreads'
+      );
       const fairHome = [], fairAway = [];
       for (const p of avgSpreadPairs) {
         const [fh, fa] = deVig2Way(p.home.odds_probability, p.away.odds_probability);
@@ -2172,8 +2271,8 @@ async function fetchFromTheOddsApi(sport) {
       const dvSHome = avg(fairHome), dvSAway = avg(fairAway);
       const flrSH = pinSpread ? pinFairH : 0;
       const flrSA = pinSpread ? pinFairA : 0;
-      const maxSHome = dvSHome >= 0.65 ? Math.max(dvSHome, flrSH) : dvSHome;
-      const maxSAway = dvSAway >= 0.65 ? Math.max(dvSAway, flrSA) : dvSAway;
+      const maxSHome = dvSHome >= 0.50 ? Math.max(dvSHome, flrSH) : dvSHome;
+      const maxSAway = dvSAway >= 0.50 ? Math.max(dvSAway, flrSA) : dvSAway;
       const findBook = (name) => spreadPairs.find(p => p.book === name);
       const pinBook = findBook('pinnacle');
       const fdBook = findBook('fanduel');
@@ -2207,7 +2306,13 @@ async function fetchFromTheOddsApi(sport) {
       }
     }
     if (totalPairs.length > 0) {
-      const avgTotalPairs = excludeKalshiFromConsensus(totalPairs);
+      // Pricing parity with the Sharp path: vig filter + 0.50 Pin floor
+      // (see the moneyline block above for rationale).
+      const avgTotalPairs = filterSharpBooks(
+        excludeKalshiFromConsensus(totalPairs),
+        bp => [bp.over.odds_probability, bp.under.odds_probability],
+        'toa-totals'
+      );
       const fairOver = [], fairUnder = [];
       for (const p of avgTotalPairs) {
         const [fo, fu] = deVig2Way(p.over.odds_probability, p.under.odds_probability);
@@ -2220,8 +2325,8 @@ async function fetchFromTheOddsApi(sport) {
       const dvTOver = avg(fairOver), dvTUnder = avg(fairUnder);
       const flrTO = pinTotal ? pinFairO : 0;
       const flrTU = pinTotal ? pinFairU : 0;
-      const maxTOver = dvTOver >= 0.65 ? Math.max(dvTOver, flrTO) : dvTOver;
-      const maxTUnder = dvTUnder >= 0.65 ? Math.max(dvTUnder, flrTU) : dvTUnder;
+      const maxTOver = dvTOver >= 0.50 ? Math.max(dvTOver, flrTO) : dvTOver;
+      const maxTUnder = dvTUnder >= 0.50 ? Math.max(dvTUnder, flrTU) : dvTUnder;
       const findBook = (name) => totalPairs.find(p => p.book === name);
       const pinBook = findBook('pinnacle');
       const fdBook = findBook('fanduel');
@@ -2325,6 +2430,9 @@ async function fetchFromTheOddsApi(sport) {
   log.info('OddsFeed', `Cached ${totalEvents} events (${Object.keys(parsed).length} matchups) for ${sport} (The Odds API fallback)`);
   // Audit: same check as SharpAPI path (see auditCacheForDuplicateEvents).
   auditCacheForDuplicateEvents(sport);
+  // Sub-game/backstop supplements (F5/H1/team totals/DK) — hoisted shared
+  // step so TOA-primary sports keep them (SharpAPI-removal audit).
+  await _runPostParseSupplements(sport, parsed);
   return parsed;
 }
 
