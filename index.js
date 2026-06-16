@@ -5968,13 +5968,15 @@ function startStatusServer() {
   }
   const MANUAL_OFFER_MAX_STAKE = Number(process.env.MANUAL_OFFER_MAX_STAKE || 25000);
   const MANUAL_OFFERS_MAX_PER_REQ = 1000;
+  const MANUAL_PACE_MS = Number(process.env.MANUAL_PACE_MS || 700); // PX order endpoints cap ~2 req/s
+  const _msleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // POST /admin/offers/place
   //   body: { offers: [{ line_id, odds, stake, external_id }, ...], dryRun?: bool }
   // Guards (fat-finger + shared-cap protection for the live money account):
   //   shape/type validation, per-offer stake cap, odds must be a real ladder
   //   rung, and a balance pre-flight that refuses to post more unmatched stake
-  //   than the account's 10x-cash headroom (shared with the parlay quoter).
+  //   than the account's 50x-cash headroom (PX resting-volume cap; shared with the parlay quoter).
   app.post('/admin/offers/place', async (req, res) => {
     const pxs = _manualPxsGuard(res); if (!pxs) return;
     const offers = (req.body && Array.isArray(req.body.offers)) ? req.body.offers : null;
@@ -6001,16 +6003,24 @@ function startStatusServer() {
       const cash = Number(bal.balance || 0);
       const unmatched = Number(bal.unmatched_wager_balance || 0);
       const totalStake = offers.reduce((s, o) => s + o.stake, 0);
-      const headroom = cash * 10 - unmatched;
+      const headroom = cash * 50 - unmatched;   // PX allows up to 50x cash in resting (unmatched) volume
       if (cash <= 0) return res.status(409).json({ ok: false, error: 'account balance is 0 — offers would be invalidated', balance: bal });
       if (totalStake > headroom) return res.status(409).json({ ok: false, error: `total stake ${totalStake} exceeds headroom ${headroom}`, balance: { cash, unmatched, headroom } });
       if (dryRun) return res.json({ ok: true, dryRun: true, offers: offers.length, totalStake, balance: { cash, unmatched, headroom } });
       const succeed = []; const failed = [];
       for (let i = 0; i < offers.length; i += 20) {
+        await _msleep(MANUAL_PACE_MS); // stay under PX's ~2 req/s order limit (and space from the balance read)
         const batch = offers.slice(i, i + 20).map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }));
-        const r = await pxs.placeMultipleWagers(batch);
-        succeed.push(...(r.succeed_wagers || []));
-        failed.push(...(r.failed_wagers || []));
+        let r = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try { r = await pxs.placeMultipleWagers(batch); break; }
+          catch (e) {
+            if (/429|rate.?limit/i.test(e.message) && attempt < 2) { await _msleep(1500); continue; }
+            failed.push(...batch.map(o => ({ external_id: o.external_id, error: e.message })));
+            break;
+          }
+        }
+        if (r) { succeed.push(...(r.succeed_wagers || [])); failed.push(...(r.failed_wagers || [])); }
       }
       log.info('ManualOffers', `place ${succeed.length} ok / ${failed.length} failed, totalStake $${totalStake} (${offers.length} requested)`);
       res.json({ ok: true, placed: succeed.length, failed: failed.length, totalStake, succeed_wagers: succeed, failed_wagers: failed });
@@ -6030,14 +6040,22 @@ function startStatusServer() {
       if (Array.isArray(b.wager_ids) && b.wager_ids.length) {
         out.wagers = [];
         for (const wid of b.wager_ids) {
+          await _msleep(MANUAL_PACE_MS);
           try { await pxs.cancelWager(wid); out.wagers.push({ wager_id: wid, ok: true }); }
           catch (e) { out.wagers.push({ wager_id: wid, ok: false, error: e.message }); }
         }
       } else if (Array.isArray(b.markets) && b.markets.length) {
         out.markets = [];
         for (const m of b.markets) {
-          try { await pxs.cancelWagersByMarket(m.event_id, m.market_id); out.markets.push({ ...m, ok: true }); }
-          catch (e) { out.markets.push({ ...m, ok: false, error: e.message }); }
+          await _msleep(MANUAL_PACE_MS);
+          let done = false;
+          for (let attempt = 0; attempt < 3 && !done; attempt++) {
+            try { await pxs.cancelWagersByMarket(m.event_id, m.market_id); out.markets.push({ ...m, ok: true }); done = true; }
+            catch (e) {
+              if (/429|rate.?limit/i.test(e.message) && attempt < 2) { await _msleep(1500); continue; }
+              out.markets.push({ ...m, ok: false, error: e.message }); done = true;
+            }
+          }
         }
       } else if (b.event_id != null) {
         await pxs.cancelWagersByEvent(b.event_id);
