@@ -1,12 +1,16 @@
 // ============================================================================
-// px-single.js — ProphetX client for the SECOND account (single-leg wagers)
+// px-single.js — ProphetX order-book client (single-leg wagers: golf SL + outrights)
 // ============================================================================
-// COMPLETELY ISOLATED from services/prophetx.js:
-//   - Own access/secret keys (PX_SINGLE_ACCESS_KEY / PX_SINGLE_SECRET_KEY env)
-//   - Own token cache, own refresh logic, own session-limit cooldown
-//   - Operates on the SAME PX base URL (cash.api.prophetx.co/partner) but
-//     authenticates as a different MM partner, so all read/write happens on
-//     the single-leg account exclusively.
+// Separate token cache / refresh / session-cooldown from services/prophetx.js,
+// but as of the 2026-06-16 CFTC account merge it authenticates as the SAME
+// account by default:
+//   - Credentials: PX_SINGLE_ACCESS_KEY / PX_SINGLE_SECRET_KEY if set, ELSE
+//     fall back to the main account (PX_ACCESS_KEY / PX_SECRET_KEY). Operator
+//     consolidated everything onto the one merged account, so leaving the
+//     PX_SINGLE_* vars unset routes golf posting through the funded account.
+//   - Same PX base URL (config.px.baseUrl).
+//   - Own session (PX allows 20 concurrent per user); shares the account's
+//     balance + 10x unmatched-exposure cap with the parlay quoter.
 //
 // This file is loaded only when GOLF_SINGLE_LEG_ENABLED=true (or any module
 // that uses it requires it on demand). Importing it does NOT initiate any
@@ -30,12 +34,19 @@ let oddsLadderCache = { ladder: null, time: 0 };
 const LADDER_TTL_MS = 60 * 60 * 1000;
 
 function _keys() {
-  const access = process.env.PX_SINGLE_ACCESS_KEY;
-  const secret = process.env.PX_SINGLE_SECRET_KEY;
+  // Post-CFTC consolidation (operator 2026-06-16): everything that posts or
+  // quotes runs on the ONE merged account. PX_SINGLE_* keys are now OPTIONAL —
+  // when unset, fall back to the main account credentials (config.px), so
+  // golf single-leg + outrights trade the same funded account as the parlay
+  // quoter. PX allows up to 20 concurrent sessions per user, so this client
+  // and the main prophetx.js client coexisting on the same keys is fine
+  // (separate sessions, shared balance + 10x exposure cap — intended).
+  const access = process.env.PX_SINGLE_ACCESS_KEY || (config.px && config.px.accessKey);
+  const secret = process.env.PX_SINGLE_SECRET_KEY || (config.px && config.px.secretKey);
   if (!access || !secret) {
-    throw new Error('px-single: PX_SINGLE_ACCESS_KEY / PX_SINGLE_SECRET_KEY not configured');
+    throw new Error('px-single: no credentials — set PX_SINGLE_ACCESS_KEY/SECRET_KEY or the main PX_ACCESS_KEY/PX_SECRET_KEY');
   }
-  return { access, secret };
+  return { access, secret, usingMain: !process.env.PX_SINGLE_ACCESS_KEY };
 }
 
 async function login() {
@@ -48,8 +59,8 @@ async function login() {
     throw new Error(`px-single: login on cooldown (${waitSec}s) — avoiding session_num_exceed`);
   }
 
-  const { access, secret } = _keys();
-  log.info('PX-Single', 'Logging in (second account)…');
+  const { access, secret, usingMain } = _keys();
+  log.info('PX-Single', `Logging in (${usingMain ? 'MAIN merged account — PX_SINGLE_* unset' : 'dedicated PX_SINGLE account'})…`);
   const resp = await fetch(`${BASE}/partner/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
