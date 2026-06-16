@@ -7480,40 +7480,14 @@
     ].filter(Boolean);
     if (els.length === 0) return;
 
-    // Realized P&L = account-based delta (totalEquity − startingBankroll)
-    // when STARTING_BANKROLL is configured. This is the canonical headline
-    // metric that reconciles directly to the operator's PX balance + open
-    // exposure vs the initial deposit. Falls back to PX-summed realizedPnL
-    // (lifetime sum of per-order profit) when account-based isn't set —
-    // useful at boot before /status loads or in test environments without
-    // a starting bankroll. Last-resort fallback: in-memory tracker.
+    // Parlay RFQ realized P&L — the headline parlay-performance number,
+    // ISOLATED from single-leg activity (2026-06-16 account merge: single-leg
+    // order-book offers now post to the same account, so equity−starting is
+    // commingled and is NOT used here). Sourced from settled parlay_orders
+    // (backend portfolio.parlayRealizedPnL = tracker runningPnL; the
+    // /parlay/sp/orders namespace — single-leg wagers never enter it).
+    // Fallbacks: PX-summed parlay realizedPnL, then in-memory tracker.
     const pxPnL = window._pxPnL;
-    // Account-based fallback. If the backend's portfolio.accountPnL is null
-    // (PX balance fetch glitched — config.pricing.liveBankroll never
-    // populated; observed 2026-05-30 after restart), compute it locally
-    // from the frontend's working PX balance + open exposure − starting
-    // bankroll. Keeps Realized P&L AND ROI on the canonical account-based
-    // basis instead of silently falling back to pxPnL.realizedPnL (the
-    // partial mirror sum that can undercount settled flow by thousands).
-    let effectiveAccountPnL = portfolio?.accountPnL;
-    if (effectiveAccountPnL == null && portfolio?.startingBankroll != null && window._pxBalance != null) {
-      let bn = null;
-      if (typeof window._pxBalance === 'number') bn = window._pxBalance;
-      else if (typeof window._pxBalance === 'object') {
-        bn = window._pxBalance.balance != null ? Number(window._pxBalance.balance)
-           : window._pxBalance.available != null ? Number(window._pxBalance.available) : null;
-      }
-      if (bn != null && !isNaN(bn)) {
-        const pr = (pxPnL && pxPnL.openExposure != null) ? pxPnL.openExposure : (portfolio?.currentRisk || 0);
-        effectiveAccountPnL = (bn + pr) - portfolio.startingBankroll;
-      }
-    }
-    // PARLAY RFQ realized P&L — the headline parlay-performance number,
-    // ISOLATED from single-leg activity (2026-06-16 account merge). Settled
-    // parlay_orders only (the /parlay/sp/orders namespace); single-leg
-    // order-book wagers never enter it. The commingled account-wide delta
-    // (effectiveAccountPnL = equity − starting) is shown SEPARATELY below as
-    // "Account (all)" for reconciliation, no longer as the headline.
     const parlayPnL = (portfolio?.parlayRealizedPnL != null) ? portfolio.parlayRealizedPnL
                     : (pxPnL?.realizedPnL != null ? pxPnL.realizedPnL : (orderStats.runningPnL || 0));
     const pnl = parlayPnL;
@@ -7535,13 +7509,10 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: realized profit / total settled stake.
-    // Numerator MUST match the displayed Realized P&L, otherwise the
-    // ratio is computed from different sources of truth and reads
-    // misleadingly low. Observed 2026-05-30: pxPnL.realizedPnL ($6,233,
-    // partial mirror) / totalSettled ($830,378) = 0.75%, while the
-    // canonical accountPnL ($13,998) over the same denom = 1.69%.
-    // Prefer effectiveAccountPnL (account-based, matches the headline).
+    // ROI: parlay realized profit / total settled parlay stake.
+    // Numerator MUST match the displayed Parlay P&L (parlayPnL) and the
+    // denominator is parlay settled stake (pxPnL.stakes.totalSettled, from
+    // /parlay/sp/orders) — so this is parlay ROI, isolated from single-leg.
     let roi;
     if (pxPnL) {
       const denom = pxPnL.stakes?.totalSettled || 0;
@@ -7618,10 +7589,7 @@
       ? (pxPnL.netBalanceImpact >= 0 ? 'positive' : 'negative') : 'neutral';
 
     const pnlLabel = 'Parlay P&L';
-    const pnlTitle = 'Parlay RFQ realized P&L — settled parlay_orders only (isolated from single-leg / order-book activity). The account-wide figure is the separate "Account (all)" stat.';
-    // Account-wide commingled delta (parlay + single-leg − fees ± transfers).
-    const acctAllStr = effectiveAccountPnL != null ? fmtPnl(effectiveAccountPnL) : null;
-    const acctAllCls = effectiveAccountPnL == null ? 'neutral' : (effectiveAccountPnL >= 0 ? 'positive' : 'negative');
+    const pnlTitle = 'Parlay RFQ realized P&L — settled parlay_orders only (isolated from single-leg / order-book activity on the shared account).';
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
@@ -7631,7 +7599,6 @@
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
         ${stat('ROI', roiStr, roiCls, 'Parlay realized P&L / total settled parlay stake')}
-        ${acctAllStr != null ? stat('Account (all)', acctAllStr, acctAllCls, 'Account-wide equity delta since the 2026-06-16 merge — parlay + single-leg − fees ± transfers. NOT parlay performance; shown for reconciliation. The gap vs Parlay P&L is your single-leg/fees/transfer activity.') : ''}
         ${stat('Open Parlays', confirmed)}
       </div>
     </div>`;
