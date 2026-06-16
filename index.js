@@ -5949,6 +5949,111 @@ function startStatusServer() {
   });
 
   // -----------------------------------------------------------------------
+  // Generic manual order book — place/cancel arbitrary PRE-STAGED offers on the
+  // funded (merged) account, FROM THE ALLOWLISTED RAILWAY IP. Operator scripts
+  // price/stage boards locally (MLB props, soccer, NHL, golf, ...) and POST them
+  // here, because PX gates ORDER PLACEMENT to specific source IPs: reads work
+  // from anywhere but writes from the operator laptop 401 "ip address is not
+  // allowed". Reads/staging stay local; only writes route through here. Admin
+  // Basic auth (global middleware) already protects every /admin/* path.
+  // px-single is lazy-required so a missing dep can't crash boot. (2026-06-16)
+  // -----------------------------------------------------------------------
+  let _manualPxs = null;
+  function _manualPxsGuard(res) {
+    if (!_manualPxs) {
+      try { _manualPxs = require('./services/px-single'); }
+      catch (e) { res.status(500).json({ ok: false, error: 'px-single unavailable: ' + e.message }); return null; }
+    }
+    return _manualPxs;
+  }
+  const MANUAL_OFFER_MAX_STAKE = Number(process.env.MANUAL_OFFER_MAX_STAKE || 25000);
+  const MANUAL_OFFERS_MAX_PER_REQ = 1000;
+
+  // POST /admin/offers/place
+  //   body: { offers: [{ line_id, odds, stake, external_id }, ...], dryRun?: bool }
+  // Guards (fat-finger + shared-cap protection for the live money account):
+  //   shape/type validation, per-offer stake cap, odds must be a real ladder
+  //   rung, and a balance pre-flight that refuses to post more unmatched stake
+  //   than the account's 10x-cash headroom (shared with the parlay quoter).
+  app.post('/admin/offers/place', async (req, res) => {
+    const pxs = _manualPxsGuard(res); if (!pxs) return;
+    const offers = (req.body && Array.isArray(req.body.offers)) ? req.body.offers : null;
+    const dryRun = !!(req.body && req.body.dryRun);
+    if (!offers || offers.length === 0) return res.status(400).json({ ok: false, error: 'body.offers must be a non-empty array' });
+    if (offers.length > MANUAL_OFFERS_MAX_PER_REQ) return res.status(400).json({ ok: false, error: `too many offers (${offers.length} > ${MANUAL_OFFERS_MAX_PER_REQ})` });
+    const errs = []; const seen = new Set();
+    offers.forEach((o, i) => {
+      if (!o || typeof o.line_id !== 'string' || !o.line_id) errs.push(`offer[${i}]: missing line_id`);
+      if (!Number.isInteger(o && o.odds)) errs.push(`offer[${i}]: odds must be an integer`);
+      if (!(Number.isFinite(o && o.stake) && o.stake > 0)) errs.push(`offer[${i}]: stake must be > 0`);
+      else if (o.stake > MANUAL_OFFER_MAX_STAKE) errs.push(`offer[${i}]: stake ${o.stake} > cap ${MANUAL_OFFER_MAX_STAKE}`);
+      if (!o || typeof o.external_id !== 'string' || !o.external_id) errs.push(`offer[${i}]: missing external_id`);
+      else if (seen.has(o.external_id)) errs.push(`offer[${i}]: duplicate external_id`);
+      else seen.add(o.external_id);
+    });
+    if (errs.length) return res.status(400).json({ ok: false, error: 'validation failed', details: errs.slice(0, 25) });
+    try {
+      const ladder = await pxs.fetchOddsLadder();
+      const lset = new Set(ladder);
+      const off = offers.filter(o => !lset.has(o.odds)).map(o => ({ external_id: o.external_id, odds: o.odds }));
+      if (off.length) return res.status(400).json({ ok: false, error: 'off-ladder odds', details: off.slice(0, 25) });
+      const bal = await pxs.fetchBalance();
+      const cash = Number(bal.balance || 0);
+      const unmatched = Number(bal.unmatched_wager_balance || 0);
+      const totalStake = offers.reduce((s, o) => s + o.stake, 0);
+      const headroom = cash * 10 - unmatched;
+      if (cash <= 0) return res.status(409).json({ ok: false, error: 'account balance is 0 — offers would be invalidated', balance: bal });
+      if (totalStake > headroom) return res.status(409).json({ ok: false, error: `total stake ${totalStake} exceeds headroom ${headroom}`, balance: { cash, unmatched, headroom } });
+      if (dryRun) return res.json({ ok: true, dryRun: true, offers: offers.length, totalStake, balance: { cash, unmatched, headroom } });
+      const succeed = []; const failed = [];
+      for (let i = 0; i < offers.length; i += 20) {
+        const batch = offers.slice(i, i + 20).map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }));
+        const r = await pxs.placeMultipleWagers(batch);
+        succeed.push(...(r.succeed_wagers || []));
+        failed.push(...(r.failed_wagers || []));
+      }
+      log.info('ManualOffers', `place ${succeed.length} ok / ${failed.length} failed, totalStake $${totalStake} (${offers.length} requested)`);
+      res.json({ ok: true, placed: succeed.length, failed: failed.length, totalStake, succeed_wagers: succeed, failed_wagers: failed });
+    } catch (e) {
+      log.error('ManualOffers', 'place failed: ' + e.message);
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // POST /admin/offers/cancel
+  //   body: ONE of { wager_ids: [...] } | { markets: [{event_id, market_id}] } | { event_id: <num> }
+  app.post('/admin/offers/cancel', async (req, res) => {
+    const pxs = _manualPxsGuard(res); if (!pxs) return;
+    const b = req.body || {};
+    try {
+      const out = {};
+      if (Array.isArray(b.wager_ids) && b.wager_ids.length) {
+        out.wagers = [];
+        for (const wid of b.wager_ids) {
+          try { await pxs.cancelWager(wid); out.wagers.push({ wager_id: wid, ok: true }); }
+          catch (e) { out.wagers.push({ wager_id: wid, ok: false, error: e.message }); }
+        }
+      } else if (Array.isArray(b.markets) && b.markets.length) {
+        out.markets = [];
+        for (const m of b.markets) {
+          try { await pxs.cancelWagersByMarket(m.event_id, m.market_id); out.markets.push({ ...m, ok: true }); }
+          catch (e) { out.markets.push({ ...m, ok: false, error: e.message }); }
+        }
+      } else if (b.event_id != null) {
+        await pxs.cancelWagersByEvent(b.event_id);
+        out.event_id = b.event_id; out.cancelled_event = true;
+      } else {
+        return res.status(400).json({ ok: false, error: 'provide wager_ids[], markets[], or event_id' });
+      }
+      log.info('ManualOffers', `cancel ${JSON.stringify(b).slice(0, 160)}`);
+      res.json({ ok: true, ...out });
+    } catch (e) {
+      log.error('ManualOffers', 'cancel failed: ' + e.message);
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // Golf Outrights (second PX account — bulk-post YES offers on Top
   // 1/5/10/20/Make Cut markets priced from DK + sweetener). Gated on
   // GOLF_OUTRIGHTS_ENABLED. Lazy-required so a missing dep doesn't crash boot.
