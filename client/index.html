@@ -631,7 +631,7 @@
         <span class="stat-item"><span class="stat-label">Quotes:</span> <span class="stat-val" id="stat-quotes">0</span></span>
         <span class="stat-item" title="Parlays the bettor accepted (orderUuid present). Excludes 'Offered' state where PX matched our quote but the bettor walked away during final review."><span class="stat-label">Accepted:</span> <span class="stat-val" id="stat-confirmed">0</span></span>
         <span class="stat-item"><span class="stat-label">Settled:</span> <span class="stat-val" id="stat-settled">0</span></span>
-        <span class="stat-item"><span class="stat-label">P&L:</span> <span class="stat-val" id="stat-pnl">$0.00</span></span>
+        <span class="stat-item"><span class="stat-label">Parlay P&L:</span> <span class="stat-val" id="stat-pnl">$0.00</span></span>
         <!-- Bot-defense cooldown counter. Q = quote-time declines (template
              + team cooldowns combined); C = confirm-time walk-aways (race
              window cases). Hover for the full breakdown. -->
@@ -1883,19 +1883,21 @@
     // Headline P&L = PX balance + open risk − starting bankroll.
     // PX balance is fetched from the API; open risk is the sum of
     // confirmedStake on orders the tracker considers active.
-    const accountPnL = data.portfolio?.accountPnL;
-    // Expose the authoritative account-level net P&L (PX balance + open risk -
-    // starting bankroll) so the Daily Volume chart can anchor its GROSS per-parlay
-    // sum to this true figure instead of overstating (~$24.9K gross vs ~$18K net).
-    window._accountPnL = accountPnL;
+    // Header P&L = PARLAY RFQ realized P&L (isolated from single-leg activity
+    // after the 2026-06-16 account merge). The account-wide commingled delta
+    // (accountPnL) is exposed for reconciliation but is no longer the headline.
+    window._accountPnL = data.portfolio?.accountPnL; // commingled (vestigial)
+    const headlinePnL = (data.portfolio?.parlayRealizedPnL != null)
+      ? data.portfolio.parlayRealizedPnL
+      : data.portfolio?.accountPnL;
     const pnlEl = document.getElementById('stat-pnl');
-    if (accountPnL == null) {
+    if (headlinePnL == null) {
       pnlEl.textContent = '—';
       pnlEl.className = 'value neutral';
     } else {
-      pnlEl.textContent = fmtPnl(accountPnL);
-      if (accountPnL > 0) { pnlEl.className = 'value positive'; }
-      else if (accountPnL < 0) { pnlEl.className = 'value negative'; }
+      pnlEl.textContent = fmtPnl(headlinePnL);
+      if (headlinePnL > 0) { pnlEl.className = 'value positive'; }
+      else if (headlinePnL < 0) { pnlEl.className = 'value negative'; }
       else { pnlEl.className = 'value neutral'; }
     }
 
@@ -7506,8 +7508,15 @@
         effectiveAccountPnL = (bn + pr) - portfolio.startingBankroll;
       }
     }
-    const pnl = effectiveAccountPnL != null ? effectiveAccountPnL
-              : (pxPnL?.realizedPnL != null ? pxPnL.realizedPnL : (orderStats.runningPnL || 0));
+    // PARLAY RFQ realized P&L — the headline parlay-performance number,
+    // ISOLATED from single-leg activity (2026-06-16 account merge). Settled
+    // parlay_orders only (the /parlay/sp/orders namespace); single-leg
+    // order-book wagers never enter it. The commingled account-wide delta
+    // (effectiveAccountPnL = equity − starting) is shown SEPARATELY below as
+    // "Account (all)" for reconciliation, no longer as the headline.
+    const parlayPnL = (portfolio?.parlayRealizedPnL != null) ? portfolio.parlayRealizedPnL
+                    : (pxPnL?.realizedPnL != null ? pxPnL.realizedPnL : (orderStats.runningPnL || 0));
+    const pnl = parlayPnL;
     const wins = pxPnL?.counts?.wins ?? (orderStats.totalWins || 0);
     const losses = pxPnL?.counts?.losses ?? (orderStats.totalLosses || 0);
     const settled = wins + losses;
@@ -7536,7 +7545,9 @@
     let roi;
     if (pxPnL) {
       const denom = pxPnL.stakes?.totalSettled || 0;
-      const num = effectiveAccountPnL != null ? effectiveAccountPnL : pxPnL.realizedPnL;
+      // Numerator matches the headline (now parlay-only) — totalSettled is
+      // parlay settled stake (/parlay/sp/orders), so this is parlay ROI.
+      const num = parlayPnL;
       roi = denom > 0 ? (num / denom) * 100 : null;
     } else {
       let settledPnl = 0;
@@ -7606,13 +7617,11 @@
     const netImpactCls = pxPnL?.netBalanceImpact != null
       ? (pxPnL.netBalanceImpact >= 0 ? 'positive' : 'negative') : 'neutral';
 
-    const pnlLabel = (effectiveAccountPnL != null || pxPnL) ? 'Realized P&L' : 'P&L';
-    const pnlTitle = effectiveAccountPnL != null
-      ? ('Account-based: Total Equity (Cash Available + Deployed) minus Starting Bankroll'
-         + (portfolio?.accountPnL == null ? ' [computed client-side — backend balance fetch glitched]' : ''))
-      : pxPnL
-        ? 'Sum of PX profit field across all settled orders (capped at last 5,000 orders)'
-        : 'Tracker-derived P&L (may be inflated by unsettled losses)';
+    const pnlLabel = 'Parlay P&L';
+    const pnlTitle = 'Parlay RFQ realized P&L — settled parlay_orders only (isolated from single-leg / order-book activity). The account-wide figure is the separate "Account (all)" stat.';
+    // Account-wide commingled delta (parlay + single-leg − fees ± transfers).
+    const acctAllStr = effectiveAccountPnL != null ? fmtPnl(effectiveAccountPnL) : null;
+    const acctAllCls = effectiveAccountPnL == null ? 'neutral' : (effectiveAccountPnL >= 0 ? 'positive' : 'negative');
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
@@ -7621,7 +7630,8 @@
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — cash free for new parlays (PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
-        ${stat('ROI', roiStr, roiCls, 'Realized P&L / total settled stake')}
+        ${stat('ROI', roiStr, roiCls, 'Parlay realized P&L / total settled parlay stake')}
+        ${acctAllStr != null ? stat('Account (all)', acctAllStr, acctAllCls, 'Account-wide equity delta since the 2026-06-16 merge — parlay + single-leg − fees ± transfers. NOT parlay performance; shown for reconciliation. The gap vs Parlay P&L is your single-leg/fees/transfer activity.') : ''}
         ${stat('Open Parlays', confirmed)}
       </div>
     </div>`;

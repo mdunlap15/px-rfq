@@ -1062,12 +1062,29 @@ function startStatusServer() {
         const accountPnL = (totalEquity != null && startingBankroll != null)
           ? (totalEquity - startingBankroll)
           : null;
+        // ACCOUNT-WIDE vs PARLAY-ONLY P&L (2026-06-16 account merge).
+        // accountPnL = totalEquity − starting is now COMMINGLED: parlay RFQ
+        // results + single-leg order-book results − the 2% single-leg fee ±
+        // deposits/withdrawals all land in the one account. It is NO LONGER a
+        // parlay-performance metric. The isolated parlay number is
+        // parlayRealizedPnL, summed purely from settled parlay_orders (the
+        // /parlay/sp/orders namespace — single-leg wagers never appear there).
+        // Reconciliation identity going forward:
+        //   accountPnL ≈ parlayRealizedPnL + singleLegPnL − singleLegFees ± transfers
+        // (singleLegPnL not yet tracked — follow-up.)
+        const parlayRealizedPnL = orderTracker.getStats().runningPnL;
         return {
           bankroll: getBankroll(),
           balance: liveBal || getBankroll(),
           accountValue,
           startingBankroll,
+          // PARLAY RFQ performance — use THIS as the parlay headline.
+          parlayRealizedPnL,
+          // Account-wide, commingled (parlay + single-leg − fees ± transfers).
+          // Not parlay performance. Kept for equity reconciliation only.
           accountPnL,
+          accountPnLBasis: 'all-activity-commingled',
+          accountPnLNote: 'Account-wide since the 2026-06-16 merge (parlay + single-leg − fees ± transfers). For parlay-only results use parlayRealizedPnL.',
           totalEquity,
           totalRisk: orderTracker.getTotalPortfolioRisk(),
           currentRisk: orderTracker.getTotalPortfolioRisk(),
