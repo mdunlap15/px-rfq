@@ -2774,6 +2774,15 @@ function startStatusServer() {
     res.json(websocket.getConfirmActivity());
   });
 
+  // Recent priced quotes (in-memory ring buffer). Read-only window onto the
+  // last N parlays we actually PRICED — populates even while paused, so the
+  // operator can eyeball would-be offered odds vs fair (the markup we'd
+  // extract) before going live, without quoting. outcome=paused_skip means
+  // priced-but-not-sent (observation mode); submitted means it shipped.
+  app.get('/recent-quotes', (req, res) => {
+    res.json(websocket.getRecentQuotes(req.query.limit));
+  });
+
   // SGP experiment control panel (SGP roadmap Stage 0): per-class status —
   // dark/live, today's filled risk vs daily budget, rolling-week P&L vs
   // stop-loss, per-ticket cap, prop game-script exposure ledgers, and

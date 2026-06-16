@@ -167,6 +167,25 @@ function classifyMlbProp(marketName) {
   if (/innings\s+pitch|outs\s+recorded|earned\s+run|hits\s+allow|walks\s+(allow|issued)|pitcher.*(win|loss|decision|to\s+(get|record))|\bera\b|\bwhip\b/.test(n)) {
     return 'pitcher_other';
   }
+  // Hitter combo props (multi-stat), e.g. "Hits + Runs + RBIs" /
+  // "Total Hits, Runs & RBIs". Mirror the NBA classifier (pra_combo): detect
+  // multi-stat combos BEFORE the single-stat buckets. A composite must NOT
+  // fall through to a single-stat bucket (hitter_rbi_runs / hitter_hits / ...)
+  // — those map to ONE TOA book market (e.g. hitter_rbi_runs -> batter_rbis =
+  // pure RBIs), and pricing the much-more-likely combo against single-stat
+  // odds would badly underprice it (the "Arozarena Total Hits, Runs & RBIs
+  // 1.5 -> hitter_rbi_runs" landmine, observed flooding declines 2026-06-16).
+  // Route to hitter_other (no TOA mapping, not one-sided-eligible) so combos
+  // always decline safely. NOTE: "Home Runs" contains "runs" but is a single
+  // stat — exclude it from the runs/RBI category before counting.
+  const _hHr      = /home\s+run|\bhr\b/.test(n);
+  const _hTb      = /total\s+bases|\btb\b/.test(n);
+  const _hHits    = /\bhits?\b/.test(n);
+  const _hRbiRuns = /\brbi/.test(n) || /runs\s+batted\s+in/.test(n) || /runs\s+scored/.test(n)
+    || (/\bruns?\b/.test(n) && !/home\s+runs?/.test(n));
+  const _hitterStatCats = (_hHr ? 1 : 0) + (_hTb ? 1 : 0) + (_hHits ? 1 : 0) + (_hRbiRuns ? 1 : 0);
+  if (_hitterStatCats >= 2) return 'hitter_other';
+
   // Hitter buckets — order matters; check most specific first
   if (/total\s+bases|tb\b/.test(n)) return 'hitter_total_bases';
   if (/home\s+run|\bhr\b/.test(n)) return 'hitter_hr';
@@ -1549,6 +1568,15 @@ async function handleRFQ(data) {
       result.meta
     );
 
+    // Mirror the priced quote into the in-memory /recent-quotes ring buffer
+    // (works while paused). Outcome mirrors the submit decision just below so
+    // the operator can tell would-offer (paused_skip) from actually-sent.
+    recordRecentQuote(
+      parlayId,
+      result.meta,
+      (isPausedNow || paused) ? 'paused_skip' : (callbackUrl ? 'submitted' : 'no_callback')
+    );
+
     // Submit offer to PX FIRST — speed is critical in the RFQ auction.
     // Bookkeeping (pending exposure, signature) happens AFTER the HTTP call
     // so it doesn't add latency before our offer reaches PX.
@@ -2530,6 +2558,60 @@ const rfqStages = {
   submitError: 0,
 };
 
+// --- Recent priced-quotes ring buffer ------------------------------------
+// Captures every parlay we successfully PRICE — whether or not we then submit,
+// so it populates in PAUSED/observation mode too. Feeds the read-only
+// /recent-quotes endpoint, which lets the operator eyeball actual would-be
+// offered odds vs fair (the markup we'd extract) BEFORE going live, without
+// quoting. Pure in-memory, capped, and wrapped in try/catch so telemetry can
+// never break the RFQ hot path.
+const RECENT_QUOTES_MAX = 100;
+const _recentQuotes = [];
+function _probToAmerican(p) {
+  if (!(p > 0 && p < 1)) return null;
+  const dec = 1 / p;
+  return dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / (dec - 1));
+}
+function recordRecentQuote(parlayId, meta, outcome) {
+  try {
+    if (!meta) return;
+    const legs = Array.isArray(meta.legs) ? meta.legs.map(l => ({
+      desc: l.team || l.marketName || l.lineId || null,
+      market: l.market || null,
+      line: (l.line != null ? l.line : null),
+      selection: l.selection || null,
+      sport: l.sport || null,
+      pxEventName: l.pxEventName || null,
+      fairProb: (l.fairProb != null ? l.fairProb : null),
+      // True per-leg offered implied prob (payout-vig + favorite markup).
+      offeredProb: (l.legOfferedProb != null ? l.legOfferedProb : (l.bookPriceOverride != null ? l.bookPriceOverride : null)),
+    })) : [];
+    const fairProb = (meta.fairParlayProb != null ? meta.fairParlayProb : null);
+    _recentQuotes.unshift({
+      time: new Date().toISOString(),
+      parlayId: parlayId || null,
+      outcome, // 'paused_skip' (would-offer, not sent) | 'submitted' | 'no_callback'
+      sport: meta.sport || (legs[0] && legs[0].sport) || null,
+      legCount: legs.length,
+      offeredOdds: (meta.americanOdds != null ? meta.americanOdds : null),
+      fairOdds: _probToAmerican(fairProb),
+      fairParlayProb: fairProb,
+      vig: (meta.vig != null ? meta.vig : null),
+      maxRisk: (meta.maxRisk != null ? meta.maxRisk : null),
+      isSGP: !!meta.isSGP,
+      sgpCombo: meta.sgpCombo || null,
+      nestedPairs: meta.nestedPairs || 0,
+      xteamPairs: meta.xteamPairs || 0,
+      legs,
+    });
+    if (_recentQuotes.length > RECENT_QUOTES_MAX) _recentQuotes.length = RECENT_QUOTES_MAX;
+  } catch (_) { /* never let telemetry break the hot path */ }
+}
+function getRecentQuotes(limit) {
+  const n = Math.min(Math.max(1, parseInt(limit, 10) || 50), RECENT_QUOTES_MAX);
+  return { count: _recentQuotes.length, max: RECENT_QUOTES_MAX, quotes: _recentQuotes.slice(0, n) };
+}
+
 // Raw RFQ receipt log — track every parlayId received via WebSocket,
 // regardless of whether we quoted, declined, or errored. Lets us positively
 // confirm whether a specific parlay was ever broadcast to us.
@@ -2885,6 +2967,7 @@ module.exports = {
   getQuoteCoverageStats,
   getConfirmActivity,
   getPxSubmitErrorsByCombo,
+  getRecentQuotes,
   _classifyMlbProp: classifyMlbProp, // exposed for /prop-opportunity sanity testing
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing
