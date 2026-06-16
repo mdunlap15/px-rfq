@@ -1009,18 +1009,17 @@ async function getTotalPnL() {
   const db = getClient();
   if (!db) return null;
 
+  // Reuse getDailyPnL (paginated, retried, settled_at-bounded — verified at
+  // scale, ~70 day rows in <3s) and sum its day buckets. The old single
+  // unpaginated select silently truncated to Supabase's ~1,000-row default
+  // (understating the total by ~$15K vs the true ~$22K), and at the current
+  // settled-row count the unindexed `like('status','settled_%')` full scan
+  // exceeds the statement timeout and returns null entirely. 400 days covers
+  // all history (settlement data starts ~2026-04).
   try {
-    const { data, error } = await db.from('parlay_orders')
-      .select('pnl')
-      .like('status', 'settled_%')
-      .not('pnl', 'is', null);
-
-    if (error) {
-      log.warn('DB', `getTotalPnL error: ${error.message}`);
-      return null;
-    }
-    if (!data) return 0;
-    return data.reduce((sum, row) => sum + (Number(row.pnl) || 0), 0);
+    const days = await getDailyPnL(400, { groupBy: 'settled_at' });
+    if (!Array.isArray(days)) return null;
+    return days.reduce((sum, d) => sum + (Number(d.pnl) || 0), 0);
   } catch (err) {
     log.warn('DB', `getTotalPnL error: ${err.message}`);
     return null;

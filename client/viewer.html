@@ -1125,6 +1125,20 @@
         }
       }).catch(() => {});
 
+      // Daily-PnL override for the Daily Volume & P&L chart. Without this the
+      // chart falls back to the in-memory buffer, which overstates P&L as
+      // gross-wins only (PX emits settle events on our wins, not silent
+      // losses) — the same ~$100K-vs-~$24K bug the main dashboard fixes via
+      // this override. Mirrors index.html; throttled to >=90s since it's a
+      // heavy paginated scan. (/daily-pnl is in AUTH_VIEWER_PATHS.)
+      if (!window._dvDailyPnlPayload || (Date.now() - (window._dvPnlFetchedAt || 0)) > 90000) {
+        fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
+          window._dvDailyPnlPayload = d;
+          window._dvPnlFetchedAt = Date.now();
+          if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+        }).catch(() => {});
+      }
+
       // Fetch PX-native open positions. This is the authoritative list
       // of truly-open parlays (PX status='finalized'). The tracker's
       // confirmed list drifts high (silent losses accumulate as

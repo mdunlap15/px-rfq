@@ -497,6 +497,11 @@ async function startup() {
         config.pricing.liveBankroll = amount;
         log.debug('Balance', `PX balance: $${amount}`);
       }
+      // Post-CFTC-merge (2026-06-08): PX reports account-wide locked stake via
+      // matched_wager_balance. Capture it so total-equity = cash + locked stake
+      // (the parlay tracker alone misses single-leg matched stake now that the
+      // account is commingled).
+      if (bal && bal.matched_wager_balance != null) config.pricing.liveMatchedWager = Number(bal.matched_wager_balance);
     } catch (err) {
       log.debug('Balance', `Balance fetch failed: ${err.message}`);
     }
@@ -674,6 +679,7 @@ async function startup() {
       config.pricing.liveBankroll = amount;
       log.info('Startup', `    ✓ PX balance: $${amount}`);
     }
+    if (bal && bal.matched_wager_balance != null) config.pricing.liveMatchedWager = Number(bal.matched_wager_balance);
   } catch (err) {
     log.warn('Startup', `    ⚠ Balance fetch failed: ${err.message}`);
   }
@@ -783,7 +789,7 @@ function startStatusServer() {
   // Viewers cannot reach /, /index.html, or any admin POST endpoint —
   // the middleware below rejects with 403.
   const AUTH_VIEWER_PATHS = new Set(
-    (process.env.AUTH_VIEWER_PATHS || '/edge-vs-fair.html,/viewer,/viewer.html,/status,/orders,/me,/bankroll,/viewer/manifest.json,/viewer/sw.js,/viewer/icon-192.svg,/viewer/icon-512.svg,/push/vapid-key,/push/subscribe,/push/unsubscribe,/push/mute-prefs,/wow-analysis,/wow-analysis.html')
+    (process.env.AUTH_VIEWER_PATHS || '/edge-vs-fair.html,/viewer,/viewer.html,/status,/orders,/me,/bankroll,/daily-pnl,/viewer/manifest.json,/viewer/sw.js,/viewer/icon-192.svg,/viewer/icon-512.svg,/push/vapid-key,/push/subscribe,/push/unsubscribe,/push/mute-prefs,/wow-analysis,/wow-analysis.html')
       .split(',').map(s => s.trim()).filter(Boolean)
   );
   if (AUTH_ENABLED) {
@@ -1053,7 +1059,18 @@ function startStatusServer() {
         // fall back to the tracker only on cold-start.
         const pxOpenExposure = pxLedger.getCachedOpenExposure();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : currentRisk;
-        const totalEquity = (accountValue != null) ? (accountValue + effectiveRisk) : null;
+        // Post-CFTC-merge (2026-06-08): PX's matched_wager_balance is the
+        // authoritative ACCOUNT-WIDE locked stake (parlay + single-leg). True
+        // equity = cash + matched_wager_balance. The old `cash + parlay-open`
+        // undercounted because the parlay tracker can't see single-leg matched
+        // stake on the now-commingled account (it dropped ~$8K of locked stake,
+        // understating equity by the same). Prefer PX's figure; fall back to the
+        // parlay-open estimate only when matched_wager_balance isn't available.
+        const matchedWagerBalance = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
+          ? config.pricing.liveMatchedWager
+          : null;
+        const deployed = matchedWagerBalance != null ? matchedWagerBalance : effectiveRisk;
+        const totalEquity = (accountValue != null) ? (accountValue + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
         // leave null so the dashboard falls back appropriately —
@@ -1086,6 +1103,10 @@ function startStatusServer() {
           accountPnLBasis: 'all-activity-commingled',
           accountPnLNote: 'Account-wide since the 2026-06-16 merge (parlay + single-leg − fees ± transfers). For parlay-only results use parlayRealizedPnL.',
           totalEquity,
+          // Account-wide locked stake (parlay + single-leg) per PX's
+          // matched_wager_balance; the addend used in totalEquity above. null
+          // until the first post-boot balance poll populates it.
+          matchedWagerBalance,
           totalRisk: orderTracker.getTotalPortfolioRisk(),
           currentRisk: orderTracker.getTotalPortfolioRisk(),
           totalToWin: orderTracker.getTotalToWin(),
@@ -2491,9 +2512,12 @@ function startStatusServer() {
       }
       const totalBooks = mikeBooks + rickBooks;
 
-      // 5. Live TE for drift check.  liveBankroll + open exposure.
+      // 5. Live TE for drift check.  liveBankroll + account-wide locked stake.
       //    Mirrors the portfolio.totalEquity computation in the main /status
-      //    handler (around line 920) — keeps the two views consistent.
+      //    handler — keeps the two views consistent. Post-CFTC-merge this uses
+      //    PX's matched_wager_balance (account-wide locked stake), matching the
+      //    basis the cohort snapshotEquity was captured on; falling back to
+      //    parlay-open exposure only when matched_wager_balance isn't available.
       let liveTotalEquity = null;
       try {
         const liveBal = config.pricing.liveBankroll;
@@ -2501,7 +2525,10 @@ function startStatusServer() {
           ? pxLedger.getCachedOpenExposure() : null;
         const fallbackRisk = orderTracker.getTotalPortfolioRisk();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : fallbackRisk;
-        liveTotalEquity = (liveBal && liveBal > 0) ? (liveBal + effectiveRisk) : null;
+        const matchedWager = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
+          ? config.pricing.liveMatchedWager : null;
+        const deployed = matchedWager != null ? matchedWager : effectiveRisk;
+        liveTotalEquity = (liveBal && liveBal > 0) ? (liveBal + deployed) : null;
       } catch (_) { /* leave null */ }
 
       const drift = (liveTotalEquity != null) ? (liveTotalEquity - totalBooks) : null;
