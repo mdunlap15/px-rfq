@@ -6861,7 +6861,8 @@
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
         ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
-        ${stat('Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake — parlays + single-leg, per PX matched_wager_balance (% of account equity)')}
+        ${stat('Total Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake = single-leg deployed (PX "Filled") + parlay My-Risk, per PX matched_wager_balance (% of account equity)')}
+        ${stat('Deployed - Parlays', portStr, portCls, 'Parlay-only locked stake — sum of the My Risk column across open parlays (the parlay slice of Total Deployed; single-leg deployed = Total Deployed − this)')}
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
