@@ -2310,7 +2310,14 @@ async function fetchFromTheOddsApi(sport) {
       };
     }
 
-    // Spreads
+    // Spreads — line-aware consensus. Tag each book's pair with its posted
+    // line so buildConsensusSpread keys de-vig BY LINE (modal line = primary,
+    // every other posted line preserved in byLine for alt-line RFQs). The
+    // previous hand-rolled block de-vigged across ALL books regardless of
+    // point and stamped the result with the FIRST book's line — so a +1.5 RFQ
+    // could be priced off a blend of pick-em and +1.5 books. buildConsensusSpread
+    // already carries the same parity logic (filterSharpBooks + 0.50 Pin floor),
+    // so this is a clean swap that matches the tennis/dynamic path.
     const spreadPairs = [];
     for (const book of allBooks) {
       const sMarket = book.markets?.find(m => m.key === 'spreads');
@@ -2320,51 +2327,22 @@ async function fetchFromTheOddsApi(sport) {
       if (home && away) {
         spreadPairs.push({
           book: book.key,
-          home: { odds_probability: americanToImpliedProb(home.price), odds_american: home.price, point: home.point },
-          away: { odds_probability: americanToImpliedProb(away.price), odds_american: away.price, point: away.point },
+          home: { odds_probability: americanToImpliedProb(home.price), odds_american: home.price, point: home.point, line: home.point },
+          away: { odds_probability: americanToImpliedProb(away.price), odds_american: away.price, point: away.point, line: away.point },
         });
       }
     }
     if (spreadPairs.length > 0) {
-      // Pricing parity with the Sharp path: vig filter + 0.50 Pin floor
-      // (see the moneyline block above for rationale).
-      const avgSpreadPairs = filterSharpBooks(
-        excludeKalshiFromConsensus(spreadPairs),
-        bp => [bp.home.odds_probability, bp.away.odds_probability],
-        'toa-spreads'
-      );
-      const fairHome = [], fairAway = [];
-      for (const p of avgSpreadPairs) {
-        const [fh, fa] = deVig2Way(p.home.odds_probability, p.away.odds_probability);
-        fairHome.push(fh);
-        fairAway.push(fa);
-      }
-      const pinSpread = spreadPairs.find(p => p.book === 'pinnacle');
-      const pinFairH = pinSpread ? deVig2Way(pinSpread.home.odds_probability, pinSpread.away.odds_probability)[0] : 0;
-      const pinFairA = pinSpread ? deVig2Way(pinSpread.home.odds_probability, pinSpread.away.odds_probability)[1] : 0;
-      const dvSHome = avg(fairHome), dvSAway = avg(fairAway);
-      const flrSH = pinSpread ? pinFairH : 0;
-      const flrSA = pinSpread ? pinFairA : 0;
-      const maxSHome = dvSHome >= 0.50 ? Math.max(dvSHome, flrSH) : dvSHome;
-      const maxSAway = dvSAway >= 0.50 ? Math.max(dvSAway, flrSA) : dvSAway;
-      const findBook = (name) => spreadPairs.find(p => p.book === name);
-      const pinBook = findBook('pinnacle');
-      const fdBook = findBook('fanduel');
-      const dkBook = findBook('draftkings');
-      const klBook = findBook('kalshi');
-      markets.spreads = {
-        home: { rawOdds: spreadPairs[0].home.odds_american, point: spreadPairs[0].home.point, impliedProb: spreadPairs[0].home.odds_probability, fairProb: maxSHome, displayFairProb: avg(fairHome) },
-        away: { rawOdds: spreadPairs[0].away.odds_american, point: spreadPairs[0].away.point, impliedProb: spreadPairs[0].away.odds_probability, fairProb: maxSAway, displayFairProb: avg(fairAway) },
-        line: spreadPairs[0].home.point,
-        books: spreadPairs.length,
-        pinnacle: pinBook ? { home: pinBook.home.odds_american, away: pinBook.away.odds_american } : null,
-        fanduel: fdBook ? { home: fdBook.home.odds_american, away: fdBook.away.odds_american } : null,
-        draftkings: dkBook ? { home: dkBook.home.odds_american, away: dkBook.away.odds_american } : null,
-        kalshi: klBook ? { home: klBook.home.odds_american, away: klBook.away.odds_american } : null,
-      };
+      markets.spreads = buildConsensusSpread(spreadPairs);
     }
 
-    // Totals
+    // Totals — line-aware consensus. Tag each book's pair with its posted
+    // line so buildConsensusTotals keys de-vig BY LINE. The previous block
+    // de-vigged across ALL books regardless of point and labeled the result
+    // with the FIRST book's line — root cause of the TB@LAD Under 7.5 quoted
+    // off a blend of 7.0/7.5 books. buildConsensusTotals already carries the
+    // same parity logic (filterSharpBooks + 0.50 Pin floor), so this is a
+    // clean swap that matches the tennis/dynamic path.
     const totalPairs = [];
     for (const book of allBooks) {
       const tMarket = book.markets?.find(m => m.key === 'totals');
@@ -2374,48 +2352,13 @@ async function fetchFromTheOddsApi(sport) {
       if (over && under) {
         totalPairs.push({
           book: book.key,
-          over: { odds_probability: americanToImpliedProb(over.price), odds_american: over.price, point: over.point },
-          under: { odds_probability: americanToImpliedProb(under.price), odds_american: under.price, point: under.point },
+          over: { odds_probability: americanToImpliedProb(over.price), odds_american: over.price, point: over.point, line: over.point },
+          under: { odds_probability: americanToImpliedProb(under.price), odds_american: under.price, point: under.point, line: under.point },
         });
       }
     }
     if (totalPairs.length > 0) {
-      // Pricing parity with the Sharp path: vig filter + 0.50 Pin floor
-      // (see the moneyline block above for rationale).
-      const avgTotalPairs = filterSharpBooks(
-        excludeKalshiFromConsensus(totalPairs),
-        bp => [bp.over.odds_probability, bp.under.odds_probability],
-        'toa-totals'
-      );
-      const fairOver = [], fairUnder = [];
-      for (const p of avgTotalPairs) {
-        const [fo, fu] = deVig2Way(p.over.odds_probability, p.under.odds_probability);
-        fairOver.push(fo);
-        fairUnder.push(fu);
-      }
-      const pinTotal = totalPairs.find(p => p.book === 'pinnacle');
-      const pinFairO = pinTotal ? deVig2Way(pinTotal.over.odds_probability, pinTotal.under.odds_probability)[0] : 0;
-      const pinFairU = pinTotal ? deVig2Way(pinTotal.over.odds_probability, pinTotal.under.odds_probability)[1] : 0;
-      const dvTOver = avg(fairOver), dvTUnder = avg(fairUnder);
-      const flrTO = pinTotal ? pinFairO : 0;
-      const flrTU = pinTotal ? pinFairU : 0;
-      const maxTOver = dvTOver >= 0.50 ? Math.max(dvTOver, flrTO) : dvTOver;
-      const maxTUnder = dvTUnder >= 0.50 ? Math.max(dvTUnder, flrTU) : dvTUnder;
-      const findBook = (name) => totalPairs.find(p => p.book === name);
-      const pinBook = findBook('pinnacle');
-      const fdBook = findBook('fanduel');
-      const dkBook = findBook('draftkings');
-      const klBook = findBook('kalshi');
-      markets.totals = {
-        over: { rawOdds: totalPairs[0].over.odds_american, point: totalPairs[0].over.point, impliedProb: totalPairs[0].over.odds_probability, fairProb: maxTOver, displayFairProb: avg(fairOver) },
-        under: { rawOdds: totalPairs[0].under.odds_american, point: totalPairs[0].under.point, impliedProb: totalPairs[0].under.odds_probability, fairProb: maxTUnder, displayFairProb: avg(fairUnder) },
-        line: totalPairs[0].over.point,
-        books: totalPairs.length,
-        pinnacle: pinBook ? { over: pinBook.over.odds_american, under: pinBook.under.odds_american } : null,
-        fanduel: fdBook ? { over: fdBook.over.odds_american, under: fdBook.under.odds_american } : null,
-        draftkings: dkBook ? { over: dkBook.over.odds_american, under: dkBook.under.odds_american } : null,
-        kalshi: klBook ? { over: klBook.over.odds_american, under: klBook.under.odds_american } : null,
-      };
+      markets.totals = buildConsensusTotals(totalPairs);
     }
 
     // BTTS (Both Teams To Score) — simple 2-way Yes/No
@@ -8831,6 +8774,9 @@ module.exports = {
   normalizeTeamName,
   deVig2Way,
   americanToImpliedProb,
+  // Internal consensus builders exposed for unit testing / debug (pure fns).
+  buildConsensusTotals,
+  buildConsensusSpread,
   fetchScores,
   getGameResult,
   checkLineupFreshness,
