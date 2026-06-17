@@ -352,7 +352,13 @@ const ODDS_API_FALLBACK = {
 // Railway env; example full set after migration:
 //   TOA_PRIMARY_SPORTS=basketball_nba,icehockey_nhl,mma_mixed_martial_arts,soccer,baseball_mlb
 function _isToaPrimary(sport) {
-  const raw = process.env.TOA_PRIMARY_SPORTS || '';
+  // SharpAPI retired 2026-06-17: TOA is primary for ALL flip-gated sports by
+  // default. TOA_PRIMARY_SPORTS was the one-sport-at-a-time migration toggle
+  // (flip a sport to TOA while Sharp was still primary) and is now optional:
+  //   - unset/empty (the new normal): every flip-gated sport is TOA-primary
+  //   - set (legacy): TOA-primary restricted to the listed sports
+  const raw = (process.env.TOA_PRIMARY_SPORTS || '').trim();
+  if (!raw) return true;
   return raw.split(',').map(s => s.trim()).includes(sport);
 }
 
@@ -401,7 +407,12 @@ async function fetchOddsForSport(sport, opts) {
     if (liveMode) return null;
     const toaResult = await fetchFromTheOddsApi(sport);
     if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
-    log.info('OddsFeed', 'Tennis TOA returned 0 events — falling through to SharpAPI');
+    // SharpAPI retired: once its key is gone, TOA is authoritative for tennis
+    // too — don't waste a guaranteed-failing Sharp call, just return empty and
+    // let the staleness gate decline (fail closed). Falls through to Sharp only
+    // while a key still exists (the overlap window).
+    if (!process.env.SHARP_ODDS_API_KEY) return toaResult || {};
+    log.info('OddsFeed', 'Tennis TOA returned 0 events — falling through to SharpAPI (overlap window)');
     // fall through to SharpAPI path below
   } else if (ODDS_API_FALLBACK[sport] && ODDS_API_FALLBACK[sport].flipGated && _isToaPrimary(sport)) {
     // SharpAPI-removal flip path (audit): this sport has been switched to

@@ -1079,7 +1079,10 @@ function validate() {
   const missing = [];
   if (!config.px.accessKey) missing.push('PX_ACCESS_KEY');
   if (!config.px.secretKey) missing.push('PX_SECRET_KEY');
-  if (!config.oddsApi.apiKey) missing.push('SHARP_ODDS_API_KEY');
+  // The Odds API is the primary (and, since SharpAPI was retired 2026-06-17,
+  // the sole) odds source — require ITS key. SharpAPI's key is now optional
+  // (legacy overlap-window fallback only), so it no longer blocks boot.
+  if (!process.env.THE_ODDS_API_KEY) missing.push('THE_ODDS_API_KEY');
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
