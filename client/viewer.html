@@ -6819,23 +6819,31 @@
     // overdrawn. Coloring low-balance red falsely signals distress.
     const balanceCls = balanceNum != null ? 'positive' : '';
 
-    // PX's balance field is cash-available, NOT total equity — PX has
-    // already subtracted stakes locked in open parlays. Total equity
-    // (what the account was worth at the start of the day, minus net P&L
-    // since) = balance + deployed.
-    const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + portRisk) : null;
+    // ACCOUNT-WIDE equity = cash + all locked stake. Post-CFTC-merge the
+    // account is commingled (parlay + single-leg), so the authoritative
+    // locked-stake figure is PX's matched_wager_balance (on window._pxBalance),
+    // NOT the parlay-only open exposure (portRisk) — that misses single-leg
+    // matched stake and understated equity. Use matched_wager_balance when
+    // present; fall back to parlay open exposure until the balance object loads.
+    const matchedWagerNum = (window._pxBalance && typeof window._pxBalance === 'object'
+      && window._pxBalance.matched_wager_balance != null
+      && !isNaN(Number(window._pxBalance.matched_wager_balance)))
+      ? Number(window._pxBalance.matched_wager_balance) : null;
+    const deployedAmt = matchedWagerNum != null ? matchedWagerNum : portRisk;
+    const deployedAmtStr = fmtDollar(deployedAmt);
+    const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
     const totalEquityCls = totalEquity == null ? ''
       : totalEquity < 500 ? 'negative'
       : totalEquity < 2000 ? ''
       : 'positive';
-    // Percent-of-total-equity labels so Deployed/Cash Available split
-    // sums to 100%. Denominator is Balance + Deployed, not Balance.
-    const deployedPct = (totalEquity && totalEquity > 0 && portRisk >= 0)
-      ? Math.round(portRisk / totalEquity * 1000) / 10 : null;
+    // Percent-of-account-equity labels so Deployed/Cash Available split
+    // sums to 100%. Denominator is Cash + Deployed.
+    const deployedPct = (totalEquity && totalEquity > 0 && deployedAmt >= 0)
+      ? Math.round(deployedAmt / totalEquity * 1000) / 10 : null;
     const cashPct = (totalEquity && totalEquity > 0 && balanceNum != null)
       ? Math.round(balanceNum / totalEquity * 1000) / 10 : null;
-    const deployedStr = portStr + (deployedPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${deployedPct}%]</span>` : '');
+    const deployedStr = deployedAmtStr + (deployedPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${deployedPct}%]</span>` : '');
     const cashAvailStr = balanceStr + (cashPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${cashPct}%]</span>` : '');
 
     // Net balance impact = realized P&L − open exposure. Matches the
@@ -6852,9 +6860,9 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Total Equity', totalEquityStr, totalEquityCls, 'Cash Available + Deployed — approximate account value including stakes locked in open parlays')}
-        ${stat('Deployed', deployedStr, portCls, 'Stake locked in open parlays (% of total equity)')}
-        ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — cash free for new parlays (PX already excludes deployed stakes)')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
+        ${stat('Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake — parlays + single-leg, per PX matched_wager_balance (% of account equity)')}
+        ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
         ${stat('ROI', roiStr, roiCls, 'Realized P&L / total settled stake')}
