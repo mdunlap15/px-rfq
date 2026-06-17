@@ -7509,27 +7509,30 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: parlay realized profit / total settled parlay stake.
-    // Numerator MUST match the displayed Parlay P&L (parlayPnL) and the
-    // denominator is parlay settled stake (pxPnL.stakes.totalSettled, from
-    // /parlay/sp/orders) — so this is parlay ROI, isolated from single-leg.
+    // ROI: parlay realized profit / total settled parlay stake — BOTH must be
+    // full-history. The numerator (parlayPnL) is the all-time Parlay P&L, so
+    // the denominator must be all-time settled stake too. pxPnL.stakes.totalSettled
+    // is RECENT-ONLY (the bounded /parlay/sp/orders REST window) — pairing it
+    // with the full-history numerator produced absurd ROI, e.g. +3325% =
+    // $22,314 P&L / $671 of recently-settled stake. So always derive the
+    // denominator from the full settled-order history in allOrders (/orders
+    // returns the complete settled set). NOTE: depends on /orders not being
+    // truncated; if that poll payload is ever capped, source a full-history
+    // settled-stake total from the server instead.
     let roi;
-    if (pxPnL) {
-      const denom = pxPnL.stakes?.totalSettled || 0;
-      // Numerator matches the headline (now parlay-only) — totalSettled is
-      // parlay settled stake (/parlay/sp/orders), so this is parlay ROI.
-      const num = parlayPnL;
-      roi = denom > 0 ? (num / denom) * 100 : null;
-    } else {
-      let settledPnl = 0;
+    {
       let settledRiskTotal = 0;
+      let settledPnlSum = 0;
       for (const o of (allOrders || [])) {
         if (!o.status || !o.status.startsWith('settled_')) continue;
-        settledPnl += (o.pnl || 0);
+        settledPnlSum += (o.pnl || 0);
         if (o.confirmedStake && o.offeredOdds) settledRiskTotal += calcBettorWager(o.confirmedStake, o.offeredOdds);
         else if (o.confirmedStake) settledRiskTotal += o.confirmedStake;
       }
-      roi = settledRiskTotal > 0 ? (settledPnl / settledRiskTotal) * 100 : null;
+      // Keep the numerator tied to the displayed headline Parlay P&L; fall back
+      // to the settled-order pnl sum when parlayPnL isn't available.
+      const num = (parlayPnL != null) ? parlayPnL : settledPnlSum;
+      roi = settledRiskTotal > 0 ? (num / settledRiskTotal) * 100 : null;
     }
     const roiCls = roi != null ? (roi >= 0 ? 'positive' : 'negative') : 'neutral';
     const roiStr = roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%' : '-';

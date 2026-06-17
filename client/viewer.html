@@ -6769,13 +6769,15 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: prefer PX-native (realized profit / total settled stake).
-    // Fallback to tracker-computed only when PX data not yet loaded.
+    // ROI: full-history parlay realized profit / full-history settled stake,
+    // both summed from allOrders (/orders returns the complete settled set).
+    // Do NOT use pxPnL.stakes.totalSettled / pxPnL.realizedPnL — those are
+    // RECENT-only (the bounded /parlay/sp/orders window), which makes ROI a
+    // noisy recent-slice figure inconsistent with the all-time headline P&L
+    // (and on the main dashboard the same recent denominator paired with the
+    // all-time numerator produced a +3325% ROI).
     let roi;
-    if (pxPnL) {
-      const denom = pxPnL.stakes?.totalSettled || 0;
-      roi = denom > 0 ? (pxPnL.realizedPnL / denom) * 100 : null;
-    } else {
+    {
       let settledPnl = 0;
       let settledRiskTotal = 0;
       for (const o of (allOrders || [])) {
