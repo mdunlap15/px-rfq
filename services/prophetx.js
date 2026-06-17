@@ -473,7 +473,11 @@ async function fetchBalance() {
 async function fetchOrderByUuid(uuid) {
   if (!uuid) return null;
   try {
-    const orders = await fetchOrders(50);
+    // Look back 200 (was 50) so the just-settled order's leg backfill in
+    // handleParlaySettled doesn't silently miss when a burst of newer
+    // confirms/quotes pushes it past a small window. recordSettlement still
+    // records P&L regardless; this just keeps the leg-level record populated.
+    const orders = await fetchOrders(200);
     return orders.find(o => o.order_uuid === uuid) || null;
   } catch (err) {
     log.warn('PX-Orders', `fetchOrderByUuid(${uuid}) failed: ${err.message}`);

@@ -6039,8 +6039,20 @@ function startStatusServer() {
       const cash = Number(bal.balance || 0);
       const unmatched = Number(bal.unmatched_wager_balance || 0);
       const totalStake = offers.reduce((s, o) => s + o.stake, 0);
-      const headroom = cash * 50 - unmatched;   // PX allows up to 50x cash in resting (unmatched) volume
+      // Resting-volume cap multiplier. Default 50 (legacy). The CFTC merge
+      // introduced an account-wide ~10x unmatched-stake cap — set
+      // PX_RESTING_CAP_MULT=10 (confirm the exact value with PX/Alec) to enforce
+      // it; kept at 50 here so this change is behavior-neutral until confirmed.
+      const restingMult = Number(process.env.PX_RESTING_CAP_MULT) || 50;
+      const headroom = cash * restingMult - unmatched;
       if (cash <= 0) return res.status(409).json({ ok: false, error: 'account balance is 0 — offers would be invalidated', balance: bal });
+      // Staleness guard: the post-merge balance shape flags when the unmatched
+      // figure isn't freshly synced. A stale (lower) unmatched makes headroom
+      // look too generous → an over-post PX would then cap/invalidate. Refuse
+      // unless the unmatched balance is freshly synced.
+      if (bal.unmatched_wager_balance_status && bal.unmatched_wager_balance_status !== 'succeed') {
+        return res.status(409).json({ ok: false, error: `unmatched balance not fresh (status=${bal.unmatched_wager_balance_status}) — refusing to compute headroom`, balance: bal });
+      }
       if (totalStake > headroom) return res.status(409).json({ ok: false, error: `total stake ${totalStake} exceeds headroom ${headroom}`, balance: { cash, unmatched, headroom } });
       if (dryRun) return res.json({ ok: true, dryRun: true, offers: offers.length, totalStake, balance: { cash, unmatched, headroom } });
       const succeed = []; const failed = [];

@@ -2175,10 +2175,111 @@ let cachedRollup7d = {
   },
 };
 
+// Build the cachedRollup7d shape from the SQL-aggregate RPC outputs
+// (db.getDeclinesRollup7d). Parity with the in-Node aggregation below — see
+// scripts/_declines_rollup_rpc.sql PARITY NOTES. rollup/missed rows carry a
+// `day` (ET date); histogram carries leg_bucket.
+function buildRollupFromAggregates({ rollup, histogram, missed }) {
+  const declinesByReason = {};
+  const volumeByReason = {};
+  let declinesTotal = 0;
+  for (const row of (rollup || [])) {
+    const reason = row.reason || 'unknown';
+    const cnt = Number(row.cnt) || 0;
+    const legs = Number(row.total_legs) || 0;
+    declinesByReason[reason] = (declinesByReason[reason] || 0) + cnt;
+    declinesTotal += cnt;
+    if (!volumeByReason[reason]) volumeByReason[reason] = { count: 0, totalLegs: 0, byLegCount: {} };
+    volumeByReason[reason].count += cnt;
+    volumeByReason[reason].totalLegs += legs;
+  }
+  for (const row of (histogram || [])) {
+    const reason = row.reason || 'unknown';
+    const bucket = String(row.leg_bucket);
+    const cnt = Number(row.cnt) || 0;
+    if (!volumeByReason[reason]) volumeByReason[reason] = { count: 0, totalLegs: 0, byLegCount: {} };
+    volumeByReason[reason].byLegCount[bucket] = (volumeByReason[reason].byLegCount[bucket] || 0) + cnt;
+  }
+  let mvCount = 0, mvStake = 0;
+  const mvByReason = {};
+  for (const row of (missed || [])) {
+    const reason = row.reason || 'not seen';
+    const cnt = Number(row.cnt) || 0;
+    const stake = Number(row.total_stake) || 0;
+    mvCount += cnt;
+    mvStake += stake;
+    if (!mvByReason[reason]) mvByReason[reason] = { count: 0, totalStake: 0, avgStake: 0 };
+    mvByReason[reason].count += cnt;
+    mvByReason[reason].totalStake += stake;
+  }
+  for (const r of Object.keys(mvByReason)) {
+    const v = mvByReason[r];
+    v.totalStake = Math.round(v.totalStake * 100) / 100;
+    v.avgStake = v.count > 0 ? Math.round(v.totalStake / v.count * 100) / 100 : 0;
+  }
+  // Risk-limit subset: counts from declines (rollup), stake from missed matches.
+  const rlmByDay = {};
+  const ensureDay = (day) => { if (!rlmByDay[day]) rlmByDay[day] = { totalCount: 0, totalStake: 0, byReason: {} }; return rlmByDay[day]; };
+  for (const row of (rollup || [])) {
+    if (!RISK_LIMIT_REASONS.has(row.reason)) continue;
+    const day = String(row.day).substring(0, 10);
+    const cnt = Number(row.cnt) || 0;
+    const b = ensureDay(day);
+    b.totalCount += cnt;
+    if (!b.byReason[row.reason]) b.byReason[row.reason] = { count: 0, stake: 0 };
+    b.byReason[row.reason].count += cnt;
+  }
+  for (const row of (missed || [])) {
+    if (!RISK_LIMIT_REASONS.has(row.reason)) continue;
+    const day = String(row.day).substring(0, 10);
+    const stake = Number(row.total_stake) || 0;
+    const b = ensureDay(day);
+    b.totalStake += stake;
+    if (!b.byReason[row.reason]) b.byReason[row.reason] = { count: 0, stake: 0 };
+    b.byReason[row.reason].stake += stake;
+  }
+  let grandCount = 0, grandStake = 0;
+  const rlmByReason = {};
+  for (const day of Object.keys(rlmByDay)) {
+    rlmByDay[day].totalStake = Math.round(rlmByDay[day].totalStake * 100) / 100;
+    grandCount += rlmByDay[day].totalCount;
+    grandStake += rlmByDay[day].totalStake;
+    for (const [r, sub] of Object.entries(rlmByDay[day].byReason)) {
+      sub.stake = Math.round(sub.stake * 100) / 100;
+      if (!rlmByReason[r]) rlmByReason[r] = { count: 0, stake: 0 };
+      rlmByReason[r].count += sub.count;
+      rlmByReason[r].stake += sub.stake;
+    }
+  }
+  for (const r of Object.keys(rlmByReason)) rlmByReason[r].stake = Math.round(rlmByReason[r].stake * 100) / 100;
+  return {
+    refreshedAt: new Date().toISOString(),
+    windowDays: ROLLUP_WINDOW_DAYS,
+    declines: { total: declinesTotal, reasons: declinesByReason, volumeByReason },
+    missedVolume: { totalMissed: mvCount, totalStake: Math.round(mvStake * 100) / 100, byReason: mvByReason },
+    riskLimitMissed: {
+      byDay: rlmByDay,
+      byReason: rlmByReason,
+      grandTotal: { count: grandCount, stake: Math.round(grandStake * 100) / 100 },
+      reasons: [...RISK_LIMIT_REASONS],
+    },
+  };
+}
+
 async function refreshPersistentRollup7d() {
   if (!db.isEnabled()) return;
   try {
     const fromIso = new Date(Date.now() - ROLLUP_WINDOW_DAYS * 24 * 3600 * 1000).toISOString();
+    // Fast path: SQL-aggregate RPCs (scripts/_declines_rollup_rpc.sql). Returns
+    // null if the functions aren't deployed yet → fall through to the in-Node
+    // aggregation below (no regression). The RPC path avoids pulling 200k+ rows
+    // into Node and fixes the 7-day risk-limit breakdown collapsing to one day.
+    const agg = await db.getDeclinesRollup7d(fromIso);
+    if (agg) {
+      cachedRollup7d = buildRollupFromAggregates(agg);
+      log.info('Market', `7d rollup refreshed via RPC: ${cachedRollup7d.declines.total} declines, ${cachedRollup7d.missedVolume.totalMissed} missed fills, $${cachedRollup7d.missedVolume.totalStake.toFixed(2)} stake`);
+      return;
+    }
     const [declines, matched] = await Promise.all([
       db.loadDeclinesSince(fromIso),
       db.loadMatchedParlaysSince(fromIso),

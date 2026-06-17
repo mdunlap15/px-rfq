@@ -1415,6 +1415,37 @@ async function loadDeclinesSince(fromIso, opts = {}) {
   }
 }
 
+/**
+ * 7-day decline/missed-volume rollup via SQL aggregate RPCs (declines_rollup,
+ * declines_leg_histogram, matched_missed_rollup — defined in
+ * scripts/_declines_rollup_rpc.sql). Returns the three aggregated row sets, or
+ * NULL when the RPCs aren't deployed yet (caller falls back to the in-Node
+ * aggregation). This is the durable fix for loadDeclinesSince pulling 200k+
+ * rows into Node — which, once the declines table grew large, both took
+ * 78-119s/pass AND collapsed the 7-day risk-limit breakdown to a single day
+ * (the DESC row cap filled entirely with today's declines).
+ */
+async function getDeclinesRollup7d(fromIso) {
+  const client = getClient();
+  if (!client) return null;
+  try {
+    const [r, h, m] = await Promise.all([
+      client.rpc('declines_rollup', { from_ts: fromIso }),
+      client.rpc('declines_leg_histogram', { from_ts: fromIso }),
+      client.rpc('matched_missed_rollup', { from_ts: fromIso }),
+    ]);
+    const err = r.error || h.error || m.error;
+    if (err) {
+      log.warn('DB', `getDeclinesRollup7d RPC unavailable (${err.message}) — falling back to JS aggregation`);
+      return null;
+    }
+    return { rollup: r.data || [], histogram: h.data || [], missed: m.data || [] };
+  } catch (err) {
+    log.warn('DB', `getDeclinesRollup7d error: ${err.message} — falling back`);
+    return null;
+  }
+}
+
 async function loadMatchedParlaysSince(fromIso, opts = {}) {
   const client = getClient();
   if (!client) return [];
@@ -1473,6 +1504,7 @@ module.exports = {
   saveDecline,
   loadDeclines,
   loadDeclinesSince,
+  getDeclinesRollup7d,
   lookupDecline,
   savePropShadowQuote,
   loadPropShadowQuotes,

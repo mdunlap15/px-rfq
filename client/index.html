@@ -7626,8 +7626,21 @@
       return;
     }
 
-    let html = '<table><tr><th>Sport</th><th style="text-align:right">P&L</th><th style="text-align:right">W-L</th></tr>';
+    // Merge collided keys into one canonical sport row. The source buckets P&L
+    // under BOTH a display label ("Baseball") and the raw key ("baseball_mlb")
+    // for the same league (older reconstructed rows vs live rows), which
+    // rendered as duplicate/fragmented rows. canonicalSport() collapses them.
+    const merged = {};
     for (const [sport, data] of Object.entries(pnl)) {
+      const key = canonicalSport(sport);
+      if (!merged[key]) merged[key] = { pnl: 0, wins: 0, losses: 0 };
+      merged[key].pnl += (data.pnl || 0);
+      merged[key].wins += (data.wins || 0);
+      merged[key].losses += (data.losses || 0);
+    }
+    const rows = Object.entries(merged).sort((a, b) => Math.abs(b[1].pnl) - Math.abs(a[1].pnl));
+    let html = '<table><tr><th>Sport</th><th style="text-align:right">P&L</th><th style="text-align:right">W-L</th></tr>';
+    for (const [sport, data] of rows) {
       const cls = data.pnl > 0 ? 'positive' : data.pnl < 0 ? 'negative' : 'neutral';
       html += `
         <tr>
