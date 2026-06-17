@@ -780,6 +780,40 @@ function getRecentLatencyRecords(limit = 500) {
   return records.slice(0, limit);
 }
 
+// Reconcile market intel on a canonical win signal (orderUuid / PX-booked).
+// If order.matched arrived BEFORE the confirm for a genuine win,
+// recordMatchedParlay recorded the auction as a provisional loss/tie
+// ('tied_lost'/'other_sp') or 'missed'. Promote it to 'won' so win-rate isn't
+// understated and a tie we actually won isn't stuck as tied_lost. Idempotent +
+// matchedWonIds-guarded so it never double-counts with recordMatchedParlay's
+// own canonical-win branch (which fires when matched arrives AFTER the confirm
+// and sees the orderUuid). Called from EVERY canonical-confirm path:
+// recordConfirmation (live accept) and importPxBookedOrder (accept-unknown
+// verify + ghost/full reconcile recovery) — the latter would otherwise leave
+// wins stuck at tied_lost since it early-returns when status is already
+// 'confirmed' (a matched-first tie optimistically promotes status).
+function reconcileMatchedWin(parlayId) {
+  if (!parlayId || matchedWonIds.has(parlayId)) return;
+  const mp = matchedParlays.find(e => e && e.parlayId === parlayId);
+  if (!mp || mp.outcome === 'won') return;
+  const prior = mp.outcome;
+  mp.outcome = 'won';
+  mp.weQuoted = true;
+  matchedWonIds.add(parlayId);
+  // Mirror the live canonical-win branch: bump BOTH weWon and weQuoted exactly
+  // once, else quoteWinRate (weWon/weQuoted) skews and can exceed 100%.
+  marketStats.weWon = (marketStats.weWon || 0) + 1;
+  marketStats.weQuoted = (marketStats.weQuoted || 0) + 1;
+  // Undo the prior provisional tally for this parlay.
+  if ((prior === 'other_sp' || prior === 'tied_lost') && (marketStats.otherSpMatched || 0) > 0) {
+    marketStats.otherSpMatched--;
+  } else if (prior === 'missed' && (marketStats.missedNoQuote || 0) > 0) {
+    marketStats.missedNoQuote--;
+  }
+  db.saveMatchedParlay(mp).catch(() => {});
+  log.debug('Market', `Reconciled matched ${parlayId.substring(0, 8)} ${prior} → won on canonical confirm`);
+}
+
 function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) {
   const order = orders[parlayId];
   if (order) {
@@ -816,6 +850,10 @@ function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) 
       // matrix despite ~30+ confirmed parlays in the same window.
       const legs = order.legs || (order.meta && order.meta.legs) || [];
       if (legs.length > 0) recordFillBucketFill(legs);
+
+      // Reconcile market intel on the canonical win signal (shared helper —
+      // also called from importPxBookedOrder for the recovery/verify paths).
+      reconcileMatchedWin(parlayId);
     }
 
     order.status = 'confirmed';
@@ -1040,6 +1078,12 @@ function markAcceptUnknown(parlayId, orderUuid, confirmedOdds, confirmedStake, e
  * safe to run during live traffic (reads + writes are per-parlay).
  */
 function importPxBookedOrder(parlayId, orderUuid, confirmedStake, confirmedOdds) {
+  // PX has this parlay on OUR books = a canonical win. Reconcile market intel
+  // FIRST, before the status guards below: a matched-first tie may already have
+  // optimistically flipped status to 'confirmed', which makes this function
+  // early-return 'already-confirmed' and would otherwise leave the
+  // matched_parlays row stuck at 'tied_lost'. Idempotent + matchedWonIds-guarded.
+  reconcileMatchedWin(parlayId);
   const order = orders[parlayId];
   if (!order) return { ok: false, reason: 'not-found' };
   if (order.status === 'confirmed') return { ok: false, reason: 'already-confirmed' };
@@ -1512,10 +1556,23 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
   if (weQuoted) {
     const offered = ourQuote.offeredOdds;
     const ODDS_TOL = 5; // American odds — generous to absorb minor PX drift
-    const isOurWin = (matchedOdds != null && offered != null &&
+    const oddsTie = (matchedOdds != null && offered != null &&
       Math.abs(matchedOdds - offered) <= ODDS_TOL);
+    // Canonical win = we actually got the fill. PX broadcasts order.matched to
+    // EVERY SP that quoted (Apr 25 audit), so a price tying our offer is NOT
+    // proof we won — another SP can take the same price first. Only claim
+    // 'won' on a canonical signal (orderUuid via recordConfirmation, an
+    // already-promoted confirm/settle, or the won-set). A same-price match
+    // WITHOUT a canonical signal is 'tied_lost' (a tie we cannot claim), not
+    // the old optimistic 'won' that conflated tie-wins with tie-losses and
+    // inflated win-rate. recordConfirmation reconciles 'tied_lost' → 'won' if
+    // our orderUuid later arrives (order.matched can race ahead of confirm).
+    const hasCanonicalWin = ourQuote.orderUuid != null
+      || ourQuote.status === 'confirmed'
+      || (typeof ourQuote.status === 'string' && ourQuote.status.startsWith('settled_'))
+      || matchedWonIds.has(parlayId);
 
-    if (!isOurWin) {
+    if (!oddsTie && !hasCanonicalWin) {
       // Another SP won this RFQ at a different price. Don't promote our
       // quote, don't bump win counters, don't record as a fill. Just
       // store diagnostic metadata so the dashboard can show we were
@@ -1536,19 +1593,29 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
       // entry is also skipped further down via the outcome === 'other_sp'
       // early-return).
     } else {
-    outcome = 'won';
-    matchedWonIds.add(parlayId);
-    // Fill count is now recorded in recordConfirmation gated on first
-    // orderUuid arrival — that's the canonical "real fill" signal
-    // (bettor committed, not just selected). Counting here would
-    // double-count every fill AND inflate by phantom-match events
-    // where the bettor backed out during PX's final-review step.
-    // weQuoted here is a misnamed legacy counter — it's really "matched
-    // events we received that we won". True quote-submission count lives
-    // in rfqStages.submitted on the websocket side. Keep incrementing for
-    // back-compat but only on real wins (post Apr 25 false-fill fix).
-    marketStats.weWon++;
-    marketStats.weQuoted++;
+    // At our price (a tie) OR a canonical win. The status-promotion +
+    // exposure-override alert below runs in BOTH cases (preserves the
+    // "PX matched past our cap" safety alert and the exposure-during-review
+    // behavior). But the win COUNTERS + matched-won set fire only on a
+    // canonical win — an ambiguous tie is 'tied_lost' pending the
+    // recordConfirmation reconcile, so we never count a tie we lost as a win.
+    if (hasCanonicalWin) {
+      outcome = 'won';
+      matchedWonIds.add(parlayId);
+      // Fill count is recorded in recordConfirmation gated on first orderUuid
+      // arrival — the canonical "real fill" signal. weQuoted here is a
+      // misnamed legacy counter ("matched events we won"); bump only on real
+      // (now canonical-only) wins.
+      marketStats.weWon++;
+      marketStats.weQuoted++;
+    } else {
+      outcome = 'tied_lost';
+      // Provisional loss tally (symmetric with the outbid 'other_sp' path) —
+      // a same-price match is most likely another SP's win. If recordConfirmation
+      // later proves it was our own win (order.matched raced ahead of confirm),
+      // the reconcile there decrements this counter and bumps weWon.
+      marketStats.otherSpMatched = (marketStats.otherSpMatched || 0) + 1;
+    }
     // Promote quoted → confirmed only. Never promote from 'rejected' —
     // that would silently override our own limit checks. Previously the
     // check was `status !== 'confirmed'`, which treated 'rejected' as
@@ -1733,8 +1800,8 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
     );
   }
 
-  if (weQuoted && outcome === 'lost') {
-    log.info('Market', `Lost quote: parlay=${parlayId.substring(0,8)}, our=${entry.ourAmericanOdds}, winning=${matchedOdds}, stake=$${matchedStake}`);
+  if (weQuoted && (outcome === 'lost' || outcome === 'other_sp' || outcome === 'tied_lost')) {
+    log.info('Market', `Lost quote (${outcome}): parlay=${parlayId.substring(0,8)}, our=${entry.ourAmericanOdds}, winning=${matchedOdds}, stake=$${matchedStake}`);
   }
 
   return entry;
@@ -1787,7 +1854,14 @@ async function backfillOurOddsFromDb(entry) {
       marketStats.weQuoted = (marketStats.weQuoted || 0) + 1;
       if ((marketStats.missedNoQuote || 0) > 0) marketStats.missedNoQuote--;
     } else {
-      entry.outcome = 'lost';
+      // Distinguish a same-price loss (we tied the winning price but another
+      // SP got the fill) from being outbid — the same tie-vs-loss blind spot
+      // the live path fixes, applied to the post-restart backfill path.
+      // entry.matchedAmericanOdds is SP-side (negated PX bettor-side) and
+      // row.offeredOdds is bettor-side, so a tie is |matched + offered| <= tol.
+      const tie = (entry.matchedAmericanOdds != null && row.offeredOdds != null &&
+        Math.abs(entry.matchedAmericanOdds + row.offeredOdds) <= 5);
+      entry.outcome = tie ? 'tied_lost' : 'lost';
       // Decrement the 'missed' counter — the parlay was an auction we
       // competed in, not one we sat out. (No dedicated 'lost' counter
       // exists; matched_parlays.outcome is the source of truth for that
@@ -2623,6 +2697,7 @@ function getMarketIntel(limit = 50) {
         && m.matchedAmericanOdds != null
         && m.outcome !== 'lost'  // legacy misclassification
         && m.outcome !== 'other_sp'  // ditto
+        && m.outcome !== 'tied_lost'  // same-price LOSS — another SP's fill, never ours
       );
       if (quoted.length === 0) return { entries: [], summary: null };
 
@@ -7683,8 +7758,9 @@ async function loadFromDb() {
       marketStats.weQuoted++;
       if (m.outcome === 'won') {
         marketStats.weWon++;
-      } else if (m.outcome === 'lost' || m.outcome === 'other_sp') {
-        // Real auction losses. Pre-2026-05-11, the entries written here
+      } else if (m.outcome === 'lost' || m.outcome === 'other_sp' || m.outcome === 'tied_lost') {
+        // Real auction losses ('tied_lost' = we tied the winning price but
+        // another SP got the fill). Pre-2026-05-11, the entries written here
         // were sometimes legacy misclassified wins (this counter used to
         // re-bucket them as wins for fill-rate display). After the fix
         // that persists 'other_sp' to matched_parlays, the dominant

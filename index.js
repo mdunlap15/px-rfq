@@ -4206,11 +4206,12 @@ function startStatusServer() {
           const { data, error } = await supabase
             .from('matched_parlays')
             .select('parlay_id,matched_odds,matched_stake,our_odds,legs,matched_at,outcome')
-            // Include both 'lost' (post-restart backfill) and 'other_sp'
-            // (live auction losses, persisted starting 2026-05-11). Both
-            // mean "we bid on this RFQ and another SP won the auction" —
-            // the Lost Analysis tab needs both to give a complete picture.
-            .in('outcome', ['lost', 'other_sp'])
+            // Include 'lost' (post-restart backfill), 'other_sp' (live outbid
+            // losses, persisted starting 2026-05-11) and 'tied_lost' (live
+            // same-price losses — we tied the winning price but another SP got
+            // the fill). All three mean "we bid on this RFQ and another SP won
+            // the auction" — the Lost Analysis tab needs all to be complete.
+            .in('outcome', ['lost', 'other_sp', 'tied_lost'])
             .gte('matched_at', fromIso)
             .order('matched_at', { ascending: false })
             .range(offset, offset + 999);

@@ -2818,7 +2818,11 @@ function getLatencyBreakdown() {
       const m = matchedByParlay.get(r.parlayId);
       const outcome = m ? m.outcome : undefined;
       if (outcome === 'won') bucket.won++;
-      else if (outcome === 'lost') bucket.lost++;
+      // Count every real auction loss — outbid ('lost'/'other_sp') AND
+      // same-price ('tied_lost') — so the win-rate denominator is honest and
+      // tie-losses can be diagnosed by latency bucket (the whole point of this
+      // view for the tie-loss question).
+      else if (outcome === 'lost' || outcome === 'other_sp' || outcome === 'tied_lost') bucket.lost++;
       else bucket.unknown++;
       // Per-parlay detail for click-to-expand on the dashboard. Trim to the
       // fields the UI needs so the payload doesn't balloon.

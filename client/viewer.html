@@ -2718,7 +2718,11 @@
         });
       }
       if (window._intelResultFilter) {
-        filteredMatched = filteredMatched.filter(m => m.outcome === window._intelResultFilter);
+        const f = window._intelResultFilter;
+        // 'lost' (Outbid) groups live 'other_sp' + backfill 'lost'; 'tied_lost'
+        // (same-price losses) filters on its own.
+        filteredMatched = filteredMatched.filter(m =>
+          f === 'lost' ? (m.outcome === 'lost' || m.outcome === 'other_sp') : m.outcome === f);
       }
       // Sport filter
       if (window._intelSportFilter) {
@@ -2763,6 +2767,7 @@
           <option value="">All outcomes</option>
           <option value="won" ${window._intelResultFilter==='won'?'selected':''}>Matched by us</option>
           <option value="lost" ${window._intelResultFilter==='lost'?'selected':''}>Outbid</option>
+          <option value="tied_lost" ${window._intelResultFilter==='tied_lost'?'selected':''}>Lost (tie)</option>
           <option value="missed" ${window._intelResultFilter==='missed'?'selected':''}>No Quote</option>
         </select>
         <select onchange="window._intelSportFilter=this.value; renderMarketIntel(window._lastIntelData||{})"
@@ -2806,7 +2811,8 @@
 
         let resultClass, resultText;
         if (m.outcome === 'won') { resultClass = 'positive'; resultText = 'Matched'; }
-        else if (m.outcome === 'lost') { resultClass = 'negative'; resultText = 'Outbid'; }
+        else if (m.outcome === 'tied_lost') { resultClass = 'negative'; resultText = 'Lost (tie)'; }
+        else if (m.outcome === 'lost' || m.outcome === 'other_sp') { resultClass = 'negative'; resultText = 'Outbid'; }
         else { resultClass = 'neutral'; resultText = 'No Quote'; }
 
         const mId = 'mp-' + mi;
