@@ -9098,7 +9098,21 @@
     const sortState = opts.sortMap[opts.dayId] || { col: 'time', dir: 1 };
     const arrow = function(col){ return sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : ''; };
     const hClick = function(col){ return 'onclick="event.stopPropagation(); ' + opts.sortClick + '(\'' + opts.dayId + '\',\'' + col + '\')" style="cursor:pointer;"'; };
-    let out = '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0;">';
+    // table-layout:fixed + explicit colgroup so the header row, every data
+    // row, and the colspan total row share identical column boundaries.
+    // Under auto-layout the colspan=5 total row, the hidden colspan=7 leg
+    // rows, and the max-width Selections cell let the columns drift, so the
+    // headers no longer sat over their values.
+    let out = '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0; table-layout:fixed;">';
+    out += '<colgroup>'
+      + '<col style="width:10%;">'   // Settled
+      + '<col style="width:38%;">'   // Selections
+      + '<col style="width:7%;">'    // Legs
+      + '<col style="width:11%;">'   // Odds
+      + '<col style="width:13%;">'   // Stake
+      + '<col style="width:13%;">'   // P&L
+      + '<col style="width:8%;">'    // Result
+      + '</colgroup>';
     out += '<tr style="color:var(--text3);">'
       + '<th ' + hClick('time') + ' style="padding:2px 8px;text-align:left;">Settled' + arrow('time') + '</th>'
       + '<th ' + hClick('selections') + ' style="padding:2px 8px;text-align:left;">Selections' + arrow('selections') + '</th>'
