@@ -6568,6 +6568,38 @@
   // includes Balance). The latter is now the single source for the header
   // stats bar across both Orders and Portfolio tabs.
 
+  // Shared settled-date-range filter for the two Portfolio P&L breakdown
+  // tables (by Sport + by Leg Count). Scoped to these tables via the
+  // window._pnlTableDateFrom/To globals — independent of the settled-log's
+  // portfolioState date filter so changing one doesn't surprise the other.
+  // Filters on settledAt (falls back to quotedAt) via the shared
+  // passesDateFilter helper, which treats date-only values as whole-day bounds.
+  function _pnlTableDateFilter(arr) {
+    const f = window._pnlTableDateFrom || '', t = window._pnlTableDateTo || '';
+    if (!f && !t) return arr;
+    return arr.filter(o => passesDateFilter(o.settledAt || o.quotedAt, f, t));
+  }
+  // Re-render BOTH P&L tables (they share one date range, so a change in
+  // either card's inputs must refresh both). Reads the full settled set from
+  // window._lastSettledData; each renderer re-applies the date filter itself.
+  function _rerenderPnlTables() {
+    renderPortfolioBySport(window._lastSettledData || []);
+    renderPortfolioByLegs(window._lastSettledData || []);
+  }
+  // The shared date-range input bar prepended to each P&L table header.
+  function _pnlTableDateBar() {
+    const f = window._pnlTableDateFrom || '', t = window._pnlTableDateTo || '';
+    const inp = 'style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:2px 6px; border-radius:4px; font-size:11px; font-family:monospace;"';
+    let h = '<div style="display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap; font-size:11px; color:var(--text3);">';
+    h += '<span>Settled:</span>';
+    h += '<input type="date" value="' + f + '" onchange="window._pnlTableDateFrom=this.value; _rerenderPnlTables()" ' + inp + ' title="From settled date (inclusive)">';
+    h += '<span>to</span>';
+    h += '<input type="date" value="' + t + '" onchange="window._pnlTableDateTo=this.value; _rerenderPnlTables()" ' + inp + ' title="To settled date (inclusive)">';
+    if (f || t) h += '<button onclick="window._pnlTableDateFrom=\'\'; window._pnlTableDateTo=\'\'; _rerenderPnlTables()" style="background:transparent; border:1px solid var(--border); color:var(--text3); padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer;">Clear</button>';
+    h += '</div>';
+    return h;
+  }
+
   function renderPortfolioBySport(settled) {
     const el = document.getElementById('portfolio-by-sport');
     if (settled.length === 0) {
@@ -6576,7 +6608,7 @@
     }
 
     const bySport = {};
-    for (const o of settled) {
+    for (const o of _pnlTableDateFilter(settled)) {
       const legs = o.legs || o.meta?.legs || [];
       const knownSports = [...new Set(legs.map(l => bucketSportKey(l.sport)).filter(s => s && s !== 'unknown'))];
       let sport;
@@ -6617,6 +6649,7 @@
     const sortClick = (col, defaultDir) => "onclick=\"event.stopPropagation(); if(window._sportSortCol==='" + col + "') window._sportSortDir=(window._sportSortDir||1)*-1; else { window._sportSortCol='" + col + "'; window._sportSortDir=" + defaultDir + "; } renderPortfolioBySport(window._lastSettledData||[])\" style=\"cursor:pointer; user-select:none;\"";
 
     let html = '';
+    html += _pnlTableDateBar();
     html += '<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">';
     html += '<input type="text" placeholder="Search sport..." value="' + escapeHtml(window._sportSearch || '') + '" oninput="window._sportSearch=this.value; rerenderWithFocus(()=>renderPortfolioBySport(window._lastSettledData||[]))" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:3px 8px; border-radius:4px; font-size:11px; width:160px;" id="sport-pnl-search">';
     html += '<span style="font-size:11px; color:var(--text3);">' + filtered.length + ' of ' + rows.length + '</span>';
@@ -6657,7 +6690,7 @@
     }
 
     const byLegs = {};
-    for (const o of settled) {
+    for (const o of _pnlTableDateFilter(settled)) {
       const legs = o.legs || o.meta?.legs || [];
       const n = legs.length || 0;
       if (!byLegs[n]) byLegs[n] = { legs: n, pnl: 0, wins: 0, losses: 0, staked: 0, count: 0, oddsSum: 0 };
@@ -6694,6 +6727,7 @@
     const sortClick = (col, defaultDir) => "onclick=\"event.stopPropagation(); if(window._legSortCol==='" + col + "') window._legSortDir=(window._legSortDir||1)*-1; else { window._legSortCol='" + col + "'; window._legSortDir=" + defaultDir + "; } renderPortfolioByLegs(window._lastSettledData||[])\" style=\"cursor:pointer; user-select:none;\"";
 
     let html = '';
+    html += _pnlTableDateBar();
     html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
     html += '<span style="font-size:11px; color:var(--text3);">Legs:</span>';
     html += '<input type="number" min="1" max="20" placeholder="min" value="' + escapeHtml(String(minLegs)) + '" oninput="window._legMinFilter=this.value; rerenderWithFocus(()=>renderPortfolioByLegs(window._lastSettledData||[]))" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:3px 6px; border-radius:4px; font-size:11px; width:60px;">';
