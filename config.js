@@ -219,6 +219,29 @@ const config = {
     // Default 0 = disabled (Railway env is the live lever).
     vigHeavyFavFairMarkup: parseFloat(process.env.VIG_HEAVY_FAV_FAIR_MARKUP) || 0,
     vigHeavyFavThreshold: parseFloat(process.env.VIG_HEAVY_FAV_THRESHOLD) || 0.70,
+    // Soccer Draw-No-Bet favorite markup. SCOPED to DNB legs only (PX
+    // "Moneyline (2 Way)" / "Draw No Bet" — lineInfo.isDNB). Same fair-shaped
+    // mechanism as vigHeavyFavFairMarkup (offered = p·(1+m), MAX-gated so it
+    // can only WIDEN), but a separate knob so we can charge real margin on DNB
+    // favorites without re-rating every NBA/MLB/tennis chalk leg.
+    //
+    // Why exists: DNB favorites are where the payout-multiplicative vig is most
+    // impotent — a 5-leg all-favorite DNB parlay (e.g. Japan/Argentina/France/
+    // England/Colombia, fair 47%) priced out at +103 with only ~0.96%/leg
+    // effective margin while FanDuel's DNB betslip carried ~5.5%/leg. Our FAIR
+    // was correct (it matches Pinnacle's actual de-vigged DNB market); the leak
+    // was margin, not probability. This knob takes the margin on the implied
+    // prob so it actually bites as fair→1. Root-cause: 3-agent workflow
+    // 2026-06-20 (parlay 019ee30e), see memory soccer-dnb-undervig-rootcause.
+    //
+    // Tuning: distance ≈ fair_prob × markup per leg, compounding across legs.
+    // Simulated against parlay 019ee30e: 0.035→quote ~-121, 0.04→~-127,
+    // 0.05→~-138 (all inside FD's -154, all +EV vs the +103 that got picked
+    // off). Recommended start VIG_DNB_FAV_MARKUP=0.04. Threshold 0.55 covers
+    // the whole favorite range (not just chalk) since DNB dogs are rare on PX.
+    // Default 0 = disabled — the code deploy is a no-op until this env is set.
+    vigDnbFavMarkup: parseFloat(process.env.VIG_DNB_FAV_MARKUP) || 0,
+    vigDnbFavThreshold: parseFloat(process.env.VIG_DNB_FAV_THRESHOLD) || 0.55,
     // Chalk-stack parlay surcharge. Parlay-level fair-shaped widening
     // that fires only when EVERY leg of a multi-leg parlay is a
     // favorite (fair_prob > vigChalkStackLegThreshold) AND the parlay's

@@ -2026,12 +2026,29 @@ function priceParlay(legs, opts = {}) {
   // combined calc. Either way the MAX picks the wider of the two.
   const heavyFavMarkup = config.pricing.vigHeavyFavFairMarkup || 0;
   const heavyFavThreshold = config.pricing.vigHeavyFavThreshold || 0.70;
-  if (heavyFavMarkup > 0 && vigLegs.length > 0) {
+  // Soccer DNB-scoped favorite markup (see config.vigDnbFavMarkup). Same
+  // fair × (1 + markup) shape as the generic heavy-fav markup, but a
+  // separate, typically-larger coefficient applied ONLY to DNB legs and at
+  // its own (lower) threshold — so we charge real margin on Draw-No-Bet
+  // favorites (where payout-vig is most impotent) without re-rating other
+  // sports' chalk. Folded into the same MAX-gated compound below.
+  const dnbFavMarkup = config.pricing.vigDnbFavMarkup || 0;
+  const dnbFavThreshold = config.pricing.vigDnbFavThreshold || 0.55;
+  if ((heavyFavMarkup > 0 || dnbFavMarkup > 0) && vigLegs.length > 0) {
     let heavyCompound = overrideProduct;
     for (const leg of vigLegs) {
       const fp = leg.fairProb;
-      if (fp > heavyFavThreshold) {
-        heavyCompound *= Math.min(0.99, fp * (1 + heavyFavMarkup));
+      // DNB favorite: use the larger of the DNB markup and the generic
+      // heavy-fav markup so a DNB leg is never marked up LESS than a
+      // same-prob team line would be.
+      const dnbApplies = leg.lineInfo.isDNB && dnbFavMarkup > 0 && fp > dnbFavThreshold;
+      const heavyApplies = heavyFavMarkup > 0 && fp > heavyFavThreshold;
+      if (dnbApplies || heavyApplies) {
+        const markup = Math.max(
+          dnbApplies ? dnbFavMarkup : 0,
+          heavyApplies ? heavyFavMarkup : 0,
+        );
+        heavyCompound *= Math.min(0.99, fp * (1 + markup));
       } else {
         heavyCompound *= applyOddsVig(fp, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0);
       }
