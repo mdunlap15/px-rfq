@@ -1911,34 +1911,48 @@ function priceParlay(legs, opts = {}) {
   // ADDITIVE with longshotAdd (both in vig rate units); capped at 0.20
   // downstream so runaway stacking can't happen.
   // ---------------------------------------------------------------------
-  const templateLegsForSig = pricedLegs.map(l => ({
-    team: l.lineInfo.teamName,
-    market: l.lineInfo.marketType,
-    line: l.lineInfo.line,
-  }));
-  // Pass parlayId so getRampDecision can atomically reserve a pending
-  // slot on non-decline. Closes the timing race where multiple RFQs on
-  // the same signature land within seconds (faster than the confirm
-  // cycle) and all see priorCount=0 because none had confirmed yet.
-  // estStake uses the RFQ's max_risk if known so /template-exposure-stats
-  // shows realistic in-flight totals; the real confirmedStake replaces it
-  // when recordConfirmation graduates the entry.
-  const templateRfqMaxRisk = (opts && Number.isFinite(+opts.maxRisk)) ? +opts.maxRisk : 0;
-  const templateDecision = templateExposure.getRampDecision(templateLegsForSig, {
-    parlayId: opts ? opts.parlayId : null,
-    estStake: templateRfqMaxRisk,
-  });
-  if (templateDecision.decline) {
-    log.info('Pricing', `Declined: ${templateDecision.reason} (stake so far $${templateDecision.totalStake.toFixed(2)})`);
-    priceParlay._lastFailure = {
-      reason: 'template exposure cap',
-      detail: templateDecision.reason,
-      blockerLeg: null,
-    };
-    return null;
+  // This ramp is QUOTE-TIME ADMISSION CONTROL only. It is SKIPPED on the
+  // confirm-time reprice (opts.skipTemplateRamp): once PX has matched our
+  // quote, re-running the cap only mis-rejects the fill — the reprice sees the
+  // order's OWN pending reservation (plus any sibling cooldown), declines, and
+  // validateForConfirmation turns that into a fail-closed reject. The cap's
+  // purpose (limit how many copies we TAKE) is already enforced at quote time;
+  // it's moot for a bet PX is booking. The confirm reprice exists only for the
+  // fair-value drift check, which is fair-prob-based, so the skipped ramp vig
+  // doesn't affect it. Diagnosed 2026-06-21: confirm reprices were failing
+  // closed on this cap and rejecting ~93% of confirms (multi-hour fill outage).
+  let templateRampAdd = 0;
+  let templatePriorCount = 0;
+  if (!opts.skipTemplateRamp) {
+    const templateLegsForSig = pricedLegs.map(l => ({
+      team: l.lineInfo.teamName,
+      market: l.lineInfo.marketType,
+      line: l.lineInfo.line,
+    }));
+    // Pass parlayId so getRampDecision can atomically reserve a pending
+    // slot on non-decline. Closes the timing race where multiple RFQs on
+    // the same signature land within seconds (faster than the confirm
+    // cycle) and all see priorCount=0 because none had confirmed yet.
+    // estStake uses the RFQ's max_risk if known so /template-exposure-stats
+    // shows realistic in-flight totals; the real confirmedStake replaces it
+    // when recordConfirmation graduates the entry.
+    const templateRfqMaxRisk = (opts && Number.isFinite(+opts.maxRisk)) ? +opts.maxRisk : 0;
+    const templateDecision = templateExposure.getRampDecision(templateLegsForSig, {
+      parlayId: opts ? opts.parlayId : null,
+      estStake: templateRfqMaxRisk,
+    });
+    if (templateDecision.decline) {
+      log.info('Pricing', `Declined: ${templateDecision.reason} (stake so far $${templateDecision.totalStake.toFixed(2)})`);
+      priceParlay._lastFailure = {
+        reason: 'template exposure cap',
+        detail: templateDecision.reason,
+        blockerLeg: null,
+      };
+      return null;
+    }
+    templateRampAdd = templateDecision.extraVig || 0;
+    templatePriorCount = templateDecision.count || 0;
   }
-  const templateRampAdd = templateDecision.extraVig || 0;
-  const templatePriorCount = templateDecision.count || 0;
 
   if (config.pricing.parlayLevelVig) {
     // Parlay-level: single vig application using max per-leg rate (over vig legs only).
@@ -3794,7 +3808,11 @@ async function validateForConfirmation(parlayId, originalMeta) {
   if (!originalMeta || !originalMeta.legs) return { valid: false, reason: 'no original meta' };
 
   const legs = originalMeta.legs.map(l => l.lineId);
-  const currentPricing = await priceParlay(legs);
+  // Skip the template-exposure ramp on the confirm reprice — it's quote-time
+  // admission control, and re-running it here mis-rejects already-matched bets
+  // (it would see this order's own pending reservation and fail closed). The
+  // reprice is purely the fair-value drift check below.
+  const currentPricing = await priceParlay(legs, { skipTemplateRamp: true });
   if (!currentPricing) {
     // Could not reprice. Common benign cause: line-index churn between
     // quote and confirm — a leg's lineId dropped out of the index because
