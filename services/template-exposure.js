@@ -189,7 +189,7 @@ let _stats = {
   releasedPending: 0,
   signaturesActive: 0,
   lastPrunedAt: null,
-  rampHits: { tier2: 0, tier3: 0, tier4: 0, decline: 0, cooldown: 0, team_cooldown: 0 },
+  rampHits: { tier2: 0, tier3: 0, tier4: 0, decline: 0, stakeCap: 0, cooldown: 0, team_cooldown: 0 },
   // Confirm-time gate hits — bumped by checkConfirmCooldown / checkTeamCooldown
   // callers in websocket.handleConfirm when a race-window block fires.
   // Separate from rampHits so we can distinguish quote-time declines (no
@@ -777,6 +777,48 @@ function getRampDecision(legs, opts = {}) {
     };
   }
 
+  // DOLLAR-aggregate cap — the count cap above is dollar-blind, so up to
+  // (declineAt) spaced-out copies can each carry full stake. This declines
+  // once the in-window AGGREGATE confirmed+pending stake on the signature has
+  // reached the configured cap. The first bet on a signature (priorCount==0)
+  // is always allowed — only repeats past the dollar ceiling are blocked.
+  // totalStake already includes pending reservations, so concurrent copies
+  // landing before any confirms are still bounded (same race-close as count).
+  const maxStake = config.pricing.templateRampMaxStake || 0;
+  if (maxStake > 0 && priorCount >= 1 && exp.totalStake >= maxStake) {
+    _stats.rampHits.stakeCap = (_stats.rampHits.stakeCap || 0) + 1;
+    const sh = signatureHash(exp.signature);
+    const reason = `template_stake_cap: $${Math.round(exp.totalStake)} prior aggregate stake on this signature `
+      + `(${exp.confirmedCount} confirmed + ${exp.pendingCount} pending) >= $${maxStake} cap in ${WINDOW_MS / 3600000}h window`;
+    try {
+      const lastNotified = _capNotificationDebounce.get(sh) || 0;
+      if (Date.now() - lastNotified >= CAP_NOTIFICATION_DEBOUNCE_MS) {
+        _capNotificationDebounce.set(sh, Date.now());
+        const push = require('./push');
+        if (push && push.notifyTemplateCap) {
+          push.notifyTemplateCap({
+            sigHash: sh,
+            description: describeLegs(legs),
+            priorCount,
+            effectiveDeclineAt: `$${maxStake} stake cap`,
+            totalPriorStake: exp.totalStake,
+            overrideApplied: 0,
+          });
+        }
+      }
+    } catch (_) { /* never let notification path break pricing */ }
+    return {
+      extraVig: 0, decline: true,
+      reason,
+      count: priorCount,
+      confirmedCount: exp.confirmedCount,
+      pendingCount: exp.pendingCount,
+      totalStake: exp.totalStake,
+      stakeCapActive: true,
+      sigHash: sh,
+    };
+  }
+
   let extraVig = 0;
   if (priorCount === 1)      { extraVig = tier2Add; _stats.rampHits.tier2++; }
   else if (priorCount === 2) { extraVig = tier3Add; _stats.rampHits.tier3++; }
@@ -950,6 +992,7 @@ function getStats() {
       tier3Add: config.pricing.templateRampTier3Add,
       tier4Add: config.pricing.templateRampTier4Add,
       declineAt: config.pricing.templateRampDeclineAt,
+      maxStake: config.pricing.templateRampMaxStake,
       cooldownSeconds: config.pricing.templateRampCooldownSeconds,
     },
     topActive: top,

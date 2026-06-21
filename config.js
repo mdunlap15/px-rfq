@@ -310,6 +310,20 @@ const config = {
     templateRampTier3Add: parseFloat(process.env.TEMPLATE_RAMP_TIER3_ADD) || 0.010,   // +1.00pp on 3rd
     templateRampTier4Add: parseFloat(process.env.TEMPLATE_RAMP_TIER4_ADD) || 0.030,   // +3.00pp on 4th
     templateRampDeclineAt: parseInt(process.env.TEMPLATE_RAMP_DECLINE_AT) || 4,       // decline 5th+ bet (priorCount >= 4)
+    // DOLLAR-aggregate cap per signature. The count cap above (declineAt) and
+    // the cooldown below are count/time-aware but DOLLAR-blind: up to
+    // (declineAt) spaced-out copies of one signature can each carry full stake
+    // before the count cap bites. The May-06 forensic (4× "Total Runs Over 9 |
+    // Over 9" at ~$2,750 each = $11k on one signature, all won) showed the
+    // residual: the count cap declined the 4th, but copies 1-3 (~$8.2k) still
+    // landed. This caps the in-window AGGREGATE confirmed+pending stake on a
+    // signature — once prior copies sum to >= this, further RFQs on the SAME
+    // signature decline regardless of count or timing. The FIRST bet on a
+    // signature is always allowed (priorCount==0 bypasses). Set 0 to disable.
+    // Recommended start ~2000-3000 (a 2nd identical multi-leg ticket above this
+    // is the copy-flood pattern, not organic flow). Default 0 = off (operator
+    // sets the live lever, like the other ramp knobs' magnitudes).
+    templateRampMaxStake: parseFloat(process.env.TEMPLATE_RAMP_MAX_STAKE) || 0,
     // Short-window cooldown: decline any RFQ on a signature whose most
     // recent confirmation landed within the last N seconds, regardless of
     // counterparty. Layers on top of the 24h decline-at-N tier — closes
