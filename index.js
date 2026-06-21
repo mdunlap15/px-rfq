@@ -307,6 +307,18 @@ async function startup() {
   } catch (err) {
     log.warn('Startup', `    ⚠ Template-cap override hydrate failed: ${err.message}`);
   }
+  // Restore persisted Config-tab vig overrides (POST /config/vig edits from
+  // before the restart). MUST run before websocket.connect so the first RFQs
+  // price with the operator's last live vig settings. Railway env stays
+  // authoritative: if any vig env var changed since the override was written,
+  // the override is discarded and env wins (see vig-config-store precedence).
+  try {
+    const vcs = require('./services/vig-config-store');
+    const r = await vcs.hydrate();
+    log.info('Startup', `    ✓ Vig-config overrides: ${r.applied ? 'applied (Config-tab settings restored)' : r.discarded ? 'discarded (Railway vig env changed — env wins)' : 'none'}`);
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Vig-config hydrate failed: ${err.message} — using env vig`);
+  }
   // Hydrate the signature-cooldown lock map from Supabase, then start the
   // periodic DB-sync loop. MUST run before websocket.connect so the first
   // RFQs after restart respect any cooldowns from parlays that confirmed
@@ -9425,6 +9437,11 @@ function startStatusServer() {
       config.pricing.parlayLevelVig = on;
       log.info('Config', `Parlay-level vig mode: ${on ? 'ON (max-per-leg applied once)' : 'OFF (per-leg compounded)'}`);
     }
+
+    // Persist the change so it survives restarts (Config-tab edits used to be
+    // in-memory only and reverted to Railway env on every redeploy). Stamped
+    // with the boot env baseline so a later Railway vig-env change still wins.
+    try { require('./services/vig-config-store').persist(); } catch (_) { /* best-effort */ }
 
     res.json({
       ok: true,
