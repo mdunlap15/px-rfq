@@ -8377,6 +8377,27 @@
       }
     }
 
+    // P&L is AUTHORITATIVE from Supabase /daily-pnl (includes losses), NOT the
+    // in-memory buffer above — the buffer misses "silent losses" (PX only emits
+    // settle events on our wins), so summing it overstates P&L as gross-wins.
+    // Zero buffer pnl/settled, then set net pnl per day from the Supabase series.
+    // Mirrors index.html renderChartDailyVolume so /viewer matches the main app.
+    const _dvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
+    // Empty-array guard: a timed-out /daily-pnl is a truthy [] that would zero
+    // pnl/settled and never repopulate (blank $0). Keep the buffer pnl then.
+    if (_dvSeries && _dvSeries.length) {
+      for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
+      for (const row of _dvSeries) {
+        const day = row.date;
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        if (row.pnl != null) byDay[day].pnl = row.pnl;
+        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
+        if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+      }
+      // Show GROSS PX P&L (no fees per operator); the /daily-pnl sum IS the gross.
+    }
+
     const allDayKeys = Object.keys(byDay).sort();
     if (allDayKeys.length === 0) {
       el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>No daily data</div></div>';
@@ -8747,6 +8768,24 @@
         byDay[day].pnl += o.pnl;
         byDay[day].settled++;
       }
+    }
+
+    // P&L authoritative from Supabase /daily-pnl (includes losses) — same fix as
+    // the chart above and index.html. The in-memory buffer misses silent losses
+    // (gross-wins only); zero buffer pnl/settled, then set net per day so the
+    // /viewer table matches the main app.
+    const _odvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
+    if (_odvSeries && _odvSeries.length) {
+      for (const k in byDay) { byDay[k].pnl = 0; byDay[k].settled = 0; }
+      for (const row of _odvSeries) {
+        const day = row.date;
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        if (row.pnl != null) byDay[day].pnl = row.pnl;
+        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
+        if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+      }
+      // GROSS PX P&L (no fees per operator); the /daily-pnl sum IS the gross.
     }
 
     // Roll days up into months (YYYY-MM)
