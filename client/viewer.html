@@ -15,7 +15,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="SP Viewer">
   <link rel="apple-touch-icon" href="/viewer/icon-192.svg">
-  <title>Parlay SP — Viewer</title>
+  <title>ProphetX Trader — Viewer</title>
   <!-- flatpickr — replaces native browser date/datetime pickers with a
        custom calendar that has a confirm button. Click on a date no
        longer immediately closes the popup; user must click "Apply" to
@@ -838,7 +838,7 @@
 <body>
 
 <header class="viewer-header">
-  <div class="brand">PARLAY SP<span class="viewer-tag">VIEWER</span></div>
+  <div class="brand">ProphetX Trader<span class="viewer-tag">VIEWER</span></div>
   <nav class="tabs">
     <button class="tab-btn active" id="tab-pnl" onclick="switchViewerTab('pnl')">P&amp;L</button>
     <button class="tab-btn" id="tab-positions" onclick="switchViewerTab('positions')">Positions<span class="tab-badge" id="positions-badge" style="display:none;">0</span></button>
@@ -1240,8 +1240,8 @@
     }
     // Update browser tab title with unseen confirmation count
     document.title = unseenConfirmations > 0
-      ? `(${unseenConfirmations}) PARLAY SP`
-      : 'PARLAY SP';
+      ? `(${unseenConfirmations}) ProphetX Trader — Viewer`
+      : 'ProphetX Trader — Viewer';
   }
 
   // -----------------------------------------------------------------------
@@ -11937,7 +11937,7 @@
       unseenConfirmations = 0;
       const badge = document.getElementById('portfolio-badge');
       if (badge) badge.style.display = 'none';
-      document.title = 'PARLAY SP';
+      document.title = 'ProphetX Trader — Viewer';
     }
     // Start/stop live odds refresh based on which tab is active
     if (section === 'exposure') startLiveOddsRefresh();
