@@ -8611,7 +8611,7 @@
     const months = Object.keys(byMonth).sort().reverse();
 
     svg += '<div style="overflow-x:auto; margin-top:8px;"><table style="font-size:11px;">';
-    svg += '<tr><th>Month / Date</th><th style="text-align:center">Fills</th><th style="text-align:center">My Risk</th><th style="text-align:center">To Win</th><th style="text-align:center">P&L</th></tr>';
+    svg += '<tr><th>Month / Date</th><th style="text-align:center">Fills</th><th style="text-align:center">My Risk</th><th style="text-align:center">To Win</th><th style="text-align:center">Settled</th><th style="text-align:center">P&L</th></tr>';
 
     for (const month of months) {
       const m = byMonth[month];
@@ -8623,10 +8623,11 @@
       svg += '<td style="text-align:center">' + m.count + '</td>';
       svg += '<td style="text-align:center">' + fmtDollar(m.risk) + '</td>';
       svg += '<td style="text-align:center; color:var(--green);">' + fmtDollar(m.toWin) + '</td>';
+      svg += '<td style="text-align:center">' + m.settled + '</td>';
       svg += '<td style="text-align:center" class="' + mPnlCls + '">' + fmtPnl(m.pnl) + '</td></tr>';
 
       // Month detail row: daily breakdown
-      svg += '<tr id="' + monthId + '" style="display:' + (monthExpanded ? 'table-row' : 'none') + ';"><td colspan="5" style="padding:0;">';
+      svg += '<tr id="' + monthId + '" style="display:' + (monthExpanded ? 'table-row' : 'none') + ';"><td colspan="6" style="padding:0;">';
       svg += '<table style="font-size:11px; width:100%; background:var(--surface2); margin:0;">';
       const monthDays = [...m.days].sort().reverse();
       for (const day of monthDays) {
@@ -8639,10 +8640,11 @@
         svg += '<td style="text-align:center; padding:2px 10px;">' + d.count + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;">' + fmtDollar(d.risk) + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px; color:var(--green);">' + fmtDollar(d.toWin) + '</td>';
+        svg += '<td style="text-align:center; padding:2px 10px;">' + d.settled + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;" class="' + pnlCls + '">' + fmtPnl(d.pnl) + '</td></tr>';
 
         // Day detail row: parlay breakdown (sortable)
-        svg += '<tr id="' + dayId + '" style="display:' + (dayExpanded ? 'table-row' : 'none') + ';"><td colspan="5" style="padding:0;">';
+        svg += '<tr id="' + dayId + '" style="display:' + (dayExpanded ? 'table-row' : 'none') + ';"><td colspan="6" style="padding:0;">';
         svg += '<table style="font-size:10px; width:100%; background:var(--surface3); margin:0;">';
         const sortState = window._dvSort[dayId] || { col: 'time', dir: 1 };
         const arrow = (col) => sortState.col === col ? (sortState.dir > 0 ? ' &#9650;' : ' &#9660;') : '';

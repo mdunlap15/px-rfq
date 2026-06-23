@@ -11668,17 +11668,23 @@
     const leftSeries  = series.filter(s => (s.axis || 'left') === 'left');
     const rightSeries = series.filter(s => s.axis === 'right');
 
-    function maxFor(items) {
-      return Math.max(1, ...byDay.flatMap(d => items.map(s => d[s.key] || 0)));
-    }
     function niceCeil(maxVal) {
       const m = Math.pow(10, Math.floor(Math.log10(maxVal)));
       const n = maxVal / m;
       const ceil = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
       return ceil * m;
     }
-    const leftMax  = niceCeil(maxFor(leftSeries));
-    const rightMax = rightSeries.length > 0 ? niceCeil(maxFor(rightSeries)) : null;
+    // Robust y-axis cap: use 90th-percentile × 1.5 when outliers are >3× p90,
+    // so a few anomalous days don't compress all normal bars into invisibility.
+    function robustMax(items) {
+      const vals = byDay.flatMap(d => items.map(s => d[s.key] || 0)).filter(v => v > 0).sort((a, b) => a - b);
+      if (!vals.length) return 1;
+      const p90 = vals[Math.floor(vals.length * 0.9)] || vals[vals.length - 1];
+      const trueMax = vals[vals.length - 1];
+      return (trueMax > p90 * 3) ? p90 * 1.5 : trueMax;
+    }
+    const leftMax  = niceCeil(robustMax(leftSeries));
+    const rightMax = rightSeries.length > 0 ? niceCeil(robustMax(rightSeries)) : null;
 
     const scaleLeft  = v => pad.t + chartH - (v / leftMax)  * chartH;
     const scaleRight = v => pad.t + chartH - (v / rightMax) * chartH;
@@ -11716,14 +11722,22 @@
         const value = d[series[s].key] || 0;
         if (value <= 0) continue;
         const axis = series[s].axis || 'left';
+        const axMax = axis === 'right' ? rightMax : leftMax;
+        const clipped = value > axMax;
+        const drawVal = clipped ? axMax : value;
         const x = groupLeft + s * (barW + 2);
-        const y = axis === 'right' ? scaleRight(value) : scaleLeft(value);
+        const y = axis === 'right' ? scaleRight(drawVal) : scaleLeft(drawVal);
         const h = Math.max(1, (pad.t + chartH) - y);
         svg += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2)
           + '" width="' + barW.toFixed(2) + '" height="' + h.toFixed(2)
-          + '" fill="' + series[s].color + '" rx="1.5">'
-          + '<title>' + d.date + ' · ' + series[s].label + ': ' + _netshareFmtN(value) + '</title>'
+          + '" fill="' + series[s].color + '" rx="1.5"' + (clipped ? ' opacity="0.7"' : '') + '>'
+          + '<title>' + d.date + ' · ' + series[s].label + ': ' + _netshareFmtN(value) + (clipped ? ' (clipped — outlier)' : '') + '</title>'
           + '</rect>';
+        if (clipped) {
+          svg += '<text x="' + (x + barW / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2)
+            + '" font-size="8" fill="' + series[s].color + '" text-anchor="middle" opacity="0.9">'
+            + _netshareFmtN(value) + '</text>';
+        }
       }
 
       const dayLabel = _netshareEtDateLabel(d.date);
