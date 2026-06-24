@@ -55,6 +55,7 @@ const _NHL_PROP_TO_TOA_MARKET = {
 // pitcher_strikeouts has its own bridge (lookupPlayerStrikeoutProp +
 // lookupPlayerStrikeoutPropFromTheOddsApi), not routed here.
 const _MLB_PROP_TO_TOA_MARKET = {
+  pitcher_strikeouts: 'pitcher_strikeouts',
   hitter_hits: 'batter_hits',
   hitter_hr: 'batter_home_runs',
   hitter_total_bases: 'batter_total_bases',

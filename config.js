@@ -748,8 +748,9 @@ const config = {
     // Minimum number of books with both sides required for a prop leg
     // to be quotable. Below this, decline the parlay (insufficient
     // de-vig confidence — single-book or near-single-book pricing is
-    // just re-quoting that book's vigged line).
-    propMinBooksWithBothSides: parseInt(process.env.PROP_MIN_BOOKS_WITH_BOTH_SIDES) || 3,
+    // just re-quoting that book's vigged line). DK+FD = 2 sharp books
+    // is sufficient; default lowered from 3 to 2 (2026-06-24).
+    propMinBooksWithBothSides: parseInt(process.env.PROP_MIN_BOOKS_WITH_BOTH_SIDES) || 2,
     // "Book-mirror" sweetener for one-sided binary MLB hitter props
     // (hitter_hr, hitter_rbi_runs): quote the OVER at the book's RAW posted
     // price minus this fraction (sweeter for the counterparty), via
