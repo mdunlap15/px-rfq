@@ -54,9 +54,13 @@ const config = {
     // Pitcher strikeouts prop floor — minimum per-leg vig applied to
     // marketType='player_strikeouts' legs. Skips the favorite-slope
     // ramp that game-line legs use because props don't have favorites
-    // in the team-line sense. Conservative floor for MVP; can lower
-    // once Phase 2 proves +EV at scale.
-    vigPropFloor: parseFloat(process.env.VIG_PROP_FLOOR) || 0.03,
+    // in the team-line sense. Lowered 0.03 -> 0.02 on 2026-06-24 after
+    // RCA found prop quotes ran a median ~8% / K-SGP 14-16% margin vs
+    // fair and won 0 of 549 fills (uncompetitive). NOTE: this floor only
+    // BINDS when it exceeds the per-sport base vig — if DEFAULT_VIG /
+    // VIG_BY_SPORT for the sport is already >= this, base vig drives the
+    // price and lowering the floor is a no-op. Tune DEFAULT_VIG too.
+    vigPropFloor: parseFloat(process.env.VIG_PROP_FLOOR) || 0.02,
     // Threshold on NBA series_winner favorite pricing. If our fair prob
     // for an NBA series_winner favorite exceeds this cutoff (default
     // -250 = 250/350 = 0.7143 fair prob), we quote at DK's posted book
@@ -755,10 +759,14 @@ const config = {
     // (hitter_hr, hitter_rbi_runs): quote the OVER at the book's RAW posted
     // price minus this fraction (sweeter for the counterparty), via
     // bookPriceOverride — no de-vig+vig. Prefer the real DK number (scraper) as
-    // the basis, fall back to the feed's raw posted consensus. Default 0.5%
-    // (operator 2026-06-10). Set 0 for a pure match.
+    // the basis, fall back to the feed's raw posted consensus. Raised
+    // 0.5% -> 3% on 2026-06-24: these legs BYPASS the vig path entirely, so
+    // the sweetener is the ONLY competitiveness lever on them — at 0.5% we
+    // inherited nearly the book's full over-juice and won 0 fills. 3% still
+    // leaves positive margin vs fair on typical book juice; push toward 5%
+    // with fill-rate monitoring. Set 0 for a pure match.
     propBookMirrorSweetener: process.env.PROP_BOOK_MIRROR_SWEETENER !== undefined
-      ? parseFloat(process.env.PROP_BOOK_MIRROR_SWEETENER) : 0.005,
+      ? parseFloat(process.env.PROP_BOOK_MIRROR_SWEETENER) : 0.03,
     // Max distance (in stat units) the requested prop line can sit
     // from the primary line for that (player, propType) before we
     // decline. Default ±2 — restricts quoting to near-primary alts
@@ -928,6 +936,19 @@ const config = {
     // 2.0 = double the normal vig on each leg of the SGP. Tunable while
     // we gather acceptance + ROI data on re-enabled SGPs.
     sgpVigMultiplier: parseFloat(process.env.SGP_VIG_MULTIPLIER) || 2.0,
+    // Prop-specific SGP vig multiplier. Decouples the per-leg vig blow-up on
+    // PLAYER-PROP legs of an SGP from the game-line SGP multiplier above, so
+    // K-prop / prop-prop same-game tickets can be priced competitively
+    // WITHOUT loosening spread_total / ml_total game-line SGPs. Defaults to
+    // sgpVigMultiplier (no behavior change unless SGP_PROP_VIG_MULTIPLIER is
+    // set), because lowering it weakens the deliberate correlation charge on
+    // K-prop/xteam pairs (see pricer.js comment ~L1506 "don't hand attackers
+    // a preferred template") — opt in explicitly. RCA 2026-06-24 found
+    // K-prop SGPs quoting 14-16% over fair (floor/base vig x 2.0); set
+    // SGP_PROP_VIG_MULTIPLIER=1.5 to chase those fills while retaining a
+    // correlation buffer. nested pairs already skip the SGP vig entirely.
+    sgpPropVigMultiplier: parseFloat(process.env.SGP_PROP_VIG_MULTIPLIER)
+      || parseFloat(process.env.SGP_VIG_MULTIPLIER) || 2.0,
     // Phase 2 K-prop + same-team ML SGP correlation boost. Empirically
     // calibrated from DK SGP pricing on 3 MLB combos (Guardians/Cardinals/
     // Rays + their pitcher's K-Over): DK applies 10-19% discount (avg

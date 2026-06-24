@@ -1513,6 +1513,12 @@ function priceParlay(legs, opts = {}) {
   const sgpVigMult = (isSGPParlay && !skipSgpVig)
     ? Math.max(1, config.pricing.sgpVigMultiplier || 1)
     : 1;
+  // Prop legs get their own SGP vig multiplier so we can quote K-prop /
+  // prop-prop same-game tickets competitively without loosening game-line
+  // SGPs. Falls back to sgpVigMult when SGP_PROP_VIG_MULTIPLIER is unset.
+  const sgpPropVigMult = (isSGPParlay && !skipSgpVig)
+    ? Math.max(1, config.pricing.sgpPropVigMultiplier || config.pricing.sgpVigMultiplier || 1)
+    : 1;
 
   // ---- SGP CORRELATION ADJUSTMENT ----
   // The naive product of fair leg probs understates the true joint prob
@@ -1765,8 +1771,8 @@ function priceParlay(legs, opts = {}) {
     if (marketType && /^player_/.test(marketType)) {
       let vig = Math.max(config.pricing.vigPropFloor || 0, baseVig);
       if (vigBump > 0) vig += vigBump;
-      if (sgpVigMult > 1) {
-        vig = Math.min(0.20, vig * sgpVigMult);
+      if (sgpPropVigMult > 1) {
+        vig = Math.min(0.20, vig * sgpPropVigMult);
       }
       return Math.min(0.20, vig);
     }
