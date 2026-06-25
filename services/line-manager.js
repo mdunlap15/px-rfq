@@ -143,6 +143,11 @@ let _hasSeededOnce = false;
 // "supported" forever and then decline at RFQ time. Seeded from PX's live set on
 // first boot so historical accumulation gets pruned by the first diff.
 let _lastRegisteredLineIds = new Set();
+// One-time-per-boot guard for the historical supported-lines reconcile. Must be
+// its OWN flag, not a `_lastRegisteredLineIds.size === 0` check: on-demand
+// resolveUnknownLine registrations can fire (and add to the set) BEFORE the
+// first seed runs, which would defeat a size-based gate and skip the reconcile.
+let _supportedReconcileDone = false;
 
 // Build-then-swap support for refreshLines (warm refresh).
 // During a periodic refresh, seedAllLines writes into _seedIndexTarget /
@@ -1829,17 +1834,21 @@ async function seedAllLines() {
     if (Number.isFinite(startMs) && startMs <= _nowMs) return false; // event started — not quotable
     return true;
   });
-  // First boot: seed the tracking set from PX's live supported set so the diff
-  // below prunes lines accumulated by the old append-only registration.
-  if (!_hasSeededOnce && _lastRegisteredLineIds.size === 0) {
+  // First boot: MERGE PX's live supported set into the tracking set so the diff
+  // below prunes lines accumulated by the old append-only registration (~20k+
+  // stale lines observed 2026-06-25). Runs once per boot, gated by its own flag
+  // (size check would be defeated by on-demand regs firing before first seed).
+  // Merge (not overwrite) so any on-demand lines already added survive.
+  if (!_supportedReconcileDone) {
+    _supportedReconcileDone = true;
     try {
-      const existing = await px.getSupportedLines(100000);
-      if (Array.isArray(existing) && existing.length > 0) {
-        _lastRegisteredLineIds = new Set(
-          existing.map(e => (typeof e === 'string' ? e : (e && (e.line_id || e.lineId)))).filter(Boolean)
-        );
-        log.info('Lines', `Loaded ${_lastRegisteredLineIds.size} existing PX supported lines for reconciliation`);
+      const existing = await px.getSupportedLines(100000); // paginated (token cursor)
+      let added = 0;
+      for (const e of (Array.isArray(existing) ? existing : [])) {
+        const id = (typeof e === 'string' ? e : (e && (e.line_id || e.lineId)));
+        if (id && !_lastRegisteredLineIds.has(id)) { _lastRegisteredLineIds.add(id); added++; }
       }
+      log.info('Lines', `Loaded ${added} existing PX supported lines for reconciliation (total tracked ${_lastRegisteredLineIds.size})`);
     } catch (err) {
       log.warn('Lines', `Could not fetch existing PX supported lines (skipping historical prune this boot): ${err.message}`);
     }

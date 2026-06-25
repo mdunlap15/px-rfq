@@ -387,9 +387,35 @@ async function removeSupportedLines(lineIds) {
   return { success: true, count: lineIds.length, chunks: chunks.length };
 }
 
-async function getSupportedLines(limit = 100) {
-  const data = await pxFetch(`/parlay/sp/supported-lines?limit=${limit}`);
-  return data.data?.supported_lines || [];
+// Fetch the FULL supported-lines set. PX caps each page at 100 and returns a
+// `token` cursor for the next page — a single GET only sees 100. We paginate via
+// ?token= until exhausted so the supported-set reconciler (line-manager) can see
+// the whole set and prune stale entries. maxLines bounds a pathological loop.
+async function getSupportedLines(maxLines = 100000) {
+  const all = [];
+  let token = null;
+  const maxPages = Math.ceil(maxLines / 100) + 1;
+  for (let i = 0; i < maxPages; i++) {
+    const q = token
+      ? `/parlay/sp/supported-lines?limit=100&token=${encodeURIComponent(token)}`
+      : '/parlay/sp/supported-lines?limit=100';
+    let data;
+    try {
+      data = await pxFetch(q);
+    } catch (e) {
+      // Return what we have rather than discarding the whole fetch — a partial
+      // set still lets the reconciler prune most stale lines.
+      log.warn('PX-Lines', `getSupportedLines pagination stopped at page ${i} (${all.length} fetched): ${e.message}`);
+      break;
+    }
+    const page = (data.data && data.data.supported_lines) || [];
+    all.push(...page);
+    const next = data.data && data.data.token;
+    if (!page.length || !next || next === token) break; // last page / no cursor advance
+    token = next;
+    if (all.length >= maxLines) break;
+  }
+  return all;
 }
 
 // ---------------------------------------------------------------------------
