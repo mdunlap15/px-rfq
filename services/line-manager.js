@@ -2700,6 +2700,77 @@ async function resolveUnknownLine(rfqLeg) {
                   log.info('Lines', `Phase-2 prop registered: ${playerName} ${propType} ${matchingProp.selection} ${matchingProp.line} (${lookup.booksWithBothSides} books, fair=${fairProb.toFixed(4)})`);
                   break; // exit markets loop — foundInfo will be stored downstream
                 }
+                // One-sided fallback for MLB hitter binary props (HR, hits, TB, RBIs).
+                // The 2-sided lookup above fails for batter_home_runs because books only
+                // post the Over side — matched.length > 0 but fairProbUnder is null.
+                // Mirror the pre-seed's one-sided path (line-manager.js:~1613) so
+                // RFQs for players not yet pre-seeded (e.g. props posted after the last
+                // refresh cycle) can register on-demand instead of declining.
+                // Under side is intentionally excluded: "no HR" flow self-selects sharp.
+                const _phase2OneSidedEligible = (sportKey === 'baseball_mlb'
+                  && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType));
+                if (_phase2OneSidedEligible && matchingProp.selection === 'over') {
+                  let _oneSidedHit = null;
+                  try {
+                    const _toaOs = await oddsFeed.lookupTheOddsApiPlayerPropOneSided(
+                      sportKey, toaMarketKey, eventCtx, playerName, matchingProp.line,
+                    );
+                    if (_toaOs && _toaOs.fairProbOver != null && _toaOs.oneSidedSource === 'toa-one-sided') {
+                      _oneSidedHit = {
+                        source: 'toa-one-sided',
+                        impliedOver: _toaOs.fairProbOver,
+                        rawImpliedOver: _toaOs.oneSidedRawAvgImplied != null
+                          ? _toaOs.oneSidedRawAvgImplied : _toaOs.fairProbOver,
+                        books: _toaOs.books || [],
+                        fetchedAt: _toaOs.fetchedAt || Date.now(),
+                      };
+                    }
+                  } catch (_err) {
+                    log.debug('Lines', `Phase-2 one-sided lookup error for ${playerName} ${propType} ${matchingProp.line}: ${_err.message}`);
+                  }
+                  if (_oneSidedHit) {
+                    const _fairOver = _oneSidedHit.impliedOver;
+                    let _bookPriceOverride = null;
+                    if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs') {
+                      const _raw = _oneSidedHit.rawImpliedOver;
+                      const _sweet = (config.pricing && config.pricing.propBookMirrorSweetener != null)
+                        ? config.pricing.propBookMirrorSweetener : 0.005;
+                      if (_raw != null && _raw > 0 && _raw < 1) {
+                        _bookPriceOverride = Math.max(0.005, Math.min(0.98, _raw * (1 - _sweet)));
+                      }
+                    }
+                    foundInfo = {
+                      sport: sportKey,
+                      pxEventId: eventId,
+                      pxEventName: event.name,
+                      marketType: _propMarketType(propType),
+                      marketName: market.name,
+                      selection: 'over',
+                      teamName: playerName,
+                      line: matchingProp.line,
+                      homeTeam: matchedHome,
+                      awayTeam: matchedAway,
+                      oddsApiSport: sportKey,
+                      oddsApiMarket: toaMarketKey,
+                      oddsApiSelection: 'over',
+                      startTime: event.scheduled || null,
+                      onDemand: true,
+                      playerName,
+                      propType,
+                      fairProb: _fairOver,
+                      fairProbOver: _fairOver,
+                      fairProbUnder: 1 - _fairOver,
+                      booksWithBothSides: 0,
+                      bookPriceOverride: _bookPriceOverride,
+                      propBooks: _oneSidedHit.books,
+                      propSource: _oneSidedHit.source,
+                      propFetchedAt: _oneSidedHit.fetchedAt || Date.now(),
+                    };
+                    lineFoundInPxMarket = true;
+                    log.info('Lines', `Phase-2 one-sided prop registered: ${playerName} ${propType} over ${matchingProp.line} (fair=${_fairOver.toFixed(4)}, books=${_oneSidedHit.books.join(',')})`);
+                    break;
+                  }
+                }
                 // Lookup failed or insufficient books — log + fall through to decline.
                 // "insufficient_books" now means: BOTH below minBooks AND no
                 // trusted single book with both sides (the trustedAlone gate
