@@ -5840,18 +5840,23 @@ function backfillUnknownSports() {
           // (PX's string like "Baseball"), not our sport key. Map sportName to
           // our sport keys via config.sportNameMap if possible.
           if (info && info.sportName) {
-            // Reverse lookup: find our sport key from sportName
+            // Reverse lookup: find our sport key from sportName — but ONLY when
+            // unambiguous. "Basketball" maps to basketball_nba/ncaab/wnba, so
+            // picking the first match (basketball_nba) is exactly how WNBA got
+            // mislabeled. When ambiguous, defer to the team-name and pxEventId-
+            // prefix tiers below, which CAN distinguish them. (Fixed 2026-06-25.)
             try {
               const { config } = require('../config');
-              for (const [sportKey, pxName] of Object.entries(config.sportNameMap || {})) {
-                if (pxName === info.sportName) {
-                  leg.sport = sportKey;
-                  legsResolvedByEvent++;
-                  mutated = true;
-                  break;
-                }
+              const matchingKeys = Object.entries(config.sportNameMap || {})
+                .filter(([, pxName]) => pxName === info.sportName)
+                .map(([k]) => k);
+              if (matchingKeys.length === 1) {
+                leg.sport = matchingKeys[0];
+                legsResolvedByEvent++;
+                mutated = true;
+                continue;
               }
-              if (leg.sport && leg.sport !== 'unknown') continue;
+              // ambiguous (≥2 keys) — fall through to team/prefix resolution
             } catch (err) { /* fall through to team match */ }
           }
         }

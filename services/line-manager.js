@@ -801,14 +801,14 @@ async function seedAllLines() {
     // We'll determine the actual sport key by which one has a matching Odds API event
     let sportKey = possibleSportKeys[0]; // default to first match (now most-specific)
 
-    // Store event metadata
-    eventIndex[event.event_id] = {
-      name: event.name,
-      sport: sportKey,
-      sportName: event.sport_name,
-      competitors: event.competitors,
-      scheduled: event.scheduled,
-    };
+    // NOTE: eventIndex[event.event_id] is stored AFTER the team-matching loop
+    // below (was previously stored here with the DEFAULT sportKey). PX lumps
+    // NBA/WNBA/NCAAB under sport_name="Basketball", so storing before matching
+    // pinned every basketball event to the default (basketball_nba) in the
+    // eventIndex even when matching corrected sportKey to basketball_wnba — which
+    // is how WNBA props ended up tagged basketball_nba in matched_parlays
+    // (getEventInfo → eventSport → decline-time sport on unregistered legs).
+    // Fixed 2026-06-25.
 
     // Extract home/away from PX event
     // Tennis/soccer may use different side labels or just have 2 competitors without home/away
@@ -927,6 +927,20 @@ async function seedAllLines() {
       const temp = matchedHome;
       // Note: we'll handle the swap in line indexing below
     }
+
+    // Store event metadata with the FINAL (team-matched) sportKey. Only matched
+    // events reach here — unmatched events `continue` above and never enter the
+    // index, so getEventInfo returns null (→ 'unknown') for them rather than the
+    // wrong basketball_nba default. This is what makes WNBA events resolve to
+    // basketball_wnba everywhere downstream (eventSport, decline categories,
+    // matched_parlays). (Moved from before the matching loop, 2026-06-25.)
+    eventIndex[event.event_id] = {
+      name: event.name,
+      sport: sportKey,
+      sportName: event.sport_name,
+      competitors: event.competitors,
+      scheduled: event.scheduled,
+    };
 
     // Just-in-time alt-line warm. Fire-and-forget so the per-event fetch
     // overlaps with the markets fetch below instead of waiting up to 15s
