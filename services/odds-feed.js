@@ -427,6 +427,20 @@ function _checkToaQuota(remaining) {
 // SHARPAPI CLIENT
 // ---------------------------------------------------------------------------
 
+// SharpAPI fully retired 2026-06-25 (operator cancelled the subscription).
+// Hard kill-switch: SharpAPI is NO LONGER A SOURCE FOR ANYTHING. Every odds
+// path resolves from The Odds API (TOA) + the DK/FD scrapers. This helper is
+// the single gate every former Sharp call-site checks: it stays false unless
+// SHARPAPI_ENABLED is explicitly set to 'true' (emergency re-enable only), so
+// even if a stale SHARP_ODDS_API_KEY lingers in the environment, no Sharp
+// request is ever issued — the overlap-window fall-throughs all fail closed
+// to TOA (stale gates decline if TOA is empty). Replaces the scattered
+// `process.env.SHARP_ODDS_API_KEY` presence checks that previously let Sharp
+// run whenever the key happened to be set.
+function _sharpEnabled() {
+  return process.env.SHARPAPI_ENABLED === 'true' && !!process.env.SHARP_ODDS_API_KEY;
+}
+
 /**
  * Fetch odds for a single league from SharpAPI.
  * Gets moneyline, spread, and total markets from all available books,
@@ -451,28 +465,25 @@ async function fetchOddsForSport(sport, opts) {
     if (liveMode) return null;
     const toaResult = await fetchFromTheOddsApi(sport);
     if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
-    // SharpAPI retired: once its key is gone, TOA is authoritative for tennis
-    // too — don't waste a guaranteed-failing Sharp call, just return empty and
-    // let the staleness gate decline (fail closed). Falls through to Sharp only
-    // while a key still exists (the overlap window).
-    if (!process.env.SHARP_ODDS_API_KEY) return toaResult || {};
-    log.info('OddsFeed', 'Tennis TOA returned 0 events — falling through to SharpAPI (overlap window)');
+    // SharpAPI retired (2026-06-25): TOA is authoritative for tennis. Return
+    // whatever TOA gave (possibly empty) and let the staleness gate decline
+    // (fail closed) — never fall through to a Sharp call.
+    if (!_sharpEnabled()) return toaResult || {};
+    log.info('OddsFeed', 'Tennis TOA returned 0 events — falling through to SharpAPI (SHARPAPI_ENABLED override)');
     // fall through to SharpAPI path below
   } else if (ODDS_API_FALLBACK[sport] && ODDS_API_FALLBACK[sport].flipGated && _isToaPrimary(sport)) {
-    // SharpAPI-removal flip path (audit): this sport has been switched to
-    // TOA via TOA_PRIMARY_SPORTS. While a Sharp key still exists (the
-    // overlap window), fall through to SharpAPI on TOA failure/empty;
-    // once the key is gone, TOA is authoritative and failures surface to
-    // the normal staleness handling (stale gates decline — fail closed).
+    // SharpAPI retired (2026-06-25): TOA is the sole source for these sports.
+    // Return TOA's result (possibly empty → stale gates decline, fail closed);
+    // never fall through to a Sharp call unless SHARPAPI_ENABLED is set.
     if (liveMode) return null;
     try {
       const toaResult = await fetchFromTheOddsApi(sport);
       if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
-      if (!process.env.SHARP_ODDS_API_KEY) return toaResult || {};
-      log.warn('OddsFeed', `${sport}: TOA-primary returned 0 events — falling through to SharpAPI (overlap window)`);
+      if (!_sharpEnabled()) return toaResult || {};
+      log.warn('OddsFeed', `${sport}: TOA-primary returned 0 events — falling through to SharpAPI (SHARPAPI_ENABLED override)`);
     } catch (err) {
-      if (!process.env.SHARP_ODDS_API_KEY) throw err;
-      log.warn('OddsFeed', `${sport}: TOA-primary fetch failed (${err.message}) — falling through to SharpAPI (overlap window)`);
+      if (!_sharpEnabled()) throw err;
+      log.warn('OddsFeed', `${sport}: TOA-primary fetch failed (${err.message}) — falling through to SharpAPI (SHARPAPI_ENABLED override)`);
     }
     // fall through to SharpAPI path below
   } else if (ODDS_API_FALLBACK[sport] && !ODDS_API_FALLBACK[sport].flipGated) {
@@ -481,6 +492,16 @@ async function fetchOddsForSport(sport, opts) {
       return null;
     }
     return fetchFromTheOddsApi(sport);
+  }
+
+  // SharpAPI fully retired (2026-06-25). This block is the legacy Sharp /odds
+  // fetch; with every configured sport routed through TOA above it is already
+  // unreachable, but guard it anyway so a future routing change can never
+  // silently resurrect a Sharp call. Fail closed to empty (stale gate handles
+  // the rest). Set SHARPAPI_ENABLED=true to override in an emergency.
+  if (!_sharpEnabled()) {
+    log.debug('OddsFeed', `${sport}: SharpAPI disabled (retired) — returning empty, TOA is authoritative`);
+    return {};
   }
 
   const mapping = LEAGUE_MAP[sport];
@@ -1108,8 +1129,9 @@ async function _runPostParseSupplements(sport, parsed) {
       log.warn('OddsFeed', `MLB F5 supplement failed: ${err.message}`);
     }
     _scheduleSupplementRetry(sport, 'MLB F5', supplementMlbF5Markets, parsed);
-    // Pitcher feed when SharpAPI isn't supplying lineups.
-    if (_isToaPrimary('baseball_mlb') || !process.env.SHARP_ODDS_API_KEY) {
+    // Pitcher feed — TOA is the sole lineup source now that SharpAPI is
+    // retired (always runs; the Sharp lineup feed no longer exists).
+    if (_isToaPrimary('baseball_mlb') || !_sharpEnabled()) {
       try {
         await _refreshMlbProbablePitchers();
       } catch (err) {
@@ -7040,6 +7062,10 @@ async function fetchOddsDelta(sport) {
  * Run delta updates for all SharpAPI sports (not Odds API fallback sports).
  */
 async function refreshAllSportsDelta() {
+  // SharpAPI retired (2026-06-25): the /odds/delta endpoint is Sharp-only.
+  // With Sharp disabled, skip delta entirely — the full TOA refresh
+  // (refreshAllSports) is the sole source and already covers every sport.
+  if (!_sharpEnabled()) return;
   let mmaTouched = false;
   for (const sport of Object.keys(LEAGUE_MAP)) {
     try {
@@ -7066,7 +7092,10 @@ async function refreshAllSportsDelta() {
 }
 
 async function refreshEventsIndex() {
-  const sharpKeyPresent = !!process.env.SHARP_ODDS_API_KEY;
+  // SharpAPI retired (2026-06-25): always build the events index from TOA's
+  // free /events endpoint. The Sharp-events branch below is dead unless
+  // SHARPAPI_ENABLED is explicitly set.
+  const sharpKeyPresent = _sharpEnabled();
   for (const sport of Object.keys(LEAGUE_MAP)) {
     // SharpAPI-removal audit: flipped (or keyless) sports build the events
     // index from TOA's free /events endpoint instead — line-manager's

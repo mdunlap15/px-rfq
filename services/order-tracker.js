@@ -4321,7 +4321,9 @@ async function refreshLiveOdds(oddsFeed) {
       // tracking is an accepted loss post-cancel — display-only, never a
       // pricing input. Burning a guaranteed-failing call per cycle just
       // pollutes logs.
-      if (process.env.SHARP_ODDS_API_KEY) {
+      // SharpAPI retired (2026-06-25): live Sharp fair-prob tracking is gone.
+      // Gate behind the same kill-switch as odds-feed (SHARPAPI_ENABLED).
+      if (process.env.SHARPAPI_ENABLED === 'true' && process.env.SHARP_ODDS_API_KEY) {
         await oddsFeed.fetchOddsForSport(sport, { live: true }).catch(() => null);
       }
       // The Odds API live — replaces DK scraper for in-play h2h/spreads/totals.
