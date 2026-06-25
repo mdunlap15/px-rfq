@@ -849,7 +849,179 @@ const PLAYER_PROP_CONFIGS = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// DK MLB PLAYER PROPS — event-page scraper (2026-06-25 rebuild)
+// ---------------------------------------------------------------------------
+// DK retired the /leagues/...?category= board layout the old MLB path scraped
+// (it captured 0 markets — the league pages no longer fire the passively-
+// intercepted XHR shape). MLB batter props now live on the per-EVENT page as
+// milestone ladders, the same structure the validated WC scraper handles:
+// load the event, click each batter-stat tab, and intercept the
+// eventSubcategory/v1/markets XHR DK's own SPA fires. Recon 2026-06-25 confirmed
+// the current subcategories — but we classify by marketType.name (stable)
+// rather than the subcategory id (rotates per-league) so an id rotation can't
+// silently break it again.
+//
+// All four are YES-only milestone ladders ("1+", "2+", "3+"): selection.label
+// "N+" (or selection.milestoneValue=N) maps to line = N - 0.5, side = over.
+// Emitted into propsOneSided, consumed by lookupDkPlayerPropOneSidedFairProb.
+const _DK_MLB_MILESTONE_PATTERNS = [
+  { propType: 'hitter_hr',          re: /home\s+runs?\s+milestones?/i },
+  { propType: 'hitter_hits',        re: /\bhits\s+milestones?/i },
+  { propType: 'hitter_total_bases', re: /total\s+bases\s+milestones?/i },
+  { propType: 'hitter_rbi_runs',    re: /\brbis?\s+milestones?/i },
+];
+// Combos ("Hits + Runs + RBIs Milestones" etc.) deliberately excluded — they
+// map to no single TOA/PX market and would badly mis-price.
+const _DK_MLB_TAB_TITLES = ['Batter Props', 'Home Runs', 'Hits', 'Total Bases', 'RBIs'];
+const _DK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
+const _DK_MLB_MAX_EVENTS = parseInt(process.env.DK_MLB_MAX_EVENTS, 10) || 20;
+const _DK_MLB_SCRAPE_BUDGET_MS = parseInt(process.env.DK_MLB_SCRAPE_BUDGET_MS, 10) || 240000;
+
+function _dkSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function _dkParseAmerican(s) {
+  if (s == null) return null;
+  const n = parseInt(String(s).replace(/[−–—]/g, '-').replace(/[^\-0-9]/g, ''), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Heavy multi-event scrape. Loads the MLB league page for today's event slugs,
+// then walks each event page clicking the batter-stat tabs and parsing the
+// milestone XHRs into one-sided props. Time-boxed; partial results on timeout.
+async function _scrapeDkMlbPlayerProps() {
+  const startedAt = Date.now();
+  const browser = await _launchBrowser({ headless: true });
+  const propsOneSided = [];
+  const seen = new Set();
+  let eventsProcessed = 0;
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(_DK_UA);
+    await page.setViewport({ width: 1400, height: 900 });
+
+    // 1) League page -> today's event slugs/ids.
+    await page.goto('https://sportsbook.draftkings.com/leagues/baseball/mlb',
+      { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    await _dkSleep(3500);
+    const events = await page.evaluate(() => {
+      const out = [];
+      for (const a of document.querySelectorAll('a[href*="/event/"]')) {
+        const m = (a.getAttribute('href') || '').match(/\/event\/([^/]+)\/(\d+)/);
+        if (m && !out.find(e => e.id === m[2])) out.push({ slug: m[1], id: m[2] });
+      }
+      return out;
+    });
+    log.info('DkScraper', `MLB event-page scrape: ${events.length} events found`);
+
+    // 2) Per event: load, click batter tabs, capture milestone XHRs.
+    for (const evt of events.slice(0, _DK_MLB_MAX_EVENTS)) {
+      if (Date.now() - startedAt > _DK_MLB_SCRAPE_BUDGET_MS) {
+        log.warn('DkScraper', `MLB scrape budget hit after ${eventsProcessed} events — returning partial`);
+        break;
+      }
+      const bodies = {};
+      const onResp = async (resp) => {
+        try {
+          const url = resp.url();
+          if (!/eventSubcategory\/v1\/markets/.test(url)) return;
+          const m = url.match(/templateVars=\d+%2C(\d+)/);
+          const txt = await resp.text();
+          if (txt.length < 400) return;
+          bodies[m ? m[1] : ('u' + Object.keys(bodies).length)] = JSON.parse(txt);
+        } catch (_) { /* ignore */ }
+      };
+      page.on('response', onResp);
+      try {
+        await page.goto(`https://sportsbook.draftkings.com/event/${evt.slug}/${evt.id}`,
+          { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        await _dkSleep(3000);
+        for (const title of _DK_MLB_TAB_TITLES) {
+          await page.evaluate((tt) => {
+            const els = Array.from(document.querySelectorAll('h2,h3,[role="tab"],button,a'))
+              .filter(e => (e.textContent || '').trim() === tt && e.offsetParent !== null && e.children.length <= 1);
+            if (els[0]) { els[0].scrollIntoView(); els[0].click(); }
+          }, title);
+          await _dkSleep(2500);
+        }
+      } catch (err) {
+        log.debug('DkScraper', `MLB event ${evt.slug} nav error: ${err.message}`);
+      }
+      page.off('response', onResp);
+      eventsProcessed++;
+
+      // 3) Parse captured subcategory bodies into one-sided milestone props.
+      for (const doc of Object.values(bodies)) {
+        const mById = {};
+        for (const mk of (doc.markets || [])) mById[mk.id] = mk;
+        for (const sel of (doc.selections || [])) {
+          const mk = mById[sel.marketId];
+          if (!mk) continue;
+          const mtype = (mk.marketType && mk.marketType.name) || mk.name || '';
+          const cls = _DK_MLB_MILESTONE_PATTERNS.find(p => p.re.test(mtype));
+          if (!cls) continue;
+          const milestone = sel.milestoneValue != null
+            ? sel.milestoneValue
+            : parseInt(String(sel.label || '').replace(/[^0-9]/g, ''), 10);
+          if (!Number.isFinite(milestone) || milestone < 1) continue;
+          const line = milestone - 0.5; // "1+" -> 0.5 (over), "2+" -> 1.5, ...
+          const part = (sel.participants || [])[0] || {};
+          const player = (part.seoIdentifier || part.name
+            || mk.name.replace(/\s+(home runs?|hits|total bases|rbis?).*$/i, '')).trim();
+          const american = _dkParseAmerican(sel.displayOdds && sel.displayOdds.american);
+          const decimal = (typeof sel.trueOdds === 'number' ? sel.trueOdds
+            : parseFloat(sel.displayOdds && sel.displayOdds.decimal)) || null;
+          if (!player || !decimal || decimal <= 1) continue;
+          const key = `${cls.propType}|${player.toLowerCase()}|${line}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          propsOneSided.push({
+            sport: 'baseball_mlb',
+            propType: cls.propType,
+            playerName: player,
+            line,
+            side: 'over',
+            americanOdds: american,
+            decimalOdds: round(decimal, 4),
+            impliedProb: round(1 / decimal, 4),
+            eventId: mk.eventId || evt.id,
+            eventName: null,
+            startTime: null,
+          });
+        }
+      }
+    }
+
+    const byType = {};
+    for (const p of propsOneSided) byType[p.propType] = (byType[p.propType] || 0) + 1;
+    const summary = Object.entries(byType).map(([k, n]) => `${k}=${n}`).join(', ') || '(none)';
+    log.info('DkScraper', `MLB player props (event-page): ${propsOneSided.length} one-sided across ${eventsProcessed} events in ${Date.now() - startedAt}ms [${summary}]`);
+    return { fetchedAt: new Date().toISOString(), props: [], propsOneSided };
+  } finally {
+    await browser.close();
+  }
+}
+
+// Public entry for MLB — stale-while-revalidate so no caller ever blocks on the
+// multi-event scrape. Returns cached data immediately (or an empty payload when
+// cold) and kicks off a background refresh when stale and none is running.
+// `force:true` (manual/recon) awaits the in-flight scrape.
+function fetchDkMlbPlayerProps({ force = false } = {}) {
+  const cacheKey = 'playerProps_baseball_mlb';
+  const cached = cacheBySport[cacheKey];
+  const fresh = cached && Date.now() - cached.at < CACHE_TTL_MS;
+  if ((force || !fresh) && !inFlightBySport[cacheKey]) {
+    inFlightBySport[cacheKey] = _scrapeDkMlbPlayerProps()
+      .then((payload) => { cacheBySport[cacheKey] = { at: Date.now(), data: payload }; return payload; })
+      .catch((err) => { log.warn('DkScraper', `MLB player-prop scrape failed: ${err.message}`); return null; })
+      .finally(() => { delete inFlightBySport[cacheKey]; });
+  }
+  if (force && inFlightBySport[cacheKey]) return inFlightBySport[cacheKey];
+  return Promise.resolve(cached ? cached.data : { fetchedAt: null, props: [], propsOneSided: [] });
+}
+
 async function fetchDkPlayerProps(sport, { force = false } = {}) {
+  // MLB uses the dedicated event-page scraper (stale-while-revalidate).
+  if (sport === 'baseball_mlb') return fetchDkMlbPlayerProps({ force });
   const cfg = PLAYER_PROP_CONFIGS[sport];
   if (!cfg) throw new Error(`Unknown sport for player props: ${sport}`);
   const cacheKey = `playerProps_${sport}`;

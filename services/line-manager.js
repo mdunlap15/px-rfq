@@ -2728,6 +2728,33 @@ async function resolveUnknownLine(rfqLeg) {
                   } catch (_err) {
                     log.debug('Lines', `Phase-2 one-sided lookup error for ${playerName} ${propType} ${matchingProp.line}: ${_err.message}`);
                   }
+                  // DK scraper fallback when TOA one-sided is empty — covers the
+                  // hitters TOA's thin free-tier books omit (e.g. Bobby Witt Jr.).
+                  // Mirrors the pre-seed DK one-sided path (line-manager.js:~1639).
+                  if (!_oneSidedHit) {
+                    try {
+                      const dk = require('./dk-scraper');
+                      if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
+                        const _dkOs = dk.lookupDkPlayerPropOneSidedFairProb(
+                          sportKey, propType, playerName, matchingProp.line,
+                        );
+                        if (_dkOs) {
+                          const _dkOver = _dkOs.side === 'over' ? _dkOs.impliedProb : (1 - _dkOs.impliedProb);
+                          if (_dkOver > 0 && _dkOver < 1) {
+                            _oneSidedHit = {
+                              source: 'dk-scraper-one-sided',
+                              impliedOver: _dkOver,
+                              rawImpliedOver: _dkOver,
+                              books: ['draftkings'],
+                              fetchedAt: _dkOs.fetchedAt || Date.now(),
+                            };
+                          }
+                        }
+                      }
+                    } catch (_dkErr) {
+                      log.debug('Lines', `Phase-2 DK one-sided lookup error for ${playerName} ${propType} ${matchingProp.line}: ${_dkErr.message}`);
+                    }
+                  }
                   if (_oneSidedHit) {
                     const _fairOver = _oneSidedHit.impliedOver;
                     let _bookPriceOverride = null;
