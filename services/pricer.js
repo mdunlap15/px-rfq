@@ -2206,6 +2206,57 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // PARLAY-LEVEL CONSENSUS CAP — anti heavy-favorite-stacking leak.
+  // The per-leg floor above subtracts pp PER LEG and compounds, letting an
+  // N-leg parlay be offered ~N×pp more generous than the sharp consensus
+  // parlay price (the leak that lets us beat the vigged books on chalk
+  // stacks — worse with more legs). This bounds TOTAL generosity vs the raw
+  // consensus product at a single pp regardless of leg count: floor offered
+  // at (Π consensus_leg) − priceFloorVsConsensusParlayPp. The consensus is
+  // vigged, so within ~1pp of it we still sit above the de-vigged true fair
+  // (we keep margin) while never being exploitably more generous than the
+  // books. MAX-gate (only TIGHTENS, never widens). Legs without Pin/FD/DK
+  // data contribute their payout-vig'd implied so the product isn't inflated.
+  // -------------------------------------------------------------------
+  const consParlayPp = config.pricing.priceFloorVsConsensusParlayPp || 0;
+  const consParlayChalkPp = config.pricing.priceFloorVsConsensusParlayChalkPp;
+  const chalkCapLegThresh = config.pricing.vigChalkStackLegThreshold || 0.60;
+  if ((consParlayPp > 0 || (consParlayChalkPp != null && consParlayChalkPp >= 0)) && vigLegs.length > 0) {
+    let consProduct = overrideProduct;
+    let anyConsData = false;
+    // Chalk detection uses CONSENSUS implied (not our fair) so a heavy-fav stack
+    // is caught even when our de-vig underrates a leg (the leak we found 06-25:
+    // a -128 leg is 56% at consensus but our fair had it at 53.9%, dodging the
+    // fair-based chalk-stack surcharge). Every leg a favorite ⇒ chalk stack.
+    let everyLegFavorite = true;
+    for (const leg of vigLegs) {
+      const consImp = getConsensusImplied(leg.lineInfo);
+      if (consImp != null) {
+        anyConsData = true;
+        consProduct *= consImp;
+        if (consImp < chalkCapLegThresh) everyLegFavorite = false;
+      } else {
+        everyLegFavorite = false; // no book data ⇒ can't call it chalk
+        consProduct *= applyOddsVig(leg.fairProb, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0);
+      }
+    }
+    if (anyConsData) {
+      // Chalk stacks get the tighter cap (default 0 ⇒ floor at consensus, no
+      // value given away on adverse-selection-prone favorite stacks); normal
+      // parlays keep the wider cap (competitive bettor value).
+      const effPp = (everyLegFavorite && consParlayChalkPp != null && consParlayChalkPp >= 0)
+        ? consParlayChalkPp
+        : consParlayPp;
+      if (effPp >= 0) {
+        const parlayFloor = Math.max(0.01, consProduct - effPp / 100);
+        if (parlayFloor > offeredImpliedProb) {
+          offeredImpliedProb = Math.min(0.99, parlayFloor);
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // FIXED PP FLOOR ON DISTANCE FROM FAIR
   //
   // The multiplicative vig stack (per-leg vig, longshot ramp, chalk

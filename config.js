@@ -875,6 +875,32 @@ const config = {
     // when no Pin/FD/DK price is available for the leg.
     priceFloorVsConsensusPp: parseFloat(process.env.PRICE_FLOOR_VS_CONSENSUS_PP) || 8,
 
+    // PARLAY-LEVEL consensus cap (anti heavy-favorite-stacking leak, 2026-06-25).
+    // The per-leg floor above subtracts priceFloorVsConsensusPp PER LEG and then
+    // COMPOUNDS, so an N-leg parlay can be offered ~N×pp more generous than the
+    // sharp Pin/FD/DK consensus parlay price — i.e. we beat the (already-vigged)
+    // book on every leg and the gap stacks with leg count. Scan 2026-06-25: 70%
+    // of fills were offered more generous than consensus, worst on tennis/MMA and
+    // multi-leg chalk stacks. This caps TOTAL parlay generosity vs the raw
+    // consensus product at a single bound regardless of leg count: offered implied
+    // is floored at (Π consensus_leg) − this many pp. Because the consensus is
+    // vigged, staying within ~1pp of it still leaves us well above the de-vigged
+    // true fair (we keep margin) while never being exploitably more generous than
+    // the books. Default 1.0pp; raise for more bettor value, lower (toward 0) to
+    // match the books exactly. 0 disables. Tunable via PRICE_FLOOR_VS_CONSENSUS_PARLAY_PP.
+    priceFloorVsConsensusParlayPp: process.env.PRICE_FLOOR_VS_CONSENSUS_PARLAY_PP !== undefined
+      ? parseFloat(process.env.PRICE_FLOOR_VS_CONSENSUS_PARLAY_PP) : 1.0,
+    // Tighter parlay-consensus cap for CHALK STACKS (every leg a favorite at
+    // consensus implied >= vigChalkStackLegThreshold). Heavy-favorite stacks are
+    // the adverse-selection vector (sharps pick our most-generous chalk offers)
+    // AND the spot where our proportional de-vig most underrates the favorites —
+    // so we don't give bettor value there. Default 0 ⇒ floor at the consensus
+    // parlay price (we match the vigged books, never beat them, but the vig keeps
+    // us +EV). Set to a small positive pp (e.g. 0.5) to allow a sliver of chalk
+    // competitiveness. Tunable via PRICE_FLOOR_VS_CONSENSUS_PARLAY_CHALK_PP.
+    priceFloorVsConsensusParlayChalkPp: process.env.PRICE_FLOOR_VS_CONSENSUS_PARLAY_CHALK_PP !== undefined
+      ? parseFloat(process.env.PRICE_FLOOR_VS_CONSENSUS_PARLAY_CHALK_PP) : 0.0,
+
     // Same-game parlay (SGP) handling. Historically all SGPs were blocked
     // because a multiplicative correlation "boost" (+3-15%) caused PX to
     // reject with "invalid estimated prices" on any offer we pushed above
