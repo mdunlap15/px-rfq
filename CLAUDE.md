@@ -154,11 +154,14 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
+| `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
+| `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |
 
 ## Database (Supabase)
 
 - **parlay_orders**: Our quotes, confirmations, settlements, P&L
-- **matched_parlays**: All matched parlays across all SPs (market intelligence)
+- **matched_parlays**: All matched parlays across all SPs (market intelligence). NOTE: `.outcome` only records `missed`/`other_sp` — it does NOT carry the game result, so realized prop outcomes come from `prop_settlements` instead.
+- **prop_settlements**: Realized box-score outcomes for MLB hitter-prop parlays (services/prop-settlement.js, from the free MLB Stats API). Drives same-game prop correlation calibration. Run `migrations/prop_settlements.sql` once, then enable `PROP_SETTLEMENT_ENABLED=true`.
 - Upserts on `parlay_id` for orders
 
 ## Soccer Specifics

@@ -558,6 +558,26 @@ async function startup() {
   refreshDbPnL();
   setInterval(refreshDbPnL, 2 * 60 * 1000);
 
+  // Daily MLB prop-parlay settlement (realized-outcome feedback loop). Settles
+  // finished hitter-prop parlays against MLB box scores into prop_settlements,
+  // which /prop-correlation reads for live-calibrated same-game correlation
+  // factors. OFF by default — flip PROP_SETTLEMENT_ENABLED=true after running
+  // migrations/prop_settlements.sql in Supabase. Read-mostly (public box scores
+  // + our matched_parlays; writes only to prop_settlements). First pass ~90s
+  // after boot, then every 12h to catch both afternoon and night slates.
+  if (process.env.PROP_SETTLEMENT_ENABLED === 'true') {
+    const runPropSettlement = async () => {
+      try {
+        const r = await require('./services/prop-settlement').settleRecent({ sinceDays: 14 });
+        log.info('PropSettle', `daily pass: ${JSON.stringify(r)}`);
+      } catch (err) {
+        log.warn('PropSettle', `daily pass failed: ${err.message}`);
+      }
+    };
+    setTimeout(runPropSettlement, 90 * 1000);
+    setInterval(runPropSettlement, 12 * 60 * 60 * 1000);
+  }
+
   // Server-side live-odds refresh. The client dashboard fires a 60s
   // timer too, but if nobody has the dashboard open (mobile-only
   // viewing, page closed, overnight), nothing would refresh and
@@ -2854,6 +2874,38 @@ function startStatusServer() {
       const was = sgpGuard.resetDark(combo);
       log.info('SGP-Guard', `operator reset dark state for '${combo}' (was dark: ${was})`);
       res.json({ ok: true, combo, wasDark: was });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // Realized-outcome calibration for same-game prop correlation. Reads the
+  // prop_settlements table (populated from MLB box scores) and returns the
+  // live-measured correlation factor per combo (realized joint win-rate /
+  // product of realized marginal leg rates), plus the bettor-edge-vs-price
+  // signal. This is the feedback loop that turns same-game prop carve-out
+  // decisions from estimates into calibrated numbers. ?days=60&minN=8
+  app.get('/prop-correlation', async (req, res) => {
+    try {
+      const ps = require('./services/prop-settlement');
+      const days = parseInt(req.query.days) || 60;
+      const minN = parseInt(req.query.minN) || 8;
+      res.json(await ps.getCalibration({ days, minN }));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // Operator trigger: settle finished MLB hitter-prop parlays against box
+  // scores now and upsert into prop_settlements. The daily job does this
+  // automatically when PROP_SETTLEMENT_ENABLED=true; this lets you run it on
+  // demand. POST {sinceDays?:14, dryRun?:false}.
+  app.post('/settle-props', async (req, res) => {
+    try {
+      const ps = require('./services/prop-settlement');
+      const sinceDays = (req.body && parseInt(req.body.sinceDays)) || 14;
+      const dryRun = !!(req.body && req.body.dryRun);
+      res.json(await ps.settleRecent({ sinceDays, dryRun }));
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
