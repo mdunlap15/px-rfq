@@ -136,6 +136,14 @@ const lineIndex = {};
 // from line_cache.
 let _hasSeededOnce = false;
 
+// PX RULE 1 (Anthony 2026-06-25): the PX "supported lines" set must mirror ONLY
+// the lines we can actually quote, and stay in sync. We track the set we last
+// told PX about so each seed cycle can DIFF (add new, remove dropped) instead of
+// the old append-only POST that let settled/started/dropped lines linger as
+// "supported" forever and then decline at RFQ time. Seeded from PX's live set on
+// first boot so historical accumulation gets pruned by the first diff.
+let _lastRegisteredLineIds = new Set();
+
 // Build-then-swap support for refreshLines (warm refresh).
 // During a periodic refresh, seedAllLines writes into _seedIndexTarget /
 // _seedPrimaryTarget instead of the live lineIndex / primaryByEvent. Live
@@ -1807,15 +1815,54 @@ async function seedAllLines() {
     _seedPrimaryTarget = null;
   }
 
-  // 6b. Register matched lines with PX
-  const lineIds = Object.keys(lineIndex);
-  if (lineIds.length > 0) {
+  // 6b. Sync our PX "supported lines" set. RULE 1 (Anthony 2026-06-25): the set
+  // must contain ONLY lines we can actually quote and be kept in sync. The old
+  // code POSTed the whole index every cycle and NEVER removed anything, so
+  // settled/started/dropped lines stayed "supported" forever and then declined
+  // at RFQ time. Now: exclude already-started events, then DIFF against the last
+  // set we registered (add new, remove dropped).
+  const _nowMs = Date.now();
+  const lineIds = Object.keys(lineIndex).filter(k => {
+    const li = lineIndex[k];
+    if (!li) return false;
+    const startMs = li.startTimeMs || (li.startTime ? Date.parse(li.startTime) : NaN);
+    if (Number.isFinite(startMs) && startMs <= _nowMs) return false; // event started — not quotable
+    return true;
+  });
+  // First boot: seed the tracking set from PX's live supported set so the diff
+  // below prunes lines accumulated by the old append-only registration.
+  if (!_hasSeededOnce && _lastRegisteredLineIds.size === 0) {
     try {
-      await px.registerSupportedLines(lineIds);
-      log.info('Lines', `Registered ${lineIds.length} lines with ProphetX`);
+      const existing = await px.getSupportedLines(100000);
+      if (Array.isArray(existing) && existing.length > 0) {
+        _lastRegisteredLineIds = new Set(
+          existing.map(e => (typeof e === 'string' ? e : (e && (e.line_id || e.lineId)))).filter(Boolean)
+        );
+        log.info('Lines', `Loaded ${_lastRegisteredLineIds.size} existing PX supported lines for reconciliation`);
+      }
     } catch (err) {
-      log.error('Lines', `Failed to register lines: ${err.message}`);
+      log.warn('Lines', `Could not fetch existing PX supported lines (skipping historical prune this boot): ${err.message}`);
     }
+  }
+  const _newSet = new Set(lineIds);
+  const _toAdd = lineIds.filter(id => !_lastRegisteredLineIds.has(id));
+  const _toRemove = [..._lastRegisteredLineIds].filter(id => !_newSet.has(id));
+  try {
+    if (_toAdd.length > 0) {
+      await px.registerSupportedLines(_toAdd);
+      log.info('Lines', `Registered ${_toAdd.length} new supported lines with ProphetX`);
+    }
+    if (_toRemove.length > 0) {
+      await px.removeSupportedLines(_toRemove);
+      log.info('Lines', `Removed ${_toRemove.length} stale supported lines from ProphetX`);
+    }
+    _lastRegisteredLineIds = _newSet; // advance only on success
+    if (_toAdd.length === 0 && _toRemove.length === 0) {
+      log.debug('Lines', `Supported-lines set unchanged (${_newSet.size} lines)`);
+    }
+  } catch (err) {
+    log.error('Lines', `Failed to sync supported lines: ${err.message}`);
+    // Leave _lastRegisteredLineIds unchanged so next cycle retries the full diff.
   }
 
   lastSeedStats = {
@@ -3070,7 +3117,10 @@ async function resolveUnknownLine(rfqLeg) {
       log.info('Lines', `On-demand registered ${sportKey}/${foundInfo.marketType} line for ${foundInfo.teamName} ${foundInfo.line != null ? foundInfo.line : ''} (${event.name})`);
 
       // Fire-and-forget PX registration — the RFQ we're responding to already
-      // has the line_id, so we don't need to wait for PX to acknowledge
+      // has the line_id, so we don't need to wait for PX to acknowledge.
+      // Track it in the supported-set mirror so the next seed diff doesn't churn
+      // it (and prunes it later if it stops being quotable). RULE 1 sync.
+      _lastRegisteredLineIds.add(lineId);
       px.registerSupportedLines([lineId]).catch(err => {
         log.warn('Lines', `PX registration of ${lineId} failed: ${err.message}`);
       });
