@@ -61,6 +61,20 @@ const _MLB_PROP_TO_TOA_MARKET = {
   hitter_total_bases: 'batter_total_bases',
   hitter_rbi_runs: 'batter_rbis',
 };
+// Map a propType to the internal lineIndex marketType. Almost everything uses
+// the 'player_<propType>' convention, but K-props MUST register as
+// 'player_strikeouts' (NOT 'player_pitcher_strikeouts'): the K-prop carve-outs
+// (pricer.js kprop_kprop/kprop_ml + same-game exemption ~L3182, classifySgpCombo
+// ~L3489), the per-pitcher exposure tracking (order-tracker player_strikeouts),
+// and the dedicated K bridge (~L1139) ALL key on 'player_strikeouts'. The generic
+// prop pre-seed grew a K-prop path (TOA map entry, commit 80a382e) that emitted
+// 'player_pitcher_strikeouts', silently breaking every K carve-out so opposing-
+// starter K-K parlays declined as prop_correlation_same_game instead of quoting
+// (regression caught 2026-06-25). Normalize at the source so all paths agree.
+function _propMarketType(propType) {
+  if (propType === 'pitcher_strikeouts') return 'player_strikeouts';
+  return 'player_' + propType;
+}
 // World Cup / international soccer player props. PX posts these as
 // one-sided YES/NO markets ("<Player> To Score a Goal", "<Player> To Have
 // At Least 1/2 Shot(s) On Target", "<Player> To Give Assist"). TOA carries
@@ -1674,7 +1688,7 @@ async function seedAllLines() {
                   sport: sportKey,
                   pxEventId: event.event_id,
                   pxEventName: event.name,
-                  marketType: 'player_' + propType,
+                  marketType: _propMarketType(propType),
                   marketName: market.name,
                   selection: sel.selection,
                   teamName: playerName,
@@ -1725,7 +1739,7 @@ async function seedAllLines() {
                 sport: sportKey,
                 pxEventId: event.event_id,
                 pxEventName: event.name,
-                marketType: 'player_' + propType,
+                marketType: _propMarketType(propType),
                 marketName: market.name,
                 selection: sel.selection,
                 teamName: playerName,
@@ -2590,7 +2604,7 @@ async function resolveUnknownLine(rfqLeg) {
                     sport: sportKey,
                     pxEventId: eventId,
                     pxEventName: event.name,
-                    marketType: 'player_' + propType,
+                    marketType: _propMarketType(propType),
                     marketName: market.name,
                     selection: matchingProp.selection,
                     teamName: playerName, // dashboards display "team" — use player name
