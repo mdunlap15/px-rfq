@@ -1987,14 +1987,37 @@ async function handleConfirm(data) {
       return;
     }
 
-    // Build price_probability for the confirmation
+    // Build price_probability for the confirmation.
+    // PX RULE 2 (Anthony 2026-06-25): for non-SGP parlays the per-leg
+    // probabilities must MULTIPLY to the parlay odds. Recompute the per-leg
+    // probs from the ACTUAL confirmed parlay prob (robust to any quote->confirm
+    // drift) so their product is exact. confirmedOdds is SP-side (negative for
+    // our +bettor offers); flip to the bettor side, whose implied prob is the
+    // target the per-leg probs must reconcile to. (Sending raw l.fairProb made
+    // Π(probs) fall short of the parlay odds by exactly the vig -> "Invalid
+    // Probability"; ground-truth confirmed 385/385 non-SGP parlays failed.)
+    const _bettorOdds = -Number(confirmedOdds);
+    const _bettorDec = _bettorOdds > 0 ? (_bettorOdds / 100 + 1) : (100 / (-_bettorOdds) + 1);
+    const _targetParlayProb = 1 / _bettorDec;
+    const _legBase = originalOrder.meta.legs.map(l =>
+      (l.bookPriceOverride != null ? l.bookPriceOverride : l.fairProb));
+    const _legConfirm = pricer.distributeLegProbs(_legBase, _targetParlayProb);
+    // PX RULE 3: max_risk is the requester's STAKE cap at our price, not our
+    // payout cap. `maxRisk` (computed above from config) is our payout cap;
+    // convert to the stake that yields that payout at the confirmed odds.
+    const _maxRiskStake = (_targetParlayProb > 0 && _targetParlayProb < 1)
+      ? Math.max(1, Math.round(maxRisk * _targetParlayProb / (1 - _targetParlayProb)))
+      : maxRisk;
     const priceProbability = [{
-      max_risk: originalOrder.maxRisk,
+      max_risk: _maxRiskStake,
       computed_odds: confirmedOdds,
       vig: config.pricing.defaultVig,
-      lines: originalOrder.meta.legs.map(l => ({
+      lines: originalOrder.meta.legs.map((l, i) => ({
         line_id: l.lineId,
-        probability: l.fairProb,
+        probability: (_legConfirm[i] != null && _legConfirm[i] > 0)
+          ? _legConfirm[i]
+          : (l.legConfirmProb != null ? l.legConfirmProb
+            : (l.legOfferedProb != null ? l.legOfferedProb : l.fairProb)),
       })),
     }];
 

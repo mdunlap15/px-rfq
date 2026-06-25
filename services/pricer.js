@@ -494,6 +494,44 @@ function decimalToAmerican(dec) {
 }
 
 /**
+ * Distribute a parlay's full implied probability across its legs so the PRODUCT
+ * of the returned per-leg probabilities EXACTLY equals targetParlayProb.
+ *
+ * PX requires (Anthony/PX, 2026-06-25) that for non-SGP parlays the per-leg
+ * probabilities we report in the offer/confirmation multiply to the parlay's
+ * implied probability — otherwise the order is rejected with "Invalid
+ * Probability". We apply vig + parlay-level ramps (longshot, leg-count,
+ * template) + the SGP correlation multiplier at the PARLAY level, so the raw
+ * per-leg FAIR probs (whose product is fairParlayProb) fall short of the offered
+ * implied prob by exactly the vig and never reconcile. Geometric scaling keeps
+ * each leg's relative weight while folding the entire parlay price into the legs.
+ *
+ * `legBaseProbs` are the per-leg basis probs (bookPriceOverride if set, else
+ * fairProb). Returns an array of nulls if inputs are unusable (caller falls back).
+ * The last leg absorbs floating-point residual so the product is bit-exact.
+ */
+function distributeLegProbs(legBaseProbs, targetParlayProb) {
+  const n = Array.isArray(legBaseProbs) ? legBaseProbs.length : 0;
+  if (!n || !(targetParlayProb > 0) || !isFinite(targetParlayProb)) {
+    return new Array(n).fill(null);
+  }
+  const base = legBaseProbs.map(p => (p > 0 && p < 1 ? p : null));
+  if (base.some(p => p == null)) return new Array(n).fill(null);
+  const rawProduct = base.reduce((a, p) => a * p, 1);
+  if (!(rawProduct > 0) || !isFinite(rawProduct)) return new Array(n).fill(null);
+  const scale = Math.pow(targetParlayProb / rawProduct, 1 / n);
+  const out = base.map(p => Math.min(0.999999, Math.max(1e-6, p * scale)));
+  // Last leg absorbs rounding so Π(out) === targetParlayProb to machine precision.
+  if (n > 1) {
+    const prefix = out.slice(0, -1).reduce((a, p) => a * p, 1);
+    if (prefix > 0) out[n - 1] = Math.min(0.999999, Math.max(1e-6, targetParlayProb / prefix));
+  } else {
+    out[0] = Math.min(0.999999, Math.max(1e-6, targetParlayProb));
+  }
+  return out;
+}
+
+/**
  * Compute the consensus implied probability for a leg from Pin/FD/DK
  * (Kalshi excluded — same definition as the Lines tab "CONS" column).
  * Returns null when none of the three books have a price for this leg.
@@ -2475,14 +2513,35 @@ function priceParlay(legs, opts = {}) {
     return null;
   }
 
-  // Build estimated_price (per-leg breakdown) — bettor-side American odds per leg.
-  // Apply same odds-based vig so PX's recomputed parlay matches our intended price.
-  const estimatedPrice = pricedLegs.map(leg => {
-    const legImplied = leg.bookPriceOverride != null
-      ? leg.bookPriceOverride
-      : applyOddsVig(leg.fairProb, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0);
+  // PX RULE 2 (Anthony/PX 2026-06-25): the per-leg probabilities we report must
+  // MULTIPLY to the parlay's implied prob. Distribute the full parlay price
+  // (vig + ramps + SGP correlation, all baked into cappedProb) across the legs
+  // so their product === cappedProb. Attach to each priced leg so both the
+  // offer's estimated_price AND the confirmation use the SAME reconciling probs.
+  const _legBaseProbs = pricedLegs.map(l => (l.bookPriceOverride != null ? l.bookPriceOverride : l.fairProb));
+  const _legConfirmProbs = distributeLegProbs(_legBaseProbs, cappedProb);
+  pricedLegs.forEach((l, i) => { l._legConfirmProb = _legConfirmProbs[i]; });
+
+  // Build estimated_price (per-leg breakdown) — per-leg probs whose product
+  // equals the offered parlay implied prob, so PX's reconciliation passes.
+  // Falls back to the legacy per-leg vig only if distribution was unusable.
+  const estimatedPrice = pricedLegs.map((leg, i) => {
+    const legImplied = (_legConfirmProbs[i] != null && _legConfirmProbs[i] > 0)
+      ? _legConfirmProbs[i]
+      : (leg.bookPriceOverride != null
+          ? leg.bookPriceOverride
+          : applyOddsVig(leg.fairProb, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0));
     return { line_id: leg.lineId, odds: decimalToAmerican(1 / legImplied) };
   });
+
+  // PX RULE 3 (Anthony/PX 2026-06-25): max_risk is the REQUESTER's stake cap at
+  // our quoted price, NOT our payout cap. `maxRisk` above is our intended max
+  // PAYOUT liability; the stake that produces that payout at the offered odds is
+  // payout / (decimal - 1) = payout * p/(1-p), p = offered implied prob. Sending
+  // the payout number as the stake cap let a winning requester collect up to
+  // payout*(decimal-1) — at +400 that is 4x our intended liability.
+  const _offeredP = Math.min(0.999999, Math.max(1e-6, cappedProb));
+  const maxRiskStake = Math.max(1, Math.round(maxRisk * _offeredP / (1 - _offeredP)));
 
   // valid_until in nanoseconds. Prop-containing parlays get the shorter
   // validity window (default 30s vs 60s) — prop prices move on lineup/usage
@@ -2614,7 +2673,7 @@ function priceParlay(legs, opts = {}) {
     offer: {
       valid_until: validUntil,
       odds: finalAmericanOdds, // American odds for PX
-      max_risk: maxRisk,
+      max_risk: maxRiskStake, // RULE 3: requester stake cap (not our payout cap)
       estimated_price: estimatedPrice,
     },
     meta: {
@@ -2682,6 +2741,9 @@ function priceParlay(legs, opts = {}) {
           // True per-leg offered implied (payout-vig + favorite markup, MAX-gated).
           // The Single-Leg chart prefers this over reconstructing from legVig.
           legOfferedProb: legOfferedProb != null ? Math.round(legOfferedProb * 100000) / 100000 : null,
+          // RULE 2 reconciling per-leg prob: Π(legConfirmProb) === parlay implied prob.
+          // Sent to PX in the confirmation so per-leg probs multiply to the parlay odds.
+          legConfirmProb: l._legConfirmProb != null ? Math.round(l._legConfirmProb * 1000000) / 1000000 : null,
           bookPriceOverride: l.bookPriceOverride != null ? Math.round(l.bookPriceOverride * 10000) / 10000 : null,
           displayFairProb: l.displayFairProb ? Math.round(l.displayFairProb * 10000) / 10000 : null,
           pinnacleOdds: l.pinnacleOdds || null,
@@ -3897,6 +3959,7 @@ module.exports = {
   getLastPriceFailure,
   computeSingleLegQuote,
   decimalToAmerican,
+  distributeLegProbs,
   // Exposed so /lines/detail can resolve golf fair probs through the
   // same DataGolf → DK → BetOnline cascade that the live pricing
   // path uses. Without this, the Lines tab shows no fair for any
