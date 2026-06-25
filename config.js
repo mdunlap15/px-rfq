@@ -1,5 +1,24 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 
+// Parse an env SCOPE/exposure cap that supports "0 = disabled/unlimited".
+// Unlike `parseFloat(env) || N` — where "0" is falsy and silently reverts to the
+// default N — this preserves an explicit 0 (and any valid number), falling back
+// to `dflt` only when the var is unset/blank/non-numeric (negatives are invalid).
+// This is the footgun that hard-declined every prop parlay on 2026-06-11: the
+// operator set MAX_PROP_RISK_PER_GAME=0 to "disable" the cap and it silently
+// became 600, so a $6000 worst-case charge tripped "$0 + $6000 > $600" on the
+// first parlay of every game. Applied ONLY to scope caps whose gates already
+// treat <=0 as "disabled/allow-all" (verified: checkExposureLimits,
+// checkGameExposure, checkPlayerExposure, checkSeriesExposure, checkPropGameCaps).
+// NOT used for per-parlay CHARGE caps (maxRiskPerParlay*, maxRiskSgpExperimental,
+// maxSeriesRiskPerParlay) — those have use-site `|| N` floors and 0 is not a
+// meaningful "disable" there, so the falsy-|| is benign (0 -> safe default, never
+// a block).
+function _capNum(envVal, dflt) {
+  const x = parseFloat(envVal);
+  return (Number.isFinite(x) && x >= 0) ? x : dflt;
+}
+
 const config = {
   px: {
     baseUrl: process.env.PX_BASE_URL || 'https://cash.api.prophetx.co',
@@ -608,7 +627,7 @@ const config = {
     //   TOA_PROP_REFRESH_AHEAD_SECONDS=90 + REFRESH_INTERVAL_MINUTES=2
     // (gate must exceed TTL + refresh interval + ~90s seed, with headroom).
     stalePropSeconds: parseInt(process.env.STALE_PROP_SECONDS) || 900,
-    maxExposurePerTeam: parseFloat(process.env.MAX_EXPOSURE_PER_TEAM) || 5000,
+    maxExposurePerTeam: _capNum(process.env.MAX_EXPOSURE_PER_TEAM, 5000),
     // Raw vs probability-weighted per-team exposure measurement (PRIMARY cap).
     //
     // FALSE (default, 2026-05-14): per-team exposure counted each parlay leg's
@@ -748,7 +767,7 @@ const config = {
         return { 'basketball_nba': 200, 'icehockey_nhl': 200 };
       }
     })(),
-    maxExposurePerPlayerDefault: parseFloat(process.env.MAX_EXPOSURE_PER_PLAYER_DEFAULT) || 200,
+    maxExposurePerPlayerDefault: _capNum(process.env.MAX_EXPOSURE_PER_PLAYER_DEFAULT, 200),
     // Minimum number of books with both sides required for a prop leg
     // to be quotable. Below this, decline the parlay (insufficient
     // de-vig confidence — single-book or near-single-book pricing is
@@ -856,13 +875,13 @@ const config = {
     // game. Critical as alt-spread coverage expands: more breakpoints =
     // more ways to load up on one event.
     // Tunable via MAX_EXPOSURE_PER_GAME env var. Set 0 to disable.
-    maxExposurePerGame: parseFloat(process.env.MAX_EXPOSURE_PER_GAME) || 5000,
+    maxExposurePerGame: _capNum(process.env.MAX_EXPOSURE_PER_GAME, 5000),
     // Tighter risk caps for parlays containing series_* markets. Series
     // bets tie up bankroll for weeks until the series settles, so we
     // limit both per-parlay SP risk and aggregate per-series-event
     // exposure. Applied only when at least one leg is a series market.
     maxSeriesRiskPerParlay: parseFloat(process.env.MAX_SERIES_RISK_PER_PARLAY) || 500,
-    maxSeriesGrossExposure: parseFloat(process.env.MAX_SERIES_GROSS_EXPOSURE) || 1000,
+    maxSeriesGrossExposure: _capNum(process.env.MAX_SERIES_GROSS_EXPOSURE, 1000),
 
     // Consensus-floor guardrail. When our offered implied prob on a single
     // leg would land more than this many percentage points BELOW the
@@ -956,8 +975,8 @@ const config = {
     //     game-script stacking across DIFFERENT players;
     // (b) total prop risk per game regardless of direction — the blunt
     //     bound no script mapping can evade.
-    maxPropTeamSideRisk: parseFloat(process.env.MAX_PROP_TEAM_SIDE_RISK) || 300,
-    maxPropRiskPerGame: parseFloat(process.env.MAX_PROP_RISK_PER_GAME) || 600,
+    maxPropTeamSideRisk: _capNum(process.env.MAX_PROP_TEAM_SIDE_RISK, 300),
+    maxPropRiskPerGame: _capNum(process.env.MAX_PROP_RISK_PER_GAME, 600),
     // Multiplier applied to per-leg effective vig when pricing an SGP.
     // 2.0 = double the normal vig on each leg of the SGP. Tunable while
     // we gather acceptance + ROI data on re-enabled SGPs.
