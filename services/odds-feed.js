@@ -29,16 +29,60 @@ const ODDS_API_FETCH_TIMEOUT_MS = (() => {
   return 500;
 })();
 
+// ---------------------------------------------------------------------------
+// GLOBAL TOA RATE GATE
+// ---------------------------------------------------------------------------
+// All requests to the-odds-api.com go through this gate so no single code
+// path can cause a 429 storm by itself. Three callers previously had their
+// own ad-hoc throttling (alt-line pre-warm: WARM_CONCURRENCY=2/120ms per
+// worker) but on-demand alt-line fetches and prop background refreshes had
+// none. When all 75 prop cache entries hit their refresh-ahead threshold
+// simultaneously (15 MLB games × 5 prop types), they fired 75 concurrent
+// TOA calls and collided with the alt-line pre-warm and main-market fetches.
+//
+// Env knobs (no Railway restart needed — read at boot):
+//   TOA_MIN_INTERVAL_MS  (default 50)  — min ms between starting each request
+//   TOA_MAX_CONCURRENT   (default 4)   — max in-flight TOA calls at once
+//
+// Throughput: 4 concurrent × (1000ms / 50ms) = ~80 req/s sustained. Well
+// under any TOA tier's rate limit while still keeping warm cycles fast.
+// The existing WARM_REQUEST_DELAY_MS/WARM_CONCURRENCY per-worker sleeps are
+// harmless with the gate in place — they just add extra spacing on top.
+const _TOA_MIN_INTERVAL_MS = parseInt(process.env.TOA_MIN_INTERVAL_MS) || 50;
+const _TOA_MAX_CONCURRENT  = parseInt(process.env.TOA_MAX_CONCURRENT)  || 4;
+let   _toaInFlight = 0;
+const _toaQueue    = [];
+
+function _drainToaQueue() {
+  while (_toaQueue.length && _toaInFlight < _TOA_MAX_CONCURRENT) {
+    _toaInFlight++;
+    _toaQueue.shift()(); // resolve the waiter → that caller proceeds
+  }
+}
+function _toaAcquire() {
+  return new Promise(resolve => { _toaQueue.push(resolve); _drainToaQueue(); });
+}
+function _toaRelease() {
+  _toaInFlight--;
+  setTimeout(_drainToaQueue, _TOA_MIN_INTERVAL_MS);
+}
+
 async function abortableFetch(url, options, timeoutMs) {
+  const isToa = typeof url === 'string' && url.includes('the-odds-api.com');
+  if (isToa) await _toaAcquire();
   const t = timeoutMs != null ? timeoutMs : ODDS_API_FETCH_TIMEOUT_MS;
-  // 0 disables the timeout entirely
-  if (!t || t <= 0) return fetch(url, options);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), t);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    // 0 disables the timeout entirely
+    if (!t || t <= 0) return await fetch(url, options);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), t);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
   } finally {
-    clearTimeout(timer);
+    if (isToa) _toaRelease();
   }
 }
 
