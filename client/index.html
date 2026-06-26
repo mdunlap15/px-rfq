@@ -10086,6 +10086,20 @@
           fairProb *= fp;
         }
         if (!hasFair || fairProb <= 0 || fairProb >= 1) continue;
+        // SGP correlation adjustment. For same-game parlays the legs are
+        // correlated, so the TRUE fair is the naive leg-product times the SGP
+        // correlation factor — the SAME factor our OFFER is built on. Without
+        // this, the chart measured our correlation-aware offer against a
+        // correlation-BLIND baseline, inflating our pp-above-fair by the entire
+        // correlation lift and making correctly-priced SGPs look 3–6pp rich
+        // (the "SGP overpricing" false alarm). The book leg-products carry no
+        // correlation, so against this same true fair they correctly appear to
+        // UNDER-price the correlation — an apples-to-apples comparison.
+        const sgpFactor = Number(o.meta && o.meta.sgpCorrelationFactor);
+        if (Number.isFinite(sgpFactor) && sgpFactor > 0 && sgpFactor !== 1) {
+          fairProb *= sgpFactor;
+          if (fairProb <= 0 || fairProb >= 1) continue;
+        }
 
         // Compound book probs — DNB-aware. For soccer 2-way moneyline legs
         // (PX uses Draw No Bet semantics) the per-book stored *DNBProb is
