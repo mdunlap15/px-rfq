@@ -7549,31 +7549,13 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: parlay realized profit / total settled parlay stake — BOTH must be
-    // full-history. The numerator (parlayPnL) is the all-time Parlay P&L, so
-    // the denominator must be all-time settled stake too. pxPnL.stakes.totalSettled
-    // is RECENT-ONLY (the bounded /parlay/sp/orders REST window) — pairing it
-    // with the full-history numerator produced absurd ROI, e.g. +3325% =
-    // $22,314 P&L / $671 of recently-settled stake. So always derive the
-    // denominator from the full settled-order history in allOrders (/orders
-    // returns the complete settled set). NOTE: depends on /orders not being
-    // truncated; if that poll payload is ever capped, source a full-history
-    // settled-stake total from the server instead.
-    let roi;
-    {
-      let settledRiskTotal = 0;
-      let settledPnlSum = 0;
-      for (const o of (allOrders || [])) {
-        if (!o.status || !o.status.startsWith('settled_')) continue;
-        settledPnlSum += (o.pnl || 0);
-        if (o.confirmedStake && o.offeredOdds) settledRiskTotal += calcBettorWager(o.confirmedStake, o.offeredOdds);
-        else if (o.confirmedStake) settledRiskTotal += o.confirmedStake;
-      }
-      // Keep the numerator tied to the displayed headline Parlay P&L; fall back
-      // to the settled-order pnl sum when parlayPnL isn't available.
-      const num = (parlayPnL != null) ? parlayPnL : settledPnlSum;
-      roi = settledRiskTotal > 0 ? (num / settledRiskTotal) * 100 : null;
-    }
+    // ROI (15-day): realized parlay P&L ÷ settled parlay stake over orders
+    // SETTLED in the last 15 days. Computed SERVER-SIDE (portfolio.roi15d) from
+    // the full in-memory settled history — the /orders client payload is capped
+    // at 100 rows and cannot cover 15 days at production volume, so a client-side
+    // window would silently undercount the denominator. Show '-' until it loads.
+    const roi = (portfolio && portfolio.roi15d != null && isFinite(portfolio.roi15d))
+      ? Number(portfolio.roi15d) : null;
     const roiCls = roi != null ? (roi >= 0 ? 'positive' : 'negative') : 'neutral';
     const roiStr = roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%' : '-';
 
@@ -7660,7 +7642,7 @@
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
-        ${stat('ROI', roiStr, roiCls, 'Parlay realized P&L / total settled parlay stake')}
+        ${stat('ROI (15-day)', roiStr, roiCls, 'Parlay realized P&L ÷ settled parlay stake, over orders settled in the last 15 days')}
         ${stat('Open Parlays', confirmed)}
       </div>
     </div>`;

@@ -3086,6 +3086,27 @@ function getRecentOrders(limit = 200) {
   }).sort((a, b) => (b.quotedAt || '').localeCompare(a.quotedAt || ''));
 }
 
+// Realized ROI over a trailing window (default 15 days): sum of settled parlay
+// P&L ÷ sum of settled parlay stake, for orders SETTLED within `days`. Computed
+// from the in-memory orders map (loadFromDb holds the full fill history up to
+// LOAD_CAP=200k, well beyond 15 days), so it covers the whole window — unlike
+// the /orders client payload which is capped at 100 rows. Denominator is
+// confirmedStake (= our SP risk; calcBettorWager returns stake directly).
+function getRoiWindow(days = 15) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  let pnl = 0, stake = 0, n = 0;
+  for (const o of Object.values(orders)) {
+    if (!o.status || !String(o.status).startsWith('settled_')) continue;
+    const t = o.settledAt ? new Date(o.settledAt).getTime() : NaN;
+    if (Number.isNaN(t) || t < cutoff) continue;
+    pnl += Number(o.pnl || 0);
+    stake += Number(o.confirmedStake || 0);
+    n++;
+  }
+  const roi = stake > 0 ? (pnl / stake) * 100 : null;
+  return { days, roi, pnl: Math.round(pnl * 100) / 100, stake: Math.round(stake * 100) / 100, n };
+}
+
 function getStats() {
   return {
     ...stats,
@@ -6285,6 +6306,14 @@ async function reconcileGhostConfirmed(px) {
   let autoCleared = 0;
   for (const order of Object.values(orders)) {
     if (order.status !== 'confirmed') continue;
+    // Skip rows we've deliberately orphaned (pre-cutover backlog PX wiped at
+    // the 2026-06-16 migration — settlement unrecoverable, terminal-flagged
+    // by scripts/_orphan_precutover_confirmed.js). They never reload from DB
+    // (loadOrders excludes 'orphaned'), but if one is still in memory from
+    // before the orphan write, don't re-process or re-save it as 'confirmed'.
+    // The db.saveOrder orphan guard is the real protection; this just avoids
+    // wasted work + log noise.
+    if (order.meta && order.meta.orphaned) continue;
     // Skip very-fresh confirmations — give the finalize event time to arrive.
     if (order.confirmedAt && (Date.now() - new Date(order.confirmedAt).getTime()) < 60 * 1000) continue;
     checked++;
@@ -6707,6 +6736,7 @@ module.exports = {
   getPlayerExposureSnapshot,
   playerKeyForLeg,
   getRecentOrders,
+  getRoiWindow,
   getStats,
   getPnLBySport,
   getExposureForTeam,

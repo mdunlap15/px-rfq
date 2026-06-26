@@ -1138,6 +1138,13 @@ function startStatusServer() {
         //   accountPnL ≈ parlayRealizedPnL + singleLegPnL − singleLegFees ± transfers
         // (singleLegPnL not yet tracked — follow-up.)
         const parlayRealizedPnL = orderTracker.getStats().runningPnL;
+        // ROI (15-day): realized parlay P&L ÷ settled parlay stake over orders
+        // settled in the last 15 days. Computed server-side from the full
+        // in-memory settled history (the /orders client payload is capped at
+        // 100 rows and can't cover 15 days at volume). null until enough
+        // settled history is loaded.
+        let roi15d = null;
+        try { roi15d = orderTracker.getRoiWindow(15).roi; } catch (_) { /* non-fatal */ }
         return {
           bankroll: getBankroll(),
           balance: liveBal || getBankroll(),
@@ -1145,6 +1152,8 @@ function startStatusServer() {
           startingBankroll,
           // PARLAY RFQ performance — use THIS as the parlay headline.
           parlayRealizedPnL,
+          // Trailing-15-day realized ROI (parlay), for the "ROI (15-day)" stat.
+          roi15d,
           // Account-wide, commingled (parlay + single-leg − fees ± transfers).
           // Not parlay performance. Kept for equity reconciliation only.
           accountPnL,

@@ -6775,25 +6775,12 @@
     const portCls = portPct > 90 ? 'negative' : portPct > 70 ? '' : 'positive';
     const portStr = fmtDollar(portRisk);
 
-    // ROI: full-history parlay realized profit / full-history settled stake,
-    // both summed from allOrders (/orders returns the complete settled set).
-    // Do NOT use pxPnL.stakes.totalSettled / pxPnL.realizedPnL — those are
-    // RECENT-only (the bounded /parlay/sp/orders window), which makes ROI a
-    // noisy recent-slice figure inconsistent with the all-time headline P&L
-    // (and on the main dashboard the same recent denominator paired with the
-    // all-time numerator produced a +3325% ROI).
-    let roi;
-    {
-      let settledPnl = 0;
-      let settledRiskTotal = 0;
-      for (const o of (allOrders || [])) {
-        if (!o.status || !o.status.startsWith('settled_')) continue;
-        settledPnl += (o.pnl || 0);
-        if (o.confirmedStake && o.offeredOdds) settledRiskTotal += calcBettorWager(o.confirmedStake, o.offeredOdds);
-        else if (o.confirmedStake) settledRiskTotal += o.confirmedStake;
-      }
-      roi = settledRiskTotal > 0 ? (settledPnl / settledRiskTotal) * 100 : null;
-    }
+    // ROI (15-day): realized parlay P&L ÷ settled parlay stake over orders
+    // settled in the last 15 days. Computed SERVER-SIDE (portfolio.roi15d) from
+    // the full in-memory settled history — the /orders client payload is capped
+    // at 100 rows and can't cover 15 days at volume. Show '-' until it loads.
+    const roi = (portfolio && portfolio.roi15d != null && isFinite(portfolio.roi15d))
+      ? Number(portfolio.roi15d) : null;
     const roiCls = roi != null ? (roi >= 0 ? 'positive' : 'negative') : 'neutral';
     const roiStr = roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%' : '-';
 
@@ -6875,7 +6862,7 @@
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
-        ${stat('ROI', roiStr, roiCls, 'Realized P&L / total settled stake')}
+        ${stat('ROI (15-day)', roiStr, roiCls, 'Realized P&L ÷ settled stake over orders settled in the last 15 days')}
         ${stat('Open Parlays', confirmed)}
       </div>
     </div>`;
