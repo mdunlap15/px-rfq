@@ -346,6 +346,23 @@ async function startup() {
   } catch (err) {
     log.warn('Startup', `    ⚠ Manual line-odds hydrate failed: ${err.message}`);
   }
+  // Hydrate the creator-ID blocklist from Supabase kv_store. MUST run before
+  // websocket.connect so the RFQ-time gate (services/websocket.handleRFQ) is
+  // armed from the very first RFQ. Previously this ran in a fire-and-forget
+  // IIFE AFTER connect and BEHIND several ~15s Puppeteer pre-warms, leaving a
+  // tens-of-seconds boot window where blocked creators sailed through BOTH the
+  // RFQ-time and confirm-time gates (root cause of the 2026-06-26 slip — creator
+  // 45628ef7 quoted+filled ~19s apart while the cache was still empty). The 30s
+  // out-of-band refresh timer starts here too; the confirm-time ensureFresh()
+  // is the backstop if this boot load fails.
+  try {
+    const creatorBlocklist = require('./services/creator-blocklist');
+    await creatorBlocklist.restoreFromPersistence();
+    const n = creatorBlocklist.list().length;
+    log.info('Startup', `    ✓ Creator blocklist hydrated: ${n} entr${n === 1 ? 'y' : 'ies'}`);
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Creator blocklist hydrate failed: ${err.message} — ensureFresh() will retry at confirm time`);
+  }
   try {
     await websocket.connect();
     log.info('Startup', '    ✓ WebSocket connected');
@@ -665,18 +682,9 @@ async function startup() {
     } catch (err) {
       log.warn('BetOnlineScraper', `Initial Zurich prime failed: ${err.message}`);
     }
-
-    // Creator-ID blocklist hydration. Pulls the persisted blocked-creator
-    // list from Supabase kv_store so handleRFQ's check has a populated Set
-    // from the very first RFQ. Also starts the 30s refresh interval so
-    // out-of-band kv mutations (e.g. someone using psql directly) propagate
-    // without a restart.
-    try {
-      const creatorBlocklist = require('./services/creator-blocklist');
-      await creatorBlocklist.restoreFromPersistence();
-    } catch (err) {
-      log.warn('CreatorBlocklist', `Hydrate failed (non-fatal, starting empty): ${err.message}`);
-    }
+    // NOTE: creator-ID blocklist hydration moved to BEFORE websocket.connect
+    // (see the "MUST run before websocket.connect" block above) so the RFQ-time
+    // gate is armed from the first RFQ rather than after this slow pre-warm IIFE.
   })();
   setInterval(async () => {
     await Promise.all(['nba', 'nhl'].map(sport =>

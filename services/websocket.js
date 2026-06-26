@@ -1723,40 +1723,45 @@ async function handleConfirm(data) {
     }
 
     // Blocklist check at confirm time — the LAST gate before a wager lands.
-    // handleRFQ declines blocked creators before pricing, BUT PX frequently
-    // omits creator_id on the live RFQ (it's backfilled to meta only later),
-    // so a blocked counterparty can slip past the RFQ-time gate with
-    // meta.creatorId still null (observed 2026-06-06: blocked creator
-    // 45628ef7 got two $4,940 fills this way). By confirm time the order
-    // exists in PX's order feed WITH its creator_id, so when meta lacks it we
-    // resolve it live (one recent-orders page) and re-check. Also still
-    // catches creators blocked AFTER the quote landed.
+    // handleRFQ declines blocked creators before pricing, BUT a blocked
+    // counterparty can still reach here two ways:
+    //   (a) PX omits creator_id on the live RFQ (backfilled to meta only
+    //       later) — observed 2026-06-06, two $4,940 fills with meta.creatorId
+    //       still null. By confirm time PX's order feed carries creator_id, so
+    //       we resolve it live (bounded REST) when meta lacks it.
+    //   (b) on a COLD BOOT the in-memory blocklist cache is still empty when
+    //       BOTH the RFQ and this confirm arrive — observed 2026-06-26, creator
+    //       45628ef7 quoted+filled ~19s apart inside the boot window even though
+    //       meta.creatorId WAS present (blocklist hydration ran fire-and-forget
+    //       AFTER connect, behind slow Puppeteer pre-warms). resolveConfirmBlock
+    //       self-heals this with a bounded ensureFresh() before deciding.
+    // resolveConfirmBlock returns { blocked, creatorId, via } — via ∈ meta/rest.
     try {
       const blocklist = require('./creator-blocklist');
-      let blockedCid = originalOrder.meta && (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
-      // Gap-plug: only pay the REST round-trip when there's actually someone
-      // to block and we don't already know who this counterparty is.
-      if (!blockedCid && typeof blocklist.list === 'function' && blocklist.list().length > 0) {
-        try {
-          // Bounded — must NEVER hang the confirm hot path. If PX's orders
-          // endpoint is slow/unresponsive, give up fast and proceed without the
-          // live creator (the RFQ-time gate covers the common case). 2026-06-10:
-          // an UNBOUNDED fetch here hung EVERY confirm for ~2h when the PX
-          // orders endpoint degraded — zero fills, no rejects, no errors logged.
+      const metaCreatorId = originalOrder.meta &&
+        (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
+      const verdict = await blocklist.resolveConfirmBlock({
+        metaCreatorId: metaCreatorId || null,
+        // Bounded — must NEVER hang the confirm hot path. If PX's orders
+        // endpoint is slow/unresponsive, give up fast and proceed without the
+        // live creator (the RFQ-time gate covers the common case). 2026-06-10:
+        // an UNBOUNDED fetch here hung EVERY confirm for ~2h when the PX orders
+        // endpoint degraded — zero fills, no rejects, no errors logged.
+        fetchLiveCreatorId: async () => {
           const liveOrder = await Promise.race([
             px.fetchOrderByUuid(orderUuid),
             new Promise((_, rej) => setTimeout(() => rej(new Error('creator-lookup timeout (800ms)')), 800)),
           ]);
-          const liveCid = liveOrder && liveOrder.creator_id;
-          if (liveCid) {
-            blockedCid = liveCid;
-            if (originalOrder.meta) originalOrder.meta.creatorId = liveCid; // stamp so we don't re-query
-            log.info('Confirm', `Resolved creator ${liveCid} live for parlay=${parlayId} (PX omitted it on the RFQ)`);
-          }
-        } catch (e) { log.warn('Confirm', `Live creator lookup failed for ${parlayId}: ${e.message}`); }
+          return liveOrder && liveOrder.creator_id;
+        },
+      });
+      // Stamp a REST-resolved id back onto meta so later handlers don't re-query.
+      if (verdict.via === 'rest' && verdict.creatorId && originalOrder.meta) {
+        originalOrder.meta.creatorId = verdict.creatorId;
+        log.info('Confirm', `Resolved creator ${verdict.creatorId} live for parlay=${parlayId} (PX omitted it on the RFQ)`);
       }
-      if (blockedCid && blocklist.isBlocked(blockedCid)) {
-        log.info('Confirm', `Rejecting: blocked creator ${blockedCid} — parlay=${parlayId}`);
+      if (verdict.blocked) {
+        log.info('Confirm', `Rejecting: blocked creator ${verdict.creatorId} (via ${verdict.via}) — parlay=${parlayId}`);
         orderTracker.recordRejection(parlayId, 'blocked creator');
         if (callbackUrl) {
           try { await px.confirmOrder(callbackUrl, orderUuid, 'reject'); }
