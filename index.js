@@ -1099,17 +1099,25 @@ function startStatusServer() {
         // fall back to the tracker only on cold-start.
         const pxOpenExposure = pxLedger.getCachedOpenExposure();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : currentRisk;
-        // Post-CFTC-merge (2026-06-08): PX's matched_wager_balance is the
-        // authoritative ACCOUNT-WIDE locked stake (parlay + single-leg). True
-        // equity = cash + matched_wager_balance. The old `cash + parlay-open`
-        // undercounted because the parlay tracker can't see single-leg matched
-        // stake on the now-commingled account (it dropped ~$8K of locked stake,
-        // understating equity by the same). Prefer PX's figure; fall back to the
-        // parlay-open estimate only when matched_wager_balance isn't available.
+        // Post-CFTC-merge (2026-06-08) the account is commingled (parlay +
+        // single-leg). The two locked-stake pools are DISJOINT and must be
+        // SUMMED for account-wide deployed:
+        //   • parlay open stake  = effectiveRisk (PX /parlay/sp/orders open
+        //                          exposure via pxLedger; tracker on cold-start)
+        //   • single-leg matched = PX matched_wager_balance
+        // VERIFIED against PX (2026-06-26): matched_wager_balance ($13,360.69) is
+        // LESS than parlay open exposure ($14,308.58) alone — proof it EXCLUDES
+        // parlay stake (it is single-leg / non-parlay matched stake only). The
+        // old code used matched_wager_balance ALONE as `deployed`, dropping the
+        // entire open-parlay stake, so totalEquity (= cash + deployed) sank as
+        // parlays were deployed (cash debited, deployed not credited). Summing
+        // makes equity invariant to deploying (cash→deployed shift nets zero).
         const matchedWagerBalance = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
           ? config.pricing.liveMatchedWager
           : null;
-        const deployed = matchedWagerBalance != null ? matchedWagerBalance : effectiveRisk;
+        const singleLegDeployed = matchedWagerBalance != null ? matchedWagerBalance : 0;
+        const parlayDeployed = effectiveRisk != null ? effectiveRisk : 0;
+        const deployed = parlayDeployed + singleLegDeployed;
         const totalEquity = (accountValue != null) ? (accountValue + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise

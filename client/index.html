@@ -7608,16 +7608,24 @@
     // PX's balance field is cash-available, NOT total equity — PX has already
     // subtracted locked stakes from cash. Total equity = cash + locked stake.
     // Post-CFTC-merge (2026-06-08) the account is commingled (parlay +
-    // single-leg), so the authoritative locked-stake figure is PX's
-    // matched_wager_balance (on window._pxBalance), NOT the parlay-only open
-    // exposure (portRisk) — that misses single-leg matched stake and understated
-    // equity by ~$8K. Use matched_wager_balance when present; fall back to the
-    // parlay open-exposure estimate until the balance object loads it.
+    // single-leg). The two locked-stake pools are DISJOINT and must be SUMMED:
+    //   • parlay open stake     = portRisk (our /parlay/sp/orders open exposure)
+    //   • single-leg matched    = PX matched_wager_balance
+    // VERIFIED against PX (2026-06-26): matched_wager_balance ($13,360) is LESS
+    // than the parlay open exposure ($14,308) alone, proving it EXCLUDES parlay
+    // stake. The old code used matched_wager_balance ALONE as "Total Deployed",
+    // which dropped the entire open-parlay stake from deployed — so Account
+    // Equity (= cash + deployed) sank as parlays were deployed (cash left but
+    // deployed didn't rise). Summing makes equity invariant to deploying.
     const matchedWagerNum = (window._pxBalance && typeof window._pxBalance === 'object'
       && window._pxBalance.matched_wager_balance != null
       && !isNaN(Number(window._pxBalance.matched_wager_balance)))
       ? Number(window._pxBalance.matched_wager_balance) : null;
-    const deployedAmt = matchedWagerNum != null ? matchedWagerNum : portRisk;
+    const parlayDeployed = (portRisk != null && !isNaN(portRisk)) ? portRisk : 0;
+    const singleLegDeployed = matchedWagerNum != null ? matchedWagerNum : 0;
+    // Sum the two pools. Until the balance object loads (matchedWagerNum null),
+    // show the parlay-only estimate rather than 0.
+    const deployedAmt = matchedWagerNum != null ? (parlayDeployed + singleLegDeployed) : portRisk;
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
@@ -7647,7 +7655,7 @@
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
         ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
-        ${stat('Total Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake = single-leg deployed (PX "Filled") + parlay My-Risk, per PX matched_wager_balance (% of account equity)')}
+        ${stat('Total Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake = parlay open exposure (My-Risk) + single-leg matched stake (PX matched_wager_balance). The two are disjoint pools, summed. (% of account equity)')}
         ${stat('Deployed - Parlays', portStr, portCls, 'Parlay-only locked stake — sum of the My Risk column across open parlays (the parlay slice of Total Deployed; single-leg deployed = Total Deployed − this)')}
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
