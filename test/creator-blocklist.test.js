@@ -160,6 +160,29 @@ test('ensureFresh does not re-hit the DB while the cache is fresh', async () => 
   assert.equal(calls.count, 1, 'second ensureFresh within maxAge must not re-load');
 });
 
+// --- Post-block sweep: add() rejects the creator's still-open resting quotes ---
+
+test('add() sweeps the blocked creator\'s open quotes and releases their exposure', async () => {
+  mockLoadKV(() => kvWith()); // start empty so add() is a genuine new block
+  const orderTracker = require('../services/order-tracker');
+
+  // Two resting quotes from the soon-to-be-blocked creator, one from an innocent.
+  orderTracker.recordQuote('sweep-blk-1', [{ team: 'X', market: 'spread', sport: 'baseball_mlb' }],
+    100, 50, 0.45, { creatorId: BLOCKED });
+  orderTracker.recordQuote('sweep-blk-2', [{ team: 'Y', market: 'total', sport: 'baseball_mlb' }],
+    120, 75, 0.40, { creatorId: BLOCKED });
+  orderTracker.recordQuote('sweep-ok-1', [{ team: 'Z', market: 'spread', sport: 'baseball_mlb' }],
+    110, 60, 0.42, { creatorId: INNOCENT });
+
+  const result = await blocklist.add(BLOCKED, 'sharp');
+
+  assert.equal(result.added, true);
+  assert.ok(result.sweep, 'add() should return a sweep summary');
+  assert.equal(result.sweep.swept, 2, 'both blocked-creator open quotes are swept');
+  assert.equal(result.sweep.riskReleased, 125, 'released risk = 50 + 75');
+  assert.deepEqual(result.sweep.parlayIds.sort(), ['sweep-blk-1', 'sweep-blk-2']);
+});
+
 // --- A transient null load must NOT mark the cache fresh (no fail-open-but-fresh) ---
 
 test('a null/error load does not satisfy freshness — a later ensureFresh retries', async () => {

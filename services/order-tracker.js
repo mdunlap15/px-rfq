@@ -861,6 +861,24 @@ function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) 
     order.confirmedOdds = confirmedOdds;
     order.confirmedStake = confirmedStake;
     order.orderUuid = orderUuid;
+    // Leak detector: a confirm should NEVER reach here for a blocklisted
+    // creator — the confirm-time gate (websocket resolveConfirmBlock) rejects
+    // them first. If one slips through, a residual fail-open edge fired (e.g.
+    // Supabase unreachable through boot hydration, or PX omitted creator_id AND
+    // the 800ms REST lookup timed out). Surface it LOUDLY so it's caught in
+    // minutes, not a 30-day audit. Synchronous in-memory check — no hot-path cost.
+    try {
+      const cid = order.meta && (order.meta.creatorId || order.meta.creator_id);
+      if (cid) {
+        const blocklist = require('./creator-blocklist');
+        if (blocklist.isBlocked(cid)) {
+          log.error('CreatorBlocklist',
+            `LEAK: confirmed order from BLOCKED creator ${cid} — parlay=${parlayId}, ` +
+            `stake=$${confirmedStake}, odds=${confirmedOdds}. Confirm-gate failed open ` +
+            `(check Supabase/boot hydration or REST-lookup timeout).`);
+        }
+      }
+    } catch (_) { /* never let the leak check break confirmation */ }
     // Arm the standalone signature-cooldown lock the moment status flips
     // to 'confirmed'. Independent from templateExposure.recordConfirmation
     // (which is called below in a gated block). Belt-and-suspenders for
@@ -1214,6 +1232,38 @@ function recordRejection(parlayId, reason) {
   // already removes pending on graduation; this covers the reject path.
   try { templateExposure.releasePending(parlayId); } catch (_) { /* best-effort */ }
   return order;
+}
+
+// Post-block sweep: when a creator is added to the blocklist, proactively
+// reject our still-OPEN (resting) quotes from that creator and release the risk
+// we had reserved for them. PX has no offer-retract API, so this can't pull a
+// resting offer out of PX's book — but the confirm-time gate
+// (resolveConfirmBlock) rejects any later confirm for a blocked creator, so the
+// offer simply won't fill. This sweep makes that immediate and explicit: it
+// frees the reserved exposure budget right away and leaves a clean audit
+// instead of waiting for each confirm to trickle in. Only touches
+// status==='quoted' orders we can attribute to the creator (recordRejection's
+// own guard skips anything already confirmed/settled). Synchronous, in-memory;
+// safe to call from creator-blocklist.add().
+function sweepOpenOrdersByCreator(creatorId, reason) {
+  if (!creatorId) return { swept: 0, parlayIds: [], riskReleased: 0 };
+  const cid = String(creatorId);
+  const parlayIds = [];
+  let riskReleased = 0;
+  for (const [parlayId, order] of Object.entries(orders)) {
+    if (!order || order.status !== 'quoted') continue;
+    const ocid = order.meta && (order.meta.creatorId || order.meta.creator_id);
+    if (!ocid || String(ocid) !== cid) continue;
+    riskReleased += Number(order.maxRisk || (order.meta && order.meta.maxRisk) || 0) || 0;
+    try { recordRejection(parlayId, reason || 'creator blocked — swept'); } catch (_) { /* best-effort */ }
+    parlayIds.push(parlayId);
+  }
+  if (parlayIds.length) {
+    log.warn('CreatorBlocklist',
+      `Post-block sweep: rejected ${parlayIds.length} open quote(s) from creator ${cid.slice(0, 8)} ` +
+      `($${Math.round(riskReleased)} risk released)`);
+  }
+  return { swept: parlayIds.length, parlayIds, riskReleased: Math.round(riskReleased) };
 }
 
 /**
@@ -6574,6 +6624,7 @@ module.exports = {
   getRecentLatencyRecords,
   recordConfirmation,
   recordRejection,
+  sweepOpenOrdersByCreator,
   recordFinalized,
   recordSettlement,
   recordLegSettlement,

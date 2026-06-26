@@ -212,7 +212,31 @@ async function add(creatorId, reason) {
   });
   await _persist();
   log.info('CreatorBlocklist', `Blocked ${id} (reason: ${reason || '<none>'})`);
-  return { added: true, updated: false };
+  // Post-block sweep: PX exposes no offer-retract API, so our already-resting
+  // quotes from this creator stay live in PX's book until they expire or a
+  // confirm arrives. The confirm-time gate now rejects those confirms, so they
+  // can't FILL — but they're still holding reserved exposure. Sweep them now to
+  // free that budget immediately and leave an explicit audit (would have caught
+  // the 4fc8c778 2026-06-17 same-day-block cluster). Off the hot path; never
+  // throws. Lazy require avoids a load-order cycle with order-tracker.
+  const sweep = _sweepOpenOrders(id, reason);
+  return { added: true, updated: false, sweep };
+}
+
+// Reject + release exposure on this creator's still-open quotes. Returns a
+// summary { swept, parlayIds, riskReleased }; safe no-op if order-tracker isn't
+// available. Never throws — blocking must succeed even if the sweep can't run.
+function _sweepOpenOrders(id, reason) {
+  try {
+    const orderTracker = require('./order-tracker');
+    if (typeof orderTracker.sweepOpenOrdersByCreator === 'function') {
+      return orderTracker.sweepOpenOrdersByCreator(
+        id, reason ? `creator blocked: ${reason}` : 'creator blocked — swept');
+    }
+  } catch (err) {
+    log.warn('CreatorBlocklist', `Post-block sweep failed for ${id}: ${err.message}`);
+  }
+  return { swept: 0, parlayIds: [], riskReleased: 0 };
 }
 
 async function remove(creatorId) {
