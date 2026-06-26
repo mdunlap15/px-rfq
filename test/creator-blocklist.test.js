@@ -26,6 +26,12 @@ const BLOCKED = '45628ef7-dbdb-46f9-b143-3f47822a9013'; // the real incident cre
 const INNOCENT = '00000000-0000-0000-0000-000000000000';
 
 const _origLoadKV = db.loadKV;
+// IMPORTANT: stub saveKV too. add()/remove() call _persist() → db.saveKV, and
+// without a stub the test writes its (empty/test) blocklist to the REAL Supabase
+// kv_store, wiping production entries. (This happened 2026-06-26: a test run
+// clobbered the live 6-entry blocklist down to 1.) beforeEach installs a no-op;
+// afterEach restores the real one.
+const _origSaveKV = db.saveKV;
 
 // Build a kv_store payload shaped like the persisted blocklist row.
 function kvWith(...creatorIds) {
@@ -49,11 +55,14 @@ function mockLoadKV(impl) {
 }
 
 beforeEach(() => {
+  // Never let a test persist to the real kv_store (see _origSaveKV note above).
+  db.saveKV = async () => {};
   blocklist.__resetForTest(); // cold-boot state: empty + uninitialized
 });
 
 afterEach(() => {
   db.loadKV = _origLoadKV;
+  db.saveKV = _origSaveKV;
   blocklist.__resetForTest();
 });
 
