@@ -242,6 +242,15 @@ const config = {
     // Default 0 = disabled (Railway env is the live lever).
     vigHeavyFavFairMarkup: parseFloat(process.env.VIG_HEAVY_FAV_FAIR_MARKUP) || 0,
     vigHeavyFavThreshold: parseFloat(process.env.VIG_HEAVY_FAV_THRESHOLD) || 0.70,
+    // UPPER fair-prob cap on the generic heavy-fav markup. Above this fair
+    // prob the markup is SKIPPED — extreme chalk is where (a) our de-vig
+    // already tends to under-rate the favorite (the >0.85 bucket where Pin/DK
+    // sit BELOW our fair), so adding margin double-counts, and (b) a markup
+    // can push the price past PX's reject threshold. Without this cap the
+    // markup applied to any leg above the threshold up to 0.99 — the exact
+    // safety gap that made VIG_HEAVY_FAV_FAIR_MARKUP unsafe to enable env-only.
+    // Default 0.85. Set to 1 to disable the cap (old behavior).
+    vigHeavyFavFairCap: parseFloat(process.env.VIG_HEAVY_FAV_FAIR_CAP) || 0.85,
     // Soccer Draw-No-Bet favorite markup. SCOPED to DNB legs only (PX
     // "Moneyline (2 Way)" / "Draw No Bet" — lineInfo.isDNB). Same fair-shaped
     // mechanism as vigHeavyFavFairMarkup (offered = p·(1+m), MAX-gated so it
@@ -265,6 +274,14 @@ const config = {
     // Default 0 = disabled — the code deploy is a no-op until this env is set.
     vigDnbFavMarkup: parseFloat(process.env.VIG_DNB_FAV_MARKUP) || 0,
     vigDnbFavThreshold: parseFloat(process.env.VIG_DNB_FAV_THRESHOLD) || 0.55,
+    // UPPER fair-prob cap on the DNB markup. Higher than the generic cap
+    // (0.92 vs 0.85) because DNB favorites legitimately run hot — the leak is
+    // real all the way up the DNB favorite range — but still guards the most
+    // extreme DNB chalk against reject risk. The sim that calibrated 0.04
+    // (parlay 019ee30e) had no leg above ~0.85, so 0.92 leaves headroom and is
+    // a safety backstop, not an active constraint at the recommended markup.
+    // Default 0.92. Set to 1 to disable.
+    vigDnbFavCap: parseFloat(process.env.VIG_DNB_FAV_CAP) || 0.92,
     // Chalk-stack parlay surcharge. Parlay-level fair-shaped widening
     // that fires only when EVERY leg of a multi-leg parlay is a
     // favorite (fair_prob > vigChalkStackLegThreshold) AND the parlay's

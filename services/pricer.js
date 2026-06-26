@@ -634,7 +634,11 @@ function computeSingleLegQuote(fairProb, sport, marketType, consensusImplied = n
   // parlay-level and doesn't apply to single legs by definition.
   const heavyFavMarkup = config.pricing.vigHeavyFavFairMarkup || 0;
   const heavyFavThreshold = config.pricing.vigHeavyFavThreshold || 0.70;
-  if (heavyFavMarkup > 0 && fairProb > heavyFavThreshold) {
+  const heavyFavCap = config.pricing.vigHeavyFavFairCap || 0.85;
+  // Mirror priceParlay's cap + prop exclusion so the single-leg display
+  // matches the real offer: skip extreme chalk (fp ≥ cap) and player props.
+  const isProp = /^(player_|pitcher_|hitter_|batter_)/.test(marketType || '');
+  if (heavyFavMarkup > 0 && !isProp && fairProb > heavyFavThreshold && fairProb < heavyFavCap) {
     const heavyImplied = fairProb * (1 + heavyFavMarkup);
     if (heavyImplied > impliedProb && heavyImplied < 0.99) {
       impliedProb = heavyImplied;
@@ -2092,15 +2096,26 @@ function priceParlay(legs, opts = {}) {
   // sports' chalk. Folded into the same MAX-gated compound below.
   const dnbFavMarkup = config.pricing.vigDnbFavMarkup || 0;
   const dnbFavThreshold = config.pricing.vigDnbFavThreshold || 0.55;
+  const heavyFavCap = config.pricing.vigHeavyFavFairCap || 0.85;
+  const dnbFavCap = config.pricing.vigDnbFavCap || 0.92;
   if ((heavyFavMarkup > 0 || dnbFavMarkup > 0) && vigLegs.length > 0) {
     let heavyCompound = overrideProduct;
     for (const leg of vigLegs) {
       const fp = leg.fairProb;
+      // Props carry their own VIG_PROP_FLOOR protection and the favorite
+      // markup is calibrated off team-line books, so never apply the GENERIC
+      // markup to a player-prop leg. (DNB legs are team markets, never props.)
+      const mt = leg.lineInfo.marketType || '';
+      const isProp = /^(player_|pitcher_|hitter_|batter_)/.test(mt);
       // DNB favorite: use the larger of the DNB markup and the generic
       // heavy-fav markup so a DNB leg is never marked up LESS than a
-      // same-prob team line would be.
-      const dnbApplies = leg.lineInfo.isDNB && dnbFavMarkup > 0 && fp > dnbFavThreshold;
-      const heavyApplies = heavyFavMarkup > 0 && fp > heavyFavThreshold;
+      // same-prob team line would be. Both are CAPPED at an upper fair-prob
+      // bound so extreme chalk — where our de-vig already under-rates the
+      // favorite and a markup risks a PX reject — is left alone.
+      const dnbApplies = leg.lineInfo.isDNB && dnbFavMarkup > 0
+        && fp > dnbFavThreshold && fp < dnbFavCap;
+      const heavyApplies = heavyFavMarkup > 0 && !isProp
+        && fp > heavyFavThreshold && fp < heavyFavCap;
       if (dnbApplies || heavyApplies) {
         const markup = Math.max(
           dnbApplies ? dnbFavMarkup : 0,
