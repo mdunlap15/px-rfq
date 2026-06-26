@@ -70,6 +70,28 @@ async function saveOrder(order) {
       }
     }
 
+    // Guard: never let a periodic reconcile revert a deliberately-ORPHANED
+    // row back to 'confirmed'. The pre-cutover stuck-'confirmed' backlog
+    // (PX wiped it at the 2026-06-16 CFTC migration, settlement
+    // unrecoverable) was orphaned to a terminal status by
+    // scripts/_orphan_precutover_confirmed.js. The live tracker may still
+    // hold such an order in memory as 'confirmed' (loaded before the
+    // orphan) and reconcileGhostConfirmed re-saves it every cycle — block
+    // that here, where the DB is the source of truth for orphan state.
+    // Scoped to status==='confirmed' writes so it adds no read to the
+    // settlement hot path. See memory pnl-reconciliation-phantom-rows.
+    if (row.status === 'confirmed') {
+      const { data: existing } = await db
+        .from('parlay_orders')
+        .select('status, meta')
+        .eq('parlay_id', order.parlayId)
+        .maybeSingle();
+      if (existing && (existing.status === 'orphaned' || existing.meta?.orphaned)) {
+        log.debug('DB', `Blocked saveOrder for ${order.parlayId} — cannot revert orphaned row to confirmed`);
+        return;
+      }
+    }
+
     const { error } = await db
       .from('parlay_orders')
       .upsert(row, { onConflict: 'parlay_id' });
