@@ -1154,6 +1154,11 @@ function startStatusServer() {
           parlayRealizedPnL,
           // Trailing-15-day realized ROI (parlay), for the "ROI (15-day)" stat.
           roi15d,
+          // PX resting-volume cap multiple (offer-posting capacity = this ×
+          // cash available). Default 50. Surfaced so the dashboard's Listing
+          // Capacity stat uses the same multiple the order-book headroom check
+          // enforces (index.js /admin/offers).
+          restingCapMult: Number(process.env.PX_RESTING_CAP_MULT) || 50,
           // Account-wide, commingled (parlay + single-leg − fees ± transfers).
           // Not parlay performance. Kept for equity reconciliation only.
           accountPnL,
