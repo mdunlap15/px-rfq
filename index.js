@@ -4218,14 +4218,18 @@ function startStatusServer() {
       res.json({ data: { wagers: out }, pages, rateLimited: rl });
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
-  // Matched (open) positions — the "Open Trades" book. Read-only.
+  // Matched (open) positions — the "Open Trades" book. Read-only. get_matched_bets
+  // takes no limit param (400s on one); call it bare unless explicit params given.
   app.get('/px/matched-bets', async (req, res) => {
     try {
+      const params = [];
       const status = String(req.query.status || '').replace(/[^a-z_]/gi, '');
-      const limit = Math.min(parseInt(req.query.limit, 10) || 1000, 5000);
-      const q = `/partner/mm/get_matched_bets?limit=${limit}${status ? `&status=${status}` : ''}`;
+      if (status) params.push('status=' + status);
+      const cursor = String(req.query.cursor || '').replace(/[^a-zA-Z0-9=_:.-]/g, '');
+      if (cursor) params.push('cursor=' + encodeURIComponent(cursor));
+      const q = '/partner/mm/get_matched_bets' + (params.length ? '?' + params.join('&') : '');
       res.json(await px.pxFetch(q));
-    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 400) }); }
   });
 
   // Daily P&L from Supabase (settled orders grouped by date).
