@@ -4165,6 +4165,34 @@ function startStatusServer() {
     });
   });
 
+  // --- Straight (single-leg) wager passthroughs (READ-ONLY) ----------------
+  // The portfolio-tracker app reads the operator's OWN single-leg wager history
+  // and resolves each wager's market/event detail through these thin proxies,
+  // reusing the PX partner auth this app already holds. GET-only; they expose no
+  // trade/cancel capability. All sit behind the same Basic auth as every route.
+  app.get('/px/wager-histories', async (req, res) => {
+    try {
+      const status = String(req.query.status || '').replace(/[^a-z_]/gi, '');
+      const limit = Math.min(parseInt(req.query.limit, 10) || 250, 1000);
+      const q = `/partner/mm/get_wager_histories?limit=${limit}${status ? `&status=${status}` : ''}`;
+      res.json(await px.pxFetch(q));
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+  });
+  app.get('/px/sport-events', async (req, res) => {
+    try {
+      const ids = String(req.query.event_ids || '').replace(/[^0-9,]/g, '');
+      if (!ids) return res.status(400).json({ error: 'event_ids required' });
+      res.json(await px.pxFetch(`/partner/mm/get_sport_events?event_ids=${ids}`));
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+  });
+  app.get('/px/markets', async (req, res) => {
+    try {
+      const id = String(req.query.event_id || '').replace(/[^0-9]/g, '');
+      if (!id) return res.status(400).json({ error: 'event_id required' });
+      res.json(await px.pxFetch(`/partner/mm/get_markets?event_id=${id}`));
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+  });
+
   // Daily P&L from Supabase (settled orders grouped by date).
   // Optional ?groupBy=quoted_at|settled_at — defaults to settled_at.
   // The dashboard's "Daily Volume & P&L" chart groups by quoted_at, so
