@@ -4192,6 +4192,25 @@ function startStatusServer() {
       res.json(await px.pxFetch(`/partner/mm/get_markets?event_id=${id}`));
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
+  // Full open/standing wagers over a date window via the v2 cursor feed, paginated
+  // server-side. Reaches older standing offers (e.g. golf outrights) that fall out
+  // of the recency-capped get_wager_histories window. Returns { data: { wagers } }.
+  app.get('/px/open-wagers', async (req, res) => {
+    try {
+      const days = Math.min(parseInt(req.query.days, 10) || 7, 45);
+      const now = Math.floor(Date.now() / 1000), from = now - days * 86400;
+      let cursor = '', pages = 0; const out = [];
+      for (;;) {
+        const q = `/partner/v2/mm/get_wager_histories?from=${from}&to=${now}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+        const j = await px.pxFetch(q);
+        const d = j && j.data; const ws = (d && d.wagers) || [];
+        out.push(...ws);
+        cursor = d && d.next_cursor; pages++;
+        if (!cursor || !ws.length || pages >= 250) break;
+      }
+      res.json({ data: { wagers: out }, pages });
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+  });
 
   // Daily P&L from Supabase (settled orders grouped by date).
   // Optional ?groupBy=quoted_at|settled_at — defaults to settled_at.
