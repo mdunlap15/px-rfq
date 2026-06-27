@@ -4218,6 +4218,15 @@ function startStatusServer() {
       res.json({ data: { wagers: out }, pages, rateLimited: rl });
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
+  // Matched (open) positions — the "Open Trades" book. Read-only.
+  app.get('/px/matched-bets', async (req, res) => {
+    try {
+      const status = String(req.query.status || '').replace(/[^a-z_]/gi, '');
+      const limit = Math.min(parseInt(req.query.limit, 10) || 1000, 5000);
+      const q = `/partner/mm/get_matched_bets?limit=${limit}${status ? `&status=${status}` : ''}`;
+      res.json(await px.pxFetch(q));
+    } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
+  });
 
   // Daily P&L from Supabase (settled orders grouped by date).
   // Optional ?groupBy=quoted_at|settled_at — defaults to settled_at.
