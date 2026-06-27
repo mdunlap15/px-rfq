@@ -4196,19 +4196,26 @@ function startStatusServer() {
   // server-side. Reaches older standing offers (e.g. golf outrights) that fall out
   // of the recency-capped get_wager_histories window. Returns { data: { wagers } }.
   app.get('/px/open-wagers', async (req, res) => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try {
       const days = Math.min(parseInt(req.query.days, 10) || 7, 45);
       const now = Math.floor(Date.now() / 1000), from = now - days * 86400;
-      let cursor = '', pages = 0; const out = [];
+      let cursor = '', pages = 0, rl = false; const out = [];
       for (;;) {
         const q = `/partner/v2/mm/get_wager_histories?from=${from}&to=${now}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-        const j = await px.pxFetch(q);
+        let j = null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try { j = await px.pxFetch(q); break; }
+          catch (e) { if (/429|rate_limit/i.test(String(e.message))) { rl = true; await sleep(4000 * (attempt + 1)); } else throw e; }
+        }
+        if (!j) break; // gave up on this page after retries -> return partial
         const d = j && j.data; const ws = (d && d.wagers) || [];
         out.push(...ws);
         cursor = d && d.next_cursor; pages++;
-        if (!cursor || !ws.length || pages >= 250) break;
+        if (!cursor || !ws.length || pages >= 400) break;
+        await sleep(350); // pace pagination to stay under PX's rate limit
       }
-      res.json({ data: { wagers: out }, pages });
+      res.json({ data: { wagers: out }, pages, rateLimited: rl });
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
 
