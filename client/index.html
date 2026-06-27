@@ -4318,9 +4318,9 @@
     const dStyle = 'background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 6px; border-radius:4px; font-size:11px;';
     const pFSel = 'background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px;';
     let html = `<div style="padding:8px 12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">
-      <input type="text" placeholder="Search team..." value="${posState.search}"
+      <input type="text" placeholder="Search team or parlay ID..." value="${posState.search}"
         id="pos-search" oninput="posState.search=this.value; rerenderWithFocus(()=>posRerender())"
-        style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; width:150px;">
+        style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; width:170px;">
       <select onchange="posState.statusFilter=this.value; posRerender()" style="${pFSel}">
         <option value="">All statuses</option>
         <option value="won"${posState.statusFilter==='won'?' selected':''}>Won - Awaiting Settle</option>
@@ -4688,7 +4688,7 @@
     // box — and every filter change — preserves focus + caret position.
     const rerend = "rerenderWithFocus(function(){renderSettled({recentOrders:[]})})";
     let html = '<div style="padding:8px 12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">'
-      + '<input type="text" id="settled-search" placeholder="Search team..." value="' + settledState.search + '" oninput="settledState.search=this.value; ' + rerend + '" style="' + sFSel + ' width:150px;">'
+      + '<input type="text" id="settled-search" placeholder="Search team or parlay ID..." value="' + settledState.search + '" oninput="settledState.search=this.value; ' + rerend + '" style="' + sFSel + ' width:170px;">'
       + '<select onchange="settledState.sportFilter=this.value; ' + rerend + '" style="' + sFSel + '"><option value="">All sports</option>'
       + sports.map(s => '<option value="' + s + '"' + (settledState.sportFilter === s ? ' selected' : '') + '>' + sportLabel(s) + '</option>').join('')
       + '</select>'
@@ -4953,7 +4953,7 @@
         <tr>
           <th ${eSortClick('name')}>Team / Selection${eSortArrow('name')}</th>
           <th ${eSortClick('parlays', 'right')}>Parlays${eSortArrow('parlays')}</th>
-          <th ${eSortClick('net', 'right')} title="Worst-case loss after offsetting positions (Over/Under, spread sides)">Net Exposure${eSortArrow('net')}</th>
+          <th ${eSortClick('net', 'right')} title="Probability-weighted worst-case loss after offsetting opposite-side positions (Over/Under, spread sides). The operational headline; the raw tail bound is the Max Payout column.">Net Exposure${eSortArrow('net')}</th>
           <th ${eSortClick('risk', 'right')} title="Sum of each parlay's payout weighted by the probability its OTHER legs hit. Answers 'if this team wins, what's our expected payout?' — not the sum of individual My Risk figures.">Weighted Risk${eSortArrow('risk')}</th>
           <th ${eSortClick('payout', 'right')} title="Sum of every parlay's full payout (unweighted). Worst-case maximum loss if every parlay on this selection wins in full. Matches the sum of the My Risk column in the detail drop-down.">Max Payout${eSortArrow('payout')}</th>
           <th ${eSortClick('remaining', 'right')}>Remaining${eSortArrow('remaining')}</th>
@@ -5629,6 +5629,7 @@
         case 'start': va = a.startTime ? new Date(a.startTime).getTime() : 0; vb = b.startTime ? new Date(b.startTime).getTime() : 0; break;
         case 'parlays': va = a.parlayCount || 0; vb = b.parlayCount || 0; break;
         case 'gross': va = a.grossRisk || 0; vb = b.grossRisk || 0; break;
+        case 'maxPayout': va = a.maxPayout || 0; vb = b.maxPayout || 0; break;
         case 'stakes': va = a.totalStakes || 0; vb = b.totalStakes || 0; break;
         case 'netExposure':
         default: va = a.netExposure || 0; vb = b.netExposure || 0;
@@ -5675,7 +5676,8 @@
     html += '<th ' + gSortClick('parlays', 'right') + '>Parlays' + gSortArrow('parlays') + '</th>';
     html += '<th ' + gSortClick('gross', 'right') + ' title="Sum of each parlay\'s payout weighted by the probability its OTHER legs hit. Not the same as summing My Risk values in the detail drop-down (that would be Max Payout).">Weighted Risk' + gSortArrow('gross') + '</th>';
     html += '<th ' + gSortClick('stakes', 'right') + '>Stakes Held' + gSortArrow('stakes') + '</th>';
-    html += '<th ' + gSortClick('netExposure', 'right') + '>Net Exposure' + gSortArrow('netExposure') + '</th>';
+    html += '<th ' + gSortClick('netExposure', 'right') + ' title="Probability-weighted worst-case loss after offsetting opposite-side positions in this game. The operational headline.">Net Exposure' + gSortArrow('netExposure') + '</th>';
+    html += '<th ' + gSortClick('maxPayout', 'right') + ' title="RAW worst case: every parlay touching this game pays in full — no probability discount, no offset. The brutal tail bound (mirrors the By Team Max Payout column).">Max Payout' + gSortArrow('maxPayout') + '</th>';
     if (maxPerGame > 0) html += '<th style="text-align:right">% of Limit</th>';
     html += '<th style="width:100px;"></th></tr>';
 
@@ -5710,6 +5712,7 @@
       html += '<td style="text-align:right; color:var(--text3);">' + fmtDollar(g.grossRisk || g.worstCase) + '</td>';
       html += '<td style="text-align:right; color:var(--green);">' + fmtDollar(g.totalStakes || 0) + '</td>';
       html += '<td style="text-align:right; font-weight:600; color:' + netColor + ';">' + fmtDollar(netExp) + '</td>';
+      html += '<td style="text-align:right; color:var(--text3);">' + fmtDollar(g.maxPayout || g.grossRisk || 0) + '</td>';
       if (maxPerGame > 0) html += '<td style="text-align:right; color:' + barColor + ';">' + pct + '%</td>';
       html += '<td><div style="background:var(--surface); border-radius:4px; height:6px; overflow:hidden;"><div style="background:' + barColor + '; width:' + Math.min(pct, 100) + '%; height:100%; border-radius:4px;"></div></div></td>';
       html += '</tr>';
@@ -5794,7 +5797,7 @@
       detail += '</table>';
 
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
-      html += '<td colspan="' + (maxPerGame > 0 ? 9 : 8) + '" style="padding:8px 12px;">';
+      html += '<td colspan="' + (maxPerGame > 0 ? 10 : 9) + '" style="padding:8px 12px;">';
       html += '<div style="font-size:11px; font-weight:600; color:var(--text2); margin-bottom:4px;">PARLAYS IN THIS GAME</div>';
       html += detail;
       html += '</td></tr>';
@@ -8317,8 +8320,13 @@
   }
   /** Render date range filter inputs — uses datetime-local for time precision */
   function dateFilterHtml(stateObj, rerenderFn, style) {
-    return '<input type="datetime-local" value="' + (stateObj.dateFrom || '') + '" onchange="' + stateObj._name + '.dateFrom=this.value; ' + rerenderFn + '()" style="' + style + '" title="From date/time">' +
-           '<input type="datetime-local" value="' + (stateObj.dateTo || '') + '" onchange="' + stateObj._name + '.dateTo=this.value; ' + rerenderFn + '()" style="' + style + '" title="To date/time">';
+    // Leading "Date:" label + an en-dash between the two inputs so it's clear
+    // these are a from/to date-range filter (empty datetime-local inputs render
+    // blank under the dark theme, with no hint of what they do).
+    return '<span style="color:var(--text3); font-size:11px;" title="Filter positions by date/time range">Date:</span>' +
+           '<input type="datetime-local" aria-label="From date/time" value="' + (stateObj.dateFrom || '') + '" onchange="' + stateObj._name + '.dateFrom=this.value; ' + rerenderFn + '()" style="' + style + '" title="From date/time (range start)">' +
+           '<span style="color:var(--text3); font-size:11px;">–</span>' +
+           '<input type="datetime-local" aria-label="To date/time" value="' + (stateObj.dateTo || '') + '" onchange="' + stateObj._name + '.dateTo=this.value; ' + rerenderFn + '()" style="' + style + '" title="To date/time (range end)">';
   }
 
   // -----------------------------------------------------------------------
@@ -9175,9 +9183,9 @@
       + '<th ' + hClick('time') + ' style="padding:2px 8px;text-align:left;">Settled' + arrow('time') + '</th>'
       + '<th ' + hClick('selections') + ' style="padding:2px 8px;text-align:left;">Selections' + arrow('selections') + '</th>'
       + '<th ' + hClick('legs') + ' style="padding:2px 8px;text-align:center;">Legs' + arrow('legs') + '</th>'
-      + '<th ' + hClick('odds') + ' style="padding:2px 8px;text-align:right;">Odds' + arrow('odds') + '</th>'
-      + '<th ' + hClick('stake') + ' style="padding:2px 8px;text-align:right;">Stake' + arrow('stake') + '</th>'
-      + '<th ' + hClick('pnl') + ' style="padding:2px 8px;text-align:right;">P&L' + arrow('pnl') + '</th>'
+      + '<th ' + hClick('odds') + ' style="padding:2px 8px;text-align:center;">Odds' + arrow('odds') + '</th>'
+      + '<th ' + hClick('stake') + ' style="padding:2px 8px;text-align:center;">Stake' + arrow('stake') + '</th>'
+      + '<th ' + hClick('pnl') + ' style="padding:2px 8px;text-align:center;">P&L' + arrow('pnl') + '</th>'
       + '<th ' + hClick('result') + ' style="padding:2px 8px;text-align:center;">Result' + arrow('result') + '</th>'
       + '</tr>';
     let subtotal = 0;
@@ -9222,9 +9230,9 @@
       out += '<td style="padding:2px 8px;white-space:nowrap;">' + r.timeStr + '</td>';
       out += '<td style="padding:2px 8px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + r.selFull.replace(/"/g, '&quot;') + '">' + r.sel + '</td>';
       out += '<td style="padding:2px 8px;text-align:center;">' + r.legCount + '</td>';
-      out += '<td style="padding:2px 8px;text-align:right;">' + r.oddsStr + '</td>';
-      out += '<td style="padding:2px 8px;text-align:right;">' + fmtDollar(r.stake) + '</td>';
-      out += '<td style="padding:2px 8px;text-align:right;" class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td>';
+      out += '<td style="padding:2px 8px;text-align:center;">' + r.oddsStr + '</td>';
+      out += '<td style="padding:2px 8px;text-align:center;">' + fmtDollar(r.stake) + '</td>';
+      out += '<td style="padding:2px 8px;text-align:center;" class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td>';
       out += '<td style="padding:2px 8px;text-align:center;color:' + resultColor + ';">' + (r.result.charAt(0).toUpperCase() + r.result.slice(1)) + '</td>';
       out += '</tr>';
       if (detailId) {

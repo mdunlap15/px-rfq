@@ -3830,6 +3830,7 @@ function getGameExposureSnapshot() {
     const seen = new Set();
     let grossRisk = 0;
     let totalStakes = 0;
+    let maxPayout = 0; // RAW, un-weighted worst case: full payout summed per distinct parlay
     for (const p of game.parlays) {
       if (seen.has(p.parlayId)) continue;
       seen.add(p.parlayId);
@@ -3838,6 +3839,10 @@ function getGameExposureSnapshot() {
       // orders persisted before this field existed.
       grossRisk += (p.parlayGameWeightedRisk != null ? p.parlayGameWeightedRisk : p.weightedRisk) || 0;
       totalStakes += p.stake || 0;
+      // Max Payout = the brutal worst case: every parlay touching this game
+      // pays in full, no probability discount, no offset. Mirrors the Team
+      // table's notionalPayout column.
+      maxPayout += p.payout || 0;
     }
     const distinctParlayCount = seen.size;
     // hasLiveOdds drives the green LIVE badge in the dashboard's Game
@@ -3878,6 +3883,7 @@ function getGameExposureSnapshot() {
       startTime: game.startTime,
       parlayCount: distinctParlayCount,
       grossRisk: Math.round(grossRisk * 100) / 100,
+      maxPayout: Math.round(maxPayout * 100) / 100,
       totalStakes: Math.round(totalStakes * 100) / 100,
       netExposure: Math.round((game.netExposure || 0) * 100) / 100,
       worstCase: Math.round((game.netExposure || grossRisk) * 100) / 100,
