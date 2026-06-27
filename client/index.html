@@ -5227,6 +5227,9 @@
     //       otherwise (≥1 'won')      → bettor's parlay wins → SP loses spRisk
     const getLegResult = (l) => l && (l.inferredResult || l.settlementStatus || l.settlement_status) || null;
     const orderSpecs = [];
+    // EV-by-event accumulator for the "Top 10 events by EV impact" table.
+    // gameKey -> { ev, n, name, sport }. Populated per-position below.
+    const evByEvent = {};
     let lockedPnl = 0;
     let lockedOrderCount = 0;
     for (const o of confirmed) {
@@ -5271,6 +5274,35 @@
         return { mKey, wantsRef };
       });
       orderSpecs.push({ spRisk, spProfit, legSpecs });
+
+      // EV-by-event attribution. Per-position EV is the SAME quantity the
+      // analytic mean sums: (1−hit)·profit − hit·risk, using the sim's own
+      // per-leg probabilities (marketIndex). A multi-game parlay contributes
+      // its full EV to each distinct game (pxEventId) its pending legs touch.
+      let hitProb = 1;
+      for (const ls of legSpecs) {
+        const m = marketIndex[ls.mKey];
+        if (!m) continue;
+        hitProb *= ls.wantsRef ? m.refProb : (1 - m.refProb);
+      }
+      const evLive = (1 - hitProb) * spProfit - hitProb * spRisk;
+      const evSeen = new Set();
+      for (const l of pendingLegs) {
+        const gKey = l.pxEventId ? String(l.pxEventId)
+          : (l.homeTeam && l.awayTeam)
+            ? [String(l.homeTeam).toLowerCase(), String(l.awayTeam).toLowerCase()].sort().join('|')
+            : String(l.team || l.teamName || l.selection || 'unknown').toLowerCase();
+        if (evSeen.has(gKey)) continue; // count a parlay once per game
+        evSeen.add(gKey);
+        if (!evByEvent[gKey]) {
+          const name = (l.homeTeam && l.awayTeam)
+            ? (l.awayTeam + ' @ ' + l.homeTeam)
+            : (l.pxEventName || l.team || l.teamName || l.selection || 'Unknown');
+          evByEvent[gKey] = { ev: 0, n: 0, name, sport: l.sport || '' };
+        }
+        evByEvent[gKey].ev += evLive;
+        evByEvent[gKey].n++;
+      }
     }
 
     if (orderSpecs.length === 0 && lockedOrderCount === 0) return null;
@@ -5352,8 +5384,16 @@
       analytic += (1 - h) * spec.spProfit - h * spec.spRisk;
     }
 
+    // Top events by |EV impact| — drop near-zero, sort by magnitude, take 10.
+    const topEvents = Object.entries(evByEvent)
+      .filter(([, e]) => Math.abs(e.ev) >= 0.5)
+      .sort((a, b) => Math.abs(b[1].ev) - Math.abs(a[1].ev))
+      .slice(0, 10)
+      .map(([key, e]) => ({ key, name: e.name, sport: e.sport, n: e.n, ev: e.ev }));
+
     return {
       nSims,
+      topEvents,
       orderCount: orderSpecs.length,
       lockedOrderCount,
       lockedPnl,
@@ -5546,6 +5586,30 @@
 
     html += '<div style="flex:1; min-width:420px;">' + svg + '</div>';
     html += '</div>';
+
+    // Top 10 events by expected-value impact — which games' probable outcomes
+    // drive the headline Expected (mean). Sits directly below the distribution
+    // chart, above the sanity-check block.
+    if (r.topEvents && r.topEvents.length) {
+      html += '<div style="margin-top:20px;">';
+      html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:8px;">Top 10 Events by Expected-Value Impact</div>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+      html += '<tr style="color:var(--text3); text-align:left;">'
+        + '<th style="padding:5px 10px;">Event</th>'
+        + '<th style="padding:5px 10px;">Sport</th>'
+        + '<th style="padding:5px 10px; text-align:right;">Positions</th>'
+        + '<th style="padding:5px 10px; text-align:right;">EV impact</th></tr>';
+      for (const e of r.topEvents) {
+        html += '<tr style="border-top:1px solid var(--border);">'
+          + '<td style="padding:5px 10px;">' + escapeHtml(e.name) + '</td>'
+          + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
+          + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
+          + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + formatCls(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+      }
+      html += '</table>';
+      html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s expected value, summed by event; a multi-game parlay counts under each game it touches.</div>';
+      html += '</div>';
+    }
 
     // Input diagnostics — shows what probabilities are driving the sim
     const pct = (v) => v != null ? (v * 100).toFixed(1) + '%' : '-';
