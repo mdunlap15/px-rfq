@@ -8479,6 +8479,12 @@
       for (const row of _dvSeries) {
         const day = row.date;
         if (!day) continue;
+        // Mirror the same date-range filter applied to confirmedFiltered above.
+        // Without this, /daily-pnl?days=400 injects 400 days of rows into byDay
+        // regardless of the 30d/14d chip — inflating allDayKeys past 60 and
+        // triggering weekly-bar mode even on short-range views.
+        if (dvFromMs && new Date(day + 'T23:59:59.999').getTime() < dvFromMs) continue;
+        if (dvToMs && new Date(day + 'T00:00:00').getTime() > dvToMs) continue;
         if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
         if (row.pnl != null) byDay[day].pnl = row.pnl;
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;

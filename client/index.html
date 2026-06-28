@@ -9405,15 +9405,19 @@
       for (const row of _dvSeries) {
         const day = row.date;
         if (!day) continue;
+        // Mirror the same date-range filter applied to confirmedFiltered above.
+        // Without this, /daily-pnl?days=400 injects 400 days of rows into byDay
+        // regardless of the 30d/14d chip, inflating allDayKeys.length past 60
+        // and triggering weekly-bar mode even on short-range views — making the
+        // chart bars (weekly) not match the daily table rows.
+        if (dvFromMs && new Date(day + 'T23:59:59.999').getTime() < dvFromMs) continue;
+        if (dvToMs && new Date(day + 'T00:00:00').getTime() > dvToMs) continue;
         if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
         if (row.pnl != null) byDay[day].pnl = row.pnl;
         if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
       }
-      // 2026-06-09: show GROSS PX P&L everywhere (no fees on these wagers, per
-      // operator). The /daily-pnl sum IS the gross, so leave byDay[].pnl as-is —
-      // day/month totals and the per-parlay drill-down all read true gross wins.
-      // (Removed the prior account-net scaling, which deflated real winnings.)
+      // Show GROSS PX P&L (no fees per operator); the /daily-pnl sum IS the gross.
     }
 
     const allDayKeys = Object.keys(byDay).sort();
