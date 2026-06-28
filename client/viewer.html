@@ -4502,6 +4502,26 @@
     // EV-by-event accumulator for the "Top 10 events by EV impact" table.
     // gameKey -> { ev, n, name, sport }. Populated per-position below.
     const evByEvent = {};
+
+    // EV-by-outcome accumulator for the "Top 10 outcomes by EV impact" table.
+    // key = eventLabel + ' ||| ' + outcomeLabel -> { outcome, event, ev, n, sport }
+    const evByOutcome = {};
+    const _ocLabel = (l) => {
+      const mkt = String(l.market || l.marketType || '').toLowerCase();
+      const side = String(l.selection || l.oddsApiSelection || '').toLowerCase();
+      if (mkt === 'total' || mkt === 'totals')
+        return (side === 'under' ? 'Under' : 'Over') + (l.line != null ? ' ' + l.line : '');
+      if (mkt === 'spread' || mkt === 'spreads') {
+        const t = l.team || l.teamName || (side === 'home' ? l.homeTeam : l.awayTeam) || '?';
+        return t + (l.line != null ? ' ' + (l.line >= 0 ? '+' : '') + l.line : '');
+      }
+      if (mkt === 'h2h' || mkt === 'moneyline')
+        return l.team || l.teamName || (side === 'home' ? l.homeTeam : l.awayTeam) || l.selection || '?';
+      const tn = String(l.team || l.teamName || '').trim();
+      if (/^(yes|no)$/i.test(tn) && l.marketName) return l.marketName + ': ' + tn.toUpperCase();
+      return l.team || l.teamName || l.name || l.selection || '?';
+    };
+    const _evLabel = (l) => (l.homeTeam && l.awayTeam) ? (l.awayTeam + ' @ ' + l.homeTeam) : '—';
     let lockedPnl = 0;
     let lockedOrderCount = 0;
     for (const o of confirmed) {
@@ -4574,6 +4594,18 @@
         }
         evByEvent[gKey].ev += evLive;
         evByEvent[gKey].n++;
+      }
+
+      // EV-by-outcome attribution: attribute evLive to each distinct (event, outcome)
+      // pair this position touches. A parlay contributes once per distinct selection.
+      const ocSeen = {};
+      for (const l of pendingLegs) {
+        const oc = _ocLabel(l), ev = _evLabel(l), key = ev + ' ||| ' + oc;
+        if (ocSeen[key]) continue;
+        ocSeen[key] = 1;
+        if (!evByOutcome[key]) evByOutcome[key] = { outcome: oc, event: ev, ev: 0, n: 0, sport: l.sport || '' };
+        evByOutcome[key].ev += evLive;
+        evByOutcome[key].n++;
       }
     }
 
@@ -4663,9 +4695,16 @@
       .slice(0, 10)
       .map(([key, e]) => ({ key, name: e.name, sport: e.sport, n: e.n, ev: e.ev }));
 
+    // Top outcomes by |EV impact| — individual sides/selections.
+    const topOutcomes = Object.values(evByOutcome)
+      .filter(e => Math.abs(e.ev) >= 0.5)
+      .sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev))
+      .slice(0, 10);
+
     return {
       nSims,
       topEvents,
+      topOutcomes,
       orderCount: orderSpecs.length,
       lockedOrderCount,
       lockedPnl,
@@ -4871,6 +4910,31 @@
       }
       html += '</table>';
       html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s expected value, summed by event; a multi-game parlay counts under each game it touches.</div>';
+      html += '</div>';
+    }
+
+    // Top 10 outcomes by expected-value impact — individual sides/selections
+    // whose winning most drives (or drags) the headline Expected (mean).
+    if (r.topOutcomes && r.topOutcomes.length) {
+      html += '<div style="margin-top:20px;">';
+      html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:8px;">Top 10 Outcomes by Expected-Value Impact</div>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+      html += '<tr style="color:var(--text3); text-align:left;">'
+        + '<th style="padding:5px 10px;">Team / Outcome</th>'
+        + '<th style="padding:5px 10px;">Event</th>'
+        + '<th style="padding:5px 10px;">Sport</th>'
+        + '<th style="padding:5px 10px; text-align:right;">Positions</th>'
+        + '<th style="padding:5px 10px; text-align:right;">EV impact</th></tr>';
+      for (const e of r.topOutcomes) {
+        html += '<tr style="border-top:1px solid var(--border);">'
+          + '<td style="padding:5px 10px; font-weight:600;">' + escapeHtml(e.outcome) + '</td>'
+          + '<td style="padding:5px 10px; color:var(--text2);">' + escapeHtml(e.event) + '</td>'
+          + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
+          + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
+          + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + formatCls(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+      }
+      html += '</table>';
+      html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s live expected value attributed to the side we hold; a parlay contributes to each of its outcomes.</div>';
       html += '</div>';
     }
 
