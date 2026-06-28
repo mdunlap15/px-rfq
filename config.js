@@ -583,6 +583,20 @@ const config = {
       return v;
     })(),
     maxLegs: parseInt(process.env.MAX_LEGS) || 8,
+    // How many days out we'll quote games for. Governs the odds-feed warm
+    // horizon: events starting beyond this window are skipped for alt-line
+    // pre-warming and the DK game-line supplement (main-market ML + props
+    // still register off whatever the odds source returns, but anything
+    // further out won't get its supplemental coverage warmed). Expressed in
+    // DAYS for operator intuition; converted to hours internally.
+    //   QUOTE_HORIZON_DAYS=2  → default, ~same-day + next-day (48h)
+    //   QUOTE_HORIZON_DAYS=4  → quote up to 4 days ahead (e.g. WC weeks)
+    // Live-tunable in Railway (redeploy required to take effect).
+    quoteHorizonHours: (() => {
+      const days = parseFloat(process.env.QUOTE_HORIZON_DAYS);
+      if (!Number.isFinite(days) || days <= 0) return 48; // 2 days default
+      return Math.round(days * 24);
+    })(),
     stalePriceMinutes: parseInt(process.env.STALE_PRICE_MINUTES) || 5,
     // Per-sport override for stale threshold (minutes). Tighter for fast-moving
     // markets (MMA/boxing move on news; NFL moves on injury reports), looser

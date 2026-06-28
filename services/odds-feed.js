@@ -1307,11 +1307,13 @@ async function _supplementDkGameLines(parsedEvents, sport) {
       const hasFullCoverage = m.h2h && m.h2h.home && (m.h2h.home.rawOdds != null || m.h2h.home.fairProb != null)
                             && m.spreads && m.totals;
       if (hasFullCoverage) continue;
-      // Skip far-future events to limit work
+      // Skip far-future events to limit work. Tracks the operator quote
+      // horizon (QUOTE_HORIZON_DAYS) so raising the lever also widens DK
+      // game-line supplement coverage, not just alt-line warming.
       const startMs = ev.commenceTime ? new Date(ev.commenceTime).getTime() : null;
       if (startMs != null && !isNaN(startMs)) {
         const hoursUntil = (startMs - Date.now()) / 3600000;
-        if (hoursUntil > 36 || hoursUntil < -1) continue;
+        if (hoursUntil > config.pricing.quoteHorizonHours || hoursUntil < -1) continue;
       }
       candidates.push(ev);
     }
@@ -3955,7 +3957,9 @@ function altMaxLineDistance(sport) {
 
 // Only pre-warm events starting within this window — avoids wasting API calls
 // on events days in the future that the bettor almost certainly won't RFQ.
-const WARM_EVENT_MAX_HOURS_AHEAD = 48;
+// Operator-tunable via QUOTE_HORIZON_DAYS (config.pricing.quoteHorizonHours);
+// default 48h (~same-day + next-day). Raise it to quote further out (e.g. WC).
+const WARM_EVENT_MAX_HOURS_AHEAD = config.pricing.quoteHorizonHours;
 
 // Concurrency limit: at most N alt-line fetches in flight simultaneously.
 // Keeps us from burying The Odds API rate limiter.
