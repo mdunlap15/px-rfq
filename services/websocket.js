@@ -951,7 +951,23 @@ async function handleRFQ(data) {
           }
         }
         if (toAwait.length > 0) {
-          const resolved = await Promise.all(toAwait.map(leg => lineManagerEarly.resolveUnknownLine(leg)));
+          // Cap total wall-clock spent awaiting resolveUnknownLine. The
+          // decode stage was hitting 29-30s because pxFetch's 401-retry
+          // chain (refreshSession + login + retry = 3×10s timeouts) could
+          // compound before the AbortController fired on any one call. A
+          // wall-clock cap on the entire resolve batch ensures we move on
+          // (and decline as unknown_line) rather than burning 30s of a
+          // 3-5s RFQ window. RESOLVE_INLINE_TIMEOUT_MS default = 2000.
+          const resolveTimeoutMs = config.pricing.resolveInlineTimeoutMs;
+          const resolveWithCap = (leg) => {
+            return new Promise((resolve) => {
+              const t = setTimeout(() => resolve(null), resolveTimeoutMs);
+              lineManagerEarly.resolveUnknownLine(leg)
+                .then(r => { clearTimeout(t); resolve(r); })
+                .catch(() => { clearTimeout(t); resolve(null); });
+            });
+          };
+          const resolved = await Promise.all(toAwait.map(resolveWithCap));
           const resolvedCount = resolved.filter(Boolean).length;
           if (resolvedCount > 0) {
             log.info('RFQ', `On-demand resolved ${resolvedCount}/${toAwait.length} unknown lines for parlay=${parlayId}`);

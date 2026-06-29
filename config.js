@@ -422,6 +422,15 @@ const config = {
     // Set RESOLVE_INLINE_ON_RFQ=false to enable fast mode.
     resolveInlineOnRfq:
       process.env.RESOLVE_INLINE_ON_RFQ !== 'false' && process.env.RESOLVE_INLINE_ON_RFQ !== '0',
+    // Wall-clock cap on the entire resolveUnknownLine await batch. Prevents
+    // the pxFetch 401-retry chain (refreshSession + login + retry ≈ 3×10s)
+    // from consuming 29-30s of the RFQ window. After this deadline the leg
+    // resolves null and the RFQ declines as unknown_line — same outcome but
+    // in 2s instead of 30s. Default 2000ms. Tune via RESOLVE_INLINE_TIMEOUT_MS.
+    resolveInlineTimeoutMs: (() => {
+      const v = parseInt(process.env.RESOLVE_INLINE_TIMEOUT_MS);
+      return Number.isFinite(v) && v > 0 ? v : 2000;
+    })(),
     // Large-parlay team freeze: when a confirmed parlay's SP-side stake
     // exceeds `largeParlayFreezeSize`, freeze every team in that parlay
     // for `largeParlayFreezeSeconds`. New RFQs touching any of those
