@@ -4006,7 +4006,7 @@
     el.innerHTML = html;
   }
 
-  const posState = { sortCol: 'time', sortDir: -1, search: '', statusFilter: '', typeFilters: { sgp: false, prop: false }, sportFilter: '', legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, chunkSize: 100, visibleCount: 15, showAll: false, dateFrom: '', dateTo: '', showHidden: false, _name: 'posState' };
+  const posState = { sortCol: 'time', sortDir: -1, search: '', statusFilter: '', typeFilters: { sgp: false, prop: false }, sportFilter: '', legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', showHidden: false, _name: 'posState' };
   window.posRerender = () => renderPositions(window._lastPosData || { recentOrders: [] });
   window.togglePosSort = (col) => {
     if (posState.sortCol === col) posState.sortDir *= -1;
@@ -4372,17 +4372,9 @@
         <th ${pSortClick('status')} title="Game status">Status${pSortArrow('status')}</th>
       </tr>`;
 
-    const isPosFiltering = posState.search || posState.dateFrom || posState.dateTo;
-    let posLimit;
-    if (isPosFiltering || posState.showAll) {
-      posLimit = filtered.length;
-    } else {
-      posLimit = Math.max(posState.pageSize, posState.visibleCount || posState.pageSize);
-    }
-    const posDisplayed = filtered.slice(0, posLimit);
-    const posHasMore = filtered.length > posLimit;
-    const posRemaining = filtered.length - posLimit;
-    const posNextChunk = Math.min(posState.chunkSize || 100, posRemaining);
+    resetPageIfFilterChanged(posState, posState.search, posState.sportFilter, posState.statusFilter, posState.legsMin, posState.legsMax, posState.oddsMin, posState.oddsMax, posState.riskMin, posState.riskMax, posState.towinMin, posState.towinMax, posState.dateFrom, posState.dateTo, posState.showHidden, posState.sortCol, posState.sortDir, posState.typeFilters.sgp, posState.typeFilters.prop);
+    const posPageStart = (posState.page || 0) * posState.pageSize;
+    const posDisplayed = filtered.slice(posPageStart, posPageStart + posState.pageSize);
 
     for (const order of posDisplayed) {
       const time = order.confirmedAt ? new Date(order.confirmedAt).toLocaleString() : '-';
@@ -4516,28 +4508,7 @@
 
     html += '</table></div>';
 
-    if (posHasMore) {
-      const posShowingTxt = `Showing ${posDisplayed.length} of ${filtered.length}`;
-      const posLoadLabel = posNextChunk >= posRemaining
-        ? `Load ${posRemaining} More`
-        : `Load ${posNextChunk} More`;
-      const posShowAllBtn = posRemaining > posNextChunk
-        ? `<button class="btn" onclick="posState.showAll=true; posRerender()" style="font-size:12px; padding:4px 16px; margin-left:8px;">Show All ${filtered.length}</button>`
-        : '';
-      const posCollapseBtn = posLimit > posState.pageSize
-        ? `<button class="btn" onclick="posState.visibleCount=posState.pageSize; posState.showAll=false; posRerender()" style="font-size:12px; padding:4px 16px; margin-left:8px;">Collapse</button>`
-        : '';
-      html += `<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border); font-size:11px; color:var(--text3);">
-        <span style="margin-right:12px;">${posShowingTxt}</span>
-        <button class="btn" onclick="posState.visibleCount=(posState.visibleCount||posState.pageSize)+(posState.chunkSize||100); posState.showAll=false; posRerender()" style="font-size:12px; padding:4px 16px;">${posLoadLabel}</button>
-        ${posShowAllBtn}${posCollapseBtn}
-      </div>`;
-    } else if (posLimit > posState.pageSize && !isPosFiltering) {
-      html += `<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border); font-size:11px; color:var(--text3);">
-        <span style="margin-right:12px;">Showing all ${filtered.length}</span>
-        <button class="btn" onclick="posState.visibleCount=posState.pageSize; posState.showAll=false; posRerender()" style="font-size:12px; padding:4px 16px;">Collapse to ${posState.pageSize}</button>
-      </div>`;
-    }
+    html += renderPaginationFooter(posState, filtered.length, 'posRerender()');
 
     el.innerHTML = html;
   }
@@ -4557,7 +4528,7 @@
     pnlMin: '', pnlMax: '',
     roiMin: '', roiMax: '',
     showAdvanced: false,
-    pageSize: 20, showAll: false,
+    pageSize: 15, page: 0, _lastFilterHash: '',
     dateFrom: '', dateTo: '', _name: 'settledState',
   };
 
@@ -4760,10 +4731,9 @@
       cumulMap[o.parlayId] = runningPnl;
     }
 
-    const isSettledFiltering = settledState.search || settledState.dateFrom || settledState.dateTo;
-    const settledLimit = (settledState.showAll || isSettledFiltering) ? filtered.length : settledState.pageSize;
-    const settledDisplayed = filtered.slice(0, settledLimit);
-    const settledHasMore = filtered.length > settledLimit;
+    resetPageIfFilterChanged(settledState, settledState.search, settledState.sportFilter, settledState.resultFilter, settledState.legsFilter, settledState.legsMin, settledState.legsMax, settledState.oddsMin, settledState.oddsMax, settledState.riskMin, settledState.riskMax, settledState.pnlMin, settledState.pnlMax, settledState.roiMin, settledState.roiMax, settledState.dateFrom, settledState.dateTo, settledState.sortCol, settledState.sortDir, settledState.typeFilters.sgp, settledState.typeFilters.prop);
+    const settledPageStart = (settledState.page || 0) * settledState.pageSize;
+    const settledDisplayed = filtered.slice(settledPageStart, settledPageStart + settledState.pageSize);
 
     for (const order of settledDisplayed) {
       const time = order.settledAt ? new Date(order.settledAt).toLocaleString() : order.quotedAt ? new Date(order.quotedAt).toLocaleString() : '-';
@@ -4823,13 +4793,7 @@
 
     html += '</table></div>';
 
-    if (settledHasMore) {
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border);">' +
-        '<button class="btn" onclick="settledState.showAll=true; renderSettled({recentOrders:[]})" style="font-size:12px; padding:4px 16px;">Show All ' + filtered.length + '</button></div>';
-    } else if (settledState.showAll && filtered.length > settledState.pageSize && !isSettledFiltering) {
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border);">' +
-        '<button class="btn" onclick="settledState.showAll=false; renderSettled({recentOrders:[]})" style="font-size:12px; padding:4px 16px;">Show Recent ' + settledState.pageSize + '</button></div>';
-    }
+    html += renderPaginationFooter(settledState, filtered.length, 'renderSettled({recentOrders:[]})');
 
     el.innerHTML = html;
   }
@@ -6420,7 +6384,7 @@
   // PORTFOLIO TAB
   // -----------------------------------------------------------------------
 
-  const portfolioState = { sortCol: 'settled', sortDir: -1, search: '', sportFilter: '', resultFilter: '', typeFilters: { sgp: false, prop: false }, legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', pnlMin: '', pnlMax: '', roiMin: '', roiMax: '', showAdvanced: false, pageSize: 20, chunkSize: 100, visibleCount: 20, showAll: false, dateFrom: '', dateTo: '', _name: 'portfolioState' };
+  const portfolioState = { sortCol: 'settled', sortDir: -1, search: '', sportFilter: '', resultFilter: '', typeFilters: { sgp: false, prop: false }, legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', pnlMin: '', pnlMax: '', roiMin: '', roiMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', _name: 'portfolioState' };
   window.portfolioRerender = () => renderPortfolio(window._lastPortfolioData || { recentOrders: [], stats: {}, pnlBySport: {} });
   window.togglePortfolioSort = (col) => {
     if (portfolioState.sortCol === col) portfolioState.sortDir *= -1;
@@ -7091,7 +7055,7 @@
     el.innerHTML = html;
   }
 
-  const popenState = { sortCol: 'time', sortDir: -1, search: '', legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, showAll: false, dateFrom: '', dateTo: '', _name: 'popenState' };
+  const popenState = { sortCol: 'time', sortDir: -1, search: '', legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', _name: 'popenState' };
   window.popenRerender = () => renderPortfolioOpen(window._lastPopenData || []);
   window.togglePopenSort = (col) => {
     if (popenState.sortCol === col) popenState.sortDir *= -1;
@@ -7229,10 +7193,9 @@
     html += '<div style="overflow-x:auto;"><table>';
     html += '<tr><th ' + poSortClick('time') + '>Confirmed' + poSortArrow('time') + '</th><th>Selections</th><th ' + poSortClick('legs') + '>Legs' + poSortArrow('legs') + '</th><th ' + poSortClick('odds') + ' style="text-align:right">My Odds' + poSortArrow('odds') + '</th><th ' + poSortClick('fair') + ' style="text-align:right" title="Fair American odds compounded from per-leg displayFairProb (de-vigged consensus)">Fair' + poSortArrow('fair') + '</th><th ' + poSortClick('pin') + ' style="text-align:right; color:var(--purple);">Pinnacle' + poSortArrow('pin') + '</th><th ' + poSortClick('fd') + ' style="text-align:right; color:var(--blue);">FanDuel' + poSortArrow('fd') + '</th><th ' + poSortClick('stake') + ' style="text-align:right">My Risk' + poSortArrow('stake') + '</th><th ' + poSortClick('towin') + ' style="text-align:right">To Win' + poSortArrow('towin') + '</th><th ' + poSortClick('winprob') + ' style="text-align:right" title="Probability you win (at least one bettor leg fails)">Win Prob' + poSortArrow('winprob') + '</th><th ' + poSortClick('status') + '>Status' + poSortArrow('status') + '</th></tr>';
 
-    const isPopenFiltering = popenState.search || popenState.dateFrom || popenState.dateTo;
-    const popenLimit = (popenState.showAll || isPopenFiltering) ? filtered.length : popenState.pageSize;
-    const popenDisplayed = filtered.slice(0, popenLimit);
-    const popenHasMore = filtered.length > popenLimit;
+    resetPageIfFilterChanged(popenState, popenState.search, popenState.legsMin, popenState.legsMax, popenState.oddsMin, popenState.oddsMax, popenState.riskMin, popenState.riskMax, popenState.towinMin, popenState.towinMax, popenState.dateFrom, popenState.dateTo, popenState.sortCol, popenState.sortDir);
+    const popenPageStart = (popenState.page || 0) * popenState.pageSize;
+    const popenDisplayed = filtered.slice(popenPageStart, popenPageStart + popenState.pageSize);
 
     for (const o of popenDisplayed) {
       const time = o.confirmedAt ? new Date(o.confirmedAt).toLocaleString() : '-';
@@ -7318,13 +7281,7 @@
     }
     html += '</table></div>';
 
-    if (popenHasMore) {
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border);">' +
-        '<button class="btn" onclick="popenState.showAll=true; popenRerender()" style="font-size:12px; padding:4px 16px;">Show All ' + filtered.length + '</button></div>';
-    } else if (popenState.showAll && filtered.length > popenState.pageSize && !isPopenFiltering) {
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border);">' +
-        '<button class="btn" onclick="popenState.showAll=false; popenRerender()" style="font-size:12px; padding:4px 16px;">Show Recent ' + popenState.pageSize + '</button></div>';
-    }
+    html += renderPaginationFooter(popenState, filtered.length, 'popenRerender()');
 
     el.innerHTML = html;
   }
@@ -7529,17 +7486,9 @@
     html += '<th style="text-align:right">Cumul.</th>';
     html += '</tr>';
 
-    const isPsFiltering = portfolioState.search || portfolioState.sportFilter || portfolioState.resultFilter || portfolioState.dateFrom || portfolioState.dateTo;
-    let psLimit;
-    if (isPsFiltering || portfolioState.showAll) {
-      psLimit = filtered.length;
-    } else {
-      psLimit = Math.max(portfolioState.pageSize, portfolioState.visibleCount || portfolioState.pageSize);
-    }
-    const psDisplayed = filtered.slice(0, psLimit);
-    const psHasMore = filtered.length > psLimit;
-    const psRemaining = filtered.length - psLimit;
-    const psNextChunk = Math.min(portfolioState.chunkSize || 100, psRemaining);
+    resetPageIfFilterChanged(portfolioState, portfolioState.search, portfolioState.sportFilter, portfolioState.resultFilter, portfolioState.legsMin, portfolioState.legsMax, portfolioState.oddsMin, portfolioState.oddsMax, portfolioState.riskMin, portfolioState.riskMax, portfolioState.pnlMin, portfolioState.pnlMax, portfolioState.roiMin, portfolioState.roiMax, portfolioState.dateFrom, portfolioState.dateTo, portfolioState.sortCol, portfolioState.sortDir, portfolioState.typeFilters.sgp, portfolioState.typeFilters.prop);
+    const psPageStart = (portfolioState.page || 0) * portfolioState.pageSize;
+    const psDisplayed = filtered.slice(psPageStart, psPageStart + portfolioState.pageSize);
 
     for (const order of psDisplayed) {
       const time = order.settledAt ? new Date(order.settledAt).toLocaleString() : order.quotedAt ? new Date(order.quotedAt).toLocaleString() : '-';
@@ -7610,27 +7559,7 @@
     }
     html += '</table></div>';
 
-    if (psHasMore) {
-      const psShowingTxt = 'Showing ' + psDisplayed.length + ' of ' + filtered.length;
-      const psLoadLabel = psNextChunk >= psRemaining
-        ? 'Load ' + psRemaining + ' More'
-        : 'Load ' + psNextChunk + ' More';
-      const psShowAllBtn = psRemaining > psNextChunk
-        ? '<button class="btn" onclick="portfolioState.showAll=true; portfolioRerender()" style="font-size:12px; padding:4px 16px; margin-left:8px;">Show All ' + filtered.length + '</button>'
-        : '';
-      const psCollapseBtn = psLimit > portfolioState.pageSize
-        ? '<button class="btn" onclick="portfolioState.visibleCount=portfolioState.pageSize; portfolioState.showAll=false; portfolioRerender()" style="font-size:12px; padding:4px 16px; margin-left:8px;">Collapse</button>'
-        : '';
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border); font-size:11px; color:var(--text3);">' +
-        '<span style="margin-right:12px;">' + psShowingTxt + '</span>' +
-        '<button class="btn" onclick="portfolioState.visibleCount=(portfolioState.visibleCount||portfolioState.pageSize)+(portfolioState.chunkSize||100); portfolioState.showAll=false; portfolioRerender()" style="font-size:12px; padding:4px 16px;">' + psLoadLabel + '</button>' +
-        psShowAllBtn + psCollapseBtn +
-        '</div>';
-    } else if (psLimit > portfolioState.pageSize && !isPsFiltering) {
-      html += '<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border); font-size:11px; color:var(--text3);">' +
-        '<span style="margin-right:12px;">Showing all ' + filtered.length + '</span>' +
-        '<button class="btn" onclick="portfolioState.visibleCount=portfolioState.pageSize; portfolioState.showAll=false; portfolioRerender()" style="font-size:12px; padding:4px 16px;">Collapse to ' + portfolioState.pageSize + '</button></div>';
-    }
+    html += renderPaginationFooter(portfolioState, filtered.length, 'portfolioRerender()');
 
     el.innerHTML = html;
   }
@@ -8477,6 +8406,38 @@
       if (!isNaN(max) && v > max) return false;
     }
     return true;
+  }
+
+  /**
+   * Render prev/next pagination footer for a table state object.
+   * state must have: page (0-indexed), pageSize, _name, and a filter-hash
+   * stored in _lastFilterHash. Call resetPageIfFilterChanged(state, ...)
+   * at the top of each render function to auto-reset on filter changes.
+   */
+  function renderPaginationFooter(state, totalCount, rerenderCall) {
+    const pageSize = state.pageSize;
+    const page = state.page || 0;
+    if (totalCount <= pageSize) return '';
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const start = page * pageSize + 1;
+    const end = Math.min((page + 1) * pageSize, totalCount);
+    const prevDisabled = page === 0;
+    const nextDisabled = page >= totalPages - 1;
+    const prevBtn = `<button class="btn" ${prevDisabled ? 'disabled' : `onclick="${state._name}.page=${page-1}; ${rerenderCall}"`} style="font-size:12px; padding:4px 12px;${prevDisabled ? ' opacity:0.4;' : ''}">&#8249; Prev</button>`;
+    const nextBtn = `<button class="btn" ${nextDisabled ? 'disabled' : `onclick="${state._name}.page=${page+1}; ${rerenderCall}"`} style="font-size:12px; padding:4px 12px;${nextDisabled ? ' opacity:0.4;' : ''}">Next &#8250;</button>`;
+    return `<div style="padding:8px 12px; text-align:center; border-top:1px solid var(--border); font-size:11px; color:var(--text3); display:flex; align-items:center; justify-content:center; gap:12px;">
+      ${prevBtn}
+      <span>${start}–${end} of ${totalCount}</span>
+      ${nextBtn}
+    </div>`;
+  }
+
+  function resetPageIfFilterChanged(state, ...filterKeys) {
+    const sig = JSON.stringify(filterKeys);
+    if (state._lastFilterHash !== sig) {
+      state._lastFilterHash = sig;
+      state.page = 0;
+    }
   }
 
   /** Render a min/max numeric range filter (currency/odds/generic). */
