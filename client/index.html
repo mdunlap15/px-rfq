@@ -13577,10 +13577,11 @@
       const day = t.toLocaleDateString('sv-SE');
       const { evDollar } = computeParlayEdge(o);
       if (!Number.isFinite(evDollar)) continue;
-      if (!byDay.has(day)) byDay.set(day, { day, ev: 0, n: 0 });
+      if (!byDay.has(day)) byDay.set(day, { day, ev: 0, n: 0, spRisk: 0 });
       const b = byDay.get(day);
       b.ev += evDollar;
       b.n++;
+      b.spRisk += Number(o.confirmedStake) || 0;
     }
     const days = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
     if (days.length < 2) {
@@ -13699,7 +13700,58 @@
     svg += '</svg>';
     svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:4px;">'
       + days.length + ' days plotted &middot; ' + totalN + ' settled parlays &middot; bars green/red by sign, line is trailing 7-day average</div>';
-    el.innerHTML = svg;
+
+    // Daily breakdown table — most recent first.
+    const tableRows = [...days].reverse();
+    let tbl = '<div style="margin-top:16px; overflow-x:auto;">';
+    tbl += '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
+    tbl += '<thead><tr style="color:var(--text3); border-bottom:1px solid var(--border);">'
+      + '<th style="text-align:left; padding:5px 10px; font-weight:500;">Date</th>'
+      + '<th style="text-align:right; padding:5px 10px; font-weight:500;">Parlays</th>'
+      + '<th style="text-align:right; padding:5px 10px; font-weight:500;">My Risk</th>'
+      + '<th style="text-align:right; padding:5px 10px; font-weight:500;">EV ($)</th>'
+      + '<th style="text-align:right; padding:5px 10px; font-weight:500;">EV %</th>'
+      + '</tr></thead><tbody>';
+    let totRisk = 0, totEv = 0;
+    for (const d of tableRows) {
+      totRisk += d.spRisk;
+      totEv += d.ev;
+      const evColor = d.ev >= 0 ? 'var(--green)' : 'var(--red)';
+      const evSign = d.ev >= 0 ? '+' : '';
+      const evPct = d.spRisk > 0 ? d.ev / d.spRisk * 100 : null;
+      const evPctStr = evPct != null ? (evPct >= 0 ? '+' : '') + evPct.toFixed(1) + '%' : '—';
+      const evPctColor = evPct == null ? 'var(--text3)' : evPct >= 0 ? 'var(--green)' : 'var(--red)';
+      const mm = d.day.slice(5, 7), dd = d.day.slice(8, 10), yy = d.day.slice(2, 4);
+      tbl += '<tr style="border-bottom:1px solid var(--border);">'
+        + '<td style="padding:5px 10px; color:var(--text2); font-variant-numeric:tabular-nums;">' + mm + '/' + dd + '/' + yy + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; color:var(--text3);">' + d.n + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">'
+          + (d.spRisk > 0 ? '$' + d.spRisk.toFixed(0) : '—') + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums; color:' + evColor + ';">'
+          + evSign + '$' + Math.abs(d.ev).toFixed(0) + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums; color:' + evPctColor + ';">'
+          + evPctStr + '</td>'
+        + '</tr>';
+    }
+    // Totals footer
+    const totEvColor = totEv >= 0 ? 'var(--green)' : 'var(--red)';
+    const totEvSign = totEv >= 0 ? '+' : '';
+    const totEvPct = totRisk > 0 ? totEv / totRisk * 100 : null;
+    const totEvPctStr = totEvPct != null ? (totEvPct >= 0 ? '+' : '') + totEvPct.toFixed(1) + '%' : '—';
+    const totEvPctColor = totEvPct == null ? 'var(--text3)' : totEvPct >= 0 ? 'var(--green)' : 'var(--red)';
+    tbl += '<tr style="border-top:2px solid var(--border); font-weight:600;">'
+      + '<td style="padding:5px 10px; color:var(--text2);">Total</td>'
+      + '<td style="padding:5px 10px; text-align:right; color:var(--text3);">' + totalN + '</td>'
+      + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">'
+        + (totRisk > 0 ? '$' + totRisk.toFixed(0) : '—') + '</td>'
+      + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums; color:' + totEvColor + ';">'
+        + totEvSign + '$' + Math.abs(totEv).toFixed(0) + '</td>'
+      + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums; color:' + totEvPctColor + ';">'
+        + totEvPctStr + '</td>'
+      + '</tr>';
+    tbl += '</tbody></table></div>';
+
+    el.innerHTML = svg + tbl;
   }
 
   // Shared date range filter for P&L by Sport + P&L by Leg Count charts.
