@@ -195,6 +195,26 @@ const config = {
       if (!Number.isFinite(v) || v < 0) return 0;
       return v;
     })(),
+    // Minimum theoretical edge gate. After all pricing adjustments, if our
+    // final edge (offeredImplied − fairParlayProb) / fairParlayProb × 100 is
+    // below this floor, decline rather than quote. Calibration data shows that
+    // ≤1% theo-edge quotes are systematically money-losing (z=−4.33 in the
+    // +501–1000 range): model estimation error consumes the margin.
+    // Default 0 = disabled. Set MIN_THEO_EDGE_PCT=1.0 to cut the low-edge tail.
+    minTheoEdgePct: (() => {
+      const v = parseFloat(process.env.MIN_THEO_EDGE_PCT);
+      return Number.isFinite(v) && v >= 0 ? v : 0;
+    })(),
+    // Cross-sport additive vig bump. When legs span 2+ different sports,
+    // adds this many pp to the final offered implied prob. Bettors who
+    // combine MLB+NBA or MLB+NBA+NHL show multi-sport expertise and produce
+    // worse-than-model outcomes (z=−2.66 to −2.90). A small bump covers
+    // the correlation blind spot. Default 0 = disabled.
+    // Set CROSS_SPORT_VIG_BUMP_PP=0.5 to add 0.5pp on multi-sport parlays.
+    crossSportVigBumpPp: (() => {
+      const v = parseFloat(process.env.CROSS_SPORT_VIG_BUMP_PP);
+      return Number.isFinite(v) && v >= 0 ? v : 0;
+    })(),
     // Fair-prob multiplier markup. Mirrors how Pinnacle / DK / FD price
     // parlays — the pp distance from fair grows linearly with fair_prob
     // because their markup is applied as a fraction of fair_prob rather

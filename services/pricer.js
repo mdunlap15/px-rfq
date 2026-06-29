@@ -2272,6 +2272,27 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // CROSS-SPORT VIG BUMP — additive margin on multi-sport parlays.
+  //
+  // Bettors who combine MLB+NBA or MLB+NBA+NHL show multi-sport expertise
+  // that produces selection-biased outcomes worse than independent legs
+  // predict (z=−2.66 to −2.90 from calibration data on Over+1000 range).
+  // A small pp bump covers the correlation blind spot without pricing
+  // single-sport parlays more aggressively. Default 0 (disabled); set
+  // CROSS_SPORT_VIG_BUMP_PP=0.5 to add 0.5pp on any parlay spanning 2+
+  // sports. Only fires on cross-game parlays (SGPs are single-event).
+  // -------------------------------------------------------------------
+  const crossSportBumpPp = config.pricing.crossSportVigBumpPp || 0;
+  if (crossSportBumpPp > 0 && !isSGPParlay) {
+    const uniqueSports = new Set(
+      vigLegs.map(l => l.lineInfo?.sport).filter(Boolean)
+    );
+    if (uniqueSports.size > 1) {
+      offeredImpliedProb = Math.min(0.99, offeredImpliedProb + crossSportBumpPp / 100);
+    }
+  }
+
+  // -------------------------------------------------------------------
   // FIXED PP FLOOR ON DISTANCE FROM FAIR
   //
   // The multiplicative vig stack (per-leg vig, longshot ramp, chalk
@@ -2457,6 +2478,30 @@ function priceParlay(legs, opts = {}) {
         };
         return null;
       }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
+  //
+  // After all pricing adjustments, edge = (offered − fair) / fair × 100.
+  // Calibration data shows ≤1% theo-edge quotes are systematically
+  // money-losing (z=−4.33, +501–1000 range): model estimation error
+  // consumes the margin. Default 0 (disabled); set MIN_THEO_EDGE_PCT=1.0
+  // to cut the low-edge tail. Measured against fairParlayProb so the gate
+  // moves with volatility — tight-odds parlays need less pp to clear 1%
+  // edge than long-shot parlays.
+  // -------------------------------------------------------------------
+  const minTheoEdgePct = config.pricing.minTheoEdgePct || 0;
+  if (minTheoEdgePct > 0 && fairParlayProb > 0) {
+    const theoEdge = (offeredImpliedProb - fairParlayProb) / fairParlayProb * 100;
+    if (theoEdge < minTheoEdgePct) {
+      priceParlay._lastFailure = {
+        reason: 'below-min-edge',
+        detail: `theo edge ${theoEdge.toFixed(2)}% < floor ${minTheoEdgePct}%`,
+        blockerLeg: null,
+      };
+      return null;
     }
   }
 
