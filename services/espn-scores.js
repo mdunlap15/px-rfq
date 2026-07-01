@@ -47,6 +47,14 @@ const ESPN_LEAGUES = {
   soccer_brazil_campeonato:    [{ sport: 'soccer', league: 'bra.1' }],
   soccer_uefa_champs_league:   [{ sport: 'soccer', league: 'uefa.champions' }],
   soccer_uefa_europa_league:   [{ sport: 'soccer', league: 'uefa.europa' }],
+  // International: FIFA World Cup + national-team friendlies. line-manager
+  // tags these legs with the GENERIC 'soccer' key (not soccer_fifa_world_cup),
+  // so the getEspnGameResult generic-soccer UNION below is what resolves them
+  // at lookup time — but they must be polled here first. ESPN league codes
+  // verified 2026-07-01: fifa.world carries WC 2026 (Germany 1-1 Paraguay,
+  // France 3-0 Sweden), fifa.friendly carries national-team friendlies.
+  soccer_fifa_world_cup:       [{ sport: 'soccer', league: 'fifa.world' }],
+  soccer_intl_friendly:        [{ sport: 'soccer', league: 'fifa.friendly' }],
   // Tennis: ESPN uses /tennis/atp + /tennis/wta. Both polled so any
   // match across either tour is in the cache. The dynamic-tournament
   // routing in odds-feed normalizes both onto our generic 'tennis' key.
@@ -334,7 +342,26 @@ async function refreshAll() {
 // the cache may carry yesterday's win + today's loss for the same teams
 // and return whichever it sees first, flipping a resolved leg's status.
 function getEspnGameResult(sportKey, homeTeam, awayTeam, startTime) {
-  const entry = cache[sportKey];
+  let entry = cache[sportKey];
+  // Generic 'soccer' legs (line-manager tags most internationals — World Cup,
+  // friendlies — under the bare 'soccer' key, which is never a poll bucket)
+  // have no direct cache entry. Union every polled soccer league so they still
+  // resolve; without this, generic-soccer legs bypass ESPN entirely and fall
+  // to the TOA /scores fallback with its 1-day window (root cause of World Cup
+  // parlay legs never flipping status, caught 2026-07-01).
+  if (!entry && /^soccer/.test(sportKey || '')) {
+    const merged = [];
+    let newest = 0, hasActive = false;
+    for (const k of Object.keys(cache)) {
+      if (!/^soccer/.test(k)) continue;
+      const e = cache[k];
+      if (!e || !e.games) continue;
+      merged.push(...e.games);
+      if (e.fetchedAt > newest) newest = e.fetchedAt;
+      if (e.hasActive) hasActive = true;
+    }
+    if (merged.length) entry = { fetchedAt: newest, hasActive, games: merged };
+  }
   if (!entry) return null;
   const nHome = _normalizeTeam(homeTeam);
   const nAway = _normalizeTeam(awayTeam);
