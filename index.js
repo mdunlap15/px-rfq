@@ -4178,6 +4178,13 @@ function startStatusServer() {
       res.json(await px.pxFetch(q));
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
+  // WC prop label map: { line_id -> {player, mkt, home, away} }, written by wc_post.py
+  // at post time so the portfolio-tracker can label WC prop legs by player even after
+  // ProphetX deletes the SportEvent. Read-only passthrough over the kv_store row.
+  app.get('/px/wc-labels', async (_req, res) => {
+    try { res.json((await db.loadKV('wc_prop_labels')) || {}); }
+    catch (e) { res.status(502).json({ error: String(e.message).slice(0, 200) }); }
+  });
   app.get('/px/sport-events', async (req, res) => {
     try {
       const ids = String(req.query.event_ids || '').replace(/[^0-9,]/g, '');
