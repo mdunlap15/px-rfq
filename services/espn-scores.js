@@ -170,6 +170,11 @@ function _parseGame(event, leagueLabel) {
       awayRunsThru5,
       f5Completed,
       league: leagueLabel,
+      // ESPN event id — needed to fetch the box score (summary?event=<id>)
+      // for player-prop grading. comp.id fallback covers the rare payload
+      // shape where the top-level event id is missing but the competition
+      // carries its own id.
+      espnId: event.id != null ? String(event.id) : (comp.id != null ? String(comp.id) : null),
     };
   } catch (_) {
     return null;
@@ -452,6 +457,9 @@ function getEspnGameResult(sportKey, homeTeam, awayTeam, startTime) {
     winner,
     state: bestMatch.state,
     statusName: bestMatch.statusName,
+    // ESPN event id for this matched game — box-score.js uses it to fetch
+    // the summary endpoint (player-prop grading).
+    espnId: bestMatch.espnId || null,
     // Live-play state — used by in-play-models.js to compute live win
     // probabilities. period is sport-specific (quarter / inning / period),
     // displayClock is the per-period remaining clock ("5:23"), shortDetail

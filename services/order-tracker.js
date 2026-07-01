@@ -5396,6 +5396,58 @@ async function checkLegResults() {
         continue; // F5 branch handled this leg fully — skip full-game path
       }
 
+      // MLB player-prop branch: grade Over/Under player stat legs from the
+      // ESPN box score once the game is FINAL. PX otherwise leaves these
+      // 'open' (In Progress) for hours after the game ends. MLB only (other
+      // sports' props aren't wired to a box-score source yet). Ported from
+      // the working portfolio-tracker implementation — see box-score.js for
+      // the ESPN payload parsing and this app's propType vocabulary.
+      //
+      // Scoped to o.status === 'confirmed' ONLY (unlike the team-market
+      // branches below, which also backfill settled orders) — this is new,
+      // first-run code touching production positions, so it's deliberately
+      // scoped to open positions and never touches an order PX has already
+      // book-graded settled.
+      if (o.status === 'confirmed' && l.sport === 'baseball_mlb' && typeof market === 'string' && market.startsWith('player_')) {
+        const boxScore = require('./box-score');
+        const propType = boxScore.marketToPropType(market);
+        const player = l.team || l.playerName || l.teamName;
+        const line = l.line != null ? Number(l.line) : null;
+        if (!propType || !boxScore.statSupported(propType) || !player || line == null
+            || !(selection === 'over' || selection === 'under')) continue;
+        let espnResult = null;
+        try {
+          const espnScores = require('./espn-scores');
+          espnResult = espnScores.getEspnGameResult(l.sport, l.homeTeam, l.awayTeam, l.startTime);
+        } catch (_) { /* espn-scores unavailable — leave leg for PX to grade */ }
+        if (!espnResult || !espnResult.completed || !espnResult.espnId) continue;
+        checked++;
+        const box = await boxScore.fetchBox(espnResult.espnId);
+        if (!box) continue; // box fetch/parse failed — retry next cycle
+        const val = boxScore.statValue(box, player, propType);
+        if (val == null) continue; // player not matched / stat unresolvable -> leave for PX
+        const freshResult = selection === 'over'
+          ? (val > line ? 'won' : val < line ? 'lost' : 'push')
+          : (val < line ? 'won' : val > line ? 'lost' : 'push');
+        if (l.inferredResult && l.inferredResult !== freshResult) {
+          log.warn('Results', `Overriding inferredResult for ${player} ${propType}: stored=${l.inferredResult} → fresh=${freshResult} (actual ${val} vs line ${line}, espnId=${espnResult.espnId})`);
+        }
+        l.inferredResult = freshResult;
+        resolved++;
+        l.liveFairProb = null;
+        l.liveFairProbUpdatedAt = null;
+        if (o.legs) {
+          const matchingLeg = o.legs.find(ol => ol.lineId === l.lineId || ((ol.team || ol.teamName) === (l.team || l.teamName) && (ol.market || ol.marketType) === market));
+          if (matchingLeg) {
+            matchingLeg.inferredResult = l.inferredResult;
+            matchingLeg.liveFairProb = null;
+            matchingLeg.liveFairProbUpdatedAt = null;
+          }
+        }
+        log.info('Results', `MLB prop leg resolved: ${player} ${propType} (line ${line}, ${selection}) → ${l.inferredResult} (actual ${val})`);
+        continue; // prop branch handled this leg fully — skip full-game path
+      }
+
       const result = await oddsFeed.getGameResult(l.sport, l.homeTeam, l.awayTeam, l.startTime);
       if (!result || !result.completed) continue;
       if (result.homeScore == null || result.awayScore == null) continue;
