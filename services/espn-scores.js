@@ -286,14 +286,22 @@ async function _fetchOneLeagueDay(sport, league, dateStr) {
 // covers a 48-hour window with no overlap (ESPN's "today" is keyed by
 // its own server's UTC interpretation, so we just trust it for the
 // recent window and rely on the explicit date for what fell off).
+const _SCORE_LOOKBACK_DAYS = Math.max(1, parseInt(process.env.ESPN_SCORE_LOOKBACK_DAYS) || 3);
 async function _fetchOneLeague(sport, league) {
-  const [todayGames, yesterdayGames] = await Promise.all([
-    _fetchOneLeagueDay(sport, league, ''),
-    _fetchOneLeagueDay(sport, league, _ymdUTC(-1)),
-  ]);
+  // Fetch today + the prior _SCORE_LOOKBACK_DAYS UTC days. A 48h window
+  // (today + yesterday) drops games that finaled 2+ days ago — which strands
+  // the EARLY losing leg of a MULTI-DAY parlay before the parlay's later legs
+  // settle. Caught 2026-07-01: a WC parlay [Germany 6/29 -0.5, France 6/30,
+  // Spain 7/2] — Germany's -0.5 loss (1-1 draw) must grade to lock the parlay
+  // a win, but by 7/1 the 6/29 game had fallen out of the 48h window, so the
+  // leg never resolved and the risk sim kept it live. Default 3-day (96h)
+  // window; tune via ESPN_SCORE_LOOKBACK_DAYS.
+  const dayStrs = [''];
+  for (let d = 1; d <= _SCORE_LOOKBACK_DAYS; d++) dayStrs.push(_ymdUTC(-d));
+  const lists = await Promise.all(dayStrs.map(ds => _fetchOneLeagueDay(sport, league, ds)));
   const seen = new Set();
   const merged = [];
-  for (const list of [todayGames, yesterdayGames]) {
+  for (const list of lists) {
     for (const g of list) {
       // Dedupe on team-pair + commenceTime so a game showing up in
       // both windows (rare but possible near the UTC boundary) only
