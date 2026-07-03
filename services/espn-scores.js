@@ -91,6 +91,18 @@ function _normalizeTeam(name) {
     .trim();
 }
 
+// Word-order-independent canonical form — ESPN and PX/the odds feed
+// disagree on national-team word order for some countries (ESPN: "Congo
+// DR"; PX: "DR Congo"), which the substring-based candidate matching below
+// can't bridge since neither string contains the other. Sorting words makes
+// both forms collapse to the same key ("congo dr") without needing a
+// per-country alias table. Caught 2026-07-02: Harry Kane's England vs DR
+// Congo World Cup prop leg never resolved because getEspnGameResult
+// couldn't match "DR Congo" (PX) against ESPN's "Congo DR".
+function _wordSetKey(normalized) {
+  return String(normalized || '').split(' ').filter(Boolean).sort().join(' ');
+}
+
 // ESPN's `competition.status.type.state` values:
 //   'pre'  → not started
 //   'in'   → in progress (clock active or between periods)
@@ -291,16 +303,19 @@ async function _fetchOneLeagueDay(sport, league, dateStr) {
 // covers a 48-hour window with no overlap (ESPN's "today" is keyed by
 // its own server's UTC interpretation, so we just trust it for the
 // recent window and rely on the explicit date for what fell off).
-const _SCORE_LOOKBACK_DAYS = Math.max(1, parseInt(process.env.ESPN_SCORE_LOOKBACK_DAYS) || 3);
+const _SCORE_LOOKBACK_DAYS = Math.max(1, parseInt(process.env.ESPN_SCORE_LOOKBACK_DAYS) || 7);
 async function _fetchOneLeague(sport, league) {
   // Fetch today + the prior _SCORE_LOOKBACK_DAYS UTC days. A 48h window
   // (today + yesterday) drops games that finaled 2+ days ago — which strands
-  // the EARLY losing leg of a MULTI-DAY parlay before the parlay's later legs
-  // settle. Caught 2026-07-01: a WC parlay [Germany 6/29 -0.5, France 6/30,
-  // Spain 7/2] — Germany's -0.5 loss (1-1 draw) must grade to lock the parlay
-  // a win, but by 7/1 the 6/29 game had fallen out of the 48h window, so the
-  // leg never resolved and the risk sim kept it live. Default 3-day (96h)
-  // window; tune via ESPN_SCORE_LOOKBACK_DAYS.
+  // the EARLY losing/decided leg of a MULTI-DAY parlay before the parlay's
+  // later legs settle. Caught 2026-07-01: a WC parlay [Germany 6/29 -0.5,
+  // France 6/30, Spain 7/2] — Germany's -0.5 loss (1-1 draw) must grade to
+  // lock the parlay a win, but by 7/1 the 6/29 game had fallen out of the
+  // 48h window. Widened 3->7 days on 2026-07-02: a 5-leg WC goalscorer
+  // parlay [Vinícius Júnior 6/29, Mbappé 6/30, Kane 7/1, Ronaldo 7/2, Messi
+  // 7/3] still left Vinícius's game (4 days back) outside even the 3-day
+  // window. 7 days comfortably covers a full World Cup match week; tune via
+  // ESPN_SCORE_LOOKBACK_DAYS.
   const dayStrs = [''];
   for (let d = 1; d <= _SCORE_LOOKBACK_DAYS; d++) dayStrs.push(_ymdUTC(-d));
   const lists = await Promise.all(dayStrs.map(ds => _fetchOneLeagueDay(sport, league, ds)));
@@ -398,10 +413,12 @@ function getEspnGameResult(sportKey, homeTeam, awayTeam, startTime) {
     let flipped = false;
     for (const [ch, ca] of candidates) {
       const exact = (ch === nHome && ca === nAway) || (ch.includes(nHome) && ca.includes(nAway))
-        || (nHome.includes(ch) && nAway.includes(ca));
+        || (nHome.includes(ch) && nAway.includes(ca))
+        || (_wordSetKey(ch) === _wordSetKey(nHome) && _wordSetKey(ca) === _wordSetKey(nAway));
       if (exact) { matched = true; break; }
       const flip = (ch === nAway && ca === nHome) || (ch.includes(nAway) && ca.includes(nHome))
-        || (nAway.includes(ch) && nHome.includes(ca));
+        || (nAway.includes(ch) && nHome.includes(ca))
+        || (_wordSetKey(ch) === _wordSetKey(nAway) && _wordSetKey(ca) === _wordSetKey(nHome));
       if (flip) { matched = true; flipped = true; break; }
     }
     if (!matched) continue;
@@ -513,10 +530,12 @@ function getEspnF5Result(sportKey, homeTeam, awayTeam, startTime) {
     let flipped = false;
     for (const [ch, ca] of candidates) {
       const exact = (ch === nHome && ca === nAway) || (ch.includes(nHome) && ca.includes(nAway))
-        || (nHome.includes(ch) && nAway.includes(ca));
+        || (nHome.includes(ch) && nAway.includes(ca))
+        || (_wordSetKey(ch) === _wordSetKey(nHome) && _wordSetKey(ca) === _wordSetKey(nAway));
       if (exact) { matched = true; break; }
       const flip = (ch === nAway && ca === nHome) || (ch.includes(nAway) && ca.includes(nHome))
-        || (nAway.includes(ch) && nHome.includes(ca));
+        || (nAway.includes(ch) && nHome.includes(ca))
+        || (_wordSetKey(ch) === _wordSetKey(nAway) && _wordSetKey(ca) === _wordSetKey(nHome));
       if (flip) { matched = true; flipped = true; break; }
     }
     if (!matched) continue;

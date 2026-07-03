@@ -5448,6 +5448,57 @@ async function checkLegResults() {
         continue; // prop branch handled this leg fully — skip full-game path
       }
 
+      // Soccer player-prop branch (World Cup goalscorer / SoT / assists):
+      // grade from the ESPN box score once the game is FINAL. Sibling to the
+      // MLB branch above — same field, same fail-safe rules, different stat
+      // source (services/soccer-box-score.js) since soccer's ESPN summary
+      // payload and league-path routing differ from baseball's fixed path.
+      // These legs register with the GENERIC sport 'soccer' (confirmed from
+      // real order data, e.g. Kylian Mbappé / player_goalscorer legs) — not
+      // 'soccer_fifa_world_cup' — because the underlying PX event matched
+      // under generic 'soccer' at seed time. Scoped to o.status==='confirmed'
+      // only, matching the MLB branch — never touches book-graded settled
+      // orders.
+      if (o.status === 'confirmed' && l.sport === 'soccer' && typeof market === 'string' && market.startsWith('player_')) {
+        const soccerBox = require('./soccer-box-score');
+        const propType = soccerBox.marketToPropType(market);
+        const player = l.team || l.playerName || l.teamName;
+        const line = l.line != null ? Number(l.line) : null;
+        if (!propType || !soccerBox.statSupported(propType) || !player || line == null
+            || !(selection === 'over' || selection === 'under')) continue;
+        let espnResult = null;
+        try {
+          const espnScores = require('./espn-scores');
+          espnResult = espnScores.getEspnGameResult(l.sport, l.homeTeam, l.awayTeam, l.startTime);
+        } catch (_) { /* espn-scores unavailable — leave leg for PX to grade */ }
+        if (!espnResult || !espnResult.completed || !espnResult.espnId || !espnResult.league) continue;
+        checked++;
+        const box = await soccerBox.fetchBox(espnResult.espnId, espnResult.league);
+        if (!box) continue; // box fetch/parse failed — retry next cycle
+        const val = soccerBox.statValue(box, player, propType);
+        if (val == null) continue; // player not matched / stat unresolvable -> leave for PX
+        const freshResult = selection === 'over'
+          ? (val > line ? 'won' : val < line ? 'lost' : 'push')
+          : (val < line ? 'won' : val > line ? 'lost' : 'push');
+        if (l.inferredResult && l.inferredResult !== freshResult) {
+          log.warn('Results', `Overriding inferredResult for ${player} ${propType}: stored=${l.inferredResult} → fresh=${freshResult} (actual ${val} vs line ${line}, espnId=${espnResult.espnId})`);
+        }
+        l.inferredResult = freshResult;
+        resolved++;
+        l.liveFairProb = null;
+        l.liveFairProbUpdatedAt = null;
+        if (o.legs) {
+          const matchingLeg = o.legs.find(ol => ol.lineId === l.lineId || ((ol.team || ol.teamName) === (l.team || l.teamName) && (ol.market || ol.marketType) === market));
+          if (matchingLeg) {
+            matchingLeg.inferredResult = l.inferredResult;
+            matchingLeg.liveFairProb = null;
+            matchingLeg.liveFairProbUpdatedAt = null;
+          }
+        }
+        log.info('Results', `Soccer prop leg resolved: ${player} ${propType} (line ${line}, ${selection}) → ${l.inferredResult} (actual ${val})`);
+        continue; // prop branch handled this leg fully — skip full-game path
+      }
+
       const result = await oddsFeed.getGameResult(l.sport, l.homeTeam, l.awayTeam, l.startTime);
       if (!result || !result.completed) continue;
       if (result.homeScore == null || result.awayScore == null) continue;
