@@ -7727,6 +7727,29 @@
     const deployBuffer = (capacityLeft != null && restingMult > 0) ? capacityLeft / restingMult : null;
     const deployBufferStr = deployBuffer != null ? fmtDollar(deployBuffer) : '-';
 
+    // Locked wins pending: confirmed parlays already decided as SP wins (any
+    // bettor leg has lost → parlay can't hit) but not yet PX-settled. These
+    // carry $0 residual risk (isParlayAlreadyDead releases their exposure) yet
+    // still count in Open Parlays — this tally makes the guaranteed-but-
+    // unsettled winnings explicit. Now that MLB + soccer props grade live,
+    // these resolve within a poll cycle of a game going final instead of
+    // waiting hours on PX.
+    let lockedWinsCount = 0, lockedWinsToWin = 0;
+    try {
+      for (const o of Object.values(orderState.allOrders || {})) {
+        if (!o || o.status !== 'confirmed' || (o.meta && o.meta.phantom) || o.isStalePhantom || !o.orderUuid) continue;
+        const legs = o.legs || o.meta?.legs || [];
+        if (legs.some(l => getLegResult(l) === 'lost')) {
+          lockedWinsCount++;
+          if (o.confirmedStake && o.offeredOdds) lockedWinsToWin += calcSpProfit(o.confirmedStake, o.offeredOdds);
+        }
+      }
+    } catch (_) { /* tally is best-effort — never break the header */ }
+    const lockedWinsStat = lockedWinsCount > 0
+      ? stat('Locked Wins', lockedWinsCount + ' · ' + fmtDollar(lockedWinsToWin), 'positive',
+          'Confirmed parlays already decided as SP wins (a bettor leg has lost → the parlay cannot hit) but not yet marked settled by PX. Shows count · total To-Win. Exposure is already released; this is guaranteed-but-pending winnings.')
+      : '';
+
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
         ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
@@ -7737,6 +7760,7 @@
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
         ${stat('ROI (15-day)', roiStr, roiCls, 'Parlay realized P&L ÷ settled parlay stake, over orders settled in the last 15 days')}
         ${stat('Open Parlays', confirmed)}
+        ${lockedWinsStat}
         ${stat('Listing Capacity', capacityStr, 'neutral', `Max total resting single-leg offers PX allows = ${restingMult}× Cash Available. Shrinks as cash is deployed on parlays.`)}
         ${stat('Open Orders', openOrdersStr, 'neutral', 'Total resting single-leg offers you currently have posted on PX (unmatched_wager_balance). This consumes Listing Capacity.' + (unmatchedStale ? ' ⚠ Last sync was not fresh — value may be stale.' : ''))}
         ${stat('Capacity Left', capacityLeftStr, capacityLeftCls, `Listing Capacity − Open Orders. When this hits $0, PX auto-cancels open orders to fit. ≈ ${deployBufferStr} more cash can be deployed on parlays before cancellations begin (Capacity Left ÷ ${restingMult}). Freeze the quoters before it nears $0.`)}
@@ -7949,7 +7973,15 @@
     // "New York City FC" → "New York City" → "City", etc.
     let stripped = name.replace(CLUB_SUFFIX_RE, '').replace(CLUB_PREFIX_RE, '').trim();
     if (!stripped) stripped = name;
-    const last = stripped.split(' ').pop();
+    const words = stripped.split(' ');
+    let last = words.pop();
+    // A trailing name suffix (Jr./Sr./II/III/IV) is NOT the surname — for a
+    // player like "First Last Jr." the abbreviation must be "Last", not the
+    // suffix. Fell through before, producing "Jr. @ Rinderknech" for a tennis
+    // total where the real surname was dropped (operator-caught 2026-07-01).
+    if (words.length && /^(jr|sr|ii|iii|iv|v)\.?$/i.test(last)) {
+      last = words.pop();
+    }
     // If the last word alone is too short or still generic, prefer the
     // whole stripped name (handles short city names + single-word clubs).
     if (last.length < 3 || /^(fc|sc|cf|ac|uc|cd|rc|fk|sk|bk)$/i.test(last)) return stripped;
