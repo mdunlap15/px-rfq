@@ -123,6 +123,17 @@ const config = {
     // 0.04 starting recommendation (= 4% per side, ~2% pair vig on
     // coinflip matchups). Tune up if win-rate stays elevated.
     vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.04,
+    // First-5-innings (F5) min per-leg vig. The settlement analysis found F5
+    // totals under-won by 7.6pp and F5 run lines by 12.8pp — our fair runs
+    // optimistic on this thin sub-market. Floors the vig on any first_5_*
+    // leg. Default 0 (no change); recommended activation ~0.05 (5%) — F5 is
+    // low volume, so a wide floor costs little and closes the leak.
+    vigF5Min: parseFloat(process.env.VIG_F5_MIN) || 0,
+    // Full-game spread / run-line min per-leg vig. Run lines under-won by
+    // 3.9pp and were ~99% softer than sharp-book consensus (spread de-vig
+    // fair ~4pp optimistic). Floors vig on market==='spread' legs. Default 0;
+    // recommended activation ~0.025 (2.5%).
+    vigSpreadMin: parseFloat(process.env.VIG_SPREAD_MIN) || 0,
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
     // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
     // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,
@@ -328,12 +339,20 @@ const config = {
     // (chalk stacks slipping past the no-stacking-surcharge default).
     //
     // Map keys are leg counts; missing keys default to 1.0 (no change).
-    // Defaults below are conservative starting values — Pinnacle's per-$
-    // edge in the boxed region scales roughly linearly with leg count, so
-    // the recommended multiplier path is 1.25/1.5/1.75/2.0/2.5 for legs
-    // 4/5/6/7/8+. Override live via VIG_BY_LEG_COUNT JSON env var.
+    // Override live via VIG_BY_LEG_COUNT JSON env var.
+    //
+    // Defaults updated 2026-07-03 from the settlement analysis:
+    //   - Added "3":1.15 — 3-leg parlays were the worst leg-count bucket
+    //     (z=-2.62, -$13K) yet got NO leg-count premium (map started at 4).
+    //   - Added 9-12 — MAX_LEGS=12 allows 9-12 leg parlays but the exact-key
+    //     lookup fell through to ×1.0 for them (zero variance premium on the
+    //     highest-variance tickets). 9-12 fill at ~0% anyway, so this is
+    //     free tail insurance on the rare one that does.
+    //   - Raised 5-8 (1.5/1.75/2/2.5 -> 2/2.75/3.5/4.5): the 5-leg band
+    //     under-won by 6pp; Pinnacle's per-$ edge scales super-linearly with
+    //     leg count in the boxed region.
     vigByLegCount: (() => {
-      const defaults = { 4: 1.25, 5: 1.5, 6: 1.75, 7: 2.0, 8: 2.5 };
+      const defaults = { 3: 1.15, 4: 1.25, 5: 2.0, 6: 2.75, 7: 3.5, 8: 4.5, 9: 5.5, 10: 6.5, 11: 7.5, 12: 8.5 };
       try {
         const raw = process.env.VIG_BY_LEG_COUNT;
         if (!raw) return defaults;

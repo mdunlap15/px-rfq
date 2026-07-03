@@ -1849,6 +1849,25 @@ function priceParlay(legs, opts = {}) {
     if (sport === 'golf_matchups' && golfMatchupMinVig > 0) {
       vig = Math.max(vig, golfMatchupMinVig);
     }
+    // First-5-innings (F5) floor — the settlement analysis found F5 totals
+    // under-won by 7.6pp and F5 run lines by 12.8pp (our fair runs
+    // optimistic on this thinner, lower-liquidity sub-market). A min-vig
+    // floor widens the margin to compensate, same mechanism as series/MMA.
+    // Env-gated (VIG_F5_MIN, default 0 = no change).
+    const f5MinVig = config.pricing.vigF5Min || 0;
+    if (f5MinVig > 0 && typeof marketType === 'string' && /^first_5/.test(marketType)) {
+      vig = Math.max(vig, f5MinVig);
+    }
+    // Full-game spread / run-line floor — run lines under-won by 3.9pp and
+    // were 99% softer than the sharp book consensus (our spread de-vig fair
+    // runs ~4pp optimistic; biggest recent team-market drag). A floor adds
+    // cushion without needing a full de-vig rework. Env-gated (VIG_SPREAD_MIN,
+    // default 0). Applies to full-game spreads only — F5 spreads are caught
+    // by the F5 floor above (checked first; Math.max makes order irrelevant).
+    const spreadMinVig = config.pricing.vigSpreadMin || 0;
+    if (spreadMinVig > 0 && marketType === 'spread') {
+      vig = Math.max(vig, spreadMinVig);
+    }
     // Per-leg vigBump from sub-pricing fallbacks (e.g. tennis totals
     // snap-to-nearest). Adds to the base vig BEFORE SGP multiplier so
     // the bump is preserved through correlation amplification but
@@ -2175,7 +2194,16 @@ function priceParlay(legs, opts = {}) {
   // are skipped — the multiplier would otherwise contract our edge.
   // -------------------------------------------------------------------
   const legCountMultMap = config.pricing.vigByLegCount || {};
-  const legCountMult = legCountMultMap[vigLegs.length] || 1.0;
+  // Clamp to the highest defined key so the top entry behaves as "N+": a
+  // leg count above the map's max reuses the max multiplier instead of
+  // silently falling through to ×1.0 (the 9-12 hole this fixed, and future-
+  // proofs against MAX_LEGS ever rising past the map). Exact match wins;
+  // over-max reuses the max-key value; under-min (2-leg) stays ×1.0.
+  const _lcKeys = Object.keys(legCountMultMap).map(Number).filter(Number.isFinite);
+  const _lcMax = _lcKeys.length ? Math.max(..._lcKeys) : 0;
+  const legCountMult = legCountMultMap[vigLegs.length]
+    || (vigLegs.length > _lcMax ? legCountMultMap[_lcMax] : 1.0)
+    || 1.0;
   if (legCountMult > 1.0 && offeredImpliedProb > vigFair && vigFair > 0) {
     const currentVigFraction = offeredImpliedProb / vigFair - 1;
     const scaledOffered = vigFair * (1 + currentVigFraction * legCountMult);
