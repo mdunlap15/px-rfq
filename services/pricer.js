@@ -3996,6 +3996,32 @@ function shouldDecline(legs, parlayId) {
         return { declined: true, reason: 'sgp_experiment_limit', detail: `guard unavailable (${err.message}) — fail closed for experimental combo` };
       }
     }
+
+    // Concurrent same-market payout cap (correlated-tail control). Bounds the
+    // total open payout across every parlay holding this prop marketType on
+    // the same slate-day — the cross-game / cross-counterparty concentration
+    // the per-player and per-game caps can't see. Env-gated
+    // (MAX_CONCURRENT_MARKET_PAYOUT, default 0 = off). Charge the same
+    // worst-case per-parlay cap used above.
+    const cmeCap = config.pricing.maxConcurrentMarketPayout || 0;
+    if (cmeCap > 0) {
+      let cmeAdd = propParlayCap;
+      try {
+        const sg = require('./sgp-guard');
+        if (sg.isExperimental && sg.isExperimental(sgpCombo)) cmeAdd = config.pricing.maxRiskSgpExperimental || 15;
+      } catch (_) { /* experimental detection best-effort — fall back to prop cap */ }
+      const cme = orderTracker.checkConcurrentMarketExposure(resolvedLegs, cmeAdd, cmeCap);
+      if (cme && cme.exceeded) {
+        log.info('Pricing', `Concurrent market cap: ${cme.marketType} on ${cme.day} would be $${cme.wouldBe} (max $${cme.max})`);
+        return {
+          declined: true,
+          reason: 'concurrent market exposure limit',
+          detail: `${cme.marketType} (${cme.day}): open $${cme.current} + this parlay $${cmeAdd} = $${cme.wouldBe} > cap $${cme.max}`,
+          violations: [{ team: cme.marketType, wouldBe: cme.wouldBe, limit: cme.max }],
+          estPayout: cmeAdd,
+        };
+      }
+    }
   }
 
   // On success, surface the resolved lineInfos keyed by lineId so the caller

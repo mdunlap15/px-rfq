@@ -3698,6 +3698,87 @@ function getPlayerExposureSnapshot() {
   return out.sort((a, b) => (b.total || b.risk) - (a.total || a.risk));
 }
 
+// ---------------------------------------------------------------------------
+// CONCURRENT SAME-MARKET EXPOSURE (correlated-tail cap)
+// ---------------------------------------------------------------------------
+// Bounds total OPEN payout across every parlay holding a leg of a given prop
+// marketType resolving on the same ET slate-day (e.g. all hitter_hr props
+// tonight, across all games and all counterparties). The per-player and
+// per-game caps can't see this: on a league-wide home-run day, many
+// INDEPENDENT tickets on DIFFERENT players in DIFFERENT games cash at once
+// (shared scoring environment), and the HR-prop flow is spread across ~96
+// counterparties so no per-creator cap catches it either. This is the one
+// gate that bounds "how bad can a single correlated slate get."
+//
+// On-demand cached scan of the authoritative `orders` map (self-healing, no
+// persistent accumulator to drift — mirrors the stack-index pattern). Full
+// un-weighted payout per order (worst-case simultaneous-loss bound). Env-
+// gated via MAX_CONCURRENT_MARKET_PAYOUT (0 = disabled).
+const _CME_TTL_MS = 2000;
+let _cmeIndex = null;   // Map<`${marketType}|${dayET}`, {payout, parlays:Set}>
+let _cmeAt = 0;
+function _etDayKey(iso) {
+  if (!iso) return 'nodate';
+  try { return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); }
+  catch (_) { return 'nodate'; }
+}
+function _buildCmeIndex() {
+  const idx = new Map();
+  for (const o of Object.values(orders)) {
+    if (!o || o.status !== 'confirmed') continue;
+    if (isOrderStalePhantom(o)) continue;
+    const legs = getLegsForExposure(o);
+    if (isParlayAlreadyDead(legs)) continue; // decided-win parlays carry no residual SP risk
+    const payout = getOrderPayout(o);
+    if (!(payout > 0)) continue;
+    const seenKeys = new Set(); // dedup per order per key (2 HR legs → count payout once)
+    for (const l of legs) {
+      const mt = l.marketType || l.market;
+      if (!mt || !/^player_/.test(mt)) continue;
+      const key = `${mt}|${_etDayKey(l.startTime || l.start_time)}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      let e = idx.get(key);
+      if (!e) { e = { payout: 0, parlays: new Set() }; idx.set(key, e); }
+      e.payout += payout;
+      e.parlays.add(o.parlayId);
+    }
+  }
+  return idx;
+}
+function _getCmeIndex() {
+  const now = Date.now();
+  if (!_cmeIndex || (now - _cmeAt) > _CME_TTL_MS) { _cmeIndex = _buildCmeIndex(); _cmeAt = now; }
+  return _cmeIndex;
+}
+function checkConcurrentMarketExposure(legs, additionalRisk, cap) {
+  if (!(cap > 0) || !(additionalRisk > 0) || !Array.isArray(legs)) return null;
+  const idx = _getCmeIndex();
+  const checked = new Set();
+  for (const leg of legs) {
+    const li = leg.lineInfo || leg;
+    const mt = li.marketType || li.market;
+    if (!mt || !/^player_/.test(mt)) continue;
+    const key = `${mt}|${_etDayKey(li.startTime || li.start_time)}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
+    const current = idx.get(key)?.payout || 0;
+    const wouldBe = current + additionalRisk;
+    if (wouldBe > cap) {
+      return { exceeded: true, marketType: mt, day: key.split('|')[1],
+        current: Math.round(current * 100) / 100, wouldBe: Math.round(wouldBe * 100) / 100, max: cap };
+    }
+  }
+  return null;
+}
+function getConcurrentMarketExposureSnapshot() {
+  const idx = _getCmeIndex();
+  return [...idx.entries()]
+    .map(([key, e]) => ({ key, marketType: key.split('|')[0], day: key.split('|')[1],
+      payout: Math.round(e.payout * 100) / 100, parlayCount: e.parlays.size }))
+    .sort((a, b) => b.payout - a.payout);
+}
+
 function checkPitcherExposure(legs, additionalRisk, maxPerPitcher) {
   if (!Array.isArray(legs) || legs.length === 0) return null;
   if (!(additionalRisk > 0)) return null;
@@ -6843,6 +6924,8 @@ module.exports = {
   getPitcherExposureSnapshot,
   checkPlayerExposure,
   getPlayerExposureSnapshot,
+  checkConcurrentMarketExposure,
+  getConcurrentMarketExposureSnapshot,
   playerKeyForLeg,
   getRecentOrders,
   getRoiWindow,

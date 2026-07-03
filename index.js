@@ -3975,6 +3975,27 @@ function startStatusServer() {
     }
   });
 
+  // Concurrent same-market payout by (prop marketType, ET slate-day). Use the
+  // top rows to SIZE MAX_CONCURRENT_MARKET_PAYOUT — the highest live bucket is
+  // your current peak correlated-tail exposure on one slate.
+  app.get('/concurrent-market-exposure', (req, res) => {
+    try {
+      const snap = orderTracker.getConcurrentMarketExposureSnapshot();
+      res.json({
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        cap: config.pricing.maxConcurrentMarketPayout || 0,
+        capEnabled: (config.pricing.maxConcurrentMarketPayout || 0) > 0,
+        peakBucketPayout: snap.length ? snap[0].payout : 0,
+        bucketCount: snap.length,
+        buckets: snap,
+      });
+    } catch (err) {
+      log.error('API', `/concurrent-market-exposure failed: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   // Detailed bid-comparison report. For every matched parlay in the
   // window (bettor's parlay got filled by SOME SP), surface our price
   // alongside the winning price so the operator can calibrate vig.

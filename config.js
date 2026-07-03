@@ -1056,6 +1056,15 @@ const config = {
     //     bound no script mapping can evade.
     maxPropTeamSideRisk: _capNum(process.env.MAX_PROP_TEAM_SIDE_RISK, 300),
     maxPropRiskPerGame: _capNum(process.env.MAX_PROP_RISK_PER_GAME, 600),
+    // Concurrent same-market payout cap (correlated-tail control). Total OPEN
+    // payout across every parlay holding a leg of one prop marketType on the
+    // same ET slate-day — the bound that stops a league-wide HR/goalscorer day
+    // (many independent tickets, different players/games, cashing together)
+    // from producing a large red day. Per-player/per-game/per-creator caps
+    // can't see this cross-game, cross-counterparty concentration. Default 0
+    // (disabled). Size it from your peak historical single-slate same-market
+    // payout; a starting point is a few × MAX_RISK_PER_PARLAY_WITH_PROP.
+    maxConcurrentMarketPayout: _capNum(process.env.MAX_CONCURRENT_MARKET_PAYOUT, 0),
     // Multiplier applied to per-leg effective vig when pricing an SGP.
     // 2.0 = double the normal vig on each leg of the SGP. Tunable while
     // we gather acceptance + ROI data on re-enabled SGPs.
