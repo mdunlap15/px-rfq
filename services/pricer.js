@@ -1747,6 +1747,49 @@ function priceParlay(legs, opts = {}) {
     log.debug('Pricing', `SGP correlation ${sgpCorrelationSign} — fair ${(before*100).toFixed(2)}% × ${sgpCorrelationFactor} = ${(fairParlayProb*100).toFixed(2)}%`);
   }
 
+  // Cross-game same-market correlation. Legs of the SAME market + side across
+  // DIFFERENT games are positively correlated through the shared environment
+  // (a high-scoring night lifts every over / HR / goalscorer at once), but the
+  // independent product above underprices that joint — the leak behind
+  // correlated blow-up slates (May 6 multi-totals; league-wide HR days). Boost
+  // the fair (bettor win prob) toward the true higher joint so our offer
+  // tightens. SAME-game clusters are the SGP path above (same pxEventId); this
+  // fires only across DISTINCT pxEventIds, so the two compose without double-
+  // counting. Env-gated via CROSS_GAME_CORR_BY_MARKET (JSON marketType ->
+  // per-extra-game factor); empty default = no change. Boost = factor^(games-1),
+  // capped. MUST also feed sgpFairMultiplier below (offered side) or offered
+  // odds come out longer than Fair.
+  let crossGameCorrFactor = 1;
+  {
+    const xgMap = config.pricing.crossGameCorrByMarket || {};
+    if (Object.keys(xgMap).length && pricedLegs.length >= 2) {
+      const clusters = {};
+      for (const l of pricedLegs) {
+        const mt = l.lineInfo.marketType || l.lineInfo.market;
+        if (!mt || xgMap[mt] == null) continue;
+        const side = l.lineInfo.oddsApiSelection || l.lineInfo.selection || '';
+        const k = mt + '|' + side;
+        const c = clusters[k] || (clusters[k] = { mt, games: new Set() });
+        if (l.lineInfo.pxEventId != null) c.games.add(l.lineInfo.pxEventId);
+      }
+      const applied = [];
+      for (const [k, c] of Object.entries(clusters)) {
+        if (c.games.size < 2) continue; // same market+side across 2+ distinct games
+        const f = xgMap[c.mt];
+        if (!(f > 1)) continue;
+        crossGameCorrFactor *= Math.pow(f, c.games.size - 1);
+        applied.push(`${k}×${c.games.size}g`);
+      }
+      const capB = config.pricing.crossGameCorrMaxBoost || 2.0;
+      if (crossGameCorrFactor > capB) crossGameCorrFactor = capB;
+      if (crossGameCorrFactor > 1) {
+        const before = fairParlayProb;
+        fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * crossGameCorrFactor));
+        log.debug('Pricing', `Cross-game same-market correlation ×${crossGameCorrFactor.toFixed(3)} [${applied.join(', ')}] — fair ${(before*100).toFixed(2)}% → ${(fairParlayProb*100).toFixed(2)}%`);
+      }
+    }
+  }
+
   // Nested implication collapse: joint = P(strong) exactly, i.e. the weak
   // leg's factor is divided out of the naive product. Detected above from
   // leg shape; mirrored into sgpFairMultiplier below (vig alignment).
@@ -1941,6 +1984,7 @@ function priceParlay(legs, opts = {}) {
   const sgpFairMultiplier =
     (isKpropMlSameTeamSGP ? (1 + (config.pricing.sgpPropMlCorrBoost || 0)) : 1) *
     sgpCorrelationFactor *
+    crossGameCorrFactor *
     nestedOfferedMultiplier *
     xteamFairMultiplier;
   const vigFair = vigLegs.reduce((p, l) => p * l.fairProb, 1) * sgpFairMultiplier;

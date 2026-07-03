@@ -1205,6 +1205,32 @@ const config = {
       } catch (e) { /* fall through to defaults */ }
       return defaults;
     })(),
+    // Cross-game same-market correlation. JSON map: marketType -> per-extra-
+    // game boost factor (>1) applied to the parlay fair prob when the parlay
+    // stacks that market + same side across MULTIPLE DIFFERENT games (positive
+    // correlation via the shared slate environment — the leak behind
+    // correlated blow-up days). Boost = factor^(distinctGames-1), capped by
+    // crossGameCorrMaxBoost. Empty default = OFF (no change). SAME-game
+    // clusters are handled by the SGP correlation path, not this. Conservative
+    // starting point (cross-game is weaker than same-game):
+    //   {"player_hitter_hr":1.08,"player_goalscorer":1.08,"total":1.05,
+    //    "first_5_innings_total":1.05}
+    // Calibrate against realized multi-same-market win rates before widening.
+    crossGameCorrByMarket: (() => {
+      try {
+        const parsed = JSON.parse(process.env.CROSS_GAME_CORR_BY_MARKET || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const out = {};
+          for (const [k, v] of Object.entries(parsed)) {
+            const num = parseFloat(v);
+            if (Number.isFinite(num) && num > 0) out[k] = num;
+          }
+          return out;
+        }
+      } catch (e) { /* bad JSON — off */ }
+      return {};
+    })(),
+    crossGameCorrMaxBoost: parseFloat(process.env.CROSS_GAME_CORR_MAX_BOOST) || 2.0,
     // startingBankroll anchors the account-based P&L calculation
     // (balance − starting). If env var is NOT set, leave as null so the
     // dashboard falls back to the tracker's runningPnL (derived from
