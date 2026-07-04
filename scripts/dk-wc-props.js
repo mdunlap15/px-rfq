@@ -119,7 +119,10 @@ function parseAssists(doc) {
 
 async function scrapeEvent(slugId) {
   const eventId = slugId.split('/').pop();
-  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'] });
+  // --disable-dev-shm-usage: Railway/Docker give Chromium a tiny /dev/shm (~64MB); without this
+  // Chromium segfaults on these prop pages (kernel "cr2: 0000..." page fault) -> DK scrape returns 0000.
+  // Writes shared memory to /tmp instead. --disable-gpu/--disable-setuid-sandbox are safe headless companions.
+  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-blink-features=AutomationControlled'] });
   try {
     const page = await browser.newPage();
     await page.setUserAgent(UA);
