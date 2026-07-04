@@ -4206,6 +4206,13 @@ function startStatusServer() {
     try { res.json((await db.loadKV('wc_prop_labels')) || {}); }
     catch (e) { res.status(502).json({ error: String(e.message).slice(0, 200) }); }
   });
+  // Same relay for MLB player-prop legs (mlb_unders_post.py stashes {line_id:
+  // {player, mkt}} at post time). Lets the tracker label "Matt Olson Total Home
+  // Runs Under 0.5" even after PX deletes the SportEvent. Read-only passthrough.
+  app.get('/px/prop-labels', async (_req, res) => {
+    try { res.json((await db.loadKV('mlb_prop_labels')) || {}); }
+    catch (e) { res.status(502).json({ error: String(e.message).slice(0, 200) }); }
+  });
   app.get('/px/sport-events', async (req, res) => {
     try {
       const ids = String(req.query.event_ids || '').replace(/[^0-9,]/g, '');
