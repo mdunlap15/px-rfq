@@ -91,6 +91,33 @@ const config = {
     // heavy favorites as a meaningful chunk of NBA series bleed.
     // Tunable via NBA_SERIES_FAV_CAP_ODDS env var.
     nbaSeriesFavoriteCapAmericanOdds: parseInt(process.env.NBA_SERIES_FAV_CAP_ODDS) || -250,
+    // Heavy-favorite MONEYLINE decline caps, per sport. A parlay with a
+    // moneyline leg whose fair prob exceeds the sport's threshold is declined
+    // (originally a guard against a PX sign-flip that overpaid heavy chalk).
+    // JSON map: sport -> American odds cap (negative). Threshold prob =
+    // |cap|/(|cap|+100). Absent sport OR value 0 = NO cap (allow all). Was
+    // hardcoded (NBA -300, tennis/MMA -450); defaults preserve those exactly.
+    // Loosen via HEAVY_FAV_ML_CAP_BY_SPORT to run the overpay test — e.g.
+    //   {"tennis":-600,"mma_mixed_martial_arts":-600}
+    // (merges over defaults, so NBA stays -300). Set a sport to 0 to remove
+    // its cap entirely once the test clears it.
+    heavyFavMlCapBySport: (() => {
+      const defaults = { basketball_nba: -300, tennis: -450, mma_mixed_martial_arts: -450 };
+      const raw = process.env.HEAVY_FAV_ML_CAP_BY_SPORT;
+      if (!raw || !raw.trim()) return defaults;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const out = { ...defaults };
+          for (const [k, v] of Object.entries(parsed)) {
+            const n = parseFloat(v);
+            if (Number.isFinite(n)) out[k] = n; // 0 allowed = disable cap for that sport
+          }
+          return out;
+        }
+      } catch (e) { /* bad JSON — fall through to defaults */ }
+      return defaults;
+    })(),
     // Cap the favorite side's share of the book's overround during
     // 2-way de-vig. Proportional de-vig (share = favImplied/sumImplied)
     // over-corrects heavy favorites — on DK -3000/+1300 it strips ~4pp

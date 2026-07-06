@@ -2642,43 +2642,29 @@ function priceParlay(legs, opts = {}) {
 
   const americanOdds = decimalToAmerican(decimalOdds);
 
-  // Decline heavy favorite moneyline legs — PX sign-flip bug causes overpayment.
-  // NBA:    no moneyline favorites beyond -300 (fairProb > 300/400 = 0.75)
-  // Tennis: no moneyline favorites beyond -450 (fairProb > 450/550 ≈ 0.8182)
-  // MMA:    no moneyline favorites beyond -450 (fairProb > 450/550 ≈ 0.8182) —
-  //         same low-liquidity matchup-market profile as tennis; the PX
-  //         overpay risk outweighs trying to quote heavy MMA chalk.
-  // Caps loosened 2026-05-11 (Mike): NBA -250→-300, tennis/MMA -350→-450 —
-  // operator wants more chalk volume but is relying on chalk-shaped vig
-  // knobs (VIG_HEAVY_FAV_FAIR_MARKUP / VIG_FAIR_MULTIPLIER / chalk-stack
-  // surcharge) to make sure these heavier favorites really pay up.
+  // Decline heavy favorite moneyline legs — originally a guard against a PX
+  // sign-flip that overpaid heavy chalk. Per-sport caps are now config-driven
+  // (HEAVY_FAV_ML_CAP_BY_SPORT; defaults NBA -300, tennis/MMA -450 preserve the
+  // historical hardcoded values — loosened 2026-05-11 by Mike from -250/-350).
+  // A sport absent from the map, or set to 0, has NO cap. The cap is American
+  // odds (negative); the decline threshold prob = |cap|/(|cap|+100)
+  // (e.g. -300 -> 0.75, -450 -> 0.8182, -600 -> 0.8571). Chalk-shaped vig knobs
+  // (VIG_HEAVY_FAV_FAIR_MARKUP / VIG_FAIR_MULTIPLIER / chalk-stack surcharge)
+  // still make these heavier favorites pay up when they DO quote.
+  const mlCaps = config.pricing.heavyFavMlCapBySport || {};
   for (const leg of pricedLegs) {
     if (leg.lineInfo.marketType !== 'moneyline') continue;
-    const impliedOdds = leg.fairProb >= 0.5 ? Math.round(-100 * leg.fairProb / (1 - leg.fairProb)) : Math.round(100 * (1 - leg.fairProb) / leg.fairProb);
-    if (leg.lineInfo.sport === 'basketball_nba' && leg.fairProb > (300 / 400)) {
-      log.debug('Pricing', `Declined: NBA moneyline ${leg.lineInfo.teamName} is heavy favorite (${impliedOdds})`);
+    const cap = mlCaps[leg.lineInfo.sport];
+    if (cap == null || cap === 0) continue; // no cap configured for this sport
+    const absCap = Math.abs(cap);
+    const threshold = cap < 0 ? absCap / (absCap + 100) : 100 / (absCap + 100);
+    if (leg.fairProb > threshold) {
+      const impliedOdds = leg.fairProb >= 0.5 ? Math.round(-100 * leg.fairProb / (1 - leg.fairProb)) : Math.round(100 * (1 - leg.fairProb) / leg.fairProb);
+      log.debug('Pricing', `Declined: ${leg.lineInfo.sport} moneyline ${leg.lineInfo.teamName} heavy favorite (${impliedOdds}) exceeds ${cap} cap`);
       priceParlay._lastFailure = {
-        reason: 'NBA heavy favorite',
-        detail: `${leg.lineInfo.teamName} at ${impliedOdds} exceeds -300 limit`,
-        blockerLeg: { team: leg.lineInfo.teamName, sport: 'basketball_nba', market: 'moneyline' },
-      };
-      return null;
-    }
-    if (leg.lineInfo.sport === 'tennis' && leg.fairProb > (450 / 550)) {
-      log.debug('Pricing', `Declined: Tennis moneyline ${leg.lineInfo.teamName} is heavy favorite (${impliedOdds})`);
-      priceParlay._lastFailure = {
-        reason: 'tennis heavy favorite',
-        detail: `${leg.lineInfo.teamName} at ${impliedOdds} exceeds -450 limit`,
-        blockerLeg: { team: leg.lineInfo.teamName, sport: 'tennis', market: 'moneyline' },
-      };
-      return null;
-    }
-    if (leg.lineInfo.sport === 'mma_mixed_martial_arts' && leg.fairProb > (450 / 550)) {
-      log.debug('Pricing', `Declined: MMA moneyline ${leg.lineInfo.teamName} is heavy favorite (${impliedOdds})`);
-      priceParlay._lastFailure = {
-        reason: 'MMA heavy favorite',
-        detail: `${leg.lineInfo.teamName} at ${impliedOdds} exceeds -450 limit`,
-        blockerLeg: { team: leg.lineInfo.teamName, sport: 'mma_mixed_martial_arts', market: 'moneyline' },
+        reason: `${leg.lineInfo.sport} heavy favorite`,
+        detail: `${leg.lineInfo.teamName} at ${impliedOdds} exceeds ${cap} cap (fair ${(leg.fairProb*100).toFixed(1)}% > ${(threshold*100).toFixed(1)}%)`,
+        blockerLeg: { team: leg.lineInfo.teamName, sport: leg.lineInfo.sport, market: 'moneyline' },
       };
       return null;
     }
