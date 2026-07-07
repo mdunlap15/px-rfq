@@ -21,7 +21,10 @@ const KEYMAP = [
   { key: 'winner', re: /^Outright Winner$/i },
   { key: 'top5', re: /^Top 5 \(Including Ties\)$/i },
   { key: 'top10', re: /^Top 10 \(Including Ties\)$/i },
+  { key: 'top20', re: /^Top 20 \(Including Ties\)$/i },
 ];
+// Top 20 lives behind its own button (not in the default payload); click to load it.
+const CLICK_TABS = ['Top 20 (Including Ties)'];
 
 async function scrapeGolf(slug) {
   const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'] });
@@ -39,7 +42,17 @@ async function scrapeGolf(slug) {
     });
     await page.goto('https://sportsbook.draftkings.com/leagues/golf/' + slug, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise((r) => setTimeout(r, 6000));
-    const out = { slug, winner: [], top5: [], top10: [] };
+    for (const label of CLICK_TABS) {
+      const clicked = await page.evaluate((txt) => {
+        const el = Array.from(document.querySelectorAll('button,[role="tab"],a,h2')).find(
+          (e) => (e.textContent || '').trim() === txt && e.offsetParent !== null);
+        if (el) { el.scrollIntoView(); el.click(); return true; }
+        return false;
+      }, label);
+      if (!clicked) console.error('WARN: tab not found: ' + label);
+      await new Promise((r) => setTimeout(r, 4000));
+    }
+    const out = { slug, winner: [], top5: [], top10: [], top20: [] };
     for (const body of bodies) {
       const doc = JSON.parse(body);
       const mkts = {};
@@ -65,7 +78,7 @@ if (require.main === module) {
   const outFile = process.argv[3];
   if (!slug) { console.error('usage: node dk-golf-outrights.js <league-slug> [outFile]'); process.exit(1); }
   scrapeGolf(slug).then((r) => {
-    console.log('league', r.slug, '| winner:', r.winner.length, '| top5:', r.top5.length, '| top10:', r.top10.length);
+    console.log('league', r.slug, '| winner:', r.winner.length, '| top5:', r.top5.length, '| top10:', r.top10.length, '| top20:', r.top20.length);
     if (outFile) { fs.writeFileSync(outFile, JSON.stringify(r, null, 1)); console.log('wrote', outFile); }
   }).catch((e) => { console.error('FATAL', e.message); process.exit(1); });
 }
