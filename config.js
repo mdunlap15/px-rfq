@@ -181,6 +181,17 @@ const config = {
     // fair ~4pp optimistic). Floors vig on market==='spread' legs. Default 0;
     // recommended activation ~0.025 (2.5%).
     vigSpreadMin: parseFloat(process.env.VIG_SPREAD_MIN) || 0,
+    // Minimum per-leg vig for RFI (Run First Inning / 1st Inning Total Runs)
+    // legs. RFI's fair is a de-vigged 2-way consensus (getRfiFair), so it goes
+    // through the normal de-vig->vig pipeline; this floor sets the RFI margin.
+    // Default 0.03 (3% per side, per operator) — a fresh market with no
+    // realized calibration yet, so start conservative.
+    vigRfiMin: parseFloat(process.env.VIG_RFI_MIN) || 0.03,
+    // Dedicated stake cap for any parlay carrying an RFI leg. Kept SEPARATE
+    // from maxRiskPerParlayWithProp so RFI's launch stays bounded even if the
+    // prop cap is set high. Default $25 — deliberately tiny for a brand-new,
+    // uncalibrated market; raise via RFI_MAX_RISK once it proves out.
+    maxRiskPerParlayWithRfi: parseFloat(process.env.RFI_MAX_RISK) || 25,
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
     // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
     // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,

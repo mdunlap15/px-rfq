@@ -10502,6 +10502,10 @@ function startStatusServer() {
   app.get('/debug-rfi', async (req, res) => {
     try {
       const pToAm = p => (p > 0 && p < 1) ? pricer.decimalToAmerican(1 / p) : null;
+      // Offered price at the vigRfiMin floor (direction/magnitude preview — the
+      // live pricer layers its full vig model on top). offered ≈ fair×(1+vig).
+      const rfiVig = (config.pricing && config.pricing.vigRfiMin) || 0;
+      const offer = p => (p > 0 && p < 1) ? pToAm(Math.min(0.98, p * (1 + rfiVig))) : null;
       const upcoming = oddsFeed.getAllCachedEvents()
         .filter(e => e.sport === 'baseball_mlb')
         .filter(e => {
@@ -10525,8 +10529,9 @@ function startStatusServer() {
             books: rfi ? rfi.books : 0,
             yesFair: rfi ? +rfi.yesFair.toFixed(4) : null,
             noFair: rfi ? +rfi.noFair.toFixed(4) : null,
-            yesAmerican: rfi ? pToAm(rfi.yesFair) : null,
-            noAmerican: rfi ? pToAm(rfi.noFair) : null,
+            yesOffered: rfi ? offer(rfi.yesFair) : null,
+            noOffered: rfi ? offer(rfi.noFair) : null,
+            holdPct: rfi ? +((Math.min(0.98, rfi.yesFair * (1 + rfiVig)) + Math.min(0.98, rfi.noFair * (1 + rfiVig)) - 1) * 100).toFixed(2) : null,
             perBook: rfi ? rfi.perBook.map(b => `${b.book}:O${b.overAmerican}/U${b.underAmerican}`) : [],
             error,
           });

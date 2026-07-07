@@ -1027,6 +1027,17 @@ function priceParlay(legs, opts = {}) {
       // fairProb missing — leave fairProbs[i] undefined so Phase 3's
       // null-check fires the standard 'no fair value' decline path.
     }
+    // RFI (Run First Inning) — like props, its fair was captured at seed time
+    // (line-manager RFI pre-seed via oddsFeed.getRfiFair) and stored on
+    // lineInfo.fairProb per side (Over=yesFair, Under=noFair). It has NO odds-
+    // cache entry, so use the seeded fair directly; the normal vig pipeline
+    // (with the vigRfiMin floor) then prices it. Missing fair → decline.
+    if (s.lineInfo.marketType === 'run_first_inning') {
+      if (s.lineInfo.fairProb != null) {
+        fairProbs[i] = s.lineInfo.fairProb;
+        continue;
+      }
+    }
     // Primary cache fast path — try sync before dispatching async.
     const syncPrimary = oddsFeed.getFairProb(
       s.lineInfo.oddsApiSport,
@@ -1911,6 +1922,12 @@ function priceParlay(legs, opts = {}) {
     if (spreadMinVig > 0 && marketType === 'spread') {
       vig = Math.max(vig, spreadMinVig);
     }
+    // RFI (1st Inning Total Runs) floor — sets the margin on this fresh,
+    // uncalibrated 2-way market. Env-gated (VIG_RFI_MIN, default 0.03).
+    const rfiMinVig = config.pricing.vigRfiMin || 0;
+    if (rfiMinVig > 0 && marketType === 'run_first_inning') {
+      vig = Math.max(vig, rfiMinVig);
+    }
     // Per-leg vigBump from sub-pricing fallbacks (e.g. tennis totals
     // snap-to-nearest). Adds to the base vig BEFORE SGP multiplier so
     // the bump is preserved through correlation amplification but
@@ -2606,9 +2623,16 @@ function priceParlay(legs, opts = {}) {
     typeof l.lineInfo.marketType === 'string' &&
     /^player_/.test(l.lineInfo.marketType)
   );
+  // RFI (Run First Inning) is a fresh, uncalibrated market — cap any parlay
+  // carrying an RFI leg at the small prop-aware limit, same as player props.
+  const parlayHasRfi = pricedLegs.some(l =>
+    l.lineInfo.marketType === 'run_first_inning'
+  );
   const candidateCaps = [config.pricing.maxRiskPerParlay];
   if (parlayHasSeries) candidateCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
   if (parlayHasProp) candidateCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
+  // RFI gets its own (tighter) launch cap, independent of the prop cap.
+  if (parlayHasRfi) candidateCaps.push(config.pricing.maxRiskPerParlayWithRfi || 25);
   // Experimental-SGP tier (SGP roadmap): combos under small-test rollout get
   // a much tighter per-ticket cap. Shape identifies the CLASS (nested pairs
   // → 'prop_nested', immune to classification gaps); membership in

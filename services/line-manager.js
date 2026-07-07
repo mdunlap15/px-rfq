@@ -1797,6 +1797,76 @@ async function seedAllLines() {
       log.warn('Lines', `Pre-seed props pass error for ${event.name}: ${err.message}`);
     }
 
+    // ----- PRE-SEED RFI (Run First Inning / 1st Inning Total Runs) -----
+    // PX posts this MLB game-level YES/NO market as "1st Inning Total Runs"
+    // (type sup_moneyline): selection "Over 0.5" = YES (a run scores in the
+    // 1st), "Under 0.5" = NO. Fair from oddsFeed.getRfiFair (TOA
+    // totals_1st_1_innings, per-book physical-2-way de-vig then average).
+    // Unlike one-sided props we have a REAL de-vigged 2-way fair, so register
+    // BOTH sides with fairProb (Over=yesFair, Under=noFair) and let the normal
+    // de-vig->vig pipeline price them (participates in leg-count/SGP
+    // amplification), with the vigRfiMin margin floor. Gated by
+    // config.rfi.enabled; fail-closed when getRfiFair returns null (no books /
+    // started / unresolved). The atomic seed rebuild self-heals staleness — a
+    // game only carries RFI lines in a cycle where getRfiFair succeeded.
+    // NOTE (v1): same-game correlation (RFI-YES vs the game/F5 Over) is NOT yet
+    // penalized — bounded for now by the prop-sized stake cap on RFI parlays.
+    if (config.rfi && config.rfi.enabled && sportKey === 'baseball_mlb' && matchedHome && matchedAway) {
+      try {
+        const rfiMarket = markets.find(m => m && /1st\s*inning\s*total\s*runs/i.test(m.name || ''));
+        if (rfiMarket && Array.isArray(rfiMarket.selections)) {
+          // One stable line_id per side; PX repeats each side across order-book
+          // depth entries that share a line_id. Read the side from the name.
+          let overLineId = null, underLineId = null;
+          for (const group of rfiMarket.selections) {
+            for (const sel of (Array.isArray(group) ? group : [group])) {
+              if (!sel || !sel.line_id) continue;
+              const nm = String(sel.name || sel.display_name || '').toLowerCase();
+              if (/^over/.test(nm) && !overLineId) overLineId = sel.line_id;
+              else if (/^under/.test(nm) && !underLineId) underLineId = sel.line_id;
+            }
+          }
+          if (overLineId && underLineId) {
+            const rfi = await oddsFeed.getRfiFair('baseball_mlb', matchedHome, matchedAway, event.scheduled || null);
+            if (rfi && rfi.yesFair > 0 && rfi.yesFair < 1 && rfi.noFair > 0 && rfi.noFair < 1) {
+              const sides = [
+                { lineId: overLineId, selection: 'over', teamName: 'Over 0.5', fairProb: rfi.yesFair },
+                { lineId: underLineId, selection: 'under', teamName: 'Under 0.5', fairProb: rfi.noFair },
+              ];
+              for (const sd of sides) {
+                _setSeedLine(sd.lineId, {
+                  sport: sportKey,
+                  pxEventId: event.event_id,
+                  pxEventName: event.name,
+                  marketType: 'run_first_inning',
+                  marketName: rfiMarket.name,
+                  selection: sd.selection,
+                  teamName: sd.teamName,
+                  line: 0.5,
+                  homeTeam: matchedHome,
+                  awayTeam: matchedAway,
+                  oddsApiSport: 'baseball_mlb',
+                  oddsApiMarket: 'totals_1st_1_innings',
+                  oddsApiSelection: sd.selection,
+                  startTime: event.scheduled || null,
+                  fairProb: sd.fairProb,
+                  fairProbOver: rfi.yesFair,
+                  fairProbUnder: rfi.noFair,
+                  rfiBooks: rfi.books,
+                  propFetchedAt: rfi.fetchedAt || Date.now(),
+                });
+                totalLines++;
+                matchedLines++;
+              }
+              log.debug('Lines', `RFI seeded ${event.name}: YES ${(rfi.yesFair * 100).toFixed(1)}% / NO ${(rfi.noFair * 100).toFixed(1)}% (${rfi.books} books)`);
+            }
+          }
+        }
+      } catch (err) {
+        log.warn('Lines', `RFI pre-seed error for ${event.name}: ${err.message}`);
+      }
+    }
+
     // Small delay to avoid hammering PX API
     await new Promise(r => setTimeout(r, 100));
   }
