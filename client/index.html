@@ -14220,10 +14220,37 @@
       { lo: 0.70, hi: 1.01, label: '70+' },
     ];
 
+    // ─── DNB draw-adjusted calibration probability ───
+    // Soccer moneylines on PX are Draw-No-Bet: a draw PUSHES (refunds) the leg,
+    // it does NOT lose. So the true bettor win probability is higher than the
+    // stored fairParlayProb — which is the correct ODDS basis (Π of single-leg
+    // DNB fair, provably EV-fair) but treats each DNB leg as win-or-lose for
+    // charting, understating wins and making soccer read as a false "we're too
+    // generous" leak. This corrects ONLY the plotted probability; the offered
+    // odds are unchanged. Per DNB leg with DNB fair f = pWin/(pWin+pLose):
+    // estimate draw rate pD ≈ 0.30·4·f·(1-f) (peaks ~0.30 on even matches, →0
+    // when lopsided), so pLose = (1-f)(1-pD) and the leg's contribution to the
+    // parlay win prob scales by notLose/f = [1-(1-f)(1-pD)]/f. Approximation
+    // (draw rate is modeled, not booked) but far closer than draws-as-losses.
+    function calibProb(o) {
+      const base = o.fairParlayProb;
+      const legs = o.legs || o.meta?.legs || [];
+      let mult = 1;
+      for (const l of legs) {
+        if (!l || !l.isDNB) continue;
+        const f = l.fairProb;
+        if (!(f > 0 && f < 1)) continue;
+        const pD = 0.30 * 4 * f * (1 - f);
+        const notLose = 1 - (1 - f) * (1 - pD);
+        if (notLose > 0) mult *= notLose / f;
+      }
+      return Math.min(0.999, base * mult);
+    }
+
     let totalBrier = 0, sumExpected = 0, sumActual = 0;
     const data = buckets.map(b => ({ ...b, n: 0, hit: 0, expSum: 0 }));
     for (const o of withProb) {
-      const p = o.fairParlayProb;
+      const p = calibProb(o);
       const hit = o.settlementResult === 'lost' ? 1 : 0; // bettor side hit the parlay
       totalBrier += (hit - p) * (hit - p);
       sumExpected += p;
@@ -14363,7 +14390,7 @@
       const sports = [...new Set(legs.map(l => l.sport).filter(Boolean))];
       const k = sports.length === 1 ? sports[0] : 'multi';
       if (!bySport[k]) bySport[k] = { n: 0, hit: 0, expSum: 0, brier: 0 };
-      const p = o.fairParlayProb;
+      const p = calibProb(o);
       const hit = o.settlementResult === 'lost' ? 1 : 0;
       bySport[k].n++;
       bySport[k].hit += hit;
@@ -14407,7 +14434,8 @@
     }
     html += '<div style="font-size:10px; color:var(--text3); padding:4px 8px;">'
       + 'Each dot is a bucket of parlays at a predicted win-prob range. Green dot = expected is within the actual\'s 95% CI (well-calibrated). '
-      + 'Red = we underestimated bettor wins (offered too generously). Amber = we overestimated (too tight). Error bars = Wilson 95% CI.'
+      + 'Red = we underestimated bettor wins (offered too generously). Amber = we overestimated (too tight). Error bars = Wilson 95% CI. '
+      + 'Soccer Draw-No-Bet legs are draw-adjusted: a draw pushes (refunds) rather than loses, so the plotted probability uses the true win prob (modeled draw rate), not the raw fair — the offered odds are unchanged and already EV-fair.'
       + '</div>';
 
     el.innerHTML = html;
