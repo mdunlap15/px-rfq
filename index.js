@@ -10494,6 +10494,61 @@ function startStatusServer() {
     res.json({ ok: true, baseUrl, hitCount: hits.length, hits, allResults: results });
   });
 
+  // Verify RFI (Run First Inning / YRFI-NRFI) sourcing over the live MLB slate.
+  // Read-only: resolves each cached MLB game to its TOA event and de-vigs
+  // totals_1st_1_innings via odds-feed getRfiFair. The point is confirming
+  // FULL-SLATE coverage from the widened regions/books (not sharp-only) before
+  // RFI is ever wired into quoting. No writes; independent of config.rfi.enabled.
+  app.get('/debug-rfi', async (req, res) => {
+    try {
+      const pToAm = p => (p > 0 && p < 1) ? pricer.decimalToAmerican(1 / p) : null;
+      const upcoming = oddsFeed.getAllCachedEvents()
+        .filter(e => e.sport === 'baseball_mlb')
+        .filter(e => {
+          const t = e.commenceTime ? new Date(e.commenceTime).getTime() : NaN;
+          return Number.isFinite(t) && t > Date.now();
+        });
+      const results = [];
+      const CONCURRENCY = 4;
+      let idx = 0;
+      async function worker() {
+        while (idx < upcoming.length) {
+          const ev = upcoming[idx++];
+          let rfi = null, error = null;
+          try {
+            rfi = await oddsFeed.getRfiFair('baseball_mlb', ev.homeTeam, ev.awayTeam, ev.commenceTime);
+          } catch (e) { error = e.message; }
+          results.push({
+            game: `${ev.awayTeam} @ ${ev.homeTeam}`,
+            commenceTime: ev.commenceTime,
+            covered: !!rfi,
+            books: rfi ? rfi.books : 0,
+            yesFair: rfi ? +rfi.yesFair.toFixed(4) : null,
+            noFair: rfi ? +rfi.noFair.toFixed(4) : null,
+            yesAmerican: rfi ? pToAm(rfi.yesFair) : null,
+            noAmerican: rfi ? pToAm(rfi.noFair) : null,
+            perBook: rfi ? rfi.perBook.map(b => `${b.book}:O${b.overAmerican}/U${b.underAmerican}`) : [],
+            error,
+          });
+        }
+      }
+      const workers = [];
+      for (let i = 0; i < Math.min(CONCURRENCY, upcoming.length); i++) workers.push(worker());
+      await Promise.all(workers);
+      results.sort((a, b) => new Date(a.commenceTime) - new Date(b.commenceTime));
+      const covered = results.filter(r => r.covered).length;
+      res.json({
+        ok: true,
+        rfiConfig: config.rfi,
+        upcomingMlbGames: upcoming.length,
+        coverage: upcoming.length ? `${covered}/${upcoming.length}` : '0/0',
+        results,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   // TEMPORARY: probe SharpAPI with candidate F5 market-type names to see
   // which (if any) return data. Answers whether we can drop the Odds-API
   // F5 supplement in favor of SharpAPI as primary. Remove after confirming.

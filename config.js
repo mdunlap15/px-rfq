@@ -35,6 +35,26 @@ const config = {
     apiKey: process.env.DATAGOLF_API_KEY,
     baseUrl: 'https://feeds.datagolf.com',
   },
+  // RFI (Run First Inning — YRFI/NRFI). "Did >=1 run score in the 1st inning."
+  // Sourced from The Odds API market `totals_1st_1_innings` (the 1st-inning
+  // total, NOT a game line): YES == book OVER 0.5, NO == book UNDER 0.5.
+  // Per-event endpoint only. Widened regions/books because DraftKings posts NO
+  // 1st-inning total and many games are served ONLY by us2 books
+  // (williamhill_us / betrivers / betparx) — the default set below is what
+  // gets full-slate coverage; a narrower/sharp-only set covers ~2/13 games.
+  // Each book is de-vigged independently then averaged, so extra soft books
+  // only pull toward consensus (breadth is safe). `enabled` gates whether RFI
+  // is wired into registration/quoting; sourcing (getRfiFair) is always
+  // callable for verification. DO NOT enable writes until PX's RFI market /
+  // side convention (which PX side == YES) is confirmed empirically.
+  rfi: {
+    enabled: /^(1|true|yes)$/i.test(process.env.RFI_ENABLED || ''),
+    regions: process.env.RFI_REGIONS || 'us,us2,eu',
+    bookmakers: process.env.RFI_BOOKMAKERS
+      || 'pinnacle,fanduel,betmgm,williamhill_us,betonlineag,betrivers,betparx,ballybet',
+    // Minimum qualifying (physical-two-way) books to price; else fail-closed.
+    minBooks: parseInt(process.env.RFI_MIN_BOOKS, 10) > 0 ? parseInt(process.env.RFI_MIN_BOOKS, 10) : 1,
+  },
   pricing: {
     defaultVig: parseFloat(process.env.DEFAULT_VIG) || 0.015,
     // Per-sport vig overrides. Keyed by odds-feed sport key.

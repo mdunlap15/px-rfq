@@ -1634,6 +1634,100 @@ async function supplementMlbF5Markets(parsedEvents) {
   log.info('OddsFeed', `MLB F5 DK scrape applied: ${dkApplied} of ${stillMissingF5.length} missing events filled`);
 }
 
+// ---------------------------------------------------------------------------
+// RFI (Run First Inning) — YRFI / NRFI fair-value sourcing
+// ---------------------------------------------------------------------------
+// "Run First Inning" = did >=1 run score in the 1st inning of an MLB game.
+// This is the FIRST-INNING TOTAL, not a game line. YES ("a run scores in the
+// 1st") == the book's OVER 0.5 on the 1st-inning total; NO == UNDER 0.5.
+// Mirrors the Kalshi maker's RFI sourcing.
+//
+// Source: The Odds API market key `totals_1st_1_innings`, PER-EVENT endpoint
+// only (the bulk /odds feed 422s on this key — same gotcha as F5). Regions and
+// books are widened (config.rfi.regions / .bookmakers) because DraftKings
+// posts NO 1st-inning total at all and many games are served ONLY by us2 books
+// (williamhill_us / betrivers / betparx) — a narrow/sharp-only set covers
+// ~2/13 games, the wide set covers the full slate. Pinnacle is the sharp
+// anchor when present but often absent.
+//
+// De-vig: for each book, take OVER and UNDER at point 0.5 exactly, require a
+// physical two-way (impliedOver + impliedUnder >= 1 — drops one-sided/stale
+// quotes), proportionally de-vig that book's own 2-way (yesFair_book =
+// impliedOver / (impliedOver + impliedUnder)), then AVERAGE yesFair across all
+// qualifying books. Each book is de-vigged independently, so extra soft books
+// only pull the average toward consensus (breadth is safe here).
+//
+// Fail-closed: returns null (never a fabricated fair) if the game has started
+// or its start time is unknown, the event can't be resolved, the API errors,
+// fewer than config.rfi.minBooks qualifying books, or the averaged fair isn't
+// strictly in (0,1). This is read-only sourcing — safe to call regardless of
+// config.rfi.enabled (that flag gates registration/quoting/writes, not this).
+async function getRfiFair(sport, homeTeam, awayTeam, commenceTime) {
+  const theOddsApiKey = process.env.THE_ODDS_API_KEY;
+  if (!theOddsApiKey) return null;
+  if (sport && sport !== 'baseball_mlb') return null; // RFI is MLB-only
+
+  // Fail-closed if the game has started or its start time is unknown.
+  const startMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
+  if (!Number.isFinite(startMs) || startMs <= Date.now()) return null;
+
+  const resolved = await resolveOddsApiEventId('baseball_mlb', homeTeam, awayTeam, commenceTime);
+  if (!resolved || !resolved.eventId) return null;
+
+  const { regions, bookmakers, minBooks } = config.rfi;
+  const url = `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${resolved.eventId}/odds`
+    + `?apiKey=${theOddsApiKey}`
+    + `&regions=${regions}`
+    + `&markets=totals_1st_1_innings`
+    + `&bookmakers=${bookmakers}`
+    + `&oddsFormat=american`;
+
+  let data;
+  try {
+    const resp = await abortableFetch(url);
+    if (!resp.ok) return null;
+    data = await safeJsonFetch(resp);
+  } catch (err) {
+    return null;
+  }
+  if (!data) return null;
+
+  // Per-book physical-two-way de-vig at the 0.5 line.
+  const perBook = [];
+  for (const book of (data.bookmakers || [])) {
+    for (const m of (book.markets || [])) {
+      if (m.key !== 'totals_1st_1_innings') continue;
+      const over = (m.outcomes || []).find(o => o.name === 'Over' && Number(o.point) === 0.5);
+      const under = (m.outcomes || []).find(o => o.name === 'Under' && Number(o.point) === 0.5);
+      if (!over || !under) continue;
+      const impOver = americanToImpliedProb(over.price);
+      const impUnder = americanToImpliedProb(under.price);
+      if (!(impOver + impUnder >= 1)) continue; // physical 2-way only
+      const yesFairBook = deVig2Way(impOver, impUnder)[0];
+      if (!(yesFairBook > 0 && yesFairBook < 1)) continue;
+      perBook.push({ book: book.key, overAmerican: over.price, underAmerican: under.price, yesFair: yesFairBook });
+    }
+  }
+
+  if (perBook.length < minBooks) return null; // fail-closed — no qualifying book
+  const yesFair = avg(perBook.map(b => b.yesFair));
+  if (!(yesFair > 0 && yesFair < 1)) return null;
+
+  return {
+    market: 'run_first_inning',
+    line: 0.5,
+    yesFair,
+    noFair: 1 - yesFair,
+    books: perBook.length,
+    perBook,
+    eventId: resolved.eventId,
+    homeTeam: data.home_team || homeTeam,
+    awayTeam: data.away_team || awayTeam,
+    commenceTime,
+    fetchedAt: Date.now(),
+  };
+}
+
 /**
  * Fetch 1st-Half markets for NBA from The Odds API and attach them
  * to the existing event cache as: h2h_h1, spreads_h1, totals_h1.
@@ -8851,6 +8945,7 @@ module.exports = {
   normalizeTeamName,
   deVig2Way,
   americanToImpliedProb,
+  getRfiFair,
   // Internal consensus builders exposed for unit testing / debug (pure fns).
   buildConsensusTotals,
   buildConsensusSpread,
