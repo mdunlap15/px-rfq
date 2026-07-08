@@ -8132,6 +8132,17 @@
           else if (l.matchupType === 'tournament') golfTag = 'Tourn ';
         }
         const periodTag = isF5 ? 'F5 ' : isH1 ? 'H1 ' : golfTag;
+        // RFI (1st Inning Total Runs) legs carry teamName "Over 0.5"/"Under 0.5"
+        // with no game context — prepend the matchup so the selection says WHICH
+        // game (e.g. "TOR @ SF Under 0.5 (1st Inning Run)").
+        if (String(mkt).toLowerCase() === 'run_first_inning' && (l.homeTeam || l.awayTeam)) {
+          const away = teamAbbr(l.awayTeam || '') || (l.awayTeam || '');
+          const home = teamAbbr(l.homeTeam || '') || (l.homeTeam || '');
+          const ctx = (away && home) ? (away + ' @ ' + home + ' ') : '';
+          let out = periodTag + ctx + name;
+          if (opts.propMarket !== false) { const lbl = propMarketLabel(mkt, l.propType); if (lbl) out += ' (' + lbl + ')'; }
+          return out;
+        }
         // Bare over/under legs (F5 totals, MMA Total Rounds, etc.) arrive
         // with name='Over' and no game context. Build 'AWAY @ HOME side line'
         // using the leg's homeTeam/awayTeam fields so the row title actually
