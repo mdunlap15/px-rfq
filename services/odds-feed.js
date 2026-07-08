@@ -8421,12 +8421,19 @@ async function _getTheOddsApiEvents(sport) {
 
 // Internal: TOA per-event prop-odds fetch + cache write. Same dual-use
 // pattern as _refreshTheOddsApiEvents.
+// Regions for per-event prop odds. Default 'us' (unchanged). Widen to
+// 'us,us2,eu' to pull the us2 books (betrivers/betparx/williamhill) + eu,
+// which materially improves the strikeout-distribution fit — but TOA bills
+// per market × per region, so 'us,us2,eu' TRIPLES prop credit cost. Operator's
+// quota call, hence env-gated. Env TOA_PROP_REGIONS.
+const _TOA_PROP_REGIONS = process.env.TOA_PROP_REGIONS || 'us';
+
 async function _refreshTheOddsApiPropOdds(sport, eventId, marketKey) {
   const apiKey = process.env.THE_ODDS_API_KEY;
   const sportKey = TOA_SPORT_KEYS[sport] || sport;
   const cacheKey = `${sportKey}:${eventId}:${marketKey}`;
   const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/events/${eventId}/odds`
-    + `?apiKey=${apiKey}&regions=us&markets=${marketKey}&oddsFormat=american`;
+    + `?apiKey=${apiKey}&regions=${_TOA_PROP_REGIONS}&markets=${marketKey}&oddsFormat=american`;
   try {
     const resp = await abortableFetch(url);
     if (!resp.ok) {
@@ -8757,6 +8764,47 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   };
 }
 
+// ── Strikeout-count distribution (negative-binomial; Poisson at phi=1) ──
+// Lets us price a pitcher-K over at ANY line from books posting DIFFERENT
+// lines: recover each book's implied mean Ks from its own posted line,
+// aggregate (sharp-weighted), then evaluate the over at the requested line.
+// phi = variance/mean overdispersion (>=1). Lanczos logGamma for the NB PMF.
+function _skLogGamma(z) {
+  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _skLogGamma(1 - z);
+  z -= 1;
+  let x = c[0];
+  for (let i = 1; i < 9; i++) x += c[i] / (z + i);
+  const t = z + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+function _skPmf(k, mu, phi) {
+  if (mu <= 0) return k === 0 ? 1 : 0;
+  if (phi <= 1.0001) return Math.exp(k * Math.log(mu) - mu - _skLogGamma(k + 1)); // Poisson
+  const p = 1 / phi, r = mu / (phi - 1); // NB: mean mu, variance mu*phi
+  return Math.exp(_skLogGamma(k + r) - _skLogGamma(r) - _skLogGamma(k + 1) + r * Math.log(p) + k * Math.log(1 - p));
+}
+function _pStrikeoutAtLeast(n, mu, phi) {
+  if (n <= 0) return 1;
+  let cdf = 0;
+  for (let k = 0; k < n; k++) cdf += _skPmf(k, mu, phi);
+  return Math.max(1e-6, Math.min(1 - 1e-6, 1 - cdf));
+}
+// Invert: mean mu such that P(K >= n | mu, phi) == pOver. Monotonic in mu.
+function _recoverStrikeoutMu(n, pOver, phi) {
+  if (!(pOver > 0 && pOver < 1) || !(n >= 1)) return null;
+  let lo = 0.05, hi = 30;
+  if (_pStrikeoutAtLeast(n, lo, phi) > pOver) return lo;
+  if (_pStrikeoutAtLeast(n, hi, phi) < pOver) return hi;
+  for (let it = 0; it < 60; it++) {
+    const mid = (lo + hi) / 2;
+    if (_pStrikeoutAtLeast(n, mid, phi) < pOver) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 // TOA equivalent of lookupPlayerStrikeoutProp. Returns the same shape
 // so the websocket caller can swap them transparently. Async because
 // TOA requires HTTP calls (cached, but not pre-warmed).
@@ -8808,11 +8856,13 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
   const bookmakers = odds.bookmakers || [];
   stages.push(`books_in_resp:${bookmakers.length}`);
 
-  // Filter outcomes by player name (description field) + line value (point).
-  // TOA's "description" is clean — no "Thrown"/"Recorded" suffix like SharpAPI.
+  // Filter outcomes by player name (description field). Collect ALL of the
+  // player's posted lines/prices (NOT just PX's exact line) — the distribution
+  // fit below uses every book's own line, so a sharp book at 7.5 informs the
+  // fair at PX's 6.5. TOA's "description" is clean (no Thrown/Recorded suffix).
   const stripDiacritics = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
   const normPlayer = stripDiacritics(playerName).toLowerCase().trim();
-  const matched = []; // {book, side, point, price}
+  const allRows = []; // {book, side, point, price}
   for (const bk of bookmakers) {
     const market = (bk.markets || []).find(m => m.key === 'pitcher_strikeouts');
     if (!market) continue;
@@ -8821,14 +8871,13 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
       const playerOk = outcomePlayer === normPlayer ||
                        outcomePlayer.includes(normPlayer) ||
                        normPlayer.includes(outcomePlayer);
-      const lineOk = line == null || Math.abs((o.point || 0) - line) < 0.01;
-      if (playerOk && lineOk) {
-        matched.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
+      if (playerOk && o.point != null && Number.isFinite(o.price)) {
+        allRows.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
       }
     }
   }
-  stages.push(`player_line_match:${matched.length}`);
-  if (matched.length === 0) {
+  stages.push(`player_rows:${allRows.length}`);
+  if (allRows.length === 0) {
     return { error: 'no_player_or_line_match', stages, resolvedEventId: event.id,
              samplePlayers: [...new Set(
                bookmakers.flatMap(bk =>
@@ -8836,39 +8885,70 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
                    (m.outcomes || []).map(o => o.description))).filter(Boolean))].slice(0, 5) };
   }
 
-  // Per-book Over/Under devig.
-  const overByBook = {};
-  const underByBook = {};
-  for (const m of matched) {
-    if (/over/i.test(m.side)) overByBook[m.book] = m;
-    else if (/under/i.test(m.side)) underByBook[m.book] = m;
+  // Group into per-(book, line) two-sided quotes and de-vig each independently.
+  const byBookLine = {}; // `${book}|${point}` -> { book, point, over, under }
+  for (const r of allRows) {
+    const k = `${r.book}|${r.point}`;
+    const slot = byBookLine[k] || (byBookLine[k] = { book: r.book, point: r.point });
+    if (/over/i.test(r.side)) slot.over = r.price;
+    else if (/under/i.test(r.side)) slot.under = r.price;
   }
-  const books = [...new Set(matched.map(m => m.book))];
-  stages.push(`sides:over=${Object.keys(overByBook).length},under=${Object.keys(underByBook).length}`);
-
-  const fairProbsOver = [];
-  const fairProbsUnder = [];
-  for (const book of books) {
-    const o = overByBook[book];
-    const u = underByBook[book];
-    if (!o || !u) continue;
-    const oProb = americanToImpliedProb(o.price);
-    const uProb = americanToImpliedProb(u.price);
+  const quotes = []; // { book, point, pOver }  (one per two-sided book/line)
+  for (const q of Object.values(byBookLine)) {
+    if (q.over == null || q.under == null) continue;
+    const oProb = americanToImpliedProb(q.over);
+    const uProb = americanToImpliedProb(q.under);
     if (oProb == null || uProb == null) continue;
     const dv = deVig2Way(oProb, uProb);
-    if (Array.isArray(dv) && dv.length === 2 && Number.isFinite(dv[0]) && Number.isFinite(dv[1])) {
-      fairProbsOver.push(dv[0]);
-      fairProbsUnder.push(dv[1]);
-    }
+    if (Array.isArray(dv) && Number.isFinite(dv[0])) quotes.push({ book: q.book, point: q.point, pOver: dv[0] });
   }
-  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const books = [...new Set(quotes.map(q => q.book))];
+  stages.push(`two_sided_quotes:${quotes.length}`);
+
+  // Exact-line de-vig at PX's requested line — cross-check + fallback.
+  const exactAt = line != null ? quotes.filter(q => Math.abs(q.point - line) < 0.01) : quotes;
+  const exactFairOver = exactAt.length ? exactAt.reduce((s, q) => s + q.pOver, 0) / exactAt.length : null;
+
+  // Distribution fit: recover each quote's implied mean Ks from its OWN line,
+  // aggregate (sharp-weighted), then evaluate the over at PX's requested line.
+  const phi = (config.pricing && config.pricing.strikeoutDispersion) || 1.15;
+  const SHARP_W = { pinnacle: 3, draftkings: 2, fanduel: 2, betmgm: 1.5, williamhill_us: 1.5, betonlineag: 1.5, caesars: 1.5, betrivers: 1.25 };
+  let muW = 0, wSum = 0, muBooks = 0, nearestGap = Infinity;
+  for (const q of quotes) {
+    // Strikeout lines are half-integer; over(point) means K >= point + 0.5.
+    if (Math.abs(Math.abs(q.point % 1) - 0.5) > 0.01) continue; // require X.5 line
+    const mu = _recoverStrikeoutMu(Math.round(q.point + 0.5), q.pOver, phi);
+    if (mu == null) continue;
+    const w = SHARP_W[String(q.book).toLowerCase()] || 1;
+    muW += w * mu; wSum += w; muBooks++;
+    if (line != null) nearestGap = Math.min(nearestGap, Math.abs(q.point - line));
+  }
+  const muAgg = wSum > 0 ? muW / wSum : null;
+  stages.push(`dist:muBooks=${muBooks},mu=${muAgg != null ? muAgg.toFixed(2) : '-'},gap=${Number.isFinite(nearestGap) ? nearestGap : '-'}`);
+
+  let distFairOver = null;
+  if (muAgg != null && line != null) distFairOver = _pStrikeoutAtLeast(Math.round(line + 0.5), muAgg, phi);
+
+  // Use the distribution fair when enabled and valid; else fall back to the
+  // exact-line de-vig (which itself falls back to null → caller declines).
+  const useDist = (config.pricing && config.pricing.strikeoutDistFair !== false)
+    && distFairOver != null && distFairOver > 0 && distFairOver < 1;
+  const fairProbOver = useDist ? distFairOver : exactFairOver;
+  const fairProbUnder = fairProbOver != null ? 1 - fairProbOver : null;
 
   return {
-    matchedRows: matched,
+    matchedRows: allRows,
     books,
-    fairProbOver: avg(fairProbsOver),
-    fairProbUnder: avg(fairProbsUnder),
-    booksWithBothSides: fairProbsOver.length,
+    fairProbOver,
+    fairProbUnder,
+    // booksWithBothSides drives the caller's minBooks gate. Under the dist
+    // method, all books contributing a mean-K estimate count (even if posted
+    // at a nearby line); under fallback, only books at the exact line.
+    booksWithBothSides: useDist ? muBooks : exactAt.length,
+    method: useDist ? 'strikeout_dist' : 'exact_line_devig',
+    impliedMeanKs: muAgg,
+    exactLineFairOver: exactFairOver,
+    exactLineBooks: exactAt.length,
     resolvedEventId: event.id,
     fetchedAt: odds.fetchedAt || null, // for downstream stale checks
     stages,

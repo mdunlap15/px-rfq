@@ -192,6 +192,22 @@ const config = {
     // prop cap is set high. Default $25 — deliberately tiny for a brand-new,
     // uncalibrated market; raise via RFI_MAX_RISK once it proves out.
     maxRiskPerParlayWithRfi: parseFloat(process.env.RFI_MAX_RISK) || 25,
+    // Pitcher-strikeout prop fair is fit from a strikeout-count DISTRIBUTION
+    // across EVERY book's posted line (not just books at PX's exact line):
+    // recover each book's implied mean Ks from its own line, aggregate
+    // (sharp-weighted), then evaluate the over at PX's line. Fixes the
+    // underprice on off-consensus lines (e.g. PX posts 6.5 while sharp books
+    // post 7.5, so we used to de-vig only soft retail books at 6.5).
+    // Dispersion = variance/mean of the count distribution (>=1): 1.0 = Poisson,
+    // ~1.15 = mild negative-binomial overdispersion (pitcher game-Ks run a bit
+    // above Poisson). Env STRIKEOUT_DISPERSION.
+    strikeoutDispersion: (() => {
+      const v = parseFloat(process.env.STRIKEOUT_DISPERSION);
+      return Number.isFinite(v) && v >= 1 && v <= 2 ? v : 1.15;
+    })(),
+    // Kill-switch: STRIKEOUT_DIST_FAIR=false reverts to the old exact-line
+    // de-vig (fallback also fires automatically if the fit is degenerate).
+    strikeoutDistFair: !/^(0|false|no)$/i.test(process.env.STRIKEOUT_DIST_FAIR || ''),
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
     // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
     // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,
