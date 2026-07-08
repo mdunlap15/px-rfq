@@ -8043,10 +8043,45 @@
     return teamStr.charAt(0).toUpperCase() + teamStr.slice(1);
   }
 
+  /** Short human label for a player-prop / RFI market ('' if not one).
+   *  Disambiguates O/U prop legs in exports — "Under 5.5" alone doesn't say
+   *  Strikeouts vs Hits vs HR. Derives from propType, else the marketType
+   *  suffix (_propMarketType makes it player_<propType> / player_strikeouts). */
+  function propMarketLabel(mkt, propType) {
+    let key = (propType || '').toLowerCase();
+    if (!key) {
+      const m = (mkt || '').toLowerCase();
+      if (/^run_first_inning/.test(m)) return '1st Inning Run';
+      if (!/^player_/.test(m)) return '';
+      key = m.replace(/^player_/, '');
+    }
+    key = key.replace(/^hitter_|^pitcher_/, '');
+    const MAP = {
+      strikeouts: 'Strikeouts', ks: 'Strikeouts',
+      hr: 'Home Runs', home_runs: 'Home Runs',
+      hits: 'Hits', total_bases: 'Total Bases',
+      rbi_runs: 'RBIs', rbi: 'RBIs', rbis: 'RBIs',
+      runs: 'Runs', runs_scored: 'Runs', stolen_bases: 'Stolen Bases',
+      singles: 'Singles', doubles: 'Doubles', triples: 'Triples', walks: 'Walks',
+      points: 'Points', rebounds: 'Rebounds', assists: 'Assists',
+      threes_made: 'Threes', threes: 'Threes', blocks: 'Blocks', steals: 'Steals',
+      steals_blocks: 'Steals+Blocks', pra_combo: 'Pts+Reb+Ast', turnovers: 'Turnovers',
+      double_double: 'Double-Double', triple_double: 'Triple-Double',
+      shots_on_goal: 'Shots on Goal', sog: 'Shots on Goal',
+      goalscorer: 'Goal', shots_on_target: 'Shots on Target',
+      sot_1: 'Shots on Target', sot_2: 'Shots on Target', run_first_inning: '1st Inning Run',
+    };
+    if (MAP[key]) return MAP[key];
+    if (/ambiguous|^other/.test(key)) return 'Prop';
+    return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
   /**
    * Format all legs of a parlay into a compact summary string.
+   * opts.propMarket: append the prop-market label (Strikeouts / Home Runs / …)
+   * to player-prop legs so O/U prop lines are unambiguous (used by CSV export).
    */
-  function formatParlaySelections(legs) {
+  function formatParlaySelections(legs, opts = {}) {
     try {
       if (!legs || legs.length === 0) return '-';
       // Resolve each leg's display name with broad fallbacks. PX-backfilled
@@ -8109,7 +8144,15 @@
           const ctx = (away && home) ? (away + ' @ ' + home + ' ') : '';
           return ctx + periodTag + side + lineStr;
         }
-        return periodTag + formatSelection(name, mkt, line, l.selection);
+        const _base = periodTag + formatSelection(name, mkt, line, l.selection);
+        if (opts.propMarket) {
+          const _isProp = /^player_|^run_first_inning/.test(String(mkt).toLowerCase()) || !!l.propType;
+          if (_isProp) {
+            const _lbl = propMarketLabel(mkt, l.propType);
+            if (_lbl) return _base + ' (' + _lbl + ')';
+          }
+        }
+        return _base;
       }).join(', ');
     } catch (e) {
       // Fallback if formatting fails
@@ -8789,7 +8832,7 @@
       const legs = o.legs || o.meta?.legs || [];
       const isSettled = o.status && o.status.startsWith('settled_');
       const type = isSettled ? 'Settled' : 'Open';
-      const selections = formatParlaySelections(legs);
+      const selections = formatParlaySelections(legs, { propMarket: true });
       const sports = [...new Set(legs.map(l => sportLabel(l.sport)).filter(Boolean))].join(' / ');
       const sgpFlag = isSameGameParlay(legs) ? 'Y' : '';
       const propFlag = containsPlayerProp(legs) ? 'Y' : '';
