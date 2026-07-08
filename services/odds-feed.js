@@ -8856,7 +8856,9 @@ function _countPropDispersion(marketKey) {
   // hits+runs+RBIs and PRA are sums of unit counts → still count-like, kept.
   const M = {
     pitcher_strikeouts: kDisp,
-    batter_hits: 1.05, batter_hits_runs_rbis: 1.2,
+    // batter_hits_runs_rbis and batter_total_bases intentionally absent —
+    // correlated/weighted compound stats, poor NB fit → exact-line de-vig.
+    batter_hits: 1.05,
     batter_stolen_bases: 1.05, batter_runs_scored: 1.05, batter_rbis: 1.15,
     player_points: 1.25, player_rebounds: 1.15, player_assists: 1.2,
     player_threes: 1.1, player_blocks: 1.05, player_steals: 1.05,

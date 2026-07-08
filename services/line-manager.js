@@ -60,6 +60,8 @@ const _MLB_PROP_TO_TOA_MARKET = {
   hitter_hr: 'batter_home_runs',
   hitter_total_bases: 'batter_total_bases',
   hitter_rbi_runs: 'batter_rbis',
+  hitter_stolen_bases: 'batter_stolen_bases',
+  hitter_hits_runs_rbis: 'batter_hits_runs_rbis',
 };
 // Map a propType to the internal lineIndex marketType. Almost everything uses
 // the 'player_<propType>' convention, but K-props MUST register as

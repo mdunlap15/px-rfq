@@ -178,6 +178,10 @@ function classifyMlbProp(marketName) {
   // Route to hitter_other (no TOA mapping, not one-sided-eligible) so combos
   // always decline safely. NOTE: "Home Runs" contains "runs" but is a single
   // stat — exclude it from the runs/RBI category before counting.
+  // Combo: Hits + Runs + RBIs. Matches multiple single-stat words, so detect it
+  // BEFORE the >=2-category → hitter_other fallthrough below. Maps to TOA
+  // batter_hits_runs_rbis (priced exact-line de-vig — correlated compound stat).
+  if (/hits?\s*\+\s*runs?\s*\+\s*rbis?|\bh\s*\+\s*r\s*\+\s*rbis?\b/.test(n)) return 'hitter_hits_runs_rbis';
   const _hHr      = /home\s+run|\bhr\b/.test(n);
   const _hTb      = /total\s+bases|\btb\b/.test(n);
   const _hHits    = /\bhits?\b/.test(n);
@@ -191,7 +195,8 @@ function classifyMlbProp(marketName) {
   if (/home\s+run|\bhr\b/.test(n)) return 'hitter_hr';
   if (/\brbi/.test(n) || /runs\s+batted\s+in/.test(n) || /runs\s+scored/.test(n)) return 'hitter_rbi_runs';
   if (/\bhits\b|to\s+record\s+a\s+hit/.test(n)) return 'hitter_hits';
-  if (/single|double|triple|stolen\s+base|\bsb\b|walk\b|to\s+score/.test(n)) return 'hitter_other';
+  if (/stolen\s+bases?|\bsb\b/.test(n)) return 'hitter_stolen_bases';
+  if (/single|double|triple|walk\b|to\s+score/.test(n)) return 'hitter_other';
   // No specific match — flag as generic MLB prop so the bucket is
   // visible (helps future iterations of this classifier catch new
   // book naming conventions).
