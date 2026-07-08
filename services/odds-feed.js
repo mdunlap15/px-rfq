@@ -8567,7 +8567,8 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   const normPlayerName = (s) => stripDiacritics(s || '').toLowerCase()
     .replace(/[.'`]/g, '').replace(/\s+/g, ' ').trim();
   const normPlayer = normPlayerName(playerName);
-  const matched = []; // {book, side, point, price}
+  const matched = []; // {book, side, point, price}  (exact requested line)
+  const allRows = []; // {book, side, point, price}  (ALL of the player's lines — distribution fit)
   for (const bk of bookmakers) {
     const market = (bk.markets || []).find(m => m.key === marketKey);
     if (!market) continue;
@@ -8576,13 +8577,13 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
       const playerOk = outcomePlayer === normPlayer ||
                        outcomePlayer.includes(normPlayer) ||
                        normPlayer.includes(outcomePlayer);
+      if (!playerOk) continue;
+      if (o.point != null && Number.isFinite(o.price)) allRows.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
       const lineOk = line == null || Math.abs((o.point || 0) - line) < 0.01;
-      if (playerOk && lineOk) {
-        matched.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
-      }
+      if (lineOk) matched.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
     }
   }
-  stages.push(`player_line_match:${matched.length}`);
+  stages.push(`player_line_match:${matched.length},all_rows:${allRows.length}`);
 
   // Identify the primary line for this player (line with the most book
   // coverage = the consensus anchor) so we can reject deep alts that
@@ -8632,7 +8633,10 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     }
   }
 
-  if (matched.length === 0) {
+  // No rows at ALL for this player → genuinely unmatched. (Exact-line-empty is
+  // still OK for count props: the distribution fit below prices the requested
+  // line from the player's other lines, within the alt-line-distance guard.)
+  if (allRows.length === 0) {
     return { error: 'no_player_or_line_match', stages, resolvedEventId: event.id,
              samplePlayers: [...new Set(
                bookmakers.flatMap(bk =>
@@ -8670,17 +8674,45 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     }
   }
   const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
-  const { fairProbOver, fairProbUnder } = _applyPropHeavyFavFloor(
+  let { fairProbOver, fairProbUnder } = _applyPropHeavyFavFloor(
     avg(fairProbsOver), avg(fairProbsUnder),
     avg(viggedProbsOver), avg(viggedProbsUnder)
   );
+  const exactLineFairOver = fairProbOver;
+  let method = 'exact_line_devig';
+  let impliedMean = null;
+  let distBooks = 0;
+
+  // Count-prop distribution fair: for count markets (hits, total bases, points,
+  // rebounds, assists, threes, blocks, steals, PRA, shots on goal, strikeouts),
+  // recover the player's mean from EVERY book's line and evaluate at the
+  // requested line instead of de-vigging only the exact (often soft-retail)
+  // line — the fix for the off-consensus-line underprice that cost ~$4.4K on
+  // strikeouts. Exact-line de-vig above is the fallback. Gated by
+  // countPropDistFair; heavy-fav floor re-applied to the distribution fair.
+  const phi = _countPropDispersion(marketKey);
+  if (phi != null && line != null && config.pricing.countPropDistFair !== false) {
+    const dist = _countDistFairOver(_buildTwoSidedPropQuotes(allRows), line, phi);
+    if (dist && dist.fairOver > 0 && dist.fairOver < 1) {
+      const floored = _applyPropHeavyFavFloor(dist.fairOver, 1 - dist.fairOver, avg(viggedProbsOver), avg(viggedProbsUnder));
+      fairProbOver = floored.fairProbOver;
+      fairProbUnder = floored.fairProbUnder;
+      method = 'count_dist';
+      impliedMean = dist.muAgg;
+      distBooks = dist.muBooks;
+      stages.push(`dist:muBooks=${dist.muBooks},mu=${dist.muAgg.toFixed(2)}`);
+    }
+  }
 
   return {
     matchedRows: matched,
     books,
     fairProbOver,
     fairProbUnder,
-    booksWithBothSides: fairProbsOver.length,
+    booksWithBothSides: method === 'count_dist' ? distBooks : fairProbsOver.length,
+    method,
+    impliedMean,
+    exactLineFairOver,
     resolvedEventId: event.id,
     fetchedAt: odds.fetchedAt || null,
     stages,
@@ -8765,45 +8797,108 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   };
 }
 
-// ── Strikeout-count distribution (negative-binomial; Poisson at phi=1) ──
-// Lets us price a pitcher-K over at ANY line from books posting DIFFERENT
-// lines: recover each book's implied mean Ks from its own posted line,
-// aggregate (sharp-weighted), then evaluate the over at the requested line.
-// phi = variance/mean overdispersion (>=1). Lanczos logGamma for the NB PMF.
-function _skLogGamma(z) {
+// ── Count-prop distribution (negative-binomial; Poisson at phi=1) ──
+// Prices a count-prop OVER at ANY line from books posting DIFFERENT lines:
+// recover each book's implied mean from its own posted line, aggregate
+// (sharp-weighted), then evaluate the over at the requested line. Fixes the
+// off-consensus-line underprice (books posting the sharp line a half-unit away
+// used to be discarded, leaving only soft retail books → ~6-8pp pickoff — the
+// leak that cost the operator ~$4.4K on strikeouts). Applies to strikeouts,
+// hits, total bases, points, rebounds, assists, threes, blocks, steals, PRA,
+// shots on goal. phi = variance/mean overdispersion (>=1). Lanczos logGamma.
+function _countLogGamma(z) {
   const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
     771.32342877765313, -176.61502916214059, 12.507343278686905,
     -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
-  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _skLogGamma(1 - z);
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _countLogGamma(1 - z);
   z -= 1;
   let x = c[0];
   for (let i = 1; i < 9; i++) x += c[i] / (z + i);
   const t = z + 7.5;
   return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
 }
-function _skPmf(k, mu, phi) {
+function _countPmf(k, mu, phi) {
   if (mu <= 0) return k === 0 ? 1 : 0;
-  if (phi <= 1.0001) return Math.exp(k * Math.log(mu) - mu - _skLogGamma(k + 1)); // Poisson
+  if (phi <= 1.0001) return Math.exp(k * Math.log(mu) - mu - _countLogGamma(k + 1)); // Poisson
   const p = 1 / phi, r = mu / (phi - 1); // NB: mean mu, variance mu*phi
-  return Math.exp(_skLogGamma(k + r) - _skLogGamma(r) - _skLogGamma(k + 1) + r * Math.log(p) + k * Math.log(1 - p));
+  return Math.exp(_countLogGamma(k + r) - _countLogGamma(r) - _countLogGamma(k + 1) + r * Math.log(p) + k * Math.log(1 - p));
 }
-function _pStrikeoutAtLeast(n, mu, phi) {
+function _pCountAtLeast(n, mu, phi) {
   if (n <= 0) return 1;
   let cdf = 0;
-  for (let k = 0; k < n; k++) cdf += _skPmf(k, mu, phi);
+  for (let k = 0; k < n; k++) cdf += _countPmf(k, mu, phi);
   return Math.max(1e-6, Math.min(1 - 1e-6, 1 - cdf));
 }
-// Invert: mean mu such that P(K >= n | mu, phi) == pOver. Monotonic in mu.
-function _recoverStrikeoutMu(n, pOver, phi) {
+// Invert: mean mu such that P(count >= n | mu, phi) == pOver. Monotonic in mu.
+function _recoverCountMu(n, pOver, phi) {
   if (!(pOver > 0 && pOver < 1) || !(n >= 1)) return null;
-  let lo = 0.05, hi = 30;
-  if (_pStrikeoutAtLeast(n, lo, phi) > pOver) return lo;
-  if (_pStrikeoutAtLeast(n, hi, phi) < pOver) return hi;
+  let lo = 0.02, hi = 60;
+  if (_pCountAtLeast(n, lo, phi) > pOver) return lo;
+  if (_pCountAtLeast(n, hi, phi) < pOver) return hi;
   for (let it = 0; it < 60; it++) {
     const mid = (lo + hi) / 2;
-    if (_pStrikeoutAtLeast(n, mid, phi) < pOver) lo = mid; else hi = mid;
+    if (_pCountAtLeast(n, mid, phi) < pOver) lo = mid; else hi = mid;
   }
   return (lo + hi) / 2;
+}
+// Sharp-book weights for aggregating the recovered mean across books.
+const _PROP_SHARP_WEIGHTS = { pinnacle: 3, draftkings: 2, fanduel: 2, betmgm: 1.5, williamhill_us: 1.5, betonlineag: 1.5, caesars: 1.5, betrivers: 1.25 };
+// Per-TOA-market overdispersion (variance/mean). A market present here is a
+// COUNT prop eligible for the distribution fit; absent markets keep exact-line
+// de-vig. pitcher_strikeouts pulls from config so STRIKEOUT_DISPERSION still
+// tunes it. Higher phi = higher-variance count (points/TB/PRA) → fatter tails.
+function _countPropDispersion(marketKey) {
+  const kDisp = (config.pricing && config.pricing.strikeoutDispersion) || 1.15;
+  // PURE COUNTS ONLY. A negative-binomial models a count of events; it does
+  // NOT model a WEIGHTED sum. total_bases (single=1..HR=4) is a weighted sum —
+  // the NB fit diverged up to ~7pp from the exact-line de-vig and cross-checked
+  // WORSE (verified 2026-07-08), so total_bases stays on exact-line de-vig.
+  // hits+runs+RBIs and PRA are sums of unit counts → still count-like, kept.
+  const M = {
+    pitcher_strikeouts: kDisp,
+    batter_hits: 1.05, batter_hits_runs_rbis: 1.2,
+    batter_stolen_bases: 1.05, batter_runs_scored: 1.05, batter_rbis: 1.15,
+    player_points: 1.25, player_rebounds: 1.15, player_assists: 1.2,
+    player_threes: 1.1, player_blocks: 1.05, player_steals: 1.05,
+    player_points_rebounds_assists: 1.3, player_shots_on_goal: 1.2, player_goals: 1.05,
+  };
+  return M[marketKey] != null ? M[marketKey] : null;
+}
+// Build per-(book, line) two-sided quotes and de-vig each → [{book, point, pOver}].
+function _buildTwoSidedPropQuotes(rows) {
+  const byKey = {};
+  for (const r of rows) {
+    if (r.point == null || !Number.isFinite(r.price)) continue;
+    const k = `${r.book}|${r.point}`;
+    const slot = byKey[k] || (byKey[k] = { book: r.book, point: r.point });
+    if (/over/i.test(r.side)) slot.over = r.price;
+    else if (/under/i.test(r.side)) slot.under = r.price;
+  }
+  const quotes = [];
+  for (const q of Object.values(byKey)) {
+    if (q.over == null || q.under == null) continue;
+    const oProb = americanToImpliedProb(q.over), uProb = americanToImpliedProb(q.under);
+    if (oProb == null || uProb == null) continue;
+    const dv = deVig2Way(oProb, uProb);
+    if (Array.isArray(dv) && Number.isFinite(dv[0])) quotes.push({ book: q.book, point: q.point, pOver: dv[0] });
+  }
+  return quotes;
+}
+// Distribution fair for the OVER at requestedLine from two-sided quotes across
+// all lines (half-integer only). Returns {fairOver, muAgg, muBooks} or null.
+function _countDistFairOver(quotes, requestedLine, phi) {
+  let muW = 0, wSum = 0, muBooks = 0;
+  for (const q of quotes) {
+    if (Math.abs(Math.abs(q.point % 1) - 0.5) > 0.01) continue; // X.5 lines only
+    const mu = _recoverCountMu(Math.round(q.point + 0.5), q.pOver, phi);
+    if (mu == null) continue;
+    const w = _PROP_SHARP_WEIGHTS[String(q.book).toLowerCase()] || 1;
+    muW += w * mu; wSum += w; muBooks++;
+  }
+  if (wSum === 0) return null;
+  const muAgg = muW / wSum;
+  const fairOver = requestedLine != null ? _pCountAtLeast(Math.round(requestedLine + 0.5), muAgg, phi) : null;
+  return { fairOver, muAgg, muBooks };
 }
 
 // TOA equivalent of lookupPlayerStrikeoutProp. Returns the same shape
@@ -8910,29 +9005,18 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
   const exactAt = line != null ? quotes.filter(q => Math.abs(q.point - line) < 0.01) : quotes;
   const exactFairOver = exactAt.length ? exactAt.reduce((s, q) => s + q.pOver, 0) / exactAt.length : null;
 
-  // Distribution fit: recover each quote's implied mean Ks from its OWN line,
-  // aggregate (sharp-weighted), then evaluate the over at PX's requested line.
-  const phi = (config.pricing && config.pricing.strikeoutDispersion) || 1.15;
-  const SHARP_W = { pinnacle: 3, draftkings: 2, fanduel: 2, betmgm: 1.5, williamhill_us: 1.5, betonlineag: 1.5, caesars: 1.5, betrivers: 1.25 };
-  let muW = 0, wSum = 0, muBooks = 0, nearestGap = Infinity;
-  for (const q of quotes) {
-    // Strikeout lines are half-integer; over(point) means K >= point + 0.5.
-    if (Math.abs(Math.abs(q.point % 1) - 0.5) > 0.01) continue; // require X.5 line
-    const mu = _recoverStrikeoutMu(Math.round(q.point + 0.5), q.pOver, phi);
-    if (mu == null) continue;
-    const w = SHARP_W[String(q.book).toLowerCase()] || 1;
-    muW += w * mu; wSum += w; muBooks++;
-    if (line != null) nearestGap = Math.min(nearestGap, Math.abs(q.point - line));
-  }
-  const muAgg = wSum > 0 ? muW / wSum : null;
-  stages.push(`dist:muBooks=${muBooks},mu=${muAgg != null ? muAgg.toFixed(2) : '-'},gap=${Number.isFinite(nearestGap) ? nearestGap : '-'}`);
-
-  let distFairOver = null;
-  if (muAgg != null && line != null) distFairOver = _pStrikeoutAtLeast(Math.round(line + 0.5), muAgg, phi);
+  // Distribution fit (shared count-prop helper): recover each quote's mean Ks
+  // from its OWN line, aggregate sharp-weighted, evaluate at PX's line.
+  const phi = _countPropDispersion('pitcher_strikeouts');
+  const dist = _countDistFairOver(quotes, line, phi);
+  const muAgg = dist ? dist.muAgg : null;
+  const muBooks = dist ? dist.muBooks : 0;
+  const distFairOver = dist ? dist.fairOver : null;
+  stages.push(`dist:muBooks=${muBooks},mu=${muAgg != null ? muAgg.toFixed(2) : '-'}`);
 
   // Use the distribution fair when enabled and valid; else fall back to the
   // exact-line de-vig (which itself falls back to null → caller declines).
-  const useDist = (config.pricing && config.pricing.strikeoutDistFair !== false)
+  const useDist = (config.pricing && config.pricing.countPropDistFair !== false)
     && distFairOver != null && distFairOver > 0 && distFairOver < 1;
   const fairProbOver = useDist ? distFairOver : exactFairOver;
   const fairProbUnder = fairProbOver != null ? 1 - fairProbOver : null;
@@ -8946,8 +9030,9 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
     // method, all books contributing a mean-K estimate count (even if posted
     // at a nearby line); under fallback, only books at the exact line.
     booksWithBothSides: useDist ? muBooks : exactAt.length,
-    method: useDist ? 'strikeout_dist' : 'exact_line_devig',
+    method: useDist ? 'count_dist' : 'exact_line_devig',
     impliedMeanKs: muAgg,
+    impliedMean: muAgg,
     exactLineFairOver: exactFairOver,
     exactLineBooks: exactAt.length,
     resolvedEventId: event.id,

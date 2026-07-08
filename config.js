@@ -205,8 +205,12 @@ const config = {
       const v = parseFloat(process.env.STRIKEOUT_DISPERSION);
       return Number.isFinite(v) && v >= 1 && v <= 2 ? v : 1.15;
     })(),
-    // Kill-switch: STRIKEOUT_DIST_FAIR=false reverts to the old exact-line
-    // de-vig (fallback also fires automatically if the fit is degenerate).
+    // Kill-switch for the distribution-fit fair on ALL count props (strikeouts,
+    // hits, total bases, points, rebounds, assists, threes, blocks, steals, PRA,
+    // shots on goal). COUNT_PROP_DIST_FAIR=false reverts every count prop to the
+    // old exact-line de-vig (the per-market fallback also fires automatically if
+    // the fit is degenerate). strikeoutDistFair kept as a legacy alias.
+    countPropDistFair: !/^(0|false|no)$/i.test(process.env.COUNT_PROP_DIST_FAIR || process.env.STRIKEOUT_DIST_FAIR || ''),
     strikeoutDistFair: !/^(0|false|no)$/i.test(process.env.STRIKEOUT_DIST_FAIR || ''),
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
     // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
