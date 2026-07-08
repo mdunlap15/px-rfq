@@ -8421,12 +8421,13 @@ async function _getTheOddsApiEvents(sport) {
 
 // Internal: TOA per-event prop-odds fetch + cache write. Same dual-use
 // pattern as _refreshTheOddsApiEvents.
-// Regions for per-event prop odds. Default 'us' (unchanged). Widen to
-// 'us,us2,eu' to pull the us2 books (betrivers/betparx/williamhill) + eu,
-// which materially improves the strikeout-distribution fit — but TOA bills
-// per market × per region, so 'us,us2,eu' TRIPLES prop credit cost. Operator's
-// quota call, hence env-gated. Env TOA_PROP_REGIONS.
-const _TOA_PROP_REGIONS = process.env.TOA_PROP_REGIONS || 'us';
+// Regions for per-event prop odds. Default 'us,us2,eu' (operator opted in
+// 2026-07-08) — pulls the us2 books (betrivers/betparx/williamhill) + eu, which
+// materially improves the strikeout-distribution fit and all prop de-vigs.
+// TRADE-OFF: TOA bills per market × per region, so this is ~3× the prop credit
+// cost of 'us' alone. If quota runs tight (prop fairs going null → declines),
+// dial back with TOA_PROP_REGIONS=us in Railway.
+const _TOA_PROP_REGIONS = process.env.TOA_PROP_REGIONS || 'us,us2,eu';
 
 async function _refreshTheOddsApiPropOdds(sport, eventId, marketKey) {
   const apiKey = process.env.THE_ODDS_API_KEY;

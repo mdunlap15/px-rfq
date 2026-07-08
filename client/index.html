@@ -8078,8 +8078,9 @@
 
   /**
    * Format all legs of a parlay into a compact summary string.
-   * opts.propMarket: append the prop-market label (Strikeouts / Home Runs / …)
-   * to player-prop legs so O/U prop lines are unambiguous (used by CSV export).
+   * The prop-market label (Strikeouts / Home Runs / …) is appended to
+   * player-prop legs by DEFAULT so O/U prop lines are unambiguous everywhere
+   * (tables + CSV). Pass {propMarket:false} to suppress it.
    */
   function formatParlaySelections(legs, opts = {}) {
     try {
@@ -8145,7 +8146,7 @@
           return ctx + periodTag + side + lineStr;
         }
         const _base = periodTag + formatSelection(name, mkt, line, l.selection);
-        if (opts.propMarket) {
+        if (opts.propMarket !== false) {
           const _isProp = /^player_|^run_first_inning/.test(String(mkt).toLowerCase()) || !!l.propType;
           if (_isProp) {
             const _lbl = propMarketLabel(mkt, l.propType);
