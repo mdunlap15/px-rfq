@@ -187,14 +187,19 @@ const config = {
     // Default 0.03 (3% per side, per operator) — a fresh market with no
     // realized calibration yet, so start conservative.
     vigRfiMin: parseFloat(process.env.VIG_RFI_MIN) || 0.03,
-    // Minimum per-leg vig for pitcher-strikeout props. Our de-vigged fair is
-    // basically right, but props carry ~2-3pp fair uncertainty and we were only
-    // charging ~2% — razor-thin, so we offered too generously vs the books and
-    // got picked off (e.g. our +206 parlay when DK offered +170). Props warrant
-    // a wider margin than main markets. Env VIG_STRIKEOUT_MIN (default 0.06);
-    // raise toward ~0.08 to sit at DK-level vig, lower for more volume. 0 = off.
-    vigStrikeoutMin: (() => {
-      const v = parseFloat(process.env.VIG_STRIKEOUT_MIN);
+    // Minimum per-leg vig for ALL de-vigged player props (strikeouts, hits,
+    // total bases, points, rebounds, assists, threes, blocks, steals, PRA, shots
+    // on goal). Our de-vigged fair is basically right, but props carry ~2-3pp
+    // fair uncertainty and we were only charging ~2% — razor-thin, so we offered
+    // too generously vs the books and got picked off (e.g. our +206 strikeout
+    // parlay when DK offered +170). Props warrant a wider margin than main
+    // markets. Applies wherever de-vig+vig prices a player_* leg; the one-sided
+    // BOOK-MIRROR props (HR, soccer goalscorer) get their margin from
+    // propBookMirrorSweetener instead, not this floor. Env VIG_PROP_MIN (legacy
+    // VIG_STRIKEOUT_MIN honored); default 0.06; ~0.08 ≈ DK-level; 0 = off.
+    vigPropMin: (() => {
+      const raw = process.env.VIG_PROP_MIN != null ? process.env.VIG_PROP_MIN : process.env.VIG_STRIKEOUT_MIN;
+      const v = parseFloat(raw);
       return Number.isFinite(v) && v >= 0 ? v : 0.06;
     })(),
     // Dedicated stake cap for any parlay carrying an RFI leg. Kept SEPARATE

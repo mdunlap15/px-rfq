@@ -1948,12 +1948,15 @@ function priceParlay(legs, opts = {}) {
     if (rfiMinVig > 0 && marketType === 'run_first_inning') {
       vig = Math.max(vig, rfiMinVig);
     }
-    // Pitcher-strikeout prop floor — props carry ~2-3pp fair uncertainty, so a
-    // ~2% margin is too thin and gets picked off. Widen it. Env VIG_STRIKEOUT_MIN
-    // (default 0.06). Fair is (mostly) right; this is the margin, not the fair.
-    const kPropMinVig = config.pricing.vigStrikeoutMin || 0;
-    if (kPropMinVig > 0 && marketType === 'player_strikeouts') {
-      vig = Math.max(vig, kPropMinVig);
+    // Player-prop floor — de-vigged props carry ~2-3pp fair uncertainty, so a
+    // ~2% margin is too thin and gets picked off. Widen it across ALL player_*
+    // props (strikeouts/hits/points/rebounds/etc.). Env VIG_PROP_MIN (default
+    // 0.06). Fair is (mostly) right; this is margin, not the fair. Book-mirror
+    // props (HR, soccer) skip applyOddsVig via bookPriceOverride, so they're
+    // unaffected here (their margin is propBookMirrorSweetener).
+    const propMinVig = config.pricing.vigPropMin || 0;
+    if (propMinVig > 0 && /^player_/.test(marketType || '')) {
+      vig = Math.max(vig, propMinVig);
     }
     // Per-leg vigBump from sub-pricing fallbacks (e.g. tennis totals
     // snap-to-nearest). Adds to the base vig BEFORE SGP multiplier so
