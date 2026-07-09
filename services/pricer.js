@@ -832,19 +832,20 @@ function priceParlay(legs, opts = {}) {
       return null;
     }
 
-    // Pre-game window gate for pitcher-strikeout props. The overnight K market is
-    // immature (starter barely confirmed, thin/soft early books) — a correct
-    // distribution model still yields a wrong fair from bad input and gets picked
-    // off overnight. Decline K-props quoted more than N hours before first pitch.
-    // Env STRIKEOUT_MAX_HOURS_BEFORE_START (default 10); 0 disables.
-    const kMaxHrs = config.pricing.strikeoutMaxHoursBeforeStart;
-    if (kMaxHrs > 0 && lineInfo.marketType === 'player_strikeouts' && startMs != null && !isNaN(startMs)) {
+    // Pre-game window gate for ALL MLB player props (pitcher K + hitter props).
+    // The overnight prop market is immature (starter/lineup barely set, thin/soft
+    // early books) — a correct fair still comes out wrong from bad input and gets
+    // picked off overnight. Decline MLB player-prop legs quoted more than N hours
+    // before first pitch. Env MLB_PROP_MAX_HOURS_BEFORE_START (default 10); 0 off.
+    const mlbPropMaxHrs = config.pricing.mlbPropMaxHoursBeforeStart;
+    if (mlbPropMaxHrs > 0 && lineInfo.sport === 'baseball_mlb'
+        && /^player_/.test(lineInfo.marketType || '') && startMs != null && !isNaN(startMs)) {
       const hrsBefore = (startMs - nowMs) / 3600000;
-      if (hrsBefore > kMaxHrs) {
-        log.debug('Pricing', `Declined: strikeout prop too early (${hrsBefore.toFixed(1)}h before start > ${kMaxHrs}h) — ${legLabel}`);
+      if (hrsBefore > mlbPropMaxHrs) {
+        log.debug('Pricing', `Declined: MLB prop too early (${hrsBefore.toFixed(1)}h before start > ${mlbPropMaxHrs}h) — ${legLabel}`);
         priceParlay._lastFailure = {
           reason: 'prop too early',
-          detail: `${legLabel} K-prop ${hrsBefore.toFixed(1)}h pre-game (>${kMaxHrs}h — market not mature)`,
+          detail: `${legLabel} MLB prop ${hrsBefore.toFixed(1)}h pre-game (>${mlbPropMaxHrs}h — market not mature)`,
           blockerLeg: legDescriptor,
         };
         return null;

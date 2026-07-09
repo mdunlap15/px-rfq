@@ -212,14 +212,18 @@ const config = {
     // the fit is degenerate). strikeoutDistFair kept as a legacy alias.
     countPropDistFair: !/^(0|false|no)$/i.test(process.env.COUNT_PROP_DIST_FAIR || process.env.STRIKEOUT_DIST_FAIR || ''),
     strikeoutDistFair: !/^(0|false|no)$/i.test(process.env.STRIKEOUT_DIST_FAIR || ''),
-    // Pre-game window gate for pitcher-strikeout props. The OVERNIGHT strikeout
-    // market is immature (starter barely confirmed, thin/soft early books), so a
-    // correct model still produces a wrong fair from bad input — and got picked
-    // off overnight (David Peterson Under 4.5, 2026-07-09, a run priced 13h pre-
-    // game). Decline K-props quoted more than this many hours before first
-    // pitch. Env STRIKEOUT_MAX_HOURS_BEFORE_START (default 10); 0 disables.
-    strikeoutMaxHoursBeforeStart: (() => {
-      const v = parseFloat(process.env.STRIKEOUT_MAX_HOURS_BEFORE_START);
+    // Pre-game window gate for ALL MLB player props (pitcher K + hitter props).
+    // The OVERNIGHT prop market is immature (starter/lineup barely set, thin/soft
+    // early books), so even a correct fair is built on bad input and gets picked
+    // off (e.g. David Peterson Under 4.5 K priced 13h pre-game, 2026-07-09).
+    // Decline MLB player-prop legs quoted more than this many hours before first
+    // pitch. Env MLB_PROP_MAX_HOURS_BEFORE_START (falls back to the legacy
+    // STRIKEOUT_MAX_HOURS_BEFORE_START); default 10; 0 disables.
+    mlbPropMaxHoursBeforeStart: (() => {
+      const raw = process.env.MLB_PROP_MAX_HOURS_BEFORE_START != null
+        ? process.env.MLB_PROP_MAX_HOURS_BEFORE_START
+        : process.env.STRIKEOUT_MAX_HOURS_BEFORE_START;
+      const v = parseFloat(raw);
       return Number.isFinite(v) && v >= 0 ? v : 10;
     })(),
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
