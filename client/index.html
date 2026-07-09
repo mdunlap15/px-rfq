@@ -9528,8 +9528,15 @@
         if (dvToMs && new Date(day + 'T00:00:00').getTime() > dvToMs) continue;
         if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
         if (row.pnl != null) byDay[day].pnl = row.pnl;
-        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+        // Days the in-memory buffer doesn't reach (historical, or where settle-day
+        // != confirm-day after the settled_at repair) must take Fills + Risk from
+        // the authoritative Supabase series too — otherwise the row shows P&L with
+        // Fills=0 / $0 risk, which reads as a broken date total.
+        if (!(byDay[day].count > 0)) {
+          if (row.fills != null) byDay[day].count = row.fills;
+          if (row.risk != null) byDay[day].risk = row.risk;
+        }
       }
       // Show GROSS PX P&L (no fees per operator); the /daily-pnl sum IS the gross.
     }
@@ -9936,8 +9943,15 @@
         if (!day) continue;
         if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
         if (row.pnl != null) byDay[day].pnl = row.pnl;
-        if (row.risk != null && !(byDay[day].count > 0)) byDay[day].risk = row.risk;
         if (row.wins != null && row.losses != null) byDay[day].settled = row.wins + row.losses + (row.pushes || 0);
+        // Days the in-memory buffer doesn't reach (historical, or where settle-day
+        // != confirm-day after the settled_at repair) must take Fills + Risk from
+        // the authoritative Supabase series too — otherwise the row shows P&L with
+        // Fills=0 / $0 risk, which reads as a broken date total.
+        if (!(byDay[day].count > 0)) {
+          if (row.fills != null) byDay[day].count = row.fills;
+          if (row.risk != null) byDay[day].risk = row.risk;
+        }
       }
       // 2026-06-09: show GROSS PX P&L (no fees on these wagers, per operator).
       // The /daily-pnl sum IS the gross — leave byDay[].pnl as-is so day/month
