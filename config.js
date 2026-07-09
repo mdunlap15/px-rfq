@@ -212,6 +212,16 @@ const config = {
     // the fit is degenerate). strikeoutDistFair kept as a legacy alias.
     countPropDistFair: !/^(0|false|no)$/i.test(process.env.COUNT_PROP_DIST_FAIR || process.env.STRIKEOUT_DIST_FAIR || ''),
     strikeoutDistFair: !/^(0|false|no)$/i.test(process.env.STRIKEOUT_DIST_FAIR || ''),
+    // Pre-game window gate for pitcher-strikeout props. The OVERNIGHT strikeout
+    // market is immature (starter barely confirmed, thin/soft early books), so a
+    // correct model still produces a wrong fair from bad input — and got picked
+    // off overnight (David Peterson Under 4.5, 2026-07-09, a run priced 13h pre-
+    // game). Decline K-props quoted more than this many hours before first
+    // pitch. Env STRIKEOUT_MAX_HOURS_BEFORE_START (default 10); 0 disables.
+    strikeoutMaxHoursBeforeStart: (() => {
+      const v = parseFloat(process.env.STRIKEOUT_MAX_HOURS_BEFORE_START);
+      return Number.isFinite(v) && v >= 0 ? v : 10;
+    })(),
     // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
     // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
     // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,
