@@ -187,21 +187,11 @@ const config = {
     // Default 0.03 (3% per side, per operator) — a fresh market with no
     // realized calibration yet, so start conservative.
     vigRfiMin: parseFloat(process.env.VIG_RFI_MIN) || 0.03,
-    // Minimum per-leg vig for ALL de-vigged player props (strikeouts, hits,
-    // total bases, points, rebounds, assists, threes, blocks, steals, PRA, shots
-    // on goal). Our de-vigged fair is basically right, but props carry ~2-3pp
-    // fair uncertainty and we were only charging ~2% — razor-thin, so we offered
-    // too generously vs the books and got picked off (e.g. our +206 strikeout
-    // parlay when DK offered +170). Props warrant a wider margin than main
-    // markets. Applies wherever de-vig+vig prices a player_* leg; the one-sided
-    // BOOK-MIRROR props (HR, soccer goalscorer) get their margin from
-    // propBookMirrorSweetener instead, not this floor. Env VIG_PROP_MIN (legacy
-    // VIG_STRIKEOUT_MIN honored); default 0.06; ~0.08 ≈ DK-level; 0 = off.
-    vigPropMin: (() => {
-      const raw = process.env.VIG_PROP_MIN != null ? process.env.VIG_PROP_MIN : process.env.VIG_STRIKEOUT_MIN;
-      const v = parseFloat(raw);
-      return Number.isFinite(v) && v >= 0 ? v : 0.06;
-    })(),
+    // NOTE: the player-prop per-leg vig floor is vigPropFloor (env
+    // VIG_PROP_FLOOR), applied in getEffectiveVig's early player_* branch. A
+    // 2026-07-09 attempt to add a second floor (VIG_PROP_MIN) was removed —
+    // props return early on vigPropFloor and never reached it (dead code).
+    // To widen prop margin, raise VIG_PROP_FLOOR.
     // Dedicated stake cap for any parlay carrying an RFI leg. Kept SEPARATE
     // from maxRiskPerParlayWithProp so RFI's launch stays bounded even if the
     // prop cap is set high. Default $25 — deliberately tiny for a brand-new,
