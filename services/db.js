@@ -92,6 +92,29 @@ async function saveOrder(order) {
       }
     }
 
+    // Preserve the ORIGINAL settled_at. On restart, reconstructed orders lose
+    // their in-memory settledAt, so recordSettlement re-stamps now() — which
+    // made weeks-old settled parlays jump to the restart time on every reboot
+    // (settled_at drifting forward each poll). A settlement time is fixed once
+    // recorded (correcting the RESULT must not move the TIME), so keep the
+    // earliest settled_at the DB already holds for this parlay.
+    if (row.status && row.status.startsWith('settled_') && row.settled_at) {
+      try {
+        const { data: prev } = await db
+          .from('parlay_orders')
+          .select('settled_at')
+          .eq('parlay_id', order.parlayId)
+          .maybeSingle();
+        if (prev && prev.settled_at) {
+          const exMs = Date.parse(prev.settled_at);
+          const newMs = Date.parse(row.settled_at);
+          if (Number.isFinite(exMs) && (!Number.isFinite(newMs) || exMs < newMs)) {
+            row.settled_at = prev.settled_at; // keep the original (earlier) timestamp
+          }
+        }
+      } catch (_) { /* best-effort; fall through to the upsert */ }
+    }
+
     const { error } = await db
       .from('parlay_orders')
       .upsert(row, { onConflict: 'parlay_id' });
