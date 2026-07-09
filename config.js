@@ -187,6 +187,16 @@ const config = {
     // Default 0.03 (3% per side, per operator) — a fresh market with no
     // realized calibration yet, so start conservative.
     vigRfiMin: parseFloat(process.env.VIG_RFI_MIN) || 0.03,
+    // Minimum per-leg vig for pitcher-strikeout props. Our de-vigged fair is
+    // basically right, but props carry ~2-3pp fair uncertainty and we were only
+    // charging ~2% — razor-thin, so we offered too generously vs the books and
+    // got picked off (e.g. our +206 parlay when DK offered +170). Props warrant
+    // a wider margin than main markets. Env VIG_STRIKEOUT_MIN (default 0.06);
+    // raise toward ~0.08 to sit at DK-level vig, lower for more volume. 0 = off.
+    vigStrikeoutMin: (() => {
+      const v = parseFloat(process.env.VIG_STRIKEOUT_MIN);
+      return Number.isFinite(v) && v >= 0 ? v : 0.06;
+    })(),
     // Dedicated stake cap for any parlay carrying an RFI leg. Kept SEPARATE
     // from maxRiskPerParlayWithProp so RFI's launch stays bounded even if the
     // prop cap is set high. Default $25 — deliberately tiny for a brand-new,
