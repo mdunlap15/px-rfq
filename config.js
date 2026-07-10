@@ -1187,6 +1187,24 @@ const config = {
     // boost MULTIPLIES fairParlayProb upward — bettor gets shorter odds,
     // matching how books charge the bettor for positive correlation.
     sgpPropMlCorrBoost: parseFloat(process.env.SGP_PROP_ML_CORR_BOOST) || 0.15,
+    // Same-game same-direction prop-pair correlation FLOOR (Stage 2.5).
+    // The precise cross-team pass (matchXTeamPair) only lifts prop pairs it can
+    // roster-resolve to OPPOSING teams; K-props are excluded from it, and any
+    // pair whose players don't resolve (incomplete rosters — WNBA especially)
+    // falls through to the NAIVE INDEPENDENT product. That fail-open is a real
+    // leak: a prop-SGP sharp exploited same-game K-Under+K-Under and points-
+    // Over+points-Over quoted with ZERO correlation (~5pp too generous, 2026-07).
+    // Any two same-game props on the SAME side (both Over / both Under) are
+    // positively correlated through the shared game script, so we apply a
+    // conservative additive band-top (jointFair = min(p1p2 + φ·√(p1q1·p2q2),
+    // min(p1,p2))) to every such pair the precise passes DIDN'T consume —
+    // roster-INDEPENDENT, so it holds even when identity resolution fails.
+    // φ floor default 0.10 (below xteam's 0.15 — weaker/unresolved signal).
+    // Set SGP_PROP_SAMEGAME_PHI_FLOOR=0 to disable. Number.isFinite guard so an
+    // explicit 0 means OFF, not re-default.
+    sgpPropSameGamePhiFloor: Number.isFinite(parseFloat(process.env.SGP_PROP_SAMEGAME_PHI_FLOOR))
+      ? parseFloat(process.env.SGP_PROP_SAMEGAME_PHI_FLOOR)
+      : 0.10,
     // SGP correlation adjustment factors. The naive product of leg fair
     // probs understates the true joint probability for positively-
     // correlated combos (spread-fav + over, or spread-dog + under) and

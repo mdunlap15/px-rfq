@@ -1488,8 +1488,12 @@ function priceParlay(legs, opts = {}) {
   let nestedFairMultiplier = 1;
   let nestedOfferedMultiplier = 1;
   let nestedPairCount = 0;
+  // Hoisted so the same-direction prop fallback (Stage 2.5) can skip the legs
+  // the nested + xteam passes already consumed (avoids double-counting).
+  const _sgpNestedUsed = new Set();
+  const _sgpXteamUsed = new Set();
   if (isSGPParlay) {
-    const usedIdx = new Set();
+    const usedIdx = _sgpNestedUsed;
     for (let i = 0; i < pricedLegs.length; i++) {
       if (usedIdx.has(i)) continue;
       for (let j = i + 1; j < pricedLegs.length; j++) {
@@ -1543,7 +1547,7 @@ function priceParlay(legs, opts = {}) {
   let xteamFairMultiplier = 1;
   let xteamPairCount = 0;
   if (isSGPParlay) {
-    const usedX = new Set();
+    const usedX = _sgpXteamUsed;
     for (let i = 0; i < pricedLegs.length; i++) {
       if (usedX.has(i)) continue;
       for (let j = i + 1; j < pricedLegs.length; j++) {
@@ -1567,6 +1571,60 @@ function priceParlay(legs, opts = {}) {
       const before = fairParlayProb;
       fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * xteamFairMultiplier));
       log.debug('Pricing', `XTeam band-top lift (${xteamPairCount} pair${xteamPairCount > 1 ? 's' : ''}) — fair ${(before * 100).toFixed(2)}% × ${xteamFairMultiplier.toFixed(4)} = ${(fairParlayProb * 100).toFixed(2)}%`);
+    }
+  }
+
+  // ---- SAME-GAME SAME-DIRECTION PROP FALLBACK (SGP roadmap Stage 2.5) ----
+  // The xteam pass (Stage 2) only lifts prop pairs it can roster-resolve to
+  // OPPOSING teams; K-props are excluded from it, and any pair whose players
+  // don't resolve (incomplete rosters — WNBA especially) falls through to the
+  // NAIVE INDEPENDENT product. That fail-OPEN is the leak a prop-SGP sharp
+  // exploited (2026-07): same-game K-Under+K-Under and points-Over+points-Over
+  // quoted with ZERO correlation, ~5pp too generous. Any two same-game props on
+  // the SAME side (both Over / both Under) are positively correlated through the
+  // shared game script, so we apply the same additive band-top the xteam pass
+  // uses — but to EVERY such pair the precise passes didn't consume, and
+  // roster-INDEPENDENTLY so it holds when identity resolution fails. Leg-shape-
+  // derived (no opts) so the confirm reprice computes the identical fair
+  // (confirm-symmetry invariant). Same-direction only: mixed Over/Under is left
+  // independent (negative-corr there already prices conservatively for us).
+  let propSameGameFallbackMultiplier = 1;
+  let propSameGameFallbackPairs = 0;
+  if (isSGPParlay) {
+    const phiRaw = config.pricing.sgpPropSameGamePhiFloor;
+    const phiFloor = Math.max(0, Number.isFinite(phiRaw) ? phiRaw : 0.10);
+    if (phiFloor > 0) {
+      const isProp = li => /^player_/.test(li.marketType || '');
+      const sideOf = li => String(li.oddsApiSelection || li.selection || '').toLowerCase();
+      const consumed = new Set([..._sgpNestedUsed, ..._sgpXteamUsed]);
+      const usedFB = new Set();
+      for (let i = 0; i < pricedLegs.length; i++) {
+        if (consumed.has(i) || usedFB.has(i)) continue;
+        const a = pricedLegs[i].lineInfo;
+        if (!isProp(a)) continue;
+        const sideA = sideOf(a);
+        if (sideA !== 'over' && sideA !== 'under') continue;
+        for (let j = i + 1; j < pricedLegs.length; j++) {
+          if (consumed.has(j) || usedFB.has(j)) continue;
+          const b = pricedLegs[j].lineInfo;
+          if (!isProp(b)) continue;
+          if (a.pxEventId == null || a.pxEventId !== b.pxEventId) continue; // same game only
+          if (sideOf(b) !== sideA) continue; // same direction only
+          const p1 = pricedLegs[i].fairProb, p2 = pricedLegs[j].fairProb;
+          if (!(p1 > 0 && p1 < 1 && p2 > 0 && p2 < 1)) continue;
+          const naive = p1 * p2;
+          const jointFair = Math.min(naive + phiFloor * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
+          if (jointFair > naive) propSameGameFallbackMultiplier *= jointFair / naive;
+          propSameGameFallbackPairs++;
+          usedFB.add(i); usedFB.add(j);
+          break;
+        }
+      }
+      if (propSameGameFallbackMultiplier !== 1) {
+        const before = fairParlayProb;
+        fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * propSameGameFallbackMultiplier));
+        log.debug('Pricing', `Same-game same-dir prop fallback (${propSameGameFallbackPairs} pair${propSameGameFallbackPairs > 1 ? 's' : ''}, φ=${phiFloor}) — fair ${(before * 100).toFixed(2)}% × ${propSameGameFallbackMultiplier.toFixed(4)} = ${(fairParlayProb * 100).toFixed(2)}%`);
+      }
     }
   }
 
@@ -2026,7 +2084,8 @@ function priceParlay(legs, opts = {}) {
     sgpCorrelationFactor *
     crossGameCorrFactor *
     nestedOfferedMultiplier *
-    xteamFairMultiplier;
+    xteamFairMultiplier *
+    propSameGameFallbackMultiplier;
   const vigFair = vigLegs.reduce((p, l) => p * l.fairProb, 1) * sgpFairMultiplier;
 
   // ---------------------------------------------------------------------
