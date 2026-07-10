@@ -4660,11 +4660,11 @@
       .slice(0, 10)
       .map(([key, e]) => ({ key, name: e.name, sport: e.sport, n: e.n, ev: e.ev }));
 
-    // Top outcomes by |EV impact| — individual sides/selections.
+    // All outcomes with a non-negligible |EV impact| — individual sides/
+    // selections. No longer capped at 10: the table paginates client-side.
     const topOutcomes = Object.values(evByOutcome)
       .filter(e => Math.abs(e.ev) >= 0.5)
-      .sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev))
-      .slice(0, 10);
+      .sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev));
 
     return {
       nSims,
@@ -4878,27 +4878,21 @@
       html += '</div>';
     }
 
-    // Top 10 outcomes by expected-value impact — individual sides/selections
-    // whose winning most drives (or drags) the headline Expected (mean).
+    // Outcomes by expected-value impact — individual sides/selections whose
+    // winning most drives (or drags) the headline Expected (mean). Full list
+    // (all outcomes with a non-negligible EV impact), rendered client-side with
+    // a text filter, sortable columns, and 10-per-page pagination via
+    // _rsRenderOutcomes() below. The filter input lives OUTSIDE the re-rendered
+    // container so typing never loses focus.
     if (r.topOutcomes && r.topOutcomes.length) {
+      window._rsOutcomes = r.topOutcomes;
+      window._rsOutcomesState = { page: 0, sortCol: 'ev', sortDir: -1, filter: '' };
       html += '<div style="margin-top:20px;">';
-      html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:8px;">Top 10 Outcomes by Expected-Value Impact</div>';
-      html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-      html += '<tr style="color:var(--text3); text-align:left;">'
-        + '<th style="padding:5px 10px;">Team / Outcome</th>'
-        + '<th style="padding:5px 10px;">Event</th>'
-        + '<th style="padding:5px 10px;">Sport</th>'
-        + '<th style="padding:5px 10px; text-align:right;">Positions</th>'
-        + '<th style="padding:5px 10px; text-align:right;">EV impact</th></tr>';
-      for (const e of r.topOutcomes) {
-        html += '<tr style="border-top:1px solid var(--border);">'
-          + '<td style="padding:5px 10px; font-weight:600;">' + escapeHtml(e.outcome) + '</td>'
-          + '<td style="padding:5px 10px; color:var(--text2);">' + escapeHtml(e.event) + '</td>'
-          + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
-          + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
-          + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + formatCls(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
-      }
-      html += '</table>';
+      html += '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; flex-wrap:wrap;">';
+      html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Outcomes by Expected-Value Impact</div>';
+      html += '<input id="rs-outcomes-filter" type="text" placeholder="Filter outcome / event / sport…" oninput="_rsOutcomesFilter(this.value)" style="font-size:12px; padding:5px 9px; background:var(--surface2); border:1px solid var(--border); border-radius:5px; color:var(--text1); min-width:200px;">';
+      html += '</div>';
+      html += '<div id="rs-outcomes-container"></div>';
       html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s live expected value attributed to the side we hold; a parlay contributes to each of its outcomes.</div>';
       html += '</div>';
     }
@@ -4929,9 +4923,98 @@
     html += '<div style="margin-top:10px; font-size:12px; color:var(--text3); text-align:center; line-height:1.5;">Simulates each market outcome once per trial; parlays with shared legs are correlated, opposite-side legs are anti-correlated. Uses live odds where available.</div>';
 
     el.innerHTML = html;
+    if (document.getElementById('rs-outcomes-container')) window._rsRenderOutcomes();
   }
 
   window.renderRiskSim = renderRiskSim;
+
+  // ---- Outcomes-by-EV table: client-side filter + sort + pagination ----
+  // Operates on window._rsOutcomes (full list, set in renderRiskSim). Only the
+  // #rs-outcomes-container (table + pager) re-renders on interaction, so the
+  // filter <input> above it keeps focus/caret while typing.
+  const RS_OUTCOMES_PER_PAGE = 10;
+  function _rsOutcomesStateSafe() {
+    return window._rsOutcomesState || (window._rsOutcomesState = { page: 0, sortCol: 'ev', sortDir: -1, filter: '' });
+  }
+  window._rsOutcomesSort = function (col) {
+    const s = _rsOutcomesStateSafe();
+    if (s.sortCol === col) s.sortDir = -s.sortDir;
+    else { s.sortCol = col; s.sortDir = (col === 'ev' || col === 'n') ? -1 : 1; } // numeric cols start desc
+    s.page = 0;
+    window._rsRenderOutcomes();
+  };
+  window._rsOutcomesFilter = function (v) {
+    const s = _rsOutcomesStateSafe();
+    s.filter = String(v || '').toLowerCase();
+    s.page = 0;
+    window._rsRenderOutcomes();
+  };
+  window._rsOutcomesPage = function (delta) {
+    const s = _rsOutcomesStateSafe();
+    s.page += delta;
+    window._rsRenderOutcomes();
+  };
+  window._rsRenderOutcomes = function () {
+    const cont = document.getElementById('rs-outcomes-container');
+    if (!cont) return;
+    const all = window._rsOutcomes || [];
+    const s = _rsOutcomesStateSafe();
+    // formatCls is local to renderRiskSim; inline the same +/-/0 class mapping.
+    const clsOf = (v) => v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
+    let rows = all;
+    if (s.filter) {
+      rows = rows.filter(e =>
+        String(e.outcome || '').toLowerCase().includes(s.filter) ||
+        String(e.event || '').toLowerCase().includes(s.filter) ||
+        String(sportLabel(e.sport) || '').toLowerCase().includes(s.filter));
+    }
+    const dir = s.sortDir;
+    rows = rows.slice().sort((a, b) => {
+      switch (s.sortCol) {
+        case 'outcome': return dir * String(a.outcome || '').localeCompare(String(b.outcome || ''));
+        case 'event': return dir * String(a.event || '').localeCompare(String(b.event || ''));
+        case 'sport': return dir * String(sportLabel(a.sport) || '').localeCompare(String(sportLabel(b.sport) || ''));
+        case 'n': return dir * ((a.n || 0) - (b.n || 0));
+        case 'ev': default: return dir * (Math.abs(a.ev) - Math.abs(b.ev)); // "impact" = magnitude
+      }
+    });
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / RS_OUTCOMES_PER_PAGE));
+    if (s.page >= pages) s.page = pages - 1;
+    if (s.page < 0) s.page = 0;
+    const start = s.page * RS_OUTCOMES_PER_PAGE;
+    const pageRows = rows.slice(start, start + RS_OUTCOMES_PER_PAGE);
+    const arrow = (col) => s.sortCol === col ? (s.sortDir > 0 ? ' ▲' : ' ▼') : '';
+    const th = (col, label, align) => '<th style="padding:5px 10px; cursor:pointer; user-select:none; white-space:nowrap; text-align:' + (align || 'left') + ';" onclick="_rsOutcomesSort(\'' + col + '\')">' + label + arrow(col) + '</th>';
+    let h = '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+    h += '<tr style="color:var(--text3); text-align:left;">'
+      + th('outcome', 'Team / Outcome')
+      + th('event', 'Event')
+      + th('sport', 'Sport')
+      + th('n', 'Positions', 'right')
+      + th('ev', 'EV impact', 'right')
+      + '</tr>';
+    if (!pageRows.length) {
+      h += '<tr><td colspan="5" style="padding:12px 10px; color:var(--text3); text-align:center;">No outcomes match the filter.</td></tr>';
+    }
+    for (const e of pageRows) {
+      h += '<tr style="border-top:1px solid var(--border);">'
+        + '<td style="padding:5px 10px; font-weight:600;">' + escapeHtml(e.outcome) + '</td>'
+        + '<td style="padding:5px 10px; color:var(--text2);">' + escapeHtml(e.event) + '</td>'
+        + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + clsOf(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+    }
+    h += '</table>';
+    h += '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:8px; font-size:12px; color:var(--text3);">';
+    h += '<span>' + (total ? ('Showing ' + (start + 1) + '–' + Math.min(start + RS_OUTCOMES_PER_PAGE, total) + ' of ' + total) : '0 outcomes') + '</span>';
+    h += '<span style="display:inline-flex; align-items:center; gap:8px;">'
+      + '<button class="btn" style="font-size:12px; padding:3px 12px;" onclick="_rsOutcomesPage(-1)"' + (s.page <= 0 ? ' disabled' : '') + '>Prev</button>'
+      + '<span>Page ' + (s.page + 1) + ' / ' + pages + '</span>'
+      + '<button class="btn" style="font-size:12px; padding:3px 12px;" onclick="_rsOutcomesPage(1)"' + (s.page >= pages - 1 ? ' disabled' : '') + '>Next</button>'
+      + '</span></div>';
+    cont.innerHTML = h;
+  };
 
   function renderGameExposure(exp) {
     window._lastExposureData = exp;
