@@ -1597,28 +1597,53 @@ function priceParlay(legs, opts = {}) {
       const isProp = li => /^player_/.test(li.marketType || '');
       const sideOf = li => String(li.oddsApiSelection || li.selection || '').toLowerCase();
       const consumed = new Set([..._sgpNestedUsed, ..._sgpXteamUsed]);
-      const usedFB = new Set();
+      // A game TOTAL is a valid same-direction partner for a prop: one player's
+      // Over is positively correlated with the GAME total Over (he's a component
+      // of it). Include totals ONLY in events with no spread/ml leg, so we never
+      // double-count the spread_total / ml_total combo factor (which owns those
+      // mixed events). Team totals are excluded (their direction relative to the
+      // player needs roster resolution — the thing this fallback exists to avoid
+      // depending on).
+      const eventMkts = {};
+      for (const pl of pricedLegs) {
+        const li = pl.lineInfo; if (li.pxEventId == null) continue;
+        (eventMkts[li.pxEventId] || (eventMkts[li.pxEventId] = new Set())).add(li.marketType);
+      }
+      const eventHasSpreadOrMl = ev => { const s = eventMkts[ev]; return !!(s && (s.has('spread') || s.has('moneyline'))); };
+      const eligible = li => isProp(li) || (li.marketType === 'total' && !eventHasSpreadOrMl(li.pxEventId));
+      // Cluster the unconsumed eligible legs by (game, direction). Greedy
+      // disjoint PAIRING undercounts a 3+ same-side stack — it lifts one pair and
+      // drops the odd leg, yet a 3-Over stack in one game is MORE correlated than
+      // any single pair (the exact blow-up shape this guards against). Compound
+      // the band-top across each cluster (N-1 chained links) so the lift grows
+      // with stack size. Clusters must be anchored by >=1 PROP leg (a bare
+      // total+total alt-line pair is nested-implication territory, handled
+      // above). Deterministic (leg order) → confirm-symmetric.
+      const clusters = {};
       for (let i = 0; i < pricedLegs.length; i++) {
-        if (consumed.has(i) || usedFB.has(i)) continue;
-        const a = pricedLegs[i].lineInfo;
-        if (!isProp(a)) continue;
-        const sideA = sideOf(a);
-        if (sideA !== 'over' && sideA !== 'under') continue;
-        for (let j = i + 1; j < pricedLegs.length; j++) {
-          if (consumed.has(j) || usedFB.has(j)) continue;
-          const b = pricedLegs[j].lineInfo;
-          if (!isProp(b)) continue;
-          if (a.pxEventId == null || a.pxEventId !== b.pxEventId) continue; // same game only
-          if (sideOf(b) !== sideA) continue; // same direction only
-          const p1 = pricedLegs[i].fairProb, p2 = pricedLegs[j].fairProb;
-          if (!(p1 > 0 && p1 < 1 && p2 > 0 && p2 < 1)) continue;
+        if (consumed.has(i)) continue;
+        const li = pricedLegs[i].lineInfo;
+        if (!eligible(li)) continue;
+        const side = sideOf(li);
+        if (side !== 'over' && side !== 'under') continue; // same-direction class only
+        const p = pricedLegs[i].fairProb;
+        if (!(p > 0 && p < 1)) continue;
+        if (li.pxEventId == null) continue;
+        const key = li.pxEventId + '|' + side;
+        const c = clusters[key] || (clusters[key] = { ps: [], hasProp: false });
+        c.ps.push(p);
+        if (isProp(li)) c.hasProp = true;
+      }
+      for (const key of Object.keys(clusters)) {
+        const c = clusters[key];
+        if (c.ps.length < 2 || !c.hasProp) continue; // same-game same-side pair, prop-anchored
+        for (let k = 1; k < c.ps.length; k++) {
+          const p1 = c.ps[k - 1], p2 = c.ps[k];
           const naive = p1 * p2;
           const jointFair = Math.min(naive + phiFloor * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
           if (jointFair > naive) propSameGameFallbackMultiplier *= jointFair / naive;
-          propSameGameFallbackPairs++;
-          usedFB.add(i); usedFB.add(j);
-          break;
         }
+        propSameGameFallbackPairs += c.ps.length - 1;
       }
       if (propSameGameFallbackMultiplier !== 1) {
         const before = fairParlayProb;
