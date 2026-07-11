@@ -3380,7 +3380,19 @@ async function resolveOddsApiEventId(sport, homeTeam, awayTeam, targetTime) {
           return null;
         }
         const allSports = await sportsResp.json();
-        const active = allSports.filter(s => s.key.startsWith(fallback.sportPrefix) && s.active);
+        let active = allSports.filter(s => s.key.startsWith(fallback.sportPrefix) && s.active);
+        // Mirror fetchDynamicSports' curation (line ~2144): without it this
+        // event-ID discovery fans out to EVERY active soccer_* key (~35 in club
+        // season) — 35 sequential /events fetches per resolve, several timing
+        // out, which bogs down the refresh cycle and leaves the generic 'soccer'
+        // (World Cup) cache perpetually stale. Restrict to the allowlisted keys,
+        // and drop keys that have their own dedicated non-flip-gated fallback
+        // entry (already discovered under their own cache slot).
+        if (typeof fallback.keyAllowlist === 'function') {
+          const allow = fallback.keyAllowlist();
+          active = active.filter(s => allow.has(s.key)
+            && !(ODDS_API_FALLBACK[s.key] && !ODDS_API_FALLBACK[s.key].flipGated));
+        }
         for (const t of active) {
           try {
             const r = await abortableFetch(
