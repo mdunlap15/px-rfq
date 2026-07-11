@@ -743,6 +743,16 @@ const config = {
       return Math.round(days * 24);
     })(),
     stalePriceMinutes: parseInt(process.env.STALE_PRICE_MINUTES) || 5,
+    // Event-aware staleness relaxation (oddsFeed.isStaleForEvent). Lines barely
+    // move on a game far in the future, so the flat per-sport threshold above
+    // needlessly declines quotable far-out markets when the refresh cycle runs
+    // slow (e.g. a World Cup match 20h out failing the 5-min soccer gate).
+    // For events starting beyond staleFarOutHours, allow cache age up to
+    // staleFarOutMinutes. Imminent games are unaffected (normal threshold +
+    // the tighter pre-game guard still apply). Set STALE_FAR_OUT_HOURS=0 to
+    // disable the relaxation entirely.
+    staleFarOutHours: process.env.STALE_FAR_OUT_HOURS != null ? parseFloat(process.env.STALE_FAR_OUT_HOURS) : 6,
+    staleFarOutMinutes: parseFloat(process.env.STALE_FAR_OUT_MINUTES) || 30,
     // Per-sport override for stale threshold (minutes). Tighter for fast-moving
     // markets (MMA/boxing move on news; NFL moves on injury reports), looser
     // for slow Odds-API fallback sports that refresh less often.

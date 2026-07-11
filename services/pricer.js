@@ -786,9 +786,14 @@ function priceParlay(legs, opts = {}) {
   // Per-request cache: isStale / getCacheAge / getStaleThreshold repeat for
   // every leg of a single-sport parlay. Memoize once here.
   const staleCache = {};
-  const isStaleCached = (sport) => {
-    if (staleCache[sport] === undefined) staleCache[sport] = oddsFeed.isStale(sport);
-    return staleCache[sport];
+  // Event-aware: relaxes the flat per-sport threshold for far-out games (see
+  // oddsFeed.isStaleForEvent). Memoize by sport+startTime since two legs on the
+  // same sport can have different start times (and thus different far-out
+  // relaxation). Imminent games are unaffected + still hit isEventStalePreGame.
+  const isStaleCached = (sport, startTime) => {
+    const key = sport + '|' + (startTime || '');
+    if (staleCache[key] === undefined) staleCache[key] = oddsFeed.isStaleForEvent(sport, startTime);
+    return staleCache[key];
   };
   for (const leg of legs) {
     const lineId = leg.line_id || leg.lineId || leg;
@@ -855,7 +860,7 @@ function priceParlay(legs, opts = {}) {
     // Check if prices are stale for this sport. Uses per-sport threshold:
     // MMA/boxing/NFL have tighter windows because they move on news;
     // NCAAB/tennis have looser windows because they only refresh on full cycles.
-    if (isStaleCached(lineInfo.sport)) {
+    if (isStaleCached(lineInfo.sport, lineInfo.startTime)) {
       const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
       const threshold = oddsFeed.getStaleThreshold(lineInfo.sport);
       log.debug('Pricing', `Declined: stale prices for ${lineInfo.sport} (${ageMin}min old, threshold ${threshold}m)`);

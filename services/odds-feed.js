@@ -6949,6 +6949,25 @@ function getStaleThreshold(sport) {
 }
 
 /**
+ * Event-aware staleness gate. The flat per-sport threshold (isStale) is right
+ * for imminent games but needlessly strict for far-out ones: lines barely move
+ * on a match 20h away, yet a 5-min soccer threshold declines a perfectly
+ * quotable World Cup game whenever the refresh cycle runs a touch slow. For
+ * events starting beyond STALE_FAR_OUT_HOURS, allow a relaxed cache age
+ * (STALE_FAR_OUT_MINUTES). Imminent games are UNAFFECTED here and stay governed
+ * by the normal threshold + the tighter isEventStalePreGame guard. Falls back
+ * to plain isStale when startTime is missing/unparseable (fail-safe).
+ */
+function isStaleForEvent(sport, startTime) {
+  if (!isStale(sport)) return false; // fresh by the normal per-sport threshold
+  if (!startTime) return true;
+  const hoursToStart = (new Date(startTime).getTime() - Date.now()) / 3600e3;
+  const farOutHours = config.pricing.staleFarOutHours;
+  if (!Number.isFinite(hoursToStart) || !(farOutHours > 0) || hoursToStart < farOutHours) return true;
+  return getCacheAge(sport) > (config.pricing.staleFarOutMinutes || getStaleThreshold(sport));
+}
+
+/**
  * Pre-game closing-line guard. When an event starts within PREGAME_WINDOW_MIN,
  * sportsbooks move the line hard on late news (scratches, weather, scratches).
  * Our cached odds can be stale even when the sport-level cache passes isStale.
@@ -8338,6 +8357,13 @@ const TOA_PROP_TTL_MS = (parseInt(process.env.TOA_PROP_TTL_SECONDS) || 300) * 10
 const TOA_PROP_REFRESH_AHEAD_MS = (parseInt(process.env.TOA_PROP_REFRESH_AHEAD_SECONDS) || 180) * 1000;
 const toaEventsCache = {};   // { sportKey: { fetchedAt, events: [...], refreshing: bool } }
 const toaPropOddsCache = {}; // { `${sport}:${eventId}:${marketKey}`: { fetchedAt, refreshing: bool, ...respBody } }
+// Single-flight map for the BLOCKING cache-miss fetch path. Coalesces
+// concurrent misses for the same event+market onto one in-flight fetch so a
+// burst of RFQs for the same game's props (a fisher grid, or a popular game at
+// first quote) can't spawn N identical blocking TOA fetches — the storm that
+// timed out TOA and starved inline prop resolution in the 2026-07-10 drought.
+const _propOddsInflight = {}; // cacheKey -> Promise
+
 // Diagnostics on TOA staleness — incremented every time we serve cached
 // data past TTL because refresh failed. Lets operators spot ongoing TOA
 // outages via /status without hunting log lines. Reset on service restart.
@@ -8502,7 +8528,15 @@ async function _getTheOddsApiPropOdds(sport, eventId, marketKey) {
   // injuries, lineup changes, etc. invalidate cached data over hours).
   // Operator should manually /pause if a TOA outage extends past their
   // comfort threshold. Better to quote on stale data than not quote.
-  const refreshed = await _refreshTheOddsApiPropOdds(sport, eventId, marketKey);
+  // Single-flight: coalesce concurrent misses for this cacheKey onto ONE
+  // fetch (see _propOddsInflight). The whole burst shares the result; on
+  // failure they all fall through to the stale-serve below.
+  if (!_propOddsInflight[cacheKey]) {
+    _propOddsInflight[cacheKey] = _refreshTheOddsApiPropOdds(sport, eventId, marketKey)
+      .finally(() => { delete _propOddsInflight[cacheKey]; });
+  }
+  let refreshed = null;
+  try { refreshed = await _propOddsInflight[cacheKey]; } catch (_) { refreshed = null; }
   if (refreshed != null) return refreshed;
   if (cached) {
     const ageMin = Math.round((now - cached.fetchedAt) / 60000);
@@ -9110,6 +9144,7 @@ module.exports = {
   getLiveCacheStatus,
   getCacheAge,
   isStale,
+  isStaleForEvent,
   getStaleThreshold,
   isEventStalePreGame,
   getCacheStatus,
