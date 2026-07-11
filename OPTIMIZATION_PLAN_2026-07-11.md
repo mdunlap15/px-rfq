@@ -15,7 +15,7 @@ Produced overnight per operator request: full review of 3 months of data (7,073 
 ### A. Volume levers (verified safe)
 | Var | From → To | Why |
 |---|---|---|
-| `PRICE_FLOOR_VS_CONSENSUS_PP` | 0.08 → **8** (or delete; default 8) | The big one. Restores ~2pp/leg competitiveness on 92% of covered lines. Chalk protection now comes from the deployed d36b603 parlay-level caps (1.0pp total, 0.0pp on chalk stacks — proven active in prod data since 6/26: chalk parlays floored at exactly consensus). Expect ~2× covered main-market fills. |
+| `PRICE_FLOOR_VS_CONSENSUS_PP` | 0.08 → **1** | The big one. The 0.08 was a units slip (code reads pp and divides by 100; the operator's deliberate pre-7/3 value was 1). **1, not the code default 8**, is correct (operator-confirmed 2026-07-11): the healthy 6/26–7/3 fill regime ran at exactly per-leg 1 + the d36b603 parlay caps (1.0pp total / 0.0pp chalk), AND the single-leg/resting-line path has ONLY the per-leg floor (pricer.js:651-657) — at 8 a feed error could park a public resting line 8pp off consensus; at 1 every posted line stays anchored within 1pp of vigged consensus. Expect ~2× covered main-market fills (that's the measured per-leg=1 baseline). |
 | `MAX_RISK_PER_PARLAY_WITH_PROP` | 4005 → **2000** | Kills the one-fill lockout (with the caps below: 3 tickets/side, 5/game). Keeps the $1–2K prop band open (since 6/25: 29W-0L, +$1,918). Caps whale damage at $2K/ticket (May 18–20 whale hit $2.7–6.2K tickets for −$22.5K). |
 | `MAX_PROP_TEAM_SIDE_RISK` | 4005 → **6000** | 3× headroom vs ticket charge. |
 | `MAX_PROP_RISK_PER_GAME` | 5000 → **10000** | 5× headroom vs ticket charge. |
