@@ -177,8 +177,19 @@ async function settleRecent(opts = {}) {
 
   let written = 0;
   if (!dryRun && settlements.length) {
-    for (let i = 0; i < settlements.length; i += 500) {
-      const chunk = settlements.slice(i, i + 500);
+    // Dedupe by parlay_id: matched_parlays can carry the same parlay twice
+    // (duplicate matched events), and Postgres rejects a single upsert
+    // statement that touches the same conflict key twice ("ON CONFLICT DO
+    // UPDATE command cannot affect row a second time"). Keep the last
+    // occurrence — same parlay, same box scores, identical settlement.
+    const byId = new Map();
+    for (const s of settlements) byId.set(s.parlay_id, s);
+    const unique = [...byId.values()];
+    if (unique.length !== settlements.length) {
+      log.info('PropSettle', `deduped ${settlements.length - unique.length} duplicate parlay_id rows before upsert`);
+    }
+    for (let i = 0; i < unique.length; i += 500) {
+      const chunk = unique.slice(i, i + 500);
       const { error } = await sb.from('prop_settlements').upsert(chunk, { onConflict: 'parlay_id' });
       if (error) {
         const hint = /prop_settlements/.test(error.message) ? ' (run migrations/prop_settlements.sql in Supabase first)' : '';
