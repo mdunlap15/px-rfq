@@ -1728,6 +1728,148 @@ async function getRfiFair(sport, homeTeam, awayTeam, commenceTime) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// TEAM TOTALS — deterministic per-event sourcing.
+//
+// Team totals live ONLY on TOA's per-event endpoint (the bulk /odds endpoint
+// 422s on team_totals, same as F5/H1). The background supplementTeamTotals
+// ran during the odds refresh under heavy concurrency using a plain, un-timed
+// fetch(); in prod it silently attached nothing (verified 2026-07-12: 15/15
+// MLB games missing team_totals in cache while TOA carried full data for all
+// of them on pinnacle/dk/fd). Result: PX team-total RFQs declined "no fair
+// value" and we effectively never quoted them.
+//
+// ensureTeamTotals is the single reliable path both the refresh supplement AND
+// the line-manager seed loop call. It is timeout-bounded (abortableFetch,
+// can't hang), single-flighted (a burst of concurrent callers for one game
+// shares one fetch), and TTL-cached (a fresh cached consensus is re-attached
+// to the — possibly just-rebuilt — cache event objects without re-fetching,
+// which closes the gap between the ~3-min odds refresh rebuilding the cache
+// and the seed cadence). Fail-open: a miss leaves the game without team_totals
+// for this cycle (no worse than today). Fail-closed on started/unknown-start
+// games (we don't quote team totals live).
+// ---------------------------------------------------------------------------
+const TEAM_TOTAL_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
+const TEAM_TOTAL_BOOKMAKERS = process.env.TEAM_TOTAL_BOOKMAKERS || 'pinnacle,draftkings,fanduel,betmgm';
+const TEAM_TOTAL_TTL_MS = (parseInt(process.env.TEAM_TOTAL_TTL_SECONDS) || 240) * 1000;
+const _teamTotalCache = {};    // key -> { at, tt|null, toaHome, toaAway }
+const _teamTotalInflight = {}; // key -> Promise
+
+// Attach a team-total consensus (keyed to TOA's home/away) onto every cached
+// event object for this matchup, in that event's OWN orientation so getFairProb
+// reads market[side] correctly (getEventMarkets handles caller-orientation
+// flipping on reverse-bucket reads). Returns how many event objects it touched.
+function _attachTeamTotalsToCache(sport, toaHome, toaAway, tt) {
+  const cache = oddsCache[sport];
+  if (!cache || !cache.events || !tt) return 0;
+  const nH = normalizeTeamName(toaHome), nA = normalizeTeamName(toaAway);
+  let attached = 0;
+  const keys = new Set([normalizeEventKey(toaHome, toaAway), normalizeEventKey(toaAway, toaHome)]);
+  for (const key of keys) {
+    const entry = cache.events[key];
+    if (!entry) continue;
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.markets) continue;
+      const evH = normalizeTeamName(ev.homeTeam);
+      let home, away;
+      if (evH === nH) { home = tt.home; away = tt.away; }        // same orientation
+      else if (evH === nA) { home = tt.away; away = tt.home; }   // event stored reversed vs TOA
+      else continue;                                            // name mismatch — don't guess
+      const block = { books: tt.books || 1 };
+      if (home) block.home = home;
+      if (away) block.away = away;
+      if (block.home || block.away) { ev.markets.team_totals = block; attached++; }
+    }
+  }
+  return attached;
+}
+
+async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
+  const theOddsApiKey = process.env.THE_ODDS_API_KEY;
+  if (!theOddsApiKey || !TEAM_TOTAL_SPORTS.has(sport)) return null;
+  const startMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
+  if (!Number.isFinite(startMs) || startMs <= Date.now()) return null; // fail-closed on started/unknown
+
+  const key = `${sport}|${normalizeEventKey(homeTeam, awayTeam)}`;
+  const now = Date.now();
+  const cached = _teamTotalCache[key];
+  if (cached && (now - cached.at) < TEAM_TOTAL_TTL_MS) {
+    // Re-attach: the odds cache may have been rebuilt since we fetched, which
+    // would have dropped the consensus. Cheap, no network.
+    if (cached.tt) _attachTeamTotalsToCache(sport, cached.toaHome, cached.toaAway, cached.tt);
+    return cached.tt;
+  }
+  if (_teamTotalInflight[key]) return _teamTotalInflight[key];
+
+  _teamTotalInflight[key] = (async () => {
+    try {
+      const resolved = await resolveOddsApiEventId(sport, homeTeam, awayTeam, commenceTime);
+      if (!resolved || !resolved.eventId) { _teamTotalCache[key] = { at: now, tt: null }; return null; }
+
+      const url = `https://api.the-odds-api.com/v4/sports/${sport}/events/${resolved.eventId}/odds`
+        + `?apiKey=${theOddsApiKey}`
+        + `&regions=us,eu`
+        + `&markets=team_totals,alternate_team_totals`
+        + `&bookmakers=${TEAM_TOTAL_BOOKMAKERS}`
+        + `&oddsFormat=american`;
+
+      let data;
+      try {
+        const resp = await abortableFetch(url);
+        if (!resp.ok) { _teamTotalCache[key] = { at: now, tt: null }; return null; }
+        data = await safeJsonFetch(resp);
+      } catch (err) {
+        // Transient (timeout / network): do NOT cache the miss — retry next call.
+        if (err && err.name === 'AbortError') {
+          toaStaleServeStats.fetchTimeouts++;
+          toaStaleServeStats.lastFetchTimeoutAt = new Date().toISOString();
+        }
+        return null;
+      }
+      if (!data) return null;
+
+      // Build bookPairs — one per (book × teamSide × line) with {over,under}
+      // at the SAME line. Mirrors getBookPairsForTeamTotals' line-keyed pairing.
+      const bookPairs = [];
+      for (const book of (data.bookmakers || [])) {
+        for (const m of (book.markets || [])) {
+          if (m.key !== 'team_totals' && m.key !== 'alternate_team_totals') continue;
+          const byTeamLine = {};
+          for (const o of (m.outcomes || [])) {
+            const team = o.description;
+            if (!team || o.point == null) continue;
+            const tlKey = team + '|' + o.point;
+            if (!byTeamLine[tlKey]) byTeamLine[tlKey] = { team, line: o.point };
+            const leg = { odds_probability: americanToImpliedProb(o.price), odds_american: o.price, line: o.point };
+            if (o.name === 'Over') byTeamLine[tlKey].over = leg;
+            else if (o.name === 'Under') byTeamLine[tlKey].under = leg;
+          }
+          for (const entry of Object.values(byTeamLine)) {
+            if (!entry.over || !entry.under) continue;
+            let teamSide = null;
+            if (entry.team === data.home_team) teamSide = 'home';
+            else if (entry.team === data.away_team) teamSide = 'away';
+            else continue;
+            bookPairs.push({ book: book.key, teamSide, over: entry.over, under: entry.under });
+          }
+        }
+      }
+      if (bookPairs.length === 0) { _teamTotalCache[key] = { at: now, tt: null }; return null; }
+
+      const tt = buildConsensusTeamTotals(bookPairs);
+      if (!tt || (!tt.home && !tt.away)) { _teamTotalCache[key] = { at: now, tt: null }; return null; }
+      tt.books = new Set(bookPairs.map(b => b.book)).size;
+
+      _teamTotalCache[key] = { at: now, tt, toaHome: data.home_team, toaAway: data.away_team };
+      _attachTeamTotalsToCache(sport, data.home_team, data.away_team, tt);
+      return tt;
+    } finally {
+      delete _teamTotalInflight[key];
+    }
+  })();
+  return _teamTotalInflight[key];
+}
+
 /**
  * Fetch 1st-Half markets for NBA from The Odds API and attach them
  * to the existing event cache as: h2h_h1, spreads_h1, totals_h1.
@@ -1855,25 +1997,12 @@ async function supplementNbaH1Markets(parsedEvents) {
  * emit one bookPair per (book, teamSide) for buildConsensusTeamTotals.
  */
 async function supplementTeamTotals(parsedEvents, sport) {
-  const theOddsApiKey = process.env.THE_ODDS_API_KEY;
-  if (!theOddsApiKey) return;
+  if (!process.env.THE_ODDS_API_KEY || !TEAM_TOTAL_SPORTS.has(sport)) return;
 
-  const OA_SPORT_KEYS = {
-    basketball_nba: 'basketball_nba',
-    baseball_mlb: 'baseball_mlb',
-    icehockey_nhl: 'icehockey_nhl',
-  };
-  const oaSport = OA_SPORT_KEYS[sport];
-  if (!oaSport) return;
-
-  // IMPORTANT: The Odds API's bulk /odds endpoint does NOT support
-  // team_totals — returns 422 INVALID_MARKET. Same gotcha as F5.
-  // team_totals lives on the per-event endpoint /events/{id}/odds.
-  // We resolve each parsed event to its Odds API event ID, then fetch
-  // per-event with bounded concurrency (mirrors supplementMlbF5Markets).
-
-  // Collect candidates (skip events that already have team_totals populated
-  // from SharpAPI — no need to overwrite with Odds API data).
+  // Delegate to ensureTeamTotals (the single reliable path — abortableFetch,
+  // single-flight, TTL cache, cache-attach). This replaces the former plain-
+  // fetch() loop that silently attached nothing under prod load. Skip events
+  // that already carry team_totals (e.g. a still-fresh TTL re-attach).
   const candidates = [];
   for (const entry of Object.values(parsedEvents)) {
     const arr = Array.isArray(entry) ? entry : [entry];
@@ -1883,104 +2012,25 @@ async function supplementTeamTotals(parsedEvents, sport) {
       candidates.push(ev);
     }
   }
-  if (candidates.length === 0) {
-    log.info('OddsFeed', `${sport} team_totals supplement: no candidates`);
-    return;
-  }
+  if (candidates.length === 0) return;
 
-  let calls = 0, matchFails = 0, apiFails = 0, attached = 0, emptyPayload = 0;
+  let attached = 0;
   const CONCURRENCY = 3;
   let idx = 0;
   async function worker() {
     while (idx < candidates.length) {
       const ev = candidates[idx++];
-      const resolved = await resolveOddsApiEventId(oaSport, ev.homeTeam, ev.awayTeam, ev.commenceTime);
-      if (!resolved) { matchFails++; continue; }
-
-      // Fetch BOTH primary team_totals AND alternate_team_totals so the
-      // per-line consensus has ±1/±2 alts available. Without alt fetching,
-      // PX RFQs for non-primary lines (e.g. Cavaliers +112 when primary
-      // is +111.5) returned null fair-prob even when DK/FD posted them.
-      const url = `https://api.the-odds-api.com/v4/sports/${oaSport}/events/${resolved.eventId}/odds`
-        + `?apiKey=${theOddsApiKey}`
-        + `&regions=us,eu`
-        + `&markets=team_totals,alternate_team_totals`
-        + `&bookmakers=pinnacle,draftkings,fanduel`
-        + `&oddsFormat=american`;
-
-      try {
-        const resp = await fetch(url);
-        calls++;
-        if (!resp.ok) { apiFails++; continue; }
-        const data = await resp.json();
-
-        // Build bookPairs: one entry per (book × teamSide × line) with
-        // { over, under }. Per-event response shape:
-        // data.bookmakers[].markets[].outcomes[] where each outcome has
-        // { name:'Over'|'Under', description:<team>, price, point }.
-        // The alt market posts multiple over/under pairs per team — group
-        // by (team, line) so each line gets its own bookPair.
-        const bookPairs = [];
-        for (const book of (data.bookmakers || [])) {
-          for (const m of (book.markets || [])) {
-            if (m.key !== 'team_totals' && m.key !== 'alternate_team_totals') continue;
-            // Group outcomes by (team, line) — alt markets emit many
-            // over/under pairs per team across different lines.
-            const byTeamLine = {};
-            for (const o of (m.outcomes || [])) {
-              const team = o.description;
-              if (!team || o.point == null) continue;
-              const tlKey = team + '|' + o.point;
-              if (!byTeamLine[tlKey]) byTeamLine[tlKey] = { team, line: o.point };
-              if (o.name === 'Over') {
-                byTeamLine[tlKey].over = {
-                  odds_probability: americanToImpliedProb(o.price),
-                  odds_american: o.price,
-                  line: o.point,
-                };
-              } else if (o.name === 'Under') {
-                byTeamLine[tlKey].under = {
-                  odds_probability: americanToImpliedProb(o.price),
-                  odds_american: o.price,
-                  line: o.point,
-                };
-              }
-            }
-            for (const entry of Object.values(byTeamLine)) {
-              if (!entry.over || !entry.under) continue;
-              let teamSide = null;
-              if (entry.team === data.home_team) teamSide = 'home';
-              else if (entry.team === data.away_team) teamSide = 'away';
-              else continue;
-              bookPairs.push({
-                book: book.key,
-                teamSide,
-                over: entry.over,
-                under: entry.under,
-              });
-            }
-          }
-        }
-
-        if (bookPairs.length === 0) {
-          emptyPayload++;
-          continue;
-        }
-
-        const tt = buildConsensusTeamTotals(bookPairs);
-        if (tt) {
-          ev.markets.team_totals = tt;
-          attached++;
-        }
-      } catch (err) {
-        apiFails++;
-      }
+      // ensureTeamTotals attaches onto oddsCache[sport] events by matchup
+      // lookup; during the refresh oddsCache[sport].events IS `parsedEvents`
+      // (same reference), so these candidate objects get populated directly.
+      const tt = await ensureTeamTotals(sport, ev.homeTeam, ev.awayTeam, ev.commenceTime);
+      if (tt) attached++;
     }
   }
   const workers = [];
   for (let i = 0; i < Math.min(CONCURRENCY, candidates.length); i++) workers.push(worker());
   await Promise.all(workers);
-  log.info('OddsFeed', `${sport} team_totals supplement (per-event): ${calls}/${candidates.length} calls, ${attached} attached, matchFails=${matchFails} apiFails=${apiFails} emptyPayload=${emptyPayload}`);
+  log.info('OddsFeed', `${sport} team_totals supplement: ${attached}/${candidates.length} attached (via ensureTeamTotals)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -9161,6 +9211,7 @@ module.exports = {
   deVig2Way,
   americanToImpliedProb,
   getRfiFair,
+  ensureTeamTotals,
   // Internal consensus builders exposed for unit testing / debug (pure fns).
   buildConsensusTotals,
   buildConsensusSpread,
@@ -9181,3 +9232,4 @@ module.exports = {
   lookupPlayerPointsProp,
   getPropRowsCacheStatus,
 };
+

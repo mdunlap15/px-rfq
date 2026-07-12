@@ -593,6 +593,11 @@ const FIRST_HALF_MARKET_TYPES = [
   '1st_half_total_points',
 ];
 
+// Sports whose team-total markets we inline-source at seed time (team totals
+// live only on TOA's per-event endpoint; see oddsFeed.ensureTeamTotals). NBA/
+// NHL are offseason now but wired for their return.
+const TEAM_TOTAL_SEED_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
+
 // Pitcher strikeouts prop detection.
 //
 // PX uses market.type='total' for these — same as game totals — and
@@ -1866,6 +1871,25 @@ async function seedAllLines() {
         }
       } catch (err) {
         log.warn('Lines', `RFI pre-seed error for ${event.name}: ${err.message}`);
+      }
+    }
+
+    // ----- PRE-SEED TEAM TOTALS (guaranteed cache population) -----
+    // PX's team-total markets already register through the main-market loop
+    // above (they pass the filter; parser upgrades PX 'total'→'team_total'),
+    // but they price via getFairProb reading oddsCache[...].markets.team_totals
+    // — and the background supplementTeamTotals was silently failing under
+    // prod load, leaving that cache empty so every team-total RFQ declined
+    // "no fair value" (why we effectively never quoted them). Fetch inline
+    // here per game so the cache reliably carries the consensus (primary + alt
+    // lines via byLine) for the already-registered PX lines. ensureTeamTotals
+    // is single-flighted + TTL-cached in odds-feed, so this is cheap and
+    // shares work with the refresh-cycle supplement. Fail-open.
+    if (TEAM_TOTAL_SEED_SPORTS.has(sportKey) && matchedHome && matchedAway) {
+      try {
+        await oddsFeed.ensureTeamTotals(sportKey, matchedHome, matchedAway, event.scheduled || null);
+      } catch (err) {
+        log.warn('Lines', `team-total pre-seed error for ${event.name}: ${err.message}`);
       }
     }
 
