@@ -92,6 +92,19 @@ const _SOCCER_PROP_TO_TOA_MARKET = {
   assists: 'player_assists',
 };
 const _SOCCER_PROP_TOA_SPORT = 'soccer_fifa_world_cup';
+// Map a PX soccer sport key to the source sport key for player-prop lookups.
+// The generic 'soccer' key (SharpAPI-era events; today = World Cup) resolves to
+// the dedicated tournament key; league-specific keys (soccer_usa_mls,
+// soccer_epl, …) pass through unchanged so their props source under their own
+// key when a source has coverage. Generalizes the former hardcoded WC-only
+// assumption. NOTE: TOA carries almost no MLS props (single-soft-book
+// goalscorer only), so MLS is sourced from the DK scraper (see
+// scripts/dk-soccer-props.js / the soccer-prop scraper source) rather than TOA;
+// this mapping governs the TOA-sourced leagues.
+function _soccerPropToaSport(sportKey) {
+  if (!sportKey || sportKey === 'soccer') return _SOCCER_PROP_TOA_SPORT;
+  return sportKey;
+}
 // `line` is what we register on the lineInfo (0.5 = anytime semantics);
 // `toaLine` is what the TOA outcome filter needs: anytime markets
 // (goal_scorer_anytime, assists) carry NO point on their outcomes, so the
@@ -1541,7 +1554,7 @@ async function seedAllLines() {
             let lookup = null;
             try {
               lookup = await oddsFeed.lookupTheOddsApiPlayerProp(
-                soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey, toaMarketKey,
+                soccerProp ? _soccerPropToaSport(sportKey) : sportKey, toaMarketKey,
                 { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
                 playerName, toaQueryLine,
               );
@@ -1625,7 +1638,7 @@ async function seedAllLines() {
                 // Try TOA one-sided first (multi-book).
                 try {
                   const toaOs = await oddsFeed.lookupTheOddsApiPlayerPropOneSided(
-                    soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey, toaMarketKey,
+                    soccerProp ? _soccerPropToaSport(sportKey) : sportKey, toaMarketKey,
                     { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
                     playerName, toaQueryLine,
                   );
@@ -1731,7 +1744,7 @@ async function seedAllLines() {
                   awayTeam: matchedAway,
                   // Soccer props resolve against the dedicated TOA tournament
                   // key even though the event matched under generic 'soccer'.
-                  oddsApiSport: soccerProp ? _SOCCER_PROP_TOA_SPORT : sportKey,
+                  oddsApiSport: soccerProp ? _soccerPropToaSport(sportKey) : sportKey,
                   oddsApiMarket: toaMarketKey,
                   oddsApiSelection: sel.selection,
                   startTime: event.scheduled || null,
