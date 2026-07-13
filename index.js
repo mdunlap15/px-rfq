@@ -526,11 +526,14 @@ async function startup() {
         config.pricing.liveBankroll = amount;
         log.debug('Balance', `PX balance: $${amount}`);
       }
-      // Capture matched_wager_balance for the /status informational field only.
-      // NOTE: it is GROSS NOTIONAL order-book exposure, NOT locked cash, so it
-      // is NOT added to equity/deployed (corrected 2026-07-13 — see the /status
-      // portfolio handler). Kept for reference/debugging.
+      // Capture PX balance components for equity = Cash Balance + Filled.
+      // PX `balance` = Cash + Promotional + GEC; matched_wager_balance = "Filled"
+      // (real matched stake, INCLUDED); gec_balance + promotional_balance are
+      // EXCLUDED (operator, 2026-07-13) → Cash Balance = balance − gec − promo.
+      // unmatched_wager_balance ("Resting") is notional and never in equity.
       if (bal && bal.matched_wager_balance != null) config.pricing.liveMatchedWager = Number(bal.matched_wager_balance);
+      if (bal && bal.gec_balance != null) config.pricing.liveGecBalance = Number(bal.gec_balance);
+      if (bal && bal.promotional_balance != null) config.pricing.livePromoBalance = Number(bal.promotional_balance);
     } catch (err) {
       log.debug('Balance', `Balance fetch failed: ${err.message}`);
     }
@@ -720,6 +723,8 @@ async function startup() {
       log.info('Startup', `    ✓ PX balance: $${amount}`);
     }
     if (bal && bal.matched_wager_balance != null) config.pricing.liveMatchedWager = Number(bal.matched_wager_balance);
+    if (bal && bal.gec_balance != null) config.pricing.liveGecBalance = Number(bal.gec_balance);
+    if (bal && bal.promotional_balance != null) config.pricing.livePromoBalance = Number(bal.promotional_balance);
   } catch (err) {
     log.warn('Startup', `    ⚠ Balance fetch failed: ${err.message}`);
   }
@@ -1099,35 +1104,28 @@ function startStatusServer() {
         // fall back to the tracker only on cold-start.
         const pxOpenExposure = pxLedger.getCachedOpenExposure();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : currentRisk;
-        // Post-CFTC-merge (2026-06-08) the account is commingled (parlay +
-        // single-leg). The two locked-stake pools are DISJOINT and must be
-        // SUMMED for account-wide deployed:
-        //   • parlay open stake  = effectiveRisk (PX /parlay/sp/orders open
-        //                          exposure via pxLedger; tracker on cold-start)
-        //   • single-leg matched = PX matched_wager_balance
-        // VERIFIED against PX (2026-06-26): matched_wager_balance ($13,360.69) is
-        // LESS than parlay open exposure ($14,308.58) alone — proof it EXCLUDES
-        // parlay stake (it is single-leg / non-parlay matched stake only). The
-        // old code used matched_wager_balance ALONE as `deployed`, dropping the
-        // entire open-parlay stake, so totalEquity (= cash + deployed) sank as
-        // parlays were deployed (cash debited, deployed not credited). Summing
-        // makes equity invariant to deploying (cash→deployed shift nets zero).
-        // CORRECTION (2026-07-13, operator-confirmed): matched_wager_balance and
-        // unmatched_wager_balance are GROSS NOTIONAL order-book exposure, NOT
-        // locked cash — proof: unmatched_wager_balance runs ~$300K+ against
-        // ~$50K cash. PX's `balance` already reflects real single-leg activity,
-        // so adding matched_wager DOUBLE-COUNTED and inflated equity by the
-        // notional (~$31K → equity read $83.7K vs the ~$52-57K real). gec_balance
-        // is likewise excluded. This reverts the 2026-06-26 sum, whose premise
-        // (that matched_wager is locked single-leg cash) was never verified —
-        // it only checked matched_wager != parlay stake. Deployed = real locked
-        // PARLAY stake only; equity = cash + that.
+        // Account Equity = Cash Balance + Filled (operator-defined 2026-07-13,
+        // matches the PX app exactly). PX get_balance field mapping:
+        //   • balance                 = Cash Balance + Promotional + GEC (aggregate)
+        //   • gec_balance             = GEC Balance          → EXCLUDED (operator)
+        //   • promotional_balance     = Promotional Balance  → EXCLUDED
+        //   • matched_wager_balance   = "Filled" (matched stake)   → INCLUDED (real)
+        //   • unmatched_wager_balance = "Resting" (unmatched offers, NOTIONAL) → EXCLUDED
+        // So Cash Balance = balance − gec − promo, and Deployed = Filled.
+        // This corrects BOTH prior errors: (a) the 2026-06-26 code summed matched
+        // against parlay stake while treating aggregate `balance` as cash; (b) the
+        // 2026-07-13 over-correction dropped Filled AND left GEC inside cash.
+        const gecBalance = (config.pricing.liveGecBalance != null && config.pricing.liveGecBalance >= 0)
+          ? config.pricing.liveGecBalance : 0;
+        const promoBalance = (config.pricing.livePromoBalance != null && config.pricing.livePromoBalance >= 0)
+          ? config.pricing.livePromoBalance : 0;
+        const cashBalance = (accountValue != null) ? (accountValue - gecBalance - promoBalance) : null;
         const matchedWagerBalance = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
           ? config.pricing.liveMatchedWager
           : null;
-        const parlayDeployed = effectiveRisk != null ? effectiveRisk : 0;
-        const deployed = parlayDeployed;
-        const totalEquity = (accountValue != null) ? (accountValue + deployed) : null;
+        const filled = matchedWagerBalance != null ? matchedWagerBalance : 0;
+        const deployed = filled;
+        const totalEquity = (cashBalance != null) ? (cashBalance + filled) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
         // leave null so the dashboard falls back appropriately —
@@ -1174,9 +1172,12 @@ function startStatusServer() {
           accountPnLBasis: 'all-activity-commingled',
           accountPnLNote: 'Account-wide since the 2026-06-16 merge (parlay + single-leg − fees ± transfers). For parlay-only results use parlayRealizedPnL.',
           totalEquity,
-          // PX matched_wager_balance — GROSS NOTIONAL order-book exposure, NOT
-          // locked cash; NOT added to equity/deployed (see above). Exposed for
-          // reference only. null until the first post-boot balance poll.
+          // Cash Balance = PX balance − GEC − promotional (the "Cash Available"
+          // stat; equity = this + Filled). gecBalance exposed for reference.
+          cashBalance,
+          gecBalance,
+          // PX matched_wager_balance = "Filled" (real matched stake) — the
+          // Deployed addend in totalEquity. null until the first balance poll.
           matchedWagerBalance,
           totalRisk: orderTracker.getTotalPortfolioRisk(),
           currentRisk: orderTracker.getTotalPortfolioRisk(),
@@ -2583,21 +2584,22 @@ function startStatusServer() {
       }
       const totalBooks = mikeBooks + rickBooks;
 
-      // 5. Live TE for drift check.  liveBankroll (cash) + open PARLAY stake.
-      //    Mirrors the corrected portfolio.totalEquity in the /status handler.
-      //    matched_wager_balance is NOTIONAL order-book exposure, NOT locked
-      //    cash (unmatched runs ~$300K+ vs ~$50K cash) — the old code added it
-      //    (and even dropped parlay stake), overstating live TE by the notional
-      //    and producing a spurious ~$25K drift. Corrected 2026-07-13.
+      // 5. Live TE for drift check = Cash Balance + Filled — mirrors the
+      //    corrected portfolio.totalEquity in the /status handler.
+      //    Cash Balance = balance − GEC − promotional; Filled = matched_wager.
+      //    unmatched_wager_balance ("Resting") is notional and excluded. The old
+      //    code added matched_wager to the AGGREGATE balance (GEC still inside)
+      //    and dropped/mishandled it, producing a spurious ~$25K drift.
       let liveTotalEquity = null;
       try {
-        const liveBal = config.pricing.liveBankroll;
-        const pxOpenExposure = (typeof pxLedger !== 'undefined' && pxLedger.getCachedOpenExposure)
-          ? pxLedger.getCachedOpenExposure() : null;
-        const fallbackRisk = orderTracker.getTotalPortfolioRisk();
-        const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : fallbackRisk;
-        const deployed = effectiveRisk != null ? effectiveRisk : 0;
-        liveTotalEquity = (liveBal && liveBal > 0) ? (liveBal + deployed) : null;
+        const liveBal = config.pricing.liveBankroll; // aggregate: cash + promo + gec
+        const gec = (config.pricing.liveGecBalance != null && config.pricing.liveGecBalance >= 0)
+          ? config.pricing.liveGecBalance : 0;
+        const promo = (config.pricing.livePromoBalance != null && config.pricing.livePromoBalance >= 0)
+          ? config.pricing.livePromoBalance : 0;
+        const filled = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
+          ? config.pricing.liveMatchedWager : 0;
+        liveTotalEquity = (liveBal && liveBal > 0) ? (liveBal - gec - promo + filled) : null;
       } catch (_) { /* leave null */ }
 
       const drift = (liveTotalEquity != null) ? (liveTotalEquity - totalBooks) : null;

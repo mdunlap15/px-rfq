@@ -7717,53 +7717,44 @@
     // Balance from /balance endpoint. window._pxBalance may be a bare
     // number OR a shape like {balance, available, ...}. Fall back to '-'
     // when we haven't successfully fetched it yet (it's loaded async).
-    let balanceNum = null;
+    let balanceNum = null;   // AGGREGATE PX balance = Cash + Promotional + GEC
+    let gecNum = 0, promoNum = 0, filledNum = 0;
     if (window._pxBalance != null) {
       if (typeof window._pxBalance === 'number') balanceNum = window._pxBalance;
       else if (typeof window._pxBalance === 'object') {
-        balanceNum = window._pxBalance.balance != null ? Number(window._pxBalance.balance)
-                   : window._pxBalance.available != null ? Number(window._pxBalance.available)
-                   : null;
+        const b = window._pxBalance;
+        balanceNum = b.balance != null ? Number(b.balance)
+                   : b.available != null ? Number(b.available) : null;
+        if (b.gec_balance != null && !isNaN(Number(b.gec_balance))) gecNum = Number(b.gec_balance);
+        if (b.promotional_balance != null && !isNaN(Number(b.promotional_balance))) promoNum = Number(b.promotional_balance);
+        if (b.matched_wager_balance != null && !isNaN(Number(b.matched_wager_balance))) filledNum = Number(b.matched_wager_balance);
       }
     }
-    const balanceStr = balanceNum != null && !isNaN(balanceNum) ? fmtDollar(balanceNum) : '-';
-    // Cash Available stays green regardless of value. A low balance means
-    // capital is committed to open parlays (good — you're working), not
-    // overdrawn. Coloring low-balance red falsely signals distress.
-    const balanceCls = balanceNum != null ? 'positive' : '';
+    // Account Equity = Cash Balance + Filled (operator-defined 2026-07-13,
+    // matches the PX app). PX `balance` is the AGGREGATE (Cash + Promotional +
+    // GEC); GEC + promotional are excluded, so:
+    //   Cash Balance = balance − gec − promo   (the "Cash Available" stat)
+    //   Filled       = matched_wager_balance   (real matched stake, deployed)
+    //   Resting (unmatched_wager_balance) is notional → the "Open Orders" stat.
+    const cashBalance = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum - gecNum - promoNum) : null;
+    const balanceStr = cashBalance != null ? fmtDollar(cashBalance) : '-';
+    // Cash Available stays green regardless of value — a low cash balance means
+    // capital is committed to matched wagers (working), not overdrawn.
+    const balanceCls = cashBalance != null ? 'positive' : '';
 
-    // PX's balance field is cash-available, NOT total equity — PX has already
-    // subtracted locked stakes from cash. Total equity = cash + locked stake.
-    // Post-CFTC-merge (2026-06-08) the account is commingled (parlay +
-    // single-leg). The two locked-stake pools are DISJOINT and must be SUMMED:
-    //   • parlay open stake     = portRisk (our /parlay/sp/orders open exposure)
-    //   • single-leg matched    = PX matched_wager_balance
-    // VERIFIED against PX (2026-06-26): matched_wager_balance ($13,360) is LESS
-    // than the parlay open exposure ($14,308) alone, proving it EXCLUDES parlay
-    // stake. The old code used matched_wager_balance ALONE as "Total Deployed",
-    // which dropped the entire open-parlay stake from deployed — so Account
-    // Equity (= cash + deployed) sank as parlays were deployed (cash left but
-    // deployed didn't rise). Summing makes equity invariant to deploying.
-    // matched_wager_balance / unmatched_wager_balance are GROSS NOTIONAL
-    // order-book exposure, NOT locked cash (unmatched runs ~$300K+ against ~$50K
-    // cash; PX `balance` already reflects single-leg activity). Excluded from
-    // equity + deployed — adding matched_wager inflated equity by the notional
-    // (~$31K). Deployed = real locked parlay stake only; equity = cash + that.
-    const parlayDeployed = (portRisk != null && !isNaN(portRisk)) ? portRisk : 0;
-    const deployedAmt = parlayDeployed;
+    const deployedAmt = filledNum;   // "Filled" — matched wager stake
     const deployedAmtStr = fmtDollar(deployedAmt);
-    const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + deployedAmt) : null;
+    const totalEquity = (cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
     const totalEquityCls = totalEquity == null ? ''
       : totalEquity < 500 ? 'negative'
       : totalEquity < 2000 ? ''
       : 'positive';
-    // Percent-of-total-equity labels so Deployed/Cash Available split
-    // sums to 100%. Denominator is Balance + Deployed, not Balance.
+    // Percent-of-equity labels so Deployed + Cash Available sum to 100%.
     const deployedPct = (totalEquity && totalEquity > 0 && deployedAmt >= 0)
       ? Math.round(deployedAmt / totalEquity * 1000) / 10 : null;
-    const cashPct = (totalEquity && totalEquity > 0 && balanceNum != null)
-      ? Math.round(balanceNum / totalEquity * 1000) / 10 : null;
+    const cashPct = (totalEquity && totalEquity > 0 && cashBalance != null)
+      ? Math.round(cashBalance / totalEquity * 1000) / 10 : null;
     const deployedStr = deployedAmtStr + (deployedPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${deployedPct}%]</span>` : '');
     const cashAvailStr = balanceStr + (cashPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${cashPct}%]</span>` : '');
 
@@ -7833,15 +7824,15 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Available + open parlay stake. Order-book matched/unmatched wager balances are NOTIONAL exposure (not cash) and gec_balance are both excluded. For parlay performance see Parlay P&L.')}
-        ${stat('Total Deployed', deployedStr, portCls, 'Open parlay stake (sum of the My Risk column across open parlays). Single-leg order-book exposure is notional, not locked cash, and is not counted here. (% of account equity)')}
-        ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Filled (matched wager stake), per PX. Cash Balance = PX balance − GEC − promotional (both excluded). Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
+        ${stat('Total Deployed', deployedStr, portCls, 'Filled — matched wager stake locked in open positions (PX matched_wager_balance). Resting offers are notional and shown separately as Open Orders. (% of account equity)')}
+        ${stat('Cash Available', cashAvailStr, balanceCls, 'Cash Balance — PX balance minus GEC and promotional balances. Free cash for new wagers.')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
         ${stat('ROI (15-day)', roiStr, roiCls, 'Parlay realized P&L ÷ settled parlay stake, over orders settled in the last 15 days')}
         ${stat('Open Parlays', confirmed)}
         ${lockedWinsStat}
-        ${stat('Listing Capacity', capacityStr, 'neutral', `Max total resting single-leg offers PX allows = ${restingMult}× Cash Available. Shrinks as cash is deployed on parlays.`)}
+        ${stat('Listing Capacity', capacityStr, 'neutral', `Max total resting single-leg offers PX allows = ${restingMult}× PX aggregate balance (cash + GEC + promotional — the same figure the service's headroom guard uses, not the cash-only Cash Available above). Shrinks as balance is deployed.`)}
         ${stat('Open Orders', openOrdersStr, 'neutral', 'Total resting single-leg offers you currently have posted on PX (unmatched_wager_balance). This consumes Listing Capacity.' + (unmatchedStale ? ' ⚠ Last sync was not fresh — value may be stale.' : ''))}
         ${stat('Capacity Left', capacityLeftStr, capacityLeftCls, `Listing Capacity − Open Orders. When this hits $0, PX auto-cancels open orders to fit. ≈ ${deployBufferStr} more cash can be deployed on parlays before cancellations begin (Capacity Left ÷ ${restingMult}). Freeze the quoters before it nears $0.`)}
       </div>
