@@ -6963,13 +6963,12 @@
     // matched_wager_balance ($13,360) < parlay open ($14,308) alone — it EXCLUDES
     // parlay stake. The old code used matched_wager_balance ALONE, dropping the
     // open-parlay stake, so equity sank as parlays deployed. Summing fixes it.
-    const matchedWagerNum = (window._pxBalance && typeof window._pxBalance === 'object'
-      && window._pxBalance.matched_wager_balance != null
-      && !isNaN(Number(window._pxBalance.matched_wager_balance)))
-      ? Number(window._pxBalance.matched_wager_balance) : null;
+    // matched_wager_balance / unmatched_wager_balance are GROSS NOTIONAL
+    // order-book exposure, NOT locked cash (unmatched runs ~$300K+ vs ~$50K
+    // cash). Excluded from equity + deployed — adding matched_wager inflated
+    // equity by the notional. Deployed = real locked parlay stake only.
     const parlayDeployed = (portRisk != null && !isNaN(portRisk)) ? portRisk : 0;
-    const singleLegDeployed = matchedWagerNum != null ? matchedWagerNum : 0;
-    const deployedAmt = matchedWagerNum != null ? (parlayDeployed + singleLegDeployed) : portRisk;
+    const deployedAmt = parlayDeployed;
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
@@ -7025,9 +7024,8 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
-        ${stat('Total Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake = single-leg deployed (PX "Filled") + parlay My-Risk, per PX matched_wager_balance (% of account equity)')}
-        ${stat('Deployed - Parlays', portStr, portCls, 'Parlay-only locked stake — sum of the My Risk column across open parlays (the parlay slice of Total Deployed; single-leg deployed = Total Deployed − this)')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Available + open parlay stake. Order-book matched/unmatched wager balances are NOTIONAL exposure (not cash) and gec_balance are both excluded. For parlay performance see Parlay P&L.')}
+        ${stat('Total Deployed', deployedStr, portCls, 'Open parlay stake (sum of the My Risk column across open parlays). Single-leg order-book exposure is notional, not locked cash, and is not counted here. (% of account equity)')}
         ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}

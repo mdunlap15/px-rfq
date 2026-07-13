@@ -7744,15 +7744,13 @@
     // which dropped the entire open-parlay stake from deployed — so Account
     // Equity (= cash + deployed) sank as parlays were deployed (cash left but
     // deployed didn't rise). Summing makes equity invariant to deploying.
-    const matchedWagerNum = (window._pxBalance && typeof window._pxBalance === 'object'
-      && window._pxBalance.matched_wager_balance != null
-      && !isNaN(Number(window._pxBalance.matched_wager_balance)))
-      ? Number(window._pxBalance.matched_wager_balance) : null;
+    // matched_wager_balance / unmatched_wager_balance are GROSS NOTIONAL
+    // order-book exposure, NOT locked cash (unmatched runs ~$300K+ against ~$50K
+    // cash; PX `balance` already reflects single-leg activity). Excluded from
+    // equity + deployed — adding matched_wager inflated equity by the notional
+    // (~$31K). Deployed = real locked parlay stake only; equity = cash + that.
     const parlayDeployed = (portRisk != null && !isNaN(portRisk)) ? portRisk : 0;
-    const singleLegDeployed = matchedWagerNum != null ? matchedWagerNum : 0;
-    // Sum the two pools. Until the balance object loads (matchedWagerNum null),
-    // show the parlay-only estimate rather than 0.
-    const deployedAmt = matchedWagerNum != null ? (parlayDeployed + singleLegDeployed) : portRisk;
+    const deployedAmt = parlayDeployed;
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (balanceNum != null && !isNaN(balanceNum)) ? (balanceNum + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
@@ -7835,10 +7833,9 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'ACCOUNT-WIDE equity = cash + all locked stake (parlays + single-leg), per PX. NOT parlay-only — since the CFTC merge the account is commingled. For parlay performance see Parlay P&L.')}
-        ${stat('Total Deployed', deployedStr, portCls, 'ACCOUNT-WIDE locked stake = parlay open exposure (My-Risk) + single-leg matched stake (PX matched_wager_balance). The two are disjoint pools, summed. (% of account equity)')}
-        ${stat('Deployed - Parlays', portStr, portCls, 'Parlay-only locked stake — sum of the My Risk column across open parlays (the parlay slice of Total Deployed; single-leg deployed = Total Deployed − this)')}
-        ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — ACCOUNT-WIDE cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Available + open parlay stake. Order-book matched/unmatched wager balances are NOTIONAL exposure (not cash) and gec_balance are both excluded. For parlay performance see Parlay P&L.')}
+        ${stat('Total Deployed', deployedStr, portCls, 'Open parlay stake (sum of the My Risk column across open parlays). Single-leg order-book exposure is notional, not locked cash, and is not counted here. (% of account equity)')}
+        ${stat('Cash Available', cashAvailStr, balanceCls, 'PX balance — cash free for new wagers (shared with single-leg; PX already excludes deployed stakes)')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
         ${stat('ROI (15-day)', roiStr, roiCls, 'Parlay realized P&L ÷ settled parlay stake, over orders settled in the last 15 days')}

@@ -526,10 +526,10 @@ async function startup() {
         config.pricing.liveBankroll = amount;
         log.debug('Balance', `PX balance: $${amount}`);
       }
-      // Post-CFTC-merge (2026-06-08): PX reports account-wide locked stake via
-      // matched_wager_balance. Capture it so total-equity = cash + locked stake
-      // (the parlay tracker alone misses single-leg matched stake now that the
-      // account is commingled).
+      // Capture matched_wager_balance for the /status informational field only.
+      // NOTE: it is GROSS NOTIONAL order-book exposure, NOT locked cash, so it
+      // is NOT added to equity/deployed (corrected 2026-07-13 — see the /status
+      // portfolio handler). Kept for reference/debugging.
       if (bal && bal.matched_wager_balance != null) config.pricing.liveMatchedWager = Number(bal.matched_wager_balance);
     } catch (err) {
       log.debug('Balance', `Balance fetch failed: ${err.message}`);
@@ -1112,12 +1112,21 @@ function startStatusServer() {
         // entire open-parlay stake, so totalEquity (= cash + deployed) sank as
         // parlays were deployed (cash debited, deployed not credited). Summing
         // makes equity invariant to deploying (cash→deployed shift nets zero).
+        // CORRECTION (2026-07-13, operator-confirmed): matched_wager_balance and
+        // unmatched_wager_balance are GROSS NOTIONAL order-book exposure, NOT
+        // locked cash — proof: unmatched_wager_balance runs ~$300K+ against
+        // ~$50K cash. PX's `balance` already reflects real single-leg activity,
+        // so adding matched_wager DOUBLE-COUNTED and inflated equity by the
+        // notional (~$31K → equity read $83.7K vs the ~$52-57K real). gec_balance
+        // is likewise excluded. This reverts the 2026-06-26 sum, whose premise
+        // (that matched_wager is locked single-leg cash) was never verified —
+        // it only checked matched_wager != parlay stake. Deployed = real locked
+        // PARLAY stake only; equity = cash + that.
         const matchedWagerBalance = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
           ? config.pricing.liveMatchedWager
           : null;
-        const singleLegDeployed = matchedWagerBalance != null ? matchedWagerBalance : 0;
         const parlayDeployed = effectiveRisk != null ? effectiveRisk : 0;
-        const deployed = parlayDeployed + singleLegDeployed;
+        const deployed = parlayDeployed;
         const totalEquity = (accountValue != null) ? (accountValue + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
@@ -1165,9 +1174,9 @@ function startStatusServer() {
           accountPnLBasis: 'all-activity-commingled',
           accountPnLNote: 'Account-wide since the 2026-06-16 merge (parlay + single-leg − fees ± transfers). For parlay-only results use parlayRealizedPnL.',
           totalEquity,
-          // Account-wide locked stake (parlay + single-leg) per PX's
-          // matched_wager_balance; the addend used in totalEquity above. null
-          // until the first post-boot balance poll populates it.
+          // PX matched_wager_balance — GROSS NOTIONAL order-book exposure, NOT
+          // locked cash; NOT added to equity/deployed (see above). Exposed for
+          // reference only. null until the first post-boot balance poll.
           matchedWagerBalance,
           totalRisk: orderTracker.getTotalPortfolioRisk(),
           currentRisk: orderTracker.getTotalPortfolioRisk(),
@@ -2574,12 +2583,12 @@ function startStatusServer() {
       }
       const totalBooks = mikeBooks + rickBooks;
 
-      // 5. Live TE for drift check.  liveBankroll + account-wide locked stake.
-      //    Mirrors the portfolio.totalEquity computation in the main /status
-      //    handler — keeps the two views consistent. Post-CFTC-merge this uses
-      //    PX's matched_wager_balance (account-wide locked stake), matching the
-      //    basis the cohort snapshotEquity was captured on; falling back to
-      //    parlay-open exposure only when matched_wager_balance isn't available.
+      // 5. Live TE for drift check.  liveBankroll (cash) + open PARLAY stake.
+      //    Mirrors the corrected portfolio.totalEquity in the /status handler.
+      //    matched_wager_balance is NOTIONAL order-book exposure, NOT locked
+      //    cash (unmatched runs ~$300K+ vs ~$50K cash) — the old code added it
+      //    (and even dropped parlay stake), overstating live TE by the notional
+      //    and producing a spurious ~$25K drift. Corrected 2026-07-13.
       let liveTotalEquity = null;
       try {
         const liveBal = config.pricing.liveBankroll;
@@ -2587,9 +2596,7 @@ function startStatusServer() {
           ? pxLedger.getCachedOpenExposure() : null;
         const fallbackRisk = orderTracker.getTotalPortfolioRisk();
         const effectiveRisk = pxOpenExposure != null ? pxOpenExposure : fallbackRisk;
-        const matchedWager = (config.pricing.liveMatchedWager != null && config.pricing.liveMatchedWager >= 0)
-          ? config.pricing.liveMatchedWager : null;
-        const deployed = matchedWager != null ? matchedWager : effectiveRisk;
+        const deployed = effectiveRisk != null ? effectiveRisk : 0;
         liveTotalEquity = (liveBal && liveBal > 0) ? (liveBal + deployed) : null;
       } catch (_) { /* leave null */ }
 
