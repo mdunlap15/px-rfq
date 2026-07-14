@@ -496,10 +496,200 @@ function __debugLiveStats() {
   return _liveStatsCache;
 }
 
+// ---------------------------------------------------------------------------
+// MAKE-THE-CUT OUTRIGHTS
+//
+// DataGolf's /betting-tools/outrights carries the cut market as TWO SEPARATE
+// one-sided feeds that are actually the two halves of one 2-way market:
+//   market=make_cut → the player MAKES the cut  (YES)
+//   market=mc       → the player MISSES the cut (NO)
+// Verified 2026-07-14 on The Open: every player's two sides sum to 105-109%
+// implied (a normal 2-way overround), e.g. Scheffler make -769 (88.5%) / miss
+// +500 (16.7%), and Keith Mitchell is -120 on BOTH sides. Do NOT assume `mc`
+// is an alias of `make_cut` — quoting it as the make side inverts the market.
+//
+// Why DataGolf is valid here when golf-outrights.js says "DK, not DataGolf":
+// that rule exists because DataGolf's outrights settle DEAD-HEAT while PX
+// settles TIES INCLUDED (PX literally names those events "Top 5 Finish (Ties
+// Included)"). Make-the-cut is BINARY — you play the weekend or you don't —
+// so no dead-heat adjustment exists and the two are directly comparable. PX's
+// cut event carries no ties qualifier ("2026 The Open - To Make The Cut").
+//
+// De-vig: POWER (odds-ratio), not proportional. Cut boards are dominated by
+// heavy favorites, and proportional de-vig has a severe favorite-longshot bias
+// because books load nearly all the overround onto the cheap miss side.
+// Measured 2026-07-14 vs DataGolf's own (well-calibrated: field sums to 76.7 ≈
+// "top 70 and ties") model baseline, n=65 players with >=4 two-sided books:
+//   proportional : favs -4.15pp | coinflip -0.81pp | ALL -3.03pp
+//   power        : favs -0.83pp | coinflip -0.35pp | ALL -1.54pp   <-- used
+//   shin         : favs -2.12pp | coinflip -0.51pp | ALL -2.09pp
+// Proportional underrated Scheffler at 84.2% when both DataGolf's model (88.8%)
+// and PX's own near-zero-vig book (~89.2%) said ~89. Power gets 87.8%.
+//
+// Book coverage is thin and NOT what you'd expect (measured on The Open, /156):
+//   pointsbet 155, draftkings 154  — make side ONLY, no miss side → unusable
+//                                    for 2-way de-vig
+//   bet365 115 | betway 99 | unibet 87 | williamhill 68 | betmgm 50 |
+//   fanduel 46 | skybet 46 | betonline 41
+//   pinnacle 1 (listed in books_offering but effectively absent) | bovada 0
+// So Pinnacle/Bovada are NOT usable sources for this market despite being the
+// sharpest elsewhere; bet365/betway/unibet carry it.
+// ---------------------------------------------------------------------------
+
+// Books quoted on BOTH sides (make + miss) — the only ones we can 2-way de-vig.
+// 'datagolf' is deliberately absent: it's their model, not a tradeable quote.
+const MAKE_CUT_BOOKS = ['pinnacle', 'betonline', 'bet365', 'betmgm', 'betway', 'fanduel', 'skybet', 'williamhill', 'unibet'];
+const MAKE_CUT_TOURS = ['pga', 'euro', 'alt'];
+const MAKE_CUT_TTL_MS = 5 * 60 * 1000;
+
+let _makeCutCache = null; // { fetchedAt, boards: [{ tour, eventName, lastUpdated, players: [...] }] }
+
+/**
+ * Power (odds-ratio) 2-way de-vig. Solves for k such that
+ *   pMake^k + pMiss^k = 1
+ * and returns the fair pMake. k > 1 shrinks both sides but shrinks the
+ * LONGSHOT proportionally harder, which is what removes the favorite-longshot
+ * bias that plain proportional de-vig (p / (p+q)) suffers from.
+ *
+ * Returns null on degenerate input.
+ */
+function deVig2WayPower(pMake, pMiss) {
+  if (!(pMake > 0 && pMake < 1) || !(pMiss > 0 && pMiss < 1)) return null;
+  const f = (k) => Math.pow(pMake, k) + Math.pow(pMiss, k) - 1;
+  // Overround (sum>1) ⇒ k>1; underround (sum<1) ⇒ k<1. Bracket generously.
+  let lo = 0.2, hi = 8;
+  if (f(lo) * f(hi) > 0) return pMake / (pMake + pMiss); // no root — fall back to proportional
+  for (let i = 0; i < 60; i++) {
+    const k = (lo + hi) / 2;
+    if (f(k) > 0) lo = k; else hi = k;
+  }
+  const k = (lo + hi) / 2;
+  const a = Math.pow(pMake, k), b = Math.pow(pMiss, k);
+  if (!(a + b > 0)) return null;
+  return a / (a + b);
+}
+
+async function _fetchDgOutrights(tour, market) {
+  const apiKey = config.dataGolf.apiKey;
+  if (!apiKey) return null;
+  const url = `${config.dataGolf.baseUrl}/betting-tools/outrights`
+    + `?tour=${tour}&market=${market}&odds_format=american&file_format=json&key=${apiKey}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      log.warn('DataGolf', `Outrights fetch failed (${resp.status}) for ${tour}/${market}`);
+      return null;
+    }
+    const data = await resp.json();
+    // DataGolf returns a STRING in `odds` when the market isn't offered
+    // ("No make_cut bets being offered right now.") — e.g. LIV has no cut.
+    if (!data || !Array.isArray(data.odds)) return null;
+    return data;
+  } catch (err) {
+    log.warn('DataGolf', `Outrights fetch error ${tour}/${market}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Build the make-the-cut board for one tour. Joins the make_cut (YES) and
+ * mc (MISS) feeds by dg_id, power-de-vigs each book that quotes BOTH sides,
+ * and averages to a consensus fair p(make).
+ *
+ * Returns { tour, eventName, lastUpdated, players: [{ playerName, dgId,
+ *   fairProb, books, bookCount, modelProb }] } or null.
+ * `modelProb` is DataGolf's own baseline — carried for DIAGNOSTICS ONLY
+ * (drift/sanity vs consensus); it never feeds the quoted price.
+ */
+async function fetchMakeCutBoard(tour) {
+  const [makeData, missData] = await Promise.all([
+    _fetchDgOutrights(tour, 'make_cut'),
+    _fetchDgOutrights(tour, 'mc'),
+  ]);
+  if (!makeData || !missData) return null;
+  const missById = new Map(missData.odds.map(p => [p.dg_id, p]));
+  const players = [];
+  for (const mk of makeData.odds) {
+    const ms = missById.get(mk.dg_id);
+    if (!ms) continue;
+    const fairs = [];
+    const books = {};
+    for (const bk of MAKE_CUT_BOOKS) {
+      const pMake = americanToImpliedProb(mk[bk]);
+      const pMiss = americanToImpliedProb(ms[bk]);
+      if (pMake == null || pMiss == null) continue;
+      const fair = deVig2WayPower(pMake, pMiss);
+      if (fair == null) continue;
+      fairs.push(fair);
+      books[bk] = { make: Number(mk[bk]), miss: Number(ms[bk]), fair };
+    }
+    if (!fairs.length) continue;
+    players.push({
+      playerName: normalizeDgPlayerName(mk.player_name),
+      dgId: mk.dg_id,
+      fairProb: avg(fairs),
+      bookCount: fairs.length,
+      books,
+      modelProb: (mk.datagolf && mk.datagolf.baseline != null)
+        ? americanToImpliedProb(mk.datagolf.baseline) : null,
+    });
+  }
+  if (!players.length) return null;
+  return {
+    tour,
+    eventName: makeData.event_name || '',
+    lastUpdated: makeData.last_updated || null,
+    players,
+  };
+}
+
+/**
+ * Fetch make-cut boards across all tours, cached for MAKE_CUT_TTL_MS.
+ * Tours with no cut market offered (LIV) are simply absent.
+ */
+async function fetchMakeCutBoards({ force = false } = {}) {
+  if (!config.dataGolf.apiKey) return [];
+  if (!force && _makeCutCache && Date.now() - _makeCutCache.fetchedAt < MAKE_CUT_TTL_MS) {
+    return _makeCutCache.boards;
+  }
+  const boards = [];
+  for (const tour of MAKE_CUT_TOURS) {
+    const b = await fetchMakeCutBoard(tour);
+    if (b) boards.push(b);
+  }
+  log.info('DataGolf', `Make-cut boards: ${boards.map(b => `${b.tour}="${b.eventName}" (${b.players.length}p)`).join(', ') || 'none offered'}`);
+  _makeCutCache = { fetchedAt: Date.now(), boards };
+  return boards;
+}
+
+/**
+ * Find the make-cut board whose DataGolf event_name matches a tournament.
+ * `hints` are free-text strings (dk_slug, tournament_name, PX event name).
+ * Match = every >2-char word of ANY hint appears in the DG event name.
+ */
+async function findMakeCutBoard(hints, opts = {}) {
+  const boards = await fetchMakeCutBoards(opts);
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const hint of (Array.isArray(hints) ? hints : [hints]).filter(Boolean)) {
+    const words = norm(hint).split(' ').filter(w => w.length > 2 && !/^\d{4}$/.test(w));
+    if (!words.length) continue;
+    for (const b of boards) {
+      const en = norm(b.eventName);
+      if (words.every(w => en.includes(w))) return b;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   fetchGolfMatchupsCache,
   normalizeDgPlayerName,
   refreshLiveStats,
   getGolfLiveMatchupProb,
   __debugLiveStats,
+  // make-the-cut outrights
+  deVig2WayPower,
+  fetchMakeCutBoard,
+  fetchMakeCutBoards,
+  findMakeCutBoard,
 };

@@ -6365,6 +6365,31 @@ function startStatusServer() {
     try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug, { force: true })) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
+  // Make-the-cut dry-run: price PX's cut board off DataGolf and return exactly
+  // what a sync WOULD write, WITHOUT touching Supabase or PX order entry.
+  // Read-only review step — make_cut is DataGolf-priced (DK serves no cut
+  // market) and its offered price moves the OPPOSITE way from the DK path
+  // (fair × (1 + GOLF_MAKE_CUT_VIG), because DataGolf gives a de-vigged fair
+  // while dk_implied is raw). Check `lay_ev_ok` before enabling anything.
+  //   GET /single-leg/golf-outrights/make-cut-dryrun/the-open?name=The%20Open%20Championship
+  app.get('/single-leg/golf-outrights/make-cut-dryrun/:slug', async (req, res) => {
+    const m = _goEnabledGuard(res); if (!m) return;
+    try {
+      const r = await m.dryRunMakeCut({ dk_slug: req.params.slug, tournament_name: req.query.name || null });
+      if (!r.ok) return res.status(404).json(r);
+      // Invariant surfaced per-row: we lay the player (post NO at 1-offered),
+      // which is only +EV while offered_implied > fair.
+      const rows = r.rows.map(x => ({
+        player: x.player_name,
+        fair: x.dk_implied,
+        offered_implied: x.offered_implied,
+        offered_american: x.offered_american,
+        source_books: x.source_books,
+        lay_ev_ok: x.offered_implied > x.dk_implied,
+      })).sort((a, b) => b.fair - a.fair);
+      res.json({ ...r, rows, lay_ev_violations: rows.filter(x => !x.lay_ev_ok).length });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
   app.post('/single-leg/golf-outrights/config', async (req, res) => {
     // body: { updates: [{ id, risk_amount?, enabled?, notes? }, ...] }
     const m = _goEnabledGuard(res); if (!m) return;

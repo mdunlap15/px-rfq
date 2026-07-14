@@ -53,6 +53,8 @@ client/
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
 | `REFRESH_INTERVAL_MINUTES` | No | Default: 10 (code default — production Railway sets 2) |
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
+| `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
+| `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
 | `LOG_LEVEL` | No | Default: `info` |
 | `AUTH_USERNAME` | No | Default: `mike`. Admin username for HTTP Basic Auth. |
 | `AUTH_PASSWORD` | No | Admin password. **Auth is OFF when unset** — server is publicly accessible. |
@@ -125,6 +127,30 @@ If a username appears in both lists, `AUTH_VIEWERS` wins (more restrictive); a w
   the league page's default load fires one `league/leagueSubcategory/v1/markets` XHR carrying
   all three outright boards. `node scripts/dk-golf-outrights.js rbc-canadian-open [out.json]`
   → `{winner,top5,top10}` as `{player,odds}` ("(Including Ties)" variants, ASCII-normalized).
+  **Serves NO cut market** — make_cut is DataGolf-priced (below).
+- **DataGolf make-the-cut** (`services/datagolf.js` → `fetchMakeCutBoard`/`dryRunMakeCut`):
+  the ONLY source for golf make_cut. Endpoint `/betting-tools/outrights`. Gotchas:
+  - `market=make_cut` = MAKE (YES); **`market=mc` = MISS (NO)** — they are the two sides of
+    one 2-way market, NOT aliases. Verified: both sides sum to 105-109% per player. Treating
+    `mc` as the make side inverts every price.
+  - **Dead-heat objection does not apply.** golf-outrights.js prices Top 1/5/10/20 off DK
+    because DataGolf settles dead-heat while PX settles ties-included (PX names those events
+    "Top 5 Finish (Ties Included)"). Make-the-cut is **binary** — no dead heat — and PX's
+    event carries no ties qualifier ("2026 The Open - To Make The Cut"). DataGolf is valid here.
+  - **Power (odds-ratio) de-vig, never proportional.** Cut boards are mostly heavy favorites and
+    books load the whole overround on the cheap miss side, so proportional de-vig underrates
+    favorites by ~4pp (Scheffler 84.2% vs a true ~89). Measured vs DataGolf's model baseline:
+    proportional favs **-4.15pp** / power **-0.83pp** / shin -2.12pp. Power lands -0.53pp over 118.
+  - **Pinnacle (1/156) and Bovada (0) are NOT usable** for this market despite being sharp
+    elsewhere. DK/PointsBet cover ~155 but **make-side only** (no miss → no 2-way de-vig).
+    Real two-sided books: bet365 115, betway 99, unibet 87, williamhill 68, betmgm/fanduel/
+    skybet ~46, betonline 41. `GOLF_MAKE_CUT_MIN_BOOKS` (default 2) drops 1-book noise.
+  - **PRICE DIRECTION IS INVERTED vs the DK path.** `offered_implied` is the YES price a
+    counterparty pays and default `post_side='no'` LAYS the player, so the lay is +EV only
+    while `offered_implied > fair`. DK's `dk_implied` is a RAW vig-inflated price so
+    `×(1 - sweetener)` still lands above fair; DataGolf hands back a **de-vigged fair**, so
+    make_cut uses `fair × (1 + GOLF_MAKE_CUT_VIG)` instead. Applying the DK sweetener to a
+    fair would make every lay -EV. Read `price_source` before interpreting `dk_implied`.
 
 ## Team Name Matching (line-manager.js)
 
@@ -154,6 +180,7 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
+| `/single-leg/golf-outrights/make-cut-dryrun/:slug` | GET | Dry-run the DataGolf-priced make_cut board (no DB/PX writes). `?name=<tournament>` helps match DataGolf's event. Check `lay_ev_violations` = 0 before enabling. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
 | `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |
 

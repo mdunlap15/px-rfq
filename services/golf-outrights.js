@@ -25,6 +25,7 @@
 const log = require('./logger');
 const pxSingle = require('./px-single');
 const dkScraper = require('./dk-scraper');
+const dataGolf = require('./datagolf');
 const db = require('./db');
 
 const TBL_TOURN  = 'golf_outright_tournaments';
@@ -44,6 +45,13 @@ function _cfg() {
     sweetener: Number(process.env.GOLF_OUTRIGHTS_SWEETENER) || 0.01,
     refreshMin: Number(process.env.GOLF_OUTRIGHTS_REFRESH_MINUTES) || 10,
     driftPp: Number(process.env.GOLF_OUTRIGHTS_DRIFT_PP) || 2,
+    // --- make_cut only (DataGolf-sourced) ---
+    // Our margin over DE-VIGGED fair. NOT the same knob as `sweetener`, and it
+    // moves the price the OPPOSITE way — see _makeCutOfferedImplied().
+    makeCutVig: Number(process.env.GOLF_MAKE_CUT_VIG) || 0.03,
+    // Refuse to price a player off a single soft book. 16 of 118 players on The
+    // Open had exactly 1 two-sided book (2026-07-14); those are noise.
+    makeCutMinBooks: Number(process.env.GOLF_MAKE_CUT_MIN_BOOKS) || 2,
   };
 }
 function isEnabled() { return _cfg().enabled; }
@@ -181,6 +189,170 @@ async function _pxMarketsFor(slug) {
   return { eventCount: eventsScanned, byMarketType };
 }
 
+// ---------------------------------------------------------------------------
+// make_cut — priced from DataGolf, NOT DraftKings
+// ---------------------------------------------------------------------------
+// DK's outright scrape doesn't carry a cut market at all (it returns only
+// winner/top5/top10), so make_cut had PX lines but no price and never quoted.
+// DataGolf carries it; see services/datagolf.js for why that's legitimate here
+// (make-the-cut is binary → the dead-heat-vs-ties-included objection that keeps
+// Top-N on DK does not apply) and for the power-de-vig rationale.
+//
+// !! PRICE-DIRECTION HAZARD !!
+// `offered_implied` is the YES price a COUNTERPARTY pays, and the default
+// post_side is 'no' — we post the complement on the NO line and LAY the player
+// (_buildOutrightOrder). Backing NO at implied (1 - offered_implied) is +EV
+// only when:
+//        offered_implied  >  true fair p(make)
+// The DK path gets this free: dk_implied is a RAW posted price already inflated
+// above fair by DK's vig, so `× (1 - sweetener)` merely shaves our edge and
+// still lands above fair. DataGolf gives us a DE-VIGGED FAIR. Running a fair
+// through `× (1 - sweetener)` would land BELOW fair and make every lay -EV.
+// So make_cut moves the opposite way: `fair × (1 + makeCutVig)`.
+function _makeCutOfferedImplied(fairProb, vig) {
+  if (!(fairProb > 0 && fairProb < 1)) return null;
+  // Clamp: a favorite at fair .97 × 1.03 would exceed 1 (no valid odds).
+  return Math.min(0.9899, fairProb * (1 + vig));
+}
+
+// DG↔PX name matching. Beyond exact normalized match we need:
+//  - punctuation-collapsed keys: _normName turns "J.T. Poston" into "j t poston"
+//    but PX posts "JT Poston" → "jt poston". Strip rather than space out.
+//  - unambiguous first-initial + surname: PX "Cam Smith" vs DG "Cameron Smith",
+//    PX "Alexander Noren" vs DG "Alex Noren". Only used when the key resolves
+//    to exactly ONE player on BOTH sides — The Open field has Cameron Smith,
+//    Jordan Smith AND Jordan L. Smith, so a greedy surname match would collide.
+function _nameKeys(raw) {
+  const n = _normName(raw);                       // "j t poston"
+  const tight = n.replace(/\s+/g, '');            // "jtposton"
+  const parts = n.split(' ').filter(Boolean);
+  const initialLast = parts.length >= 2 ? parts[0][0] + '|' + parts[parts.length - 1] : null;
+  return { norm: n, tight, initialLast };
+}
+
+function _matchByName(pxList, dgPlayers) {
+  const byNorm = new Map(), byTight = new Map(), byInit = new Map();
+  const bump = (m, k, v) => { if (!k) return; if (m.has(k)) m.set(k, '__AMBIG__'); else m.set(k, v); };
+  for (const d of dgPlayers) {
+    const k = _nameKeys(d.playerName);
+    bump(byNorm, k.norm, d); bump(byTight, k.tight, d); bump(byInit, k.initialLast, d);
+  }
+  const out = new Map(); // px player_norm -> { dg, via }
+  const seen = new Set();
+  for (const p of pxList) {
+    const k = _nameKeys(p.player_name);
+    let dg = byNorm.get(k.norm), via = 'exact';
+    if (!dg || dg === '__AMBIG__') { dg = byTight.get(k.tight); via = 'punct'; }
+    if (!dg || dg === '__AMBIG__') { dg = byInit.get(k.initialLast); via = 'initial'; }
+    if (!dg || dg === '__AMBIG__') continue;
+    if (seen.has(dg.dgId)) continue; // never map two PX players to one DG player
+    seen.add(dg.dgId);
+    out.set(p.player_norm, { dg, via });
+  }
+  return out;
+}
+
+/**
+ * PURE core: match a PX make_cut line list against a DataGolf board and price
+ * every player. No I/O, no DB writes — so the sync path and the operator
+ * dry-run (dryRunMakeCut) can never disagree about what would be posted.
+ * Returns { diag, rows } where rows are ready-to-upsert config rows.
+ */
+function _priceMakeCut({ dk_slug, pxList, board, makeCutVig, makeCutMinBooks }) {
+  const diag = {
+    dg_event: board.eventName, dg_players: board.players.length, px_lines: pxList.length,
+    matched: 0, priced: 0, skipped_thin: 0, unmatched_px: [], via: {},
+  };
+  const matches = _matchByName(pxList, board.players);
+  diag.matched = matches.size;
+  const rows = [];
+  for (const p of pxList) {
+    const hit = matches.get(p.player_norm);
+    if (!hit) { if (diag.unmatched_px.length < 25) diag.unmatched_px.push(p.player_name); continue; }
+    diag.via[hit.via] = (diag.via[hit.via] || 0) + 1;
+    const dg = hit.dg;
+    if (dg.bookCount < makeCutMinBooks) { diag.skipped_thin++; continue; }
+    const offImpl = _makeCutOfferedImplied(dg.fairProb, makeCutVig);
+    if (offImpl == null) continue;
+    diag.priced++;
+    rows.push({
+      dk_slug,
+      market_type: 'make_cut',
+      player_name: p.player_name,
+      side: 'yes',
+      px_line_id: p.line_id,
+      px_no_line_id: p.no_line_id,
+      px_event_id: p.event_id,
+      px_market_id: p.market_id,
+      // dk_* are the generic "source price" columns. For make_cut the source is
+      // DataGolf's DE-VIGGED fair (NOT a raw DK price) — price_source says which.
+      dk_american_odds: americanFromImplied(dg.fairProb),
+      dk_implied: Math.round(dg.fairProb * 100000) / 100000,
+      offered_implied: Math.round(offImpl * 100000) / 100000,
+      offered_american: americanFromImplied(offImpl),
+      price_source: 'datagolf',
+      source_books: dg.bookCount,
+    });
+  }
+  return { diag, rows };
+}
+
+/**
+ * Price PX's make_cut board off DataGolf and upsert config rows.
+ * Rows land enabled=false / risk_amount=null (schema defaults) exactly like the
+ * DK path — discovery only. Nothing posts until the operator sets risk+enabled
+ * AND the POSTING_DISABLED kill-switch is lifted.
+ */
+async function _syncMakeCut({ dk_slug, tournament_name, px, sb }) {
+  const out = { attempted: true, dg_event: null, dg_players: 0, px_lines: 0, matched: 0, priced: 0, skipped_thin: 0, upserted: 0, unmatched_px: [] };
+  const pxList = (px.byMarketType && px.byMarketType.make_cut) || [];
+  out.px_lines = pxList.length;
+  if (!pxList.length) { out.note = 'no PX make_cut lines for this tournament'; return out; }
+
+  const board = await dataGolf.findMakeCutBoard([dk_slug, tournament_name]);
+  if (!board) { out.note = 'DataGolf has no make-cut board matching this tournament'; return out; }
+
+  const { makeCutVig, makeCutMinBooks } = _cfg();
+  const { diag, rows } = _priceMakeCut({ dk_slug, pxList, board, makeCutVig, makeCutMinBooks });
+  Object.assign(out, diag);
+
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    const { error } = await sb.from(TBL_CONFIG).upsert(chunk, { onConflict: 'dk_slug,market_type,player_name,side', ignoreDuplicates: false });
+    if (error) throw new Error('make_cut upsert: ' + error.message);
+    out.upserted += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * Operator dry-run: price the make_cut board and return exactly what a sync
+ * WOULD write, without touching Supabase. Reads PX + DataGolf live.
+ * `pxList` may be injected for tests; otherwise it's read from PX.
+ */
+async function dryRunMakeCut({ dk_slug, tournament_name, pxList = null } = {}) {
+  const board = await dataGolf.findMakeCutBoard([dk_slug, tournament_name]);
+  if (!board) return { ok: false, error: 'DataGolf has no make-cut board matching ' + (tournament_name || dk_slug) };
+  let list = pxList;
+  if (!list) {
+    const px = await _pxMarketsFor(dk_slug);
+    list = (px.byMarketType && px.byMarketType.make_cut) || [];
+  }
+  if (!list.length) return { ok: false, error: 'no PX make_cut lines found for ' + dk_slug };
+  const { makeCutVig, makeCutMinBooks } = _cfg();
+  const { diag, rows } = _priceMakeCut({ dk_slug, pxList: list, board, makeCutVig, makeCutMinBooks });
+  return {
+    ok: true,
+    posting_disabled: POSTING_DISABLED,
+    outrights_enabled: _cfg().enabled,
+    make_cut_vig: makeCutVig,
+    min_books: makeCutMinBooks,
+    dg_last_updated: board.lastUpdated,
+    ...diag,
+    rows,
+  };
+}
+
 async function syncTournament(dk_slug, opts = {}) {
   const sb = db.getClient();
   if (!sb) throw new Error('Supabase not available');
@@ -190,20 +362,22 @@ async function syncTournament(dk_slug, opts = {}) {
 
   // 1. Scrape DK. `force` (manual Sync) bypasses the 15-min scraper cache so the
   // operator always sees current DK state; the worker omits it to stay cached.
-  let dk;
+  // DK is the price source for Top 1/5/10/20 ONLY — it serves no cut market —
+  // so a DK failure must NOT abort the run: make_cut is DataGolf-sourced and
+  // still has to sync. (Previously any DK miss early-returned here, which is
+  // one reason make_cut never priced.)
+  let dk = null, dkError = null;
   try { dk = await dkScraper.fetchGolfOutrights(dk_slug, { force: !!opts.force }); }
-  catch (e) { throw new Error('DK scrape failed: ' + e.message); }
+  catch (e) { dkError = e.message; }
   // Scraper diagnostics — surfaced in the return so the UI shows exactly what DK
   // served. Distinguishes "DK hasn't posted Top 5/10/20 yet" from "we hit the
   // wrong subcategory tab" (nothing seen) from "regex miss" (seen but uncategorized).
   const diag = {
-    captured_keys: dk.capturedKeys || [],
-    seen_market_names: dk.seenMarketNames || [],
-    uncategorized: dk.uncategorizedMarketNames || [],
+    captured_keys: (dk && dk.capturedKeys) || [],
+    seen_market_names: (dk && dk.seenMarketNames) || [],
+    uncategorized: (dk && dk.uncategorizedMarketNames) || [],
   };
-  if (!dk.markets || !dk.markets.length) {
-    return { ok: true, dk_slug, dk_markets: 0, px_events: 0, upserted: 0, ...diag, warning: 'DK returned no categorizable outright markets — wrong slug or no outrights up yet' };
-  }
+  const dkMarkets = (dk && Array.isArray(dk.markets)) ? dk.markets : [];
 
   // 2. Build PX line lookup (one fetch per tournament)
   const px = await _pxMarketsFor(dk_slug);
@@ -212,7 +386,12 @@ async function syncTournament(dk_slug, opts = {}) {
   const { sweetener } = _cfg();
   const upserts = [];
   let dkSelections = 0, pxMatched = 0, noLines = 0;
-  for (const dkMkt of dk.markets) {
+  for (const dkMkt of dkMarkets) {
+    // make_cut is DataGolf-sourced (_syncMakeCut). If DK ever starts serving a
+    // cut market, ignore it here rather than letting two sources fight over the
+    // same rows — the DK price would be raw/vig-inflated and the make_cut price
+    // math (fair x (1+vig)) assumes a de-vigged input.
+    if (dkMkt.marketType === 'make_cut') continue;
     const pxList = px.byMarketType[dkMkt.marketType] || [];
     const pxByNorm = new Map();
     for (const p of pxList) pxByNorm.set(p.player_norm, p);
@@ -258,19 +437,37 @@ async function syncTournament(dk_slug, opts = {}) {
     if (error) throw new Error('upsert chunk: ' + error.message);
     upserted += chunk.length;
   }
+  // 4. make_cut pass — DataGolf-sourced, independent of the DK scrape above.
+  // Isolated so a make_cut failure can't lose the Top-N rows just upserted.
+  let makeCut = { attempted: false };
+  try {
+    makeCut = await _syncMakeCut({ dk_slug, tournament_name: tRow.tournament_name, px, sb });
+    upserted += makeCut.upserted || 0;
+  } catch (e) {
+    makeCut = { attempted: true, error: e.message };
+    log.warn('GolfOut', `make_cut sync failed for ${dk_slug}: ${e.message}`);
+  }
+
   // Touch tournament last_scraped_at
   await sb.from(TBL_TOURN).update({ last_scraped_at: new Date().toISOString() }).eq('dk_slug', dk_slug);
+
+  const warning = dkError
+    ? `DK scrape failed (${dkError}) — Top 1/5/10/20 not refreshed; make_cut is DataGolf-sourced and unaffected`
+    : (!dkMarkets.length ? 'DK returned no categorizable outright markets — wrong slug or no outrights up yet (does not affect make_cut)' : undefined);
 
   return {
     ok: true,
     dk_slug,
-    dk_markets: dk.markets.length,
+    dk_markets: dkMarkets.length,
     dk_selections: dkSelections,
+    dk_error: dkError || undefined,
     px_events: px.eventCount,
     px_matched_selections: pxMatched,
     no_lines_captured: noLines,
     upserted,
+    make_cut: makeCut,
     ...diag,
+    ...(warning ? { warning } : {}),
   };
 }
 
@@ -653,6 +850,7 @@ module.exports = {
   upsertTournament,
   deleteTournament,
   syncTournament,
+  dryRunMakeCut,
   loadState,
   postEnabled,
   cancelAll,
