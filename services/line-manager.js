@@ -648,9 +648,23 @@ function classifyGolfOutrightEvent(name) {
  *
  * Returns the number of lines registered.
  */
+// PX settles top 5/10/20 TIES INCLUDED, but our only wired fair-value source
+// (DataGolf) publishes those on the DEAD-HEAT basis — measured ~23-27% LOW vs
+// DK's own "Top N (Including Ties)" board on The Open (Scheffler top_5: DK site
+// +144 / DataGolf-as-DK +178). Quoting them would UNDERPRICE every leg, so we
+// don't register the lines at all — PX then never sends us a top-N leg, which is
+// a stronger guarantee than declining one. Re-enable ONLY once top-N is priced
+// from DK's ties-included scrape (services/dk-scraper.js → fetchGolfOutrights,
+// market names "Top 5 (Including Ties)" etc). See datagolf.js OUTRIGHT_MARKETS.
+const GOLF_OUTRIGHT_UNPRICEABLE = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
+
 async function _registerGolfOutrightEvent(event) {
   const marketType = classifyGolfOutrightEvent(event.name);
   if (!marketType) return 0; // novelty outright ("Will anyone shoot 59") — skip
+  if (GOLF_OUTRIGHT_UNPRICEABLE.has(marketType)) {
+    log.info('Lines', `Golf outright SKIPPED (no ties-included source): ${event.name} — ${marketType} would price off DataGolf's dead-heat basis (~25% underprice vs PX ties-included)`);
+    return 0;
+  }
   // PX names outright events "<tournament> - <market>", e.g.
   //   "2026 The Open - Tournament Winner" / "... - To Make The Cut".
   // DataGolf's event_name is the tournament ALONE ("The Open Championship"),

@@ -55,7 +55,6 @@ client/
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
 | `GOLF_OUTRIGHTS_PARLAY_ENABLED` | No | Default: `true`. Kill-switch for quoting golf outright legs (win/top 5/10/20/make cut) in **parlays**. When false, zero outright lines register → PX never sends an outright RFQ. Independent of the single-leg poster (still hard-disabled). |
 | `GOLF_OUTRIGHT_MAX_AGE_MIN` | No | Default: 360. Refuse a DataGolf outright board older than this. DataGolf serves the LAST tournament's board when a tour is idle (euro returned a 9-day-stale "BMW International Open" on 2026-07-14) — without this we'd quote a finished event. |
-| `GOLF_TOPN_TIES_UPLIFT` | No | Unset = top 5/10/20 use RAW (un-de-vigged, conservative) consensus. Set to a calibrated multiple (e.g. 1.12) to de-vig top-N by normalizing the field to N × uplift. **Only set with a real view** — see Key Gotchas. |
 | `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
 | `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
 | `LOG_LEVEL` | No | Default: `info` |
@@ -127,13 +126,20 @@ is why no golf outright leg had ever been registered or quoted. Registered via
   - `win` — sum of P(win) over the field is EXACTLY 1 (a 72-hole tie goes to a playoff), so the
     book field is **power-normalized to 1.0** → a true fair. Verified field sum 1.01.
   - `make_cut` — binary; **power 2-way de-vig** of make vs miss (see Odds Sources).
-  - `top_5/10/20` — **deliberately NOT de-vigged.** PX settles ties-included, but DataGolf's model
-    field-sums to EXACTLY 5.00/10.00/20.00 = the **dead-heat** convention, so it's a lower bound and
-    would underprice. The true ties-included target is N × (1 + unknown uplift) — not derivable from
-    the feed. We use the RAW consensus, which sits ABOVE fair by the overround (measured sums
-    6.86/13.29/25.77). Because we only ever take YES, overstating a leg makes the parlay MORE
-    expensive → we can't be picked off, we just fill less. Set `GOLF_TOPN_TIES_UPLIFT` only with a
-    calibrated view. **Expect top-N legs to quote rich and rarely fill — that's intended.**
+  - `top_5/10/20` — **NOT QUOTED. The lines are not even registered.** PX settles TIES INCLUDED;
+    **DataGolf CONVERTS book odds to DEAD-HEAT** (it does not relay the book's posted price).
+    Proven against a live DK scrape of The Open, same book/market/moment:
+    Scheffler "Top 5 (Including Ties)" on DK's site **+144 (41.0%)** vs DataGolf's `draftkings`
+    top_5 **+178 (36.0%)**; field sums DK-site **7.96** vs DataGolf **6.27** (nominal 5), top_10
+    **14.54** vs **11.80**. All ~150 players ran 23-27% low. Quoting that underprices every leg.
+    (`dead_heat=yes|no` is NOT a toggle on this endpoint — verified identical.)
+    **To enable top-N**: price from DK's own board — `services/dk-scraper.js` →
+    `fetchGolfOutrights(slug)`, market names `"Top 5 (Including Ties)"` / `"Top 10 (Including
+    Ties)"` (The Open slug: `the-open-championship`). Note that scrape is Puppeteer and took
+    **~142s**, so it must be a warmed background cache, never the RFQ hot path. DK served Winner +
+    Top 5 + Top 10 for The Open but **no Top 20 and no Make Cut**.
+    ⚠ A "conservative RAW consensus" is NOT a valid workaround — raw is only conservative relative
+    to the SAME basis; on a dead-heat basis it still lands ~25% BELOW ties-included truth.
 - **Fails closed**: cold/stale board, unknown player, or <2 books → `null` → decline.
 - Fair lookup is a **sync cache read** on the RFQ hot path (`getOutrightFairProbSync`); boards are
   warmed at line-seed time by `warmGolfOutrightBoards()`.

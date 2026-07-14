@@ -719,27 +719,16 @@ async function findMakeCutBoard(hints, opts = {}) {
 //              ambiguity. DataGolf's model field-sums to 1.00, confirming it.
 //              => safe to power-normalize the book field to 1.0 → a TRUE fair.
 //
-//   top_5/10/20 → NOT safely de-viggable. Measured field sums (The Open,
-//              2026-07-14): DataGolf's model sums to EXACTLY 5.00 / 10.00 /
-//              20.00 — that's the DEAD-HEAT convention (ties split a slot), the
-//              opposite of PX. Under ties-included MORE than N players can win
-//              the market, so the true target is N × (1 + tie uplift) where the
-//              uplift is NOT derivable from this feed. Normalizing to N would
-//              understate every player → we'd quote top-N legs TOO CHEAP and be
-//              picked off. This is precisely the dead-heat-vs-ties-included trap
-//              golf-outrights.js warns about; it is real, not theoretical.
-//              => we do NOT de-vig top-N. We use the RAW book consensus, which
-//              sits ABOVE fair by the overround (books' raw sums 6.3/12.9/25.8
-//              vs a nominal 5/10/20). Since parlay quoting only ever takes the
-//              YES side of these (see pricer's golf-outright guard), overstating
-//              a leg's probability makes the parlay MORE expensive — we cannot
-//              be picked off, we simply fill less often. Conservative by design.
-//              GOLF_TOPN_TIES_UPLIFT lets an operator opt into real de-vigging
-//              later (normalize to N × uplift) once there's a calibrated view.
-//
-// Consequence: top-N legs quote rich (~10-25%) and will rarely fill. That is
-// the intended trade — there is no honest way to tighten them without a
-// calibrated ties uplift, and guessing biases in the losing direction.
+//   top_5/10/20 → NOT PRICEABLE FROM THIS SOURCE AT ALL. See OUTRIGHT_MARKETS
+//              below. DataGolf CONVERTS book odds to DEAD-HEAT; PX is
+//              ties-included; the gap is ~23-27% in the underprice direction,
+//              proven against a live DK scrape. These decline until top-N is
+//              sourced from DK's own "Top N (Including Ties)" board.
+//              An earlier revision of this file claimed the RAW book consensus
+//              was a safe conservative fallback for top-N. That was WRONG: raw
+//              is only conservative relative to the SAME basis, and the basis
+//              itself was dead-heat, so "conservative raw" still landed ~25%
+//              BELOW ties-included truth.
 // ---------------------------------------------------------------------------
 
 const OUTRIGHT_BOOKS = ['pinnacle', 'betonline', 'bovada', 'bet365', 'betmgm', 'betway', 'fanduel', 'skybet', 'williamhill', 'unibet', 'draftkings', 'pointsbet', 'caesars', 'betcris'];
@@ -747,8 +736,29 @@ const OUTRIGHT_TTL_MS = 5 * 60 * 1000;
 const OUTRIGHT_MIN_BOOKS = 2;
 // PX market_type → DataGolf market key. make_cut is handled by the dedicated
 // 2-way path above (it has a real miss side); these are one-sided fields.
-const OUTRIGHT_MARKETS = { outright_win: 'win', outright_top_5: 'top_5', outright_top_10: 'top_10', outright_top_20: 'top_20' };
-const OUTRIGHT_TARGET = { win: 1, top_5: 5, top_10: 10, top_20: 20 };
+// !!! top_5/top_10/top_20 ARE DELIBERATELY ABSENT !!!
+// DataGolf CONVERTS book odds to the DEAD-HEAT basis — it does not relay the
+// book's posted price. PX settles TIES INCLUDED. Measured against a live DK
+// scrape of The Open (2026-07-14), same book, same market, same moment:
+//     Scheffler "Top 5 (Including Ties)" on DK's site : +144  (41.0%)
+//     DataGolf's `draftkings` field for top_5         : +178  (36.0%)
+//     field sum, DK site 7.96  vs  DataGolf dk 6.27   (nominal 5)
+//     top_10:   DK site 14.54  vs  DataGolf dk 11.80  (nominal 10)
+// Every one of ~150 players was ~23-27% low, and DataGolf's model field-sums to
+// EXACTLY 5.00/10.00/20.00 — the dead-heat signature. (`dead_heat=yes|no` on this
+// endpoint changes nothing; it's not a toggle here.)
+// Pricing a ties-included PX market off dead-heat numbers UNDERSTATES every leg
+// ⇒ we quote top-N too CHEAP ⇒ picked off. This is exactly the trap
+// golf-outrights.js warns about ("DataGolf is not a substitute — we must scrape
+// DK"); it applies to the ODDS, not just their model.
+// Top-N must come from DK's own "Top N (Including Ties)" board
+// (services/dk-scraper.js → fetchGolfOutrights). Until that's wired into the
+// parlay path, top-N returns null here and the leg DECLINES. Do not "temporarily"
+// re-add these keys — a null costs a fill; a dead-heat price costs money.
+const OUTRIGHT_MARKETS = { outright_win: 'win' };
+const OUTRIGHT_TARGET = { win: 1 };
+// Markets that exist on PX but that we refuse to price from this source.
+const OUTRIGHT_WRONG_BASIS = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
 
 let _outrightCache = null; // { fetchedAt, boards: { [tour|market]: board } }
 
@@ -886,6 +896,10 @@ function getOutrightFairProbSync(playerName, marketType, tournamentHints) {
     }
     return null;
   }
+
+  // Refuse top-N outright: this source is dead-heat, PX is ties-included, and
+  // the gap runs ~23-27% in the UNDERPRICE direction. Decline, never guess.
+  if (OUTRIGHT_WRONG_BASIS.has(marketType)) return null;
 
   const dgMarket = OUTRIGHT_MARKETS[marketType];
   if (!dgMarket) return null;
