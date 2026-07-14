@@ -325,6 +325,26 @@ function getSeriesFairProb(lineInfo) {
  *
  * Returns null for non-golf legs; caller falls back to the normal path.
  */
+/**
+ * Fair prob for a golf outright leg (win / top_5 / top_10 / top_20 / make_cut).
+ * Pure sync cache read via datagolf; null ⇒ caller declines the parlay.
+ * Never throws — a DataGolf bug must not break the RFQ hot path.
+ */
+function golfOutrightFair(lineInfo) {
+  try {
+    const dataGolf = require('./datagolf');
+    if (!dataGolf.getOutrightFairProbSync) return null;
+    const player = lineInfo.playerName || lineInfo.teamName;
+    const hit = dataGolf.getOutrightFairProbSync(player, lineInfo.marketType,
+      [lineInfo.tournamentName, lineInfo.pxEventName]);
+    if (!hit || !(hit.fairProb > 0 && hit.fairProb < 1)) return null;
+    return hit;
+  } catch (err) {
+    log.warn('Pricing', `golfOutrightFair threw: ${err.message}`);
+    return null;
+  }
+}
+
 function getGolfMatchupFairProb(lineInfo) {
   const sport = (lineInfo?.oddsApiSport || lineInfo?.sport || '').toLowerCase();
   if (!sport.includes('golf')) return null;
@@ -986,6 +1006,24 @@ function priceParlay(legs, opts = {}) {
     }
     const mmaFair = getMmaFairProb(s.lineInfo);
     if (mmaFair != null) { fairProbs[i] = mmaFair; continue; }
+    // Golf outrights (win / top 5-10-20 / make cut). Sync cache read — the
+    // boards are warmed at line-seed time. Fails CLOSED: a cold/stale board or
+    // an unknown player returns null here and the leg declines rather than
+    // quoting off nothing. Nesting + YES-only are enforced in shouldDecline.
+    if (s.lineInfo && s.lineInfo.sport === 'golf_outrights') {
+      const hit = golfOutrightFair(s.lineInfo);
+      if (hit == null) {
+        priceParlay._lastFailure = {
+          reason: 'no_fair_value',
+          detail: `${s.lineInfo.playerName || '?'} ${s.lineInfo.marketType} — no fresh DataGolf outright board (stale/uncovered player)`,
+          blockerLeg: { team: s.lineInfo.playerName, market: s.lineInfo.marketType, sport: 'golf_outrights' },
+        };
+        return null;
+      }
+      // NO side (make_cut only — the other markets are blocked in shouldDecline)
+      fairProbs[i] = s.lineInfo.selection === 'no' ? (1 - hit.fairProb) : hit.fairProb;
+      continue;
+    }
     const isGolfMatchupLeg = (s.lineInfo?.sport || s.lineInfo?.oddsApiSport || '').toLowerCase().includes('golf');
     const golfFair = getGolfMatchupFairProb(s.lineInfo);
     if (golfFair != null) {
@@ -3403,6 +3441,69 @@ function shouldDecline(legs, parlayId) {
         reason: 'novelty_market',
         detail: `unsupported sub-game market — pxEventName "${ev}", marketName "${mn}" — would mis-price using parent game's fair (e.g. tip-off ~50% vs full-game ML ~42%)`,
       };
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // GOLF OUTRIGHT structural guards. MUST run before anything that could
+  // approve the parlay.
+  //
+  // (1) SAME-PLAYER NESTING — the dangerous one. Golf outright markets are
+  // perfectly NESTED: win ⊂ top_5 ⊂ top_10 ⊂ top_20 ⊂ make_cut. So
+  //     P(Scheffler win AND Scheffler top_5) = P(win)   — NOT the product.
+  // Independent multiplication gives 15% × 35% = 5.25% against a true 15%:
+  // a ~3x underprice we'd be picked off on every time. The existing SGP /
+  // correlation machinery CANNOT catch this because it keys on shared
+  // pxEventId, and PX puts each outright market in a SEPARATE event
+  // ("...- Tournament Winner" 1019502362 vs "...- Top 5 Finish" 1026450813).
+  // A matchup leg on the same player is correlated the same way (winning your
+  // H2H is evidence you finished high), so it counts too.
+  // Different PLAYERS are safe and deliberately allowed: two players can't both
+  // win (mutually exclusive) and compete for finite top-N/cut slots, so
+  // independent multiplication OVERSTATES those parlays — conservative for us.
+  //
+  // (2) YES-SIDE ONLY for win/top_5/top_10/top_20 (operator directive): the
+  // counterparty takes YES. line-manager doesn't register those NO lines at
+  // all, so this is belt-and-braces if PX ever quotes an unregistered side.
+  {
+    const golfLegs = legs.filter(l => l && l.lineInfo && (l.lineInfo.sport === 'golf_outrights' || l.lineInfo.sport === 'golf_matchups'));
+    if (golfLegs.length) {
+      const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase().replace(/[.'’`\-]/g, '').replace(/\b(jr|sr|ii|iii|iv)\b/g, '').replace(/\s+/g, ' ').trim();
+      // Map player → the golf legs that reference them. A matchup references
+      // TWO players (home/away); an outright references exactly one.
+      const byPlayer = new Map();
+      for (const l of golfLegs) {
+        const li = l.lineInfo;
+        const names = li.sport === 'golf_outrights'
+          ? [li.playerName || li.teamName]
+          : [li.homeTeam, li.awayTeam];
+        for (const nm of names.filter(Boolean)) {
+          const k = norm(nm);
+          if (!k) continue;
+          if (!byPlayer.has(k)) byPlayer.set(k, []);
+          if (!byPlayer.get(k).includes(l)) byPlayer.get(k).push(l);
+        }
+      }
+      for (const [player, ls] of byPlayer) {
+        if (ls.length < 2) continue;
+        const desc = ls.map(l => `${l.lineInfo.marketType}${l.lineInfo.selection ? ':' + l.lineInfo.selection : ''}`).join(' + ');
+        return {
+          declined: true,
+          reason: 'golf_same_player_nested',
+          detail: `${ls.length} golf legs on the same player (${player}) — outright markets are nested (win ⊂ top5 ⊂ top10 ⊂ top20 ⊂ make_cut), so independent pricing badly underprices: ${desc}`,
+        };
+      }
+      const badSide = golfLegs.find(l => l.lineInfo.sport === 'golf_outrights'
+        && l.lineInfo.selection === 'no'
+        && l.lineInfo.marketType !== 'outright_make_cut');
+      if (badSide) {
+        return {
+          declined: true,
+          reason: 'golf_outright_no_side',
+          detail: `${badSide.lineInfo.marketType} NO side not offered — win/top_5/top_10/top_20 are YES-side only (counterparty takes YES)`,
+        };
+      }
     }
   }
 

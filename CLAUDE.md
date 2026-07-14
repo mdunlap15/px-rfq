@@ -53,6 +53,9 @@ client/
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
 | `REFRESH_INTERVAL_MINUTES` | No | Default: 10 (code default — production Railway sets 2) |
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
+| `GOLF_OUTRIGHTS_PARLAY_ENABLED` | No | Default: `true`. Kill-switch for quoting golf outright legs (win/top 5/10/20/make cut) in **parlays**. When false, zero outright lines register → PX never sends an outright RFQ. Independent of the single-leg poster (still hard-disabled). |
+| `GOLF_OUTRIGHT_MAX_AGE_MIN` | No | Default: 360. Refuse a DataGolf outright board older than this. DataGolf serves the LAST tournament's board when a tour is idle (euro returned a 9-day-stale "BMW International Open" on 2026-07-14) — without this we'd quote a finished event. |
+| `GOLF_TOPN_TIES_UPLIFT` | No | Unset = top 5/10/20 use RAW (un-de-vigged, conservative) consensus. Set to a calibrated multiple (e.g. 1.12) to de-vig top-N by normalizing the field to N × uplift. **Only set with a real view** — see Key Gotchas. |
 | `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
 | `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
 | `LOG_LEVEL` | No | Default: `info` |
@@ -101,6 +104,43 @@ If a username appears in both lists, `AUTH_VIEWERS` wins (more restrictive); a w
 - **Blocked**: Spread + moneyline on same game (highly correlated)
 - **Blocked**: Two of same market type on same game
 - **Allowed**: Spread/moneyline + total on same game
+- **Blocked**: 2+ golf legs on the **same player** (`golf_same_player_nested`). Golf outrights are
+  perfectly NESTED — win ⊂ top_5 ⊂ top_10 ⊂ top_20 ⊂ make_cut — so `P(win AND top_5) = P(win)`,
+  NOT the product. Independent pricing gives 15%×35% = 5.25% vs a true 15% (~3× underprice).
+  **The generic SGP/correlation machinery cannot catch this**: it keys on shared `pxEventId`, and
+  PX puts every outright market in its OWN event (Winner `1019502362`, Top 5 `1026450813`,
+  Make Cut `1080332570`). A golf matchup leg on the same player counts too. Different PLAYERS are
+  deliberately allowed — two players can't both win and they compete for finite top-N/cut slots,
+  so independent multiplication OVERSTATES those parlays (conservative for us).
+
+## Golf Outrights in Parlays
+
+PX models outrights as an event with `competitors: []` and `sub_type: "outrights"`, where **each
+market is one player** with YES/NO selections. They died on line-manager's `!homeComp` check, which
+is why no golf outright leg had ever been registered or quoted. Registered via
+`_registerGolfOutrightEvent` (gated by `GOLF_OUTRIGHTS_PARLAY_ENABLED`).
+
+- **YES-side only** for win/top_5/top_10/top_20 (operator directive) — the counterparty takes YES.
+  The NO lines are never registered, and `shouldDecline` rejects a NO leg as belt-and-braces.
+  `make_cut` registers BOTH sides — it's the one market with a real two-sided book quote (make+miss).
+- **Pricing basis differs per market — this is the whole ballgame:**
+  - `win` — sum of P(win) over the field is EXACTLY 1 (a 72-hole tie goes to a playoff), so the
+    book field is **power-normalized to 1.0** → a true fair. Verified field sum 1.01.
+  - `make_cut` — binary; **power 2-way de-vig** of make vs miss (see Odds Sources).
+  - `top_5/10/20` — **deliberately NOT de-vigged.** PX settles ties-included, but DataGolf's model
+    field-sums to EXACTLY 5.00/10.00/20.00 = the **dead-heat** convention, so it's a lower bound and
+    would underprice. The true ties-included target is N × (1 + unknown uplift) — not derivable from
+    the feed. We use the RAW consensus, which sits ABOVE fair by the overround (measured sums
+    6.86/13.29/25.77). Because we only ever take YES, overstating a leg makes the parlay MORE
+    expensive → we can't be picked off, we just fill less. Set `GOLF_TOPN_TIES_UPLIFT` only with a
+    calibrated view. **Expect top-N legs to quote rich and rarely fill — that's intended.**
+- **Fails closed**: cold/stale board, unknown player, or <2 books → `null` → decline.
+- Fair lookup is a **sync cache read** on the RFQ hot path (`getOutrightFairProbSync`); boards are
+  warmed at line-seed time by `warmGolfOutrightBoards()`.
+- **PX event names carry a market suffix** ("2026 The Open - Tournament Winner") but DataGolf's
+  `event_name` is the tournament alone ("The Open Championship"). line-manager stores
+  `tournamentName` = the part before the first " - ". Skip that strip and EVERY leg fails the
+  event-name match and silently declines.
 
 ## Odds Sources
 

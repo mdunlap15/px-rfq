@@ -127,6 +127,7 @@ function _classifySoccerProp(marketName) {
 const log = require('./logger');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
+const dataGolf = require('./datagolf');
 const db = require('./db');
 // Lazy require for orderTracker to avoid circular dependency
 let orderTracker = null;
@@ -611,6 +612,98 @@ const FIRST_HALF_MARKET_TYPES = [
 // NHL are offseason now but wired for their return.
 const TEAM_TOTAL_SEED_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
 
+// ---------------------------------------------------------------------------
+// GOLF OUTRIGHTS — parlay leg registration
+// ---------------------------------------------------------------------------
+// Kill-switch: unset/false ⇒ not a single outright line registers, so PX never
+// sends us an outright RFQ and nothing about golf changes.
+const GOLF_OUTRIGHTS_PARLAY_ENABLED = String(process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED || 'true').toLowerCase() === 'true';
+
+// Classify the market from the PX EVENT name (the event names the market; each
+// market inside it is one player). Mirrors golf-outrights.js's PX_EVENT_PATTERNS.
+// top_20 before top_10 before top_5 so "Top 20" can't be shadowed by /top.?2/.
+const GOLF_OUTRIGHT_EVENT_PATTERNS = [
+  { key: 'outright_make_cut', re: /make\s*(?:\/\s*miss\s*)?(?:the\s+)?cut|miss\s*(?:the\s+)?cut/i },
+  { key: 'outright_top_20',   re: /top[\s-]?20\b/i },
+  { key: 'outright_top_10',   re: /top[\s-]?10\b/i },
+  { key: 'outright_top_5',    re: /top[\s-]?5\b/i },
+  { key: 'outright_win',      re: /tournament\s+winner|outright\s+winner|to\s+win\s+(?:the\s+)?tournament|^winner$/i },
+];
+function classifyGolfOutrightEvent(name) {
+  for (const p of GOLF_OUTRIGHT_EVENT_PATTERNS) if (p.re.test(name || '')) return p.key;
+  return null;
+}
+
+/**
+ * Register one PX golf outright event's player markets as parlay lines.
+ *
+ * YES-SIDE ONLY for win/top_5/top_10/top_20 (operator directive 2026-07-14):
+ * the counterparty gets YES. We never register the NO line for those, so PX
+ * cannot build us a NO-side leg. (pricer's guard rejects a NO leg too, in case
+ * PX ever sends one against an unregistered line.)
+ *
+ * make_cut registers BOTH sides — it's the one binary market here with a real,
+ * two-sided book quote behind it (make+miss), so its NO side is priced off the
+ * same power de-vig rather than an inferred complement.
+ *
+ * Returns the number of lines registered.
+ */
+async function _registerGolfOutrightEvent(event) {
+  const marketType = classifyGolfOutrightEvent(event.name);
+  if (!marketType) return 0; // novelty outright ("Will anyone shoot 59") — skip
+  // PX names outright events "<tournament> - <market>", e.g.
+  //   "2026 The Open - Tournament Winner" / "... - To Make The Cut".
+  // DataGolf's event_name is the tournament ALONE ("The Open Championship"),
+  // so the market suffix must be stripped before matching or EVERY leg fails
+  // to price (the words "Tournament"/"Winner"/"Cut" appear in no DG name) and
+  // we silently decline the whole feature. Take the part before the first " - ".
+  const tournamentName = String(event.name || '').split(/\s+-\s+/)[0].trim() || String(event.name || '');
+  let markets;
+  try { markets = await px.fetchMarkets(event.event_id); }
+  catch (err) { log.warn('Lines', `Golf outright get_markets ${event.event_id} failed: ${err.message}`); return 0; }
+  if (!Array.isArray(markets)) return 0;
+
+  const bothSides = marketType === 'outright_make_cut';
+  let n = 0;
+  for (const market of markets) {
+    const playerName = String(market.name || '').trim();
+    if (!playerName) continue;
+    const flat = [];
+    for (const g of (market.selections || [])) { if (Array.isArray(g)) flat.push(...g); else flat.push(g); }
+    for (const sel of flat) {
+      if (!sel || !sel.line_id) continue;
+      const isYes = /^yes$/i.test(String(sel.name || '').trim());
+      const isNo = /^no$/i.test(String(sel.name || '').trim());
+      if (!isYes && !isNo) continue;
+      if (isNo && !bothSides) continue; // YES-only for win/top_N
+      lineIndex[sel.line_id] = {
+        lineId: sel.line_id,
+        sport: 'golf_outrights',
+        pxEventId: event.event_id,
+        pxEventName: event.name,
+        marketType,
+        marketName: market.name,
+        selection: isYes ? 'yes' : 'no',
+        playerName,
+        teamName: playerName,
+        // No home/away — outright events have competitors: []. Downstream code
+        // must never assume a two-team shape for sport 'golf_outrights'.
+        homeTeam: null,
+        awayTeam: null,
+        line: null,
+        startTime: event.scheduled || null,
+        // Tournament ONLY (no market suffix) — this is what matches DataGolf's
+        // event_name. pxEventName keeps the full PX string for display/debug.
+        tournamentName,
+        golfOutright: true,
+      };
+      n++;
+    }
+  }
+  log.info('Lines', `Golf outright registered: ${event.name} → ${n} lines (${marketType}, ${bothSides ? 'YES+NO' : 'YES only'})`);
+  return n;
+}
+
 // Pitcher strikeouts prop detection.
 //
 // PX uses market.type='total' for these — same as game totals — and
@@ -839,6 +932,25 @@ async function seedAllLines() {
       homeComp = event.competitors[0];
       awayComp = event.competitors[1];
     }
+    // Golf OUTRIGHTS (Tournament Winner / Top 5-10-20 / To Make The Cut).
+    // These are the reason this branch exists: PX models them as an event with
+    // competitors: [] and sub_type "outrights", where EACH MARKET IS ONE PLAYER
+    // with YES/NO selections. They therefore die on the !homeComp check below —
+    // which is why no golf outright leg has ever been registered or quoted.
+    // Registered YES-side only (operator directive): the counterparty takes YES.
+    if (GOLF_OUTRIGHTS_PARLAY_ENABLED && event.sport_name === 'Golf' && event.sub_type === 'outrights') {
+      try {
+        // Warm the DataGolf boards so the RFQ hot path only does a sync cache
+        // read. No-ops inside its TTL, so calling per-event is cheap.
+        await dataGolf.warmGolfOutrightBoards();
+        const n = await _registerGolfOutrightEvent(event);
+        golfTrace.outrightLinesRegistered = (golfTrace.outrightLinesRegistered || 0) + n;
+      } catch (err) {
+        log.warn('Lines', `Golf outright registration failed for ${event.name}: ${err.message}`);
+      }
+      continue;
+    }
+
     if (!homeComp || !awayComp) {
       log.debug('Lines', `Skipping ${event.name}: missing competitors`);
       continue;

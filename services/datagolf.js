@@ -569,6 +569,29 @@ function deVig2WayPower(pMake, pMiss) {
   return a / (a + b);
 }
 
+// DataGolf keeps serving the LAST tournament's board when a tour has nothing
+// active — e.g. on 2026-07-14 the euro feed still returned "BMW International
+// Open" stamped 2026-07-05, nine days dead. Pricing off that would quote a
+// finished event at frozen odds, and the tournament-name hint match would NOT
+// save us (PX may still list that tournament). So a board older than this is
+// refused outright. DataGolf stamps "YYYY-MM-DD HH:MM:SS UTC".
+const OUTRIGHT_MAX_AGE_MS = (Number(process.env.GOLF_OUTRIGHT_MAX_AGE_MIN) || 360) * 60 * 1000;
+
+function _parseDgTimestamp(s) {
+  if (!s) return null;
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  return isFinite(t) ? t : null;
+}
+
+/** true when a board's last_updated is missing or older than the max age. */
+function _isStaleBoard(lastUpdated) {
+  const t = _parseDgTimestamp(lastUpdated);
+  if (t == null) return true; // no timestamp ⇒ can't prove freshness ⇒ refuse
+  return (Date.now() - t) > OUTRIGHT_MAX_AGE_MS;
+}
+
 async function _fetchDgOutrights(tour, market) {
   const apiKey = config.dataGolf.apiKey;
   if (!apiKey) return null;
@@ -584,6 +607,10 @@ async function _fetchDgOutrights(tour, market) {
     // DataGolf returns a STRING in `odds` when the market isn't offered
     // ("No make_cut bets being offered right now.") — e.g. LIV has no cut.
     if (!data || !Array.isArray(data.odds)) return null;
+    if (_isStaleBoard(data.last_updated)) {
+      log.debug('DataGolf', `Refusing STALE ${tour}/${market} board "${data.event_name}" (last_updated ${data.last_updated})`);
+      return null;
+    }
     return data;
   } catch (err) {
     log.warn('DataGolf', `Outrights fetch error ${tour}/${market}: ${err.message}`);
@@ -681,6 +708,230 @@ async function findMakeCutBoard(hints, opts = {}) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// WIN / TOP-N OUTRIGHTS  (for PARLAY quoting; single-leg posting is separate)
+//
+// PX settles finishing-position outrights TIES INCLUDED — its events are named
+// "Top 5 Finish (Ties Included)". That single fact decides everything here:
+//
+//   win      → sum of P(win) over the field is EXACTLY 1. A 72-hole tie goes to
+//              a playoff and exactly one player wins, so there is no ties
+//              ambiguity. DataGolf's model field-sums to 1.00, confirming it.
+//              => safe to power-normalize the book field to 1.0 → a TRUE fair.
+//
+//   top_5/10/20 → NOT safely de-viggable. Measured field sums (The Open,
+//              2026-07-14): DataGolf's model sums to EXACTLY 5.00 / 10.00 /
+//              20.00 — that's the DEAD-HEAT convention (ties split a slot), the
+//              opposite of PX. Under ties-included MORE than N players can win
+//              the market, so the true target is N × (1 + tie uplift) where the
+//              uplift is NOT derivable from this feed. Normalizing to N would
+//              understate every player → we'd quote top-N legs TOO CHEAP and be
+//              picked off. This is precisely the dead-heat-vs-ties-included trap
+//              golf-outrights.js warns about; it is real, not theoretical.
+//              => we do NOT de-vig top-N. We use the RAW book consensus, which
+//              sits ABOVE fair by the overround (books' raw sums 6.3/12.9/25.8
+//              vs a nominal 5/10/20). Since parlay quoting only ever takes the
+//              YES side of these (see pricer's golf-outright guard), overstating
+//              a leg's probability makes the parlay MORE expensive — we cannot
+//              be picked off, we simply fill less often. Conservative by design.
+//              GOLF_TOPN_TIES_UPLIFT lets an operator opt into real de-vigging
+//              later (normalize to N × uplift) once there's a calibrated view.
+//
+// Consequence: top-N legs quote rich (~10-25%) and will rarely fill. That is
+// the intended trade — there is no honest way to tighten them without a
+// calibrated ties uplift, and guessing biases in the losing direction.
+// ---------------------------------------------------------------------------
+
+const OUTRIGHT_BOOKS = ['pinnacle', 'betonline', 'bovada', 'bet365', 'betmgm', 'betway', 'fanduel', 'skybet', 'williamhill', 'unibet', 'draftkings', 'pointsbet', 'caesars', 'betcris'];
+const OUTRIGHT_TTL_MS = 5 * 60 * 1000;
+const OUTRIGHT_MIN_BOOKS = 2;
+// PX market_type → DataGolf market key. make_cut is handled by the dedicated
+// 2-way path above (it has a real miss side); these are one-sided fields.
+const OUTRIGHT_MARKETS = { outright_win: 'win', outright_top_5: 'top_5', outright_top_10: 'top_10', outright_top_20: 'top_20' };
+const OUTRIGHT_TARGET = { win: 1, top_5: 5, top_10: 10, top_20: 20 };
+
+let _outrightCache = null; // { fetchedAt, boards: { [tour|market]: board } }
+
+/**
+ * Power-normalize a field of raw implied probabilities so they sum to `target`,
+ * i.e. find k with Σ pᵢ^k = target and return pᵢ^k. Power (not multiplicative)
+ * because multiplicative normalization carries a heavy favorite-longshot bias —
+ * measured on this very feed at -4.98pp on favorites / +8.56pp on longshots,
+ * while power is near-unbiased.
+ */
+function _powerNormalizeField(probs, target) {
+  const ps = probs.filter(p => p > 0 && p < 1);
+  if (!ps.length || !(target > 0)) return null;
+  const sum = (k) => ps.reduce((s, p) => s + Math.pow(p, k), 0);
+  let lo = 0.05, hi = 12;
+  if ((sum(lo) - target) * (sum(hi) - target) > 0) return null; // can't bracket
+  for (let i = 0; i < 80; i++) {
+    const k = (lo + hi) / 2;
+    if (sum(k) > target) lo = k; else hi = k;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * Build a win/top-N board for one tour+market.
+ * win      → per-book power-normalize to 1.0, then average → TRUE fair.
+ * top_5/10/20 → RAW consensus (deliberately NOT de-vigged; see header). If
+ *              GOLF_TOPN_TIES_UPLIFT is set, normalize to N × uplift instead.
+ * Returns { tour, market, eventName, lastUpdated, basis, players:[...] }.
+ */
+async function fetchOutrightBoard(tour, market) {
+  const data = await _fetchDgOutrights(tour, market);
+  if (!data) return null;
+  const uplift = Number(process.env.GOLF_TOPN_TIES_UPLIFT) || 0;
+  const isWin = market === 'win';
+  // Only `win` has an exact, knowable target. top-N gets one ONLY if the
+  // operator supplied a calibrated ties uplift.
+  const target = isWin ? 1 : (uplift > 0 ? OUTRIGHT_TARGET[market] * uplift : null);
+  const basis = isWin ? 'power-normalized to 1.0 (exact target)'
+    : (target ? `power-normalized to ${OUTRIGHT_TARGET[market]}×${uplift} (operator ties uplift)`
+              : 'RAW consensus — NOT de-vigged (ties-included target unknown); conservative, YES-side only');
+
+  // Collect per-book fields, then normalize each book's field independently
+  // (a book's overround is its own) before averaging across books.
+  const perBook = {};
+  for (const bk of OUTRIGHT_BOOKS) {
+    const entries = [];
+    for (const p of data.odds) {
+      const v = americanToImpliedProb(p[bk]);
+      if (v != null && v > 0 && v < 1) entries.push({ dgId: p.dg_id, p: v });
+    }
+    if (entries.length < 30) continue; // partial field ⇒ normalization invalid
+    if (target) {
+      const k = _powerNormalizeField(entries.map(e => e.p), target);
+      if (k == null) continue;
+      entries.forEach(e => { e.p = Math.pow(e.p, k); });
+    }
+    perBook[bk] = new Map(entries.map(e => [e.dgId, e.p]));
+  }
+  const bookNames = Object.keys(perBook);
+  if (!bookNames.length) return null;
+
+  const players = [];
+  for (const p of data.odds) {
+    const vals = [];
+    for (const bk of bookNames) {
+      const v = perBook[bk].get(p.dg_id);
+      if (v != null) vals.push(v);
+    }
+    if (vals.length < OUTRIGHT_MIN_BOOKS) continue;
+    players.push({
+      playerName: normalizeDgPlayerName(p.player_name),
+      dgId: p.dg_id,
+      fairProb: avg(vals),
+      bookCount: vals.length,
+      // Diagnostics only — DataGolf's model is DEAD-HEAT for top-N and must
+      // never price a ties-included PX market.
+      modelProb: (p.datagolf && p.datagolf.baseline != null) ? americanToImpliedProb(p.datagolf.baseline) : null,
+    });
+  }
+  if (!players.length) return null;
+  return { tour, market, eventName: data.event_name || '', lastUpdated: data.last_updated || null, basis, players };
+}
+
+/** All win/top-N boards across tours, cached. */
+async function fetchOutrightBoards({ force = false } = {}) {
+  if (!config.dataGolf.apiKey) return {};
+  if (!force && _outrightCache && Date.now() - _outrightCache.fetchedAt < OUTRIGHT_TTL_MS) {
+    return _outrightCache.boards;
+  }
+  const boards = {};
+  for (const tour of MAKE_CUT_TOURS) {
+    for (const market of Object.values(OUTRIGHT_MARKETS)) {
+      const b = await fetchOutrightBoard(tour, market);
+      if (b) boards[`${tour}|${market}`] = b;
+    }
+  }
+  _outrightCache = { fetchedAt: Date.now(), boards };
+  log.info('DataGolf', `Outright boards: ${Object.keys(boards).length} (${Object.values(boards).map(b => b.market + ':' + b.players.length).join(' ')})`);
+  return boards;
+}
+
+/** Does any hint's significant words all appear in the DG event name? */
+function _eventMatchesHints(eventName, tournamentHints) {
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const en = norm(eventName);
+  return (Array.isArray(tournamentHints) ? tournamentHints : [tournamentHints]).filter(Boolean).some(h => {
+    const words = norm(h).split(' ').filter(w => w.length > 2 && !/^\d{4}$/.test(w));
+    return words.length && words.every(w => en.includes(w));
+  });
+}
+
+/**
+ * SYNCHRONOUS fair probability for one golf outright leg — a pure read of the
+ * warmed caches. The pricer resolves every golf fair synchronously on the RFQ
+ * hot path, so this must never do I/O; warmGolfOutrightBoards() keeps the
+ * caches fresh. FAILS CLOSED: a cold, expired or missing board returns null and
+ * the caller declines rather than quoting off nothing.
+ *
+ *   marketType: 'outright_win' | 'outright_top_5' | 'outright_top_10'
+ *             | 'outright_top_20' | 'outright_make_cut'
+ * Returns { fairProb, bookCount, basis, eventName } or null.
+ */
+function getOutrightFairProbSync(playerName, marketType, tournamentHints) {
+  const key = _normalizeOutrightName(playerName);
+  if (!key) return null;
+
+  if (marketType === 'outright_make_cut') {
+    if (!_makeCutCache || Date.now() - _makeCutCache.fetchedAt > MAKE_CUT_TTL_MS) return null; // cold/expired ⇒ decline
+    for (const board of _makeCutCache.boards) {
+      if (!_eventMatchesHints(board.eventName, tournamentHints)) continue;
+      const hit = board.players.find(p => _normalizeOutrightName(p.playerName) === key);
+      if (!hit || hit.bookCount < OUTRIGHT_MIN_BOOKS) return null;
+      return { fairProb: hit.fairProb, bookCount: hit.bookCount, basis: 'power 2-way de-vig (make/miss)', eventName: board.eventName };
+    }
+    return null;
+  }
+
+  const dgMarket = OUTRIGHT_MARKETS[marketType];
+  if (!dgMarket) return null;
+  if (!_outrightCache || Date.now() - _outrightCache.fetchedAt > OUTRIGHT_TTL_MS) return null; // cold/expired ⇒ decline
+  for (const b of Object.values(_outrightCache.boards)) {
+    if (b.market !== dgMarket) continue;
+    // Confirm the board is the right tournament before trusting a name hit —
+    // otherwise a same-named player on another tour's board could price this.
+    if (!_eventMatchesHints(b.eventName, tournamentHints)) continue;
+    const hit = b.players.find(p => _normalizeOutrightName(p.playerName) === key);
+    if (!hit || hit.bookCount < OUTRIGHT_MIN_BOOKS) return null;
+    return { fairProb: hit.fairProb, bookCount: hit.bookCount, basis: b.basis, eventName: b.eventName };
+  }
+  return null;
+}
+
+/** Async convenience wrapper (warms then reads). Not for the RFQ hot path. */
+async function getOutrightFairProb(playerName, marketType, tournamentHints) {
+  await warmGolfOutrightBoards();
+  return getOutrightFairProbSync(playerName, marketType, tournamentHints);
+}
+
+/**
+ * Warm both outright caches (win/top-N + make-cut). Called from the line seed
+ * so the RFQ hot path only ever does a sync cache read. Safe to call often —
+ * both fetchers no-op inside their TTL.
+ */
+async function warmGolfOutrightBoards({ force = false } = {}) {
+  if (!config.dataGolf.apiKey) return;
+  try {
+    await Promise.all([fetchOutrightBoards({ force }), fetchMakeCutBoards({ force })]);
+  } catch (err) {
+    log.warn('DataGolf', `Outright board warm failed: ${err.message}`);
+  }
+}
+
+function _normalizeOutrightName(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[.'’`\-]/g, '')
+    .replace(/\b(jr|sr|ii|iii|iv)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 module.exports = {
   fetchGolfMatchupsCache,
   normalizeDgPlayerName,
@@ -692,4 +943,11 @@ module.exports = {
   fetchMakeCutBoard,
   fetchMakeCutBoards,
   findMakeCutBoard,
+  // win / top-N outrights (parlay quoting)
+  fetchOutrightBoard,
+  fetchOutrightBoards,
+  getOutrightFairProb,
+  getOutrightFairProbSync,
+  warmGolfOutrightBoards,
+  _normalizeOutrightName,
 };
