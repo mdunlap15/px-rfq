@@ -3527,7 +3527,23 @@ function shouldDecline(legs, parlayId) {
   // counterparty takes YES. line-manager doesn't register those NO lines at
   // all, so this is belt-and-braces if PX ever quotes an unregistered side.
   {
-    const golfLegs = legs.filter(l => l && l.lineInfo && (l.lineInfo.sport === 'golf_outrights' || l.lineInfo.sport === 'golf_matchups'));
+    // Resolve lineInfo HERE. This guard runs long before shouldDecline builds
+    // `resolvedLegs`, so at this point `legs` are RAW RFQ entries ({line_id})
+    // with NO .lineInfo. The original `legs.filter(l => l.lineInfo && ...)`
+    // therefore matched NOTHING in production and the guard silently never
+    // fired — we submitted an 8-leg containing BOTH "Rory McIlroy make_cut" and
+    // "Rory McIlroy win" (perfectly nested, ~3x underpriced) at +2679 on
+    // 2026-07-15. It passed local tests only because those injected
+    // pre-resolved {lineId, lineInfo} objects. Accept both shapes.
+    const golfLegs = [];
+    for (const l of (legs || [])) {
+      if (!l) continue;
+      const lineId = l.line_id || l.lineId || l;
+      let li = l.lineInfo;
+      if (!li) { try { li = lineManager.lookupLine(lineId); } catch (_) { li = null; } }
+      if (!li) continue;
+      if (li.sport === 'golf_outrights' || li.sport === 'golf_matchups') golfLegs.push({ lineInfo: li });
+    }
     if (golfLegs.length) {
       const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
         .toLowerCase().replace(/[.'’`\-]/g, '').replace(/\b(jr|sr|ii|iii|iv)\b/g, '').replace(/\s+/g, ' ').trim();
