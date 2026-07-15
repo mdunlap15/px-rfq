@@ -649,26 +649,29 @@ function classifyGolfOutrightEvent(name) {
  *
  * Returns the number of lines registered.
  */
-// Top 5/10/20 are priced ONLY from DK's "(Including Ties)" board via
-// services/golf-topn.js — PX settles ties-included and DataGolf publishes top-N
-// on the DEAD-HEAT basis (~25% LOW; Scheffler top_5: DK site +144 vs
-// DataGolf-as-DK +178). We register a top-N line only when that DK board is
-// actually loaded for this tournament, so PX can't send us a leg we'd have to
-// decline. DK served Winner + Top 5 + Top 10 for The Open but NO Top 20.
-const GOLF_TOPN_MARKETS = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
+// Top 5/10/20 are priced ONLY from DK's "(Including Ties)" board
+// (services/golf-topn.js) — PX settles ties-included and DataGolf publishes
+// top-N on the DEAD-HEAT basis (~25% LOW). That constraint lives in PRICING,
+// which fails closed, NOT in registration.
+//
+// This used to gate registration on the DK board being warm ("so PX can't send
+// a leg we'd decline"). That was wrong and actively harmful: the DK scrape takes
+// ~150s while seeds run every ~2 min, so during any cold window the gate skipped
+// top-N, and because seedAllLines is build-then-swap, skipping DELETES the lines
+// from the live index. Result: top-N registration FLAPPED (registered → wiped →
+// registered) on every boot and any scrape hiccup, PX stopped sending those
+// RFQs, and it surfaced as "we aren't quoting Top 5" (operator, 2026-07-15).
+// A missing line is far worse than a declined RFQ: we lose the RFQ entirely and
+// PX's supported set churns.
+//
+// It was also inconsistent — make_cut registers all 156 players even though only
+// ~97 can price (the rest lack 2 two-sided books). Registration means "PX may
+// ask us"; pricing decides whether we answer. getTopNFairProbSync returns null
+// on a cold/stale/absent board and the leg declines cleanly.
 
 async function _registerGolfOutrightEvent(event) {
   const marketType = classifyGolfOutrightEvent(event.name);
   if (!marketType) return 0; // novelty outright ("Will anyone shoot 59") — skip
-  const tournamentForDk = String(event.name || '').split(/\s+-\s+/)[0].trim();
-  if (GOLF_TOPN_MARKETS.has(marketType)) {
-    // Probe the warmed DK board with a sentinel: no board ⇒ don't register.
-    const board = golfTopN.__debugCache().bySlug[golfTopN.resolveDkSlug(tournamentForDk) || ''];
-    if (!board || !board.markets[marketType]) {
-      log.info('Lines', `Golf outright SKIPPED: ${event.name} — no DK "Including Ties" board for ${marketType} (DataGolf's dead-heat basis is ~25% low and must never price it)`);
-      return 0;
-    }
-  }
   // PX names outright events "<tournament> - <market>", e.g.
   //   "2026 The Open - Tournament Winner" / "... - To Make The Cut".
   // DataGolf's event_name is the tournament ALONE ("The Open Championship"),
