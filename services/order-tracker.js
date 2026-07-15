@@ -1252,6 +1252,10 @@ function sweepOpenOrdersByCreator(creatorId, reason) {
   let riskReleased = 0;
   for (const [parlayId, order] of Object.entries(orders)) {
     if (!order || order.status !== 'quoted') continue;
+    // Skip display-only history reloaded at boot — those RFQs are long expired,
+    // so there is no open risk to release and rejecting them would rewrite
+    // settled history and log a misleading "swept" count.
+    if (order.meta && order.meta.hydratedQuote) continue;
     const ocid = order.meta && (order.meta.creatorId || order.meta.creator_id);
     if (!ocid || String(ocid) !== cid) continue;
     riskReleased += Number(order.maxRisk || (order.meta && order.meta.maxRisk) || 0) || 0;
@@ -3117,7 +3121,11 @@ function getStats() {
     activeOrders: Object.values(orders).filter(o =>
       o.status === 'confirmed' && !isOrderStalePhantom(o)
     ).length,
-    openQuotes: Object.values(orders).filter(o => o.status === 'quoted').length,
+    // LIVE unfilled quotes only. Excludes meta.hydratedQuote — those are
+    // historical 'quoted' rows reloaded from Supabase purely so the All Quotes
+    // table survives a restart. Their RFQs expired long ago; counting them here
+    // would report hundreds of phantom "open" quotes after every boot.
+    openQuotes: Object.values(orders).filter(o => o.status === 'quoted' && !(o.meta && o.meta.hydratedQuote)).length,
     totalOrders: Object.keys(orders).length,
     sessionFillRate: stats.sessionQuotes > 0
       ? Number((stats.sessionFills / stats.sessionQuotes * 100).toFixed(1))
@@ -7853,7 +7861,38 @@ async function loadFromDb() {
   if (dbOrders.length >= LOAD_CAP) {
     log.warn('DB', `loadFromDb hit cap ${LOAD_CAP} — may be truncating history. Raise LOAD_CAP.`);
   }
-  for (const o of dbOrders) {
+
+  // Recent unfilled 'quoted' rows — DISPLAY ONLY, so the All Quotes table
+  // survives a redeploy. loadOrders excludes them (50K+ rows once timed out
+  // Supabase), so before this the day's quote history was erased by every
+  // restart: 125 of 7/14's 158 parlays were 'quoted' and vanished (operator
+  // report 2026-07-15). Hard-bounded by window + cap because the timeout risk
+  // is real at 7d; 48h measured at 243 rows / 969ms.
+  //
+  // SAFE because a 'quoted' row falls through every status branch below — no
+  // addExposure, no P&L, no confirmations/settlements. It only bumps
+  // stats.totalQuotes, which is correct: they ARE quotes we made.
+  // Tagged meta.hydratedQuote so consumers that treat 'quoted' as LIVE state
+  // (openQuotes, sweepOpenOrdersByCreator) can skip them — these RFQs expired
+  // long ago and are not open risk.
+  // NOT `Number(x) || 48` — that makes QUOTE_HISTORY_HOURS=0 fall back to 48,
+  // i.e. the kill-switch silently does nothing (caught in test 2026-07-15).
+  const _qhRaw = process.env.QUOTE_HISTORY_HOURS;
+  const _qh = (_qhRaw != null && _qhRaw !== '') ? Number(_qhRaw) : 48;
+  const QUOTED_HOURS = Number.isFinite(_qh) && _qh >= 0 ? _qh : 48;
+  const _qcRaw = process.env.QUOTE_HISTORY_CAP;
+  const _qc = (_qcRaw != null && _qcRaw !== '') ? Number(_qcRaw) : 5000;
+  const QUOTED_CAP = Number.isFinite(_qc) && _qc > 0 ? _qc : 5000;
+  let hydratedQuotes = [];
+  if (QUOTED_HOURS > 0) {
+    hydratedQuotes = await db.loadRecentQuotedOrders(QUOTED_HOURS, QUOTED_CAP);
+    for (const q of hydratedQuotes) {
+      q.meta = q.meta || {};
+      q.meta.hydratedQuote = true;
+    }
+  }
+
+  for (const o of dbOrders.concat(hydratedQuotes)) {
     // Hoist winning-quote info out of meta (stored there to avoid DB schema change)
     if (o.meta) {
       if (o.meta.winningOdds != null && o.winningOdds == null) o.winningOdds = o.meta.winningOdds;
@@ -7980,7 +8019,7 @@ async function loadFromDb() {
       }
     }
   }
-  log.info('DB', `Loaded ${dbOrders.length} orders (P&L: $${stats.runningPnL.toFixed(2)})`);
+  log.info('DB', `Loaded ${dbOrders.length} orders + ${hydratedQuotes.length} recent unfilled quotes (display-only) (P&L: $${stats.runningPnL.toFixed(2)})`);
 
   // Self-heal: any order with rejectedAt set but status !== 'rejected'
   // is a historical victim of the recordMatchedParlay bug that was

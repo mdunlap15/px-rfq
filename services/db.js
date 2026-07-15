@@ -230,26 +230,82 @@ async function loadOrders(limit = 100) {
     log.info('DB', `loadOrders: ${all.length} rows in ${pagesFetched} pages (${Date.now() - startMs}ms) — ${JSON.stringify(perStatus)}`);
 
     // Convert DB rows back to order format
-    return all.map(row => ({
-      parlayId: row.parlay_id,
-      status: row.status,
-      legs: row.legs,
-      offeredOdds: row.offered_odds,
-      fairParlayProb: row.fair_parlay_prob ? Number(row.fair_parlay_prob) : null,
-      maxRisk: row.max_risk ? Number(row.max_risk) : null,
-      vig: row.vig ? Number(row.vig) : null,
-      confirmedOdds: row.confirmed_odds ? Number(row.confirmed_odds) : null,
-      confirmedStake: row.confirmed_stake ? Number(row.confirmed_stake) : null,
-      orderUuid: row.order_uuid,
-      pnl: row.pnl != null ? Number(row.pnl) : null,
-      settlementResult: row.settlement_result,
-      quotedAt: row.quoted_at,
-      confirmedAt: row.confirmed_at,
-      settledAt: row.settled_at,
-      meta: row.meta || {},
-    }));
+    return all.map(_rowToOrder);
   } catch (err) {
     log.error('DB', `loadOrders error: ${err.message}`);
+    return [];
+  }
+}
+
+// Row → order object. Shared by loadOrders and loadRecentQuotedOrders so the
+// two can never drift in shape.
+function _rowToOrder(row) {
+  return {
+    parlayId: row.parlay_id,
+    status: row.status,
+    legs: row.legs,
+    offeredOdds: row.offered_odds,
+    fairParlayProb: row.fair_parlay_prob ? Number(row.fair_parlay_prob) : null,
+    maxRisk: row.max_risk ? Number(row.max_risk) : null,
+    vig: row.vig ? Number(row.vig) : null,
+    confirmedOdds: row.confirmed_odds ? Number(row.confirmed_odds) : null,
+    confirmedStake: row.confirmed_stake ? Number(row.confirmed_stake) : null,
+    orderUuid: row.order_uuid,
+    pnl: row.pnl != null ? Number(row.pnl) : null,
+    settlementResult: row.settlement_result,
+    quotedAt: row.quoted_at,
+    confirmedAt: row.confirmed_at,
+    settledAt: row.settled_at,
+    meta: row.meta || {},
+  };
+}
+
+/**
+ * Load RECENT unfilled 'quoted' orders so the dashboard's All Quotes table
+ * survives a restart.
+ *
+ * loadOrders() deliberately excludes status='quoted': historically there were
+ * 50K+ unfilled rows and paginating them timed out Supabase's free tier, so
+ * unfilled quotes lived ONLY in memory for the session. Every redeploy then
+ * erased the day's quote history from the UI — on 2026-07-14, 125 of the day's
+ * 158 parlays were 'quoted' and vanished from the table after a restart
+ * (operator report).
+ *
+ * The timeout risk is REAL but is a function of WINDOW, not of the status.
+ * Measured 2026-07-15: 24h=126 rows, 48h=243 rows (969ms, fine), 72h=1189,
+ * but a 7-DAY count still times out (returns null). So this is hard-bounded by
+ * BOTH a time window and a row cap, and any failure is swallowed — a missing
+ * quote history is cosmetic, and must never block boot.
+ *
+ * These rows are for DISPLAY. loadFromDb tags them meta.hydratedQuote so they
+ * are excluded from `openQuotes` (they expired long ago) and from the
+ * creator-blocklist sweep (nothing to release).
+ */
+async function loadRecentQuotedOrders(hours = 48, cap = 5000) {
+  const db = getClient();
+  if (!db) return [];
+  const sinceIso = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+  const startMs = Date.now();
+  try {
+    const { data, error } = await db
+      .from('parlay_orders')
+      .select('*')
+      .eq('status', 'quoted')
+      .gte('quoted_at', sinceIso)
+      .order('quoted_at', { ascending: false })
+      .limit(cap);
+    if (error) {
+      log.warn('DB', `loadRecentQuotedOrders failed (non-fatal, quote history will start empty): ${error.message}`);
+      return [];
+    }
+    const rows = data || [];
+    if (rows.length >= cap) {
+      log.warn('DB', `loadRecentQuotedOrders hit cap ${cap} over ${hours}h — older quotes in the window are omitted`);
+    }
+    log.info('DB', `loadRecentQuotedOrders: ${rows.length} unfilled quotes from last ${hours}h (${Date.now() - startMs}ms)`);
+    return rows.map(_rowToOrder);
+  } catch (err) {
+    log.warn('DB', `loadRecentQuotedOrders threw (non-fatal): ${err.message}`);
     return [];
   }
 }
@@ -1540,6 +1596,7 @@ module.exports = {
   isEnabled,
   saveOrder,
   loadOrders,
+  loadRecentQuotedOrders,
   loadOrdersByParlayIds,
   loadFillBucketRowsSince,
   countOrders,
