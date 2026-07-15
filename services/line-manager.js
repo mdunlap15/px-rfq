@@ -694,7 +694,13 @@ async function _registerGolfOutrightEvent(event) {
       const isNo = /^no$/i.test(String(sel.name || '').trim());
       if (!isYes && !isNo) continue;
       if (isNo && !bothSides) continue; // YES-only for win/top_N
-      lineIndex[sel.line_id] = {
+      // MUST go through _setSeedLine, NOT lineIndex directly: during a warm
+      // refresh seedAllLines stages into _seedIndexTarget and then WIPES the
+      // live lineIndex and replaces it with that staging object. A direct write
+      // here is silently deleted at the end of every seed — which is exactly
+      // why golf outrights registered 0 lines in production despite the code
+      // running (operator report 2026-07-15).
+      _setSeedLine(sel.line_id, {
         lineId: sel.line_id,
         sport: 'golf_outrights',
         pxEventId: event.event_id,
@@ -714,7 +720,7 @@ async function _registerGolfOutrightEvent(event) {
         // event_name. pxEventName keeps the full PX string for display/debug.
         tournamentName,
         golfOutright: true,
-      };
+      });
       n++;
     }
   }
