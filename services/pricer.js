@@ -2843,20 +2843,44 @@ function priceParlay(legs, opts = {}) {
   if (_isExperimentalParlay) {
     candidateCaps.push(config.pricing.maxRiskSgpExperimental || 15);
   }
-  const maxRisk = Math.min(...candidateCaps);
 
-  // PX expects positive bettor-side American odds in offers (e.g., +215).
-  // PX converts to negative SP-side for storage (confirmed_odds = -215).
-  // PX cannot handle negative bettor-side odds — it flips the sign and overpays.
-  if (decimalOdds < 2.0) {
-    log.debug('Pricing', `Declined: negative bettor odds (decimal ${decimalOdds.toFixed(3)}, prob ${(cappedProb*100).toFixed(1)}%) — PX cannot process`);
-    priceParlay._lastFailure = {
-      reason: 'negative odds',
-      detail: `parlay prob ${(cappedProb*100).toFixed(1)}% > 50% → negative bettor odds not supported by PX`,
-      blockerLeg: null,
-    };
-    return null;
+  // ---- NEGATIVE BETTOR-SIDE ODDS (parlay prob > 50%) ----
+  // Historically declined outright: "PX cannot handle negative bettor-side odds
+  // — it flips the sign and overpays" (guard added 2026-04-08). PX has since
+  // confirmed negative bettor odds ARE supported (operator, 2026-07-15), so we
+  // enable them — but ONLY for all-golf-outright parlays, and on a tight cap.
+  //
+  // Why it matters: make_cut favourites are 80%+ EACH, so any two of them exceed
+  // 50% and the bettor's price is negative. That made the parlays operators and
+  // PX staff actually reach for (McIlroy + Fitzpatrick = 70%) permanently
+  // unquotable.
+  //
+  // Why the cap: the old claim, IF true, is catastrophic rather than marginal.
+  // On a 70% parlay priced -238, PX honouring the sign gives the bettor -1.4 EV
+  // per $100 (we profit); PX flipping it to +238 gives the bettor +136.6 EV per
+  // $100 (we get destroyed). So this rides the same small-test shape as RFI /
+  // experimental SGP until a REAL fill proves the sign: check a settled
+  // negative-odds parlay's confirmed_odds — |confirmed| must equal |offered| and
+  // the sign must be OPPOSITE. Once proven, raise VIG-free via
+  // NEG_ODDS_MAX_RISK or drop the cap entirely.
+  const _negOddsAllowed = config.pricing.allowNegativeBettorOdds;
+  const _allOutrightNeg = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'golf_outrights');
+  const _isNegativeBettorOdds = decimalOdds < 2.0;
+  if (_isNegativeBettorOdds) {
+    if (!(_negOddsAllowed && _allOutrightNeg)) {
+      log.debug('Pricing', `Declined: negative bettor odds (decimal ${decimalOdds.toFixed(3)}, prob ${(cappedProb*100).toFixed(1)}%) — not enabled for this parlay shape`);
+      priceParlay._lastFailure = {
+        reason: 'negative odds',
+        detail: `parlay prob ${(cappedProb*100).toFixed(1)}% > 50% → negative bettor odds`
+          + (_negOddsAllowed ? ' (allowed only for all-golf-outright parlays)' : ' (ALLOW_NEGATIVE_BETTOR_ODDS not enabled)'),
+        blockerLeg: null,
+      };
+      return null;
+    }
+    // Small-test cap while the sign convention is unproven in production.
+    candidateCaps.push(config.pricing.negOddsMaxRisk || 25);
   }
+  const maxRisk = Math.min(...candidateCaps);
 
   const americanOdds = decimalToAmerican(decimalOdds);
 

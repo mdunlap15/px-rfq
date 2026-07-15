@@ -220,6 +220,22 @@ const config = {
     // prop cap is set high. Default $25 — deliberately tiny for a brand-new,
     // uncalibrated market; raise via RFI_MAX_RISK once it proves out.
     maxRiskPerParlayWithRfi: parseFloat(process.env.RFI_MAX_RISK) || 25,
+    // ---- Negative bettor-side odds (parlay prob > 50%) ----
+    // Declined outright since 2026-04-08 on the claim that PX "flips the sign
+    // and overpays". PX confirmed support (operator, 2026-07-15), so this
+    // enables them — but ONLY for all-golf-outright parlays (see pricer), which
+    // is where the need is: make_cut favourites are 80%+ each, so ANY two of
+    // them exceed 50% and were permanently unquotable.
+    // Default TRUE per operator direction; set ALLOW_NEGATIVE_BETTOR_ODDS=false
+    // to revert instantly without a deploy.
+    allowNegativeBettorOdds: String(process.env.ALLOW_NEGATIVE_BETTOR_ODDS ?? 'true').toLowerCase() === 'true',
+    // Small-test cap while the sign convention is unproven in production. If the
+    // old claim were true the failure is CATASTROPHIC, not marginal: a 70%
+    // parlay priced -238 gives the bettor -1.4 EV per $100 if PX honours the
+    // sign, but +136.6 EV per $100 if PX flips it. So cap the blast radius until
+    // a settled negative-odds parlay proves |confirmed| == |offered| with the
+    // OPPOSITE sign, then raise/remove.
+    negOddsMaxRisk: parseFloat(process.env.NEG_ODDS_MAX_RISK) || 25,
     // Pitcher-strikeout prop fair is fit from a strikeout-count DISTRIBUTION
     // across EVERY book's posted line (not just books at PX's exact line):
     // recover each book's implied mean Ks from its own line, aggregate
