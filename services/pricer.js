@@ -822,6 +822,17 @@ function priceParlay(legs, opts = {}) {
   // same sport can have different start times (and thus different far-out
   // relaxation). Imminent games are unaffected + still hit isEventStalePreGame.
   const isStaleCached = (sport, startTime) => {
+    // Golf outrights have NO odds-feed cache entry — they are priced from
+    // DataGolf (win / make_cut) and DK's ties board (top 5/10), not from the
+    // odds feed. So oddsFeed.getCacheAge('golf_outrights') is Infinity and this
+    // check declined EVERY outright leg as "stale odds (Infinitym old)" —
+    // operator hit exactly this: make-cut and Top 5 parlays both returned
+    // "No Offers Available" on PX despite passing shouldDecline.
+    // Freshness IS still enforced, by each source's own gate, and both fail
+    // CLOSED (null fair ⇒ decline):
+    //   win/make_cut → datagolf TTL + GOLF_OUTRIGHT_MAX_AGE_MIN board-age guard
+    //   top_5/top_10 → golf-topn board age (GOLF_TOPN_MAX_AGE_MIN)
+    if (sport === 'golf_outrights') return false;
     const key = sport + '|' + (startTime || '');
     if (staleCache[key] === undefined) staleCache[key] = oddsFeed.isStaleForEvent(sport, startTime);
     return staleCache[key];
@@ -930,7 +941,11 @@ function priceParlay(legs, opts = {}) {
     // for events in the final pre-game window. Catches scenarios where the
     // sport-level cache passes isStale but the line has moved since refresh
     // (this is how the Rockies +190/+194 stale FD/DK quote slipped through).
-    if (oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
+    // Golf outrights exempt for the same reason as isStaleCached above: no
+    // odds-feed cache entry ⇒ getCacheAge is Infinity ⇒ this would decline every
+    // outright leg once the tournament is within 30 min of tee-off. Their own
+    // board-age guards cover freshness and fail closed.
+    if (lineInfo.sport !== 'golf_outrights' && oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
       const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
       log.info('Pricing', `Declined pre-game: ${legLabel} starts soon, cache ${ageMin}m old (limit 2m)`);
       priceParlay._lastFailure = {
@@ -2862,7 +2877,15 @@ function priceParlay(legs, opts = {}) {
   }
 
   // Don't quote on very high odds parlays — even small stakes create huge payouts
-  const maxOdds = config.pricing.maxOdds || 1000;
+  // Golf OUTRIGHTS get their own (higher) cap: they are longshots BY NATURE, so
+  // the global +1500 blocks essentially every legitimate outright parlay — a
+  // 2-leg Top 5 of two of the best players in the field prices at +2196 and was
+  // refused (operator report 2026-07-15). Only applied when EVERY leg is an
+  // outright, so a golf leg can't be used to smuggle a mixed parlay past the
+  // normal cap. Risk is still bounded by maxRisk/stake caps, which is the real
+  // control on payout size — this cap is about odds shape, not exposure.
+  const _allOutright = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'golf_outrights');
+  const maxOdds = (_allOutright ? (config.pricing.maxOddsGolfOutrights || 6000) : (config.pricing.maxOdds || 1000));
   if (americanOdds > maxOdds) {
     log.debug('Pricing', `Declined: odds +${americanOdds} exceed max +${maxOdds}`);
     priceParlay._lastFailure = {

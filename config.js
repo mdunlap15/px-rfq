@@ -1364,6 +1364,11 @@ const config = {
       ? parseFloat(process.env.STARTING_BANKROLL)
       : null,
     maxOdds: parseInt(process.env.MAX_ODDS) || 1500,
+    // Golf outrights are longshots by nature (a 2-leg Top 5 of two elite players
+    // prices ~+2200). The global maxOdds blocks nearly every legitimate outright
+    // parlay. Applied ONLY when every leg is an outright; exposure is still
+    // bounded by maxRisk, which is the real payout control.
+    maxOddsGolfOutrights: parseInt(process.env.MAX_ODDS_GOLF_OUTRIGHTS) || 6000,
   },
   supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf')
     .split(',').map(s => s.trim()),

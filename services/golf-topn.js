@@ -57,7 +57,19 @@ const dkScraper = require('./dk-scraper');
 const dataGolf = require('./datagolf');
 
 const TOPN_MARKETS = { outright_top_5: { dk: 'top_5', dg: 'top_5', n: 5 }, outright_top_10: { dk: 'top_10', dg: 'top_10', n: 10 }, outright_top_20: { dk: 'top_20', dg: 'top_20', n: 20 } };
+// WARM cadence: how often we kick a fresh DK scrape.
 const TTL_MS = (Number(process.env.GOLF_TOPN_TTL_MIN) || 30) * 60 * 1000;
+// READ tolerance: how old a board may be and still PRICE. Deliberately much
+// larger than TTL_MS and tracked separately — conflating the two made top-N go
+// DEAD for a ~2.5min window every cycle: the board expired at TTL, but the
+// re-scrape takes ~150s (Puppeteer), so every read in between returned null and
+// declined. Operator hit exactly this (board 33min old vs a 30min TTL → Top 5
+// parlay "No Offers Available"). A worse failure — a scrape that keeps failing —
+// would have pinned top-N off indefinitely.
+// Safe because these are 4-day tournament outrights: the board barely moves
+// pre-event, so a 3h-old ties board is a far better price than no price. The
+// hard freshness floor stays — beyond this we still fail CLOSED.
+const MAX_AGE_MS = (Number(process.env.GOLF_TOPN_MAX_AGE_MIN) || 180) * 60 * 1000;
 const MIN_PLAYERS = 30;         // a partial field makes normalization invalid
 // Sanity band on the derived tie uplift T/N. Ties can only ADD players (T >= N),
 // and an uplift beyond ~1.6 means the derivation broke (bad scrape, mismatched
@@ -219,7 +231,10 @@ async function warmTopN(tournaments, { force = false } = {}) {
  */
 function getTopNFairProbSync(playerName, marketType, tournamentName) {
   if (!TOPN_MARKETS[marketType]) return null;
-  if (!_cache.at || Date.now() - _cache.at > TTL_MS) return null;
+  // MAX_AGE_MS, not TTL_MS — see the constant. TTL only governs when we kick a
+  // re-scrape; a board between TTL and MAX_AGE is still perfectly priceable and
+  // a re-warm is already in flight. Beyond MAX_AGE we fail closed.
+  if (!_cache.at || Date.now() - _cache.at > MAX_AGE_MS) return null;
   const slug = resolveDkSlug(tournamentName);
   if (!slug) return null;
   const board = _cache.bySlug[slug];
@@ -232,7 +247,7 @@ function getTopNFairProbSync(playerName, marketType, tournamentName) {
 }
 
 function __debugCache() {
-  return { at: _cache.at, ageMs: _cache.at ? Date.now() - _cache.at : null, ttlMs: TTL_MS,
+  return { at: _cache.at, ageMs: _cache.at ? Date.now() - _cache.at : null, ttlMs: TTL_MS, maxAgeMs: MAX_AGE_MS, priceable: !!(_cache.at && Date.now() - _cache.at <= MAX_AGE_MS),
     bySlug: Object.fromEntries(Object.entries(_cache.bySlug).map(([s, b]) => [s, {
       tournament: b.tournament, eventName: b.eventName,
       markets: Object.fromEntries(Object.entries(b.markets).map(([m, x]) => [m, { T: x.T, uplift: x.uplift, k: x.k, overround: x.overround, players: x.players.size }])),
