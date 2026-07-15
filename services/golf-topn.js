@@ -177,7 +177,14 @@ async function warmTopNForSlug(slug, tournamentName, { force = false } = {}) {
     // /top[\s-]?5\b/ regex would match it and we'd silently price the wrong
     // basis — the exact bug that started this. Require the name to say so.
     const nm = String(dkM.marketName || dkM.name || '');
-    if (!/includ\w*\s+ties/i.test(nm)) {
+    // DK is INCONSISTENT about this label — verified against the live page
+    // 2026-07-15: "Top 5 (Including Ties)" and "Top 10 (Including Ties)" are
+    // spelled out, but "Top 20 (Inc. Ties)" / "Top 30 (Inc. Ties)" abbreviate.
+    // Matching only /includ\w*/ silently threw away every Top 20 board as
+    // "basis unverified". Still REJECTS a bare "Top 20"/"Top 20 Finish" — those
+    // carry no ties qualifier and would be the dead-heat basis, which is the
+    // whole thing this guard exists to catch.
+    if (!/includ\w*\s+ties|\binc\.?\s+ties/i.test(nm)) {
       log.warn('GolfTopN', `${slug} ${cfg.dk}: DK market "${nm}" does not say "Including Ties" — refusing (basis unverified)`);
       continue;
     }
