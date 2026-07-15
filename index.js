@@ -6365,6 +6365,19 @@ function startStatusServer() {
     try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug, { force: true })) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
+  // Golf top-N (Top 5/10/20 INCLUDING TIES) board state. Read-only.
+  // Answers "why isn't top-N quoting?": no `bySlug` entry = no DK slug for that
+  // tournament (add GOLF_DK_SLUG_MAP) or the scrape hasn't landed yet (~142s,
+  // background); an empty `markets` = DK isn't serving that board (it had no
+  // Top 20 for The Open). `uplift` is the DERIVED ties factor (T/N) — if it ever
+  // drifts outside ~[1.0,1.6] the board is refused rather than priced.
+  app.get('/golf-topn', (req, res) => {
+    try {
+      const topN = require('./services/golf-topn');
+      res.json({ ok: true, ...topN.__debugCache() });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   // Make-the-cut dry-run: price PX's cut board off DataGolf and return exactly
   // what a sync WOULD write, WITHOUT touching Supabase or PX order entry.
   // Read-only review step — make_cut is DataGolf-priced (DK serves no cut

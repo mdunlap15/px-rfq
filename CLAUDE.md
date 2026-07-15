@@ -55,6 +55,8 @@ client/
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
 | `GOLF_OUTRIGHTS_PARLAY_ENABLED` | No | Default: `true`. Kill-switch for quoting golf outright legs (win/top 5/10/20/make cut) in **parlays**. When false, zero outright lines register → PX never sends an outright RFQ. Independent of the single-leg poster (still hard-disabled). |
 | `GOLF_OUTRIGHT_MAX_AGE_MIN` | No | Default: 360. Refuse a DataGolf outright board older than this. DataGolf serves the LAST tournament's board when a tour is idle (euro returned a 9-day-stale "BMW International Open" on 2026-07-14) — without this we'd quote a finished event. |
+| `GOLF_TOPN_TTL_MIN` | No | Default: 30. TTL of the DK ties-included top-N board cache (`services/golf-topn.js`). The DK scrape is Puppeteer (~142s/tournament) so it is warmed in the background and only ever read synchronously on the RFQ path. |
+| `GOLF_DK_SLUG_MAP` | No | JSON PX-tournament → DK-league-slug overrides, e.g. `{"the open":"the-open-championship"}`. PX says "2026 The Open" but DK's slug is `the-open-championship`, so slugify does NOT work. A tournament with no slug simply never registers top-N (logged). |
 | `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
 | `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
 | `LOG_LEVEL` | No | Default: `info` |
@@ -126,20 +128,30 @@ is why no golf outright leg had ever been registered or quoted. Registered via
   - `win` — sum of P(win) over the field is EXACTLY 1 (a 72-hole tie goes to a playoff), so the
     book field is **power-normalized to 1.0** → a true fair. Verified field sum 1.01.
   - `make_cut` — binary; **power 2-way de-vig** of make vs miss (see Odds Sources).
-  - `top_5/10/20` — **NOT QUOTED. The lines are not even registered.** PX settles TIES INCLUDED;
-    **DataGolf CONVERTS book odds to DEAD-HEAT** (it does not relay the book's posted price).
-    Proven against a live DK scrape of The Open, same book/market/moment:
-    Scheffler "Top 5 (Including Ties)" on DK's site **+144 (41.0%)** vs DataGolf's `draftkings`
-    top_5 **+178 (36.0%)**; field sums DK-site **7.96** vs DataGolf **6.27** (nominal 5), top_10
-    **14.54** vs **11.80**. All ~150 players ran 23-27% low. Quoting that underprices every leg.
-    (`dead_heat=yes|no` is NOT a toggle on this endpoint — verified identical.)
-    **To enable top-N**: price from DK's own board — `services/dk-scraper.js` →
-    `fetchGolfOutrights(slug)`, market names `"Top 5 (Including Ties)"` / `"Top 10 (Including
-    Ties)"` (The Open slug: `the-open-championship`). Note that scrape is Puppeteer and took
-    **~142s**, so it must be a warmed background cache, never the RFQ hot path. DK served Winner +
-    Top 5 + Top 10 for The Open but **no Top 20 and no Make Cut**.
-    ⚠ A "conservative RAW consensus" is NOT a valid workaround — raw is only conservative relative
-    to the SAME basis; on a dead-heat basis it still lands ~25% BELOW ties-included truth.
+  - `top_5/10/20` — **DK's "(Including Ties)" board ONLY** (`services/golf-topn.js`).
+    **DataGolf must NEVER price these**: it CONVERTS book odds to DEAD-HEAT rather than relaying the
+    book's posted price. Proven on The Open, same book/market/moment — Scheffler "Top 5 (Including
+    Ties)" on DK's site **+144 (41.0%)** vs DataGolf's `draftkings` top_5 **+178 (36.0%)**; field
+    sums DK-site **7.96** vs DataGolf **6.27** (nominal 5); top_10 **14.54** vs **11.80**. All ~150
+    players ran 23-27% low = a systematic UNDERPRICE. (`dead_heat=yes|no` is NOT a toggle on that
+    endpoint — verified identical.)
+    ⚠ A "conservative RAW consensus" is NOT a workaround — raw is only conservative relative to the
+    SAME basis; on a dead-heat basis it still lands ~25% BELOW ties-included truth.
+    **De-vig target is DERIVED, not guessed** (guessing biases toward underpricing): a dead-heat
+    field sums to EXACTLY N by construction, so `book_overround = dead-heat RAW sum ÷ N`; overround
+    is a property of the book's pricing, not the tie convention, so
+    `T = ties RAW sum ÷ book_overround` = the true ties-included field sum. Measured on The Open:
+    T(top_5)=**6.35**, T(top_10)=**12.32** — ties add ~1.35 players at top-5 and ~2.3 at top-10, and
+    ties being commoner deeper is an independent check that the derivation is sound. Both sums must
+    come from the SAME player intersection. `datagolf.fetchDeadHeatAnchor()` supplies the anchor and
+    is the ONLY sanctioned use of DataGolf top-N data — it is a calibration constant, never a price.
+  - **Coverage**: DK served Winner + Top 5 + Top 10 for The Open but **no Top 20 / no Make Cut**.
+    A top-N line is registered ONLY when its DK board is loaded, so PX can't send a leg we'd decline.
+  - **DK scrape is ~142s (Puppeteer)** → background warm on `GOLF_TOPN_TTL_MIN`, sync cache read on
+    the hot path. Cold-start is by design: first seed registers win/make_cut only; the next seed
+    picks up top-N. `golf-topn.js` also refuses if DK's market name doesn't literally say
+    "Including Ties" (the scraper's loose `/top[\s-]?5\b/` would otherwise match a dead-heat board)
+    and if the derived uplift falls outside [1.0, 1.6].
 - **Fails closed**: cold/stale board, unknown player, or <2 books → `null` → decline.
 - Fair lookup is a **sync cache read** on the RFQ hot path (`getOutrightFairProbSync`); boards are
   warmed at line-seed time by `warmGolfOutrightBoards()`.
@@ -226,6 +238,7 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
+| `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. **First stop when top-N isn't quoting**: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. |
 | `/single-leg/golf-outrights/make-cut-dryrun/:slug` | GET | Dry-run the DataGolf-priced make_cut board (no DB/PX writes). `?name=<tournament>` helps match DataGolf's event. Check `lay_ev_violations` = 0 before enabling. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
 | `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |

@@ -332,9 +332,20 @@ function getSeriesFairProb(lineInfo) {
  */
 function golfOutrightFair(lineInfo) {
   try {
+    const player = lineInfo.playerName || lineInfo.teamName;
+    // Top 5/10/20 come from DK's "(Including Ties)" board — the ONLY source on
+    // PX's settlement basis. DataGolf publishes top-N on the DEAD-HEAT basis
+    // (~25% low vs DK's ties board), so it must never price these. See
+    // services/golf-topn.js.
+    const topN = require('./golf-topn');
+    if (topN.getTopNFairProbSync) {
+      const t = topN.getTopNFairProbSync(player, lineInfo.marketType, lineInfo.tournamentName);
+      if (t && t.fairProb > 0 && t.fairProb < 1) return t;
+      // A top-N leg with no DK board declines — never fall through to DataGolf.
+      if (lineInfo.marketType === 'outright_top_5' || lineInfo.marketType === 'outright_top_10' || lineInfo.marketType === 'outright_top_20') return null;
+    }
     const dataGolf = require('./datagolf');
     if (!dataGolf.getOutrightFairProbSync) return null;
-    const player = lineInfo.playerName || lineInfo.teamName;
     const hit = dataGolf.getOutrightFairProbSync(player, lineInfo.marketType,
       [lineInfo.tournamentName, lineInfo.pxEventName]);
     if (!hit || !(hit.fairProb > 0 && hit.fairProb < 1)) return null;

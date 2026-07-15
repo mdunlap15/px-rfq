@@ -843,6 +843,39 @@ async function fetchOutrightBoard(tour, market) {
   return { tour, market, eventName: data.event_name || '', lastUpdated: data.last_updated || null, basis, players };
 }
 
+/**
+ * DEAD-HEAT ANCHOR for the DK ties-included top-N pipeline (services/golf-topn.js).
+ *
+ * This is the ONLY sanctioned use of DataGolf's top-N data. It is NOT a price —
+ * it is the calibration constant that lets us de-vig DK's ties-included board:
+ *
+ *   DataGolf publishes book odds on the DEAD-HEAT basis, and a dead-heat field
+ *   sums to EXACTLY N by construction (verified: their model gives 5.000/9.999/
+ *   20.002). So for a given book:
+ *        overround = (that book's dead-heat RAW sum) / N
+ *   That overround is a property of the BOOK's pricing, not of the tie
+ *   convention, so it carries over to the same book's ties-included board:
+ *        ties-included FAIR sum  =  (ties RAW sum) / overround
+ *   which is the de-vig target we could not otherwise derive.
+ *
+ * Returns { rawSum, n, byName: Map(normName -> rawImplied) } for `book` on the
+ * dead-heat basis, or null.
+ */
+async function fetchDeadHeatAnchor(tour, market, book = 'draftkings') {
+  const data = await _fetchDgOutrights(tour, market);
+  if (!data) return null;
+  const byName = new Map();
+  let rawSum = 0, n = 0;
+  for (const p of data.odds) {
+    const v = americanToImpliedProb(p[book]);
+    if (v == null || !(v > 0 && v < 1)) continue;
+    byName.set(_normalizeOutrightName(normalizeDgPlayerName(p.player_name)), v);
+    rawSum += v; n++;
+  }
+  if (n < 30) return null;
+  return { rawSum, n, byName, eventName: data.event_name || '', lastUpdated: data.last_updated || null };
+}
+
 /** All win/top-N boards across tours, cached. */
 async function fetchOutrightBoards({ force = false } = {}) {
   if (!config.dataGolf.apiKey) return {};
@@ -963,5 +996,6 @@ module.exports = {
   getOutrightFairProb,
   getOutrightFairProbSync,
   warmGolfOutrightBoards,
+  fetchDeadHeatAnchor,
   _normalizeOutrightName,
 };

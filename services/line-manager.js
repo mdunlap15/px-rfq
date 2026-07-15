@@ -128,6 +128,7 @@ const log = require('./logger');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
 const dataGolf = require('./datagolf');
+const golfTopN = require('./golf-topn');
 const db = require('./db');
 // Lazy require for orderTracker to avoid circular dependency
 let orderTracker = null;
@@ -648,22 +649,25 @@ function classifyGolfOutrightEvent(name) {
  *
  * Returns the number of lines registered.
  */
-// PX settles top 5/10/20 TIES INCLUDED, but our only wired fair-value source
-// (DataGolf) publishes those on the DEAD-HEAT basis — measured ~23-27% LOW vs
-// DK's own "Top N (Including Ties)" board on The Open (Scheffler top_5: DK site
-// +144 / DataGolf-as-DK +178). Quoting them would UNDERPRICE every leg, so we
-// don't register the lines at all — PX then never sends us a top-N leg, which is
-// a stronger guarantee than declining one. Re-enable ONLY once top-N is priced
-// from DK's ties-included scrape (services/dk-scraper.js → fetchGolfOutrights,
-// market names "Top 5 (Including Ties)" etc). See datagolf.js OUTRIGHT_MARKETS.
-const GOLF_OUTRIGHT_UNPRICEABLE = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
+// Top 5/10/20 are priced ONLY from DK's "(Including Ties)" board via
+// services/golf-topn.js — PX settles ties-included and DataGolf publishes top-N
+// on the DEAD-HEAT basis (~25% LOW; Scheffler top_5: DK site +144 vs
+// DataGolf-as-DK +178). We register a top-N line only when that DK board is
+// actually loaded for this tournament, so PX can't send us a leg we'd have to
+// decline. DK served Winner + Top 5 + Top 10 for The Open but NO Top 20.
+const GOLF_TOPN_MARKETS = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
 
 async function _registerGolfOutrightEvent(event) {
   const marketType = classifyGolfOutrightEvent(event.name);
   if (!marketType) return 0; // novelty outright ("Will anyone shoot 59") — skip
-  if (GOLF_OUTRIGHT_UNPRICEABLE.has(marketType)) {
-    log.info('Lines', `Golf outright SKIPPED (no ties-included source): ${event.name} — ${marketType} would price off DataGolf's dead-heat basis (~25% underprice vs PX ties-included)`);
-    return 0;
+  const tournamentForDk = String(event.name || '').split(/\s+-\s+/)[0].trim();
+  if (GOLF_TOPN_MARKETS.has(marketType)) {
+    // Probe the warmed DK board with a sentinel: no board ⇒ don't register.
+    const board = golfTopN.__debugCache().bySlug[golfTopN.resolveDkSlug(tournamentForDk) || ''];
+    if (!board || !board.markets[marketType]) {
+      log.info('Lines', `Golf outright SKIPPED: ${event.name} — no DK "Including Ties" board for ${marketType} (DataGolf's dead-heat basis is ~25% low and must never price it)`);
+      return 0;
+    }
   }
   // PX names outright events "<tournament> - <market>", e.g.
   //   "2026 The Open - Tournament Winner" / "... - To Make The Cut".
@@ -893,6 +897,26 @@ async function seedAllLines() {
   };
 
   // 3-4. Fetch markets and parse for each event
+  // Kick the DK ties-included top-N warm for EVERY golf tournament PX lists,
+  // in ONE call. Fire-and-forget: the DK scrape is Puppeteer (~142s/tournament)
+  // and must never block seeding or the RFQ path. It's one call rather than
+  // per-event because warmTopN is single-flight — per-event calls would collapse
+  // into the first one and starve every other tournament.
+  // Cold-start is BY DESIGN: the first seed registers only win/make_cut, and the
+  // next seed (REFRESH_INTERVAL_MINUTES) picks up top-N once the board lands.
+  // Fail-closed beats a fast wrong price.
+  if (GOLF_OUTRIGHTS_PARLAY_ENABLED) {
+    const golfTournaments = [...new Set(events
+      .filter(e => e.sport_name === 'Golf' && e.sub_type === 'outrights')
+      .map(e => String(e.name || '').split(/\s+-\s+/)[0].trim())
+      .filter(Boolean))].map(tournamentName => ({ tournamentName }));
+    if (golfTournaments.length) {
+      golfTopN.warmTopN(golfTournaments).catch(err => {
+        log.warn('Lines', `Golf top-N warm swallowed error: ${err.message}`);
+      });
+    }
+  }
+
   for (const event of events) {
     const _isGolfTrace = event.sport_name === 'Golf';
     if (_isGolfTrace) {
