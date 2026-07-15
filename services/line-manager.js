@@ -562,6 +562,10 @@ function matchTeamName(pxName, oddsApiNames) {
 // PX market.type → Odds API market key
 const MARKET_TYPE_MAP = {
   'moneyline': 'h2h',
+  // Knockout qualification ("To Advance To The Next Round"). Maps to h2h
+  // because P(advance) IS the DNB probability derived from the 3-way — see
+  // ADVANCE_MARKET_RE. The pricer's DNB branch keys on oddsApiMarket==='h2h'.
+  'advance': 'h2h',
   'spread': 'spreads',
   'total': 'totals',
   'team_total': 'team_totals',
@@ -623,6 +627,68 @@ const GOLF_OUTRIGHTS_PARLAY_ENABLED = String(process.env.GOLF_OUTRIGHTS_PARLAY_E
 // Classify the market from the PX EVENT name (the event names the market; each
 // market inside it is one player). Mirrors golf-outrights.js's PX_EVENT_PATTERNS.
 // top_20 before top_10 before top_5 so "Top 20" can't be shadowed by /top.?2/.
+// ---------------------------------------------------------------------------
+// SOCCER "TO ADVANCE TO THE NEXT ROUND" (knockout qualification)
+// ---------------------------------------------------------------------------
+// PX market: name "To Advance To The Next Round", type 'sup_moneyline',
+// selections named by COMPETITOR ABBREVIATION ("ENG"/"ARG") with NO
+// competitor_id — so they must be mapped against the event's competitors.
+// px.parseMarketSelections returns 0 selections for it (it only understands
+// team-named moneylines), hence the dedicated parser below.
+//
+// PRICING: reuses the existing DNB fair — no new odds source. In a knockout,
+// "advance" == "win including ET/penalties", so with w+a+d = 1:
+//     P(adv) = w + d*[w/(w+a)] = w*(w+a+d)/(w+a) = w/(w+a) = DNB
+// i.e. advance is EXACTLY the draw-no-bet probability, provided ET/pens track
+// 90-min relative strength. PX's own book agrees to within a tick
+// (ML 2-Way ENG -117/ARG +116 vs Advance ENG -118/ARG +115, 2026-07-15).
+//
+// KNOWN MODEL RISK: penalties are closer to a coin-flip than 90-min strength
+// implies, so the true P(adv|draw) sits between 0.5 and DNB. DNB therefore
+// slightly OVERSTATES the favourite (conservative for us — we quote its YES
+// rich) and slightly UNDERSTATES the underdog (we'd quote its YES cheap).
+// ADVANCE_UNDERDOG_SHADE_PP nudges the underdog side up to cover that; set 0 to
+// price pure DNB.
+const ADVANCE_MARKET_RE = /to\s+advance\s+to\s+the\s+next\s+round|to\s+advance\b|to\s+qualify\b/i;
+
+/**
+ * Parse PX's advance market into our selection shape.
+ * Maps each selection to home/away by matching its name against the event's
+ * competitor ABBREVIATION first, then full name. Returns [] if either side
+ * can't be resolved — fail closed rather than guess which team advances.
+ */
+function _parseAdvanceSelections(market, homeComp, awayComp) {
+  if (!homeComp || !awayComp) return [];
+  const flat = [];
+  for (const g of (market.selections || [])) { if (Array.isArray(g)) flat.push(...g); else flat.push(g); }
+  const norm = s => String(s || '').trim().toLowerCase();
+  const match = (selName) => {
+    const n = norm(selName);
+    if (!n) return null;
+    if (n === norm(homeComp.abbreviation) || n === norm(homeComp.name)) return { side: 'home', comp: homeComp };
+    if (n === norm(awayComp.abbreviation) || n === norm(awayComp.name)) return { side: 'away', comp: awayComp };
+    return null;
+  };
+  const out = []; const seen = new Set();
+  for (const sel of flat) {
+    if (!sel || !sel.line_id || seen.has(sel.line_id)) continue;
+    const m = match(sel.name);
+    if (!m) continue;
+    seen.add(sel.line_id);
+    out.push({
+      lineId: sel.line_id,
+      marketType: 'advance',
+      selection: m.side,          // 'home' | 'away' — drives the DNB lookup
+      teamName: m.comp.name,      // real team name, not the abbreviation
+      line: null,
+      competitorId: m.comp.id,
+      outcomeName: m.comp.name,
+    });
+  }
+  // Both sides or nothing: a one-sided advance market means our mapping failed.
+  return out.length === 2 ? out : [];
+}
+
 const GOLF_OUTRIGHT_EVENT_PATTERNS = [
   { key: 'outright_make_cut', re: /make\s*(?:\/\s*miss\s*)?(?:the\s+)?cut|miss\s*(?:the\s+)?cut/i },
   { key: 'outright_top_20',   re: /top[\s-]?20\b/i },
@@ -1229,7 +1295,21 @@ async function seedAllLines() {
         && !isSeriesMarket
         && /soccer|fifa/i.test(sportKey || '')
         && /^spread\b/i.test(m.name || '');
-      if (!isSupSeries && !isSoccerSupSpread && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
+      // "To Advance To The Next Round" — knockout qualification, also
+      // type='sup_moneyline'. Same carve-out shape as the asian-handicap spread
+      // above. Priced off our EXISTING DNB fair, which is not an approximation:
+      // in a knockout, advancing == winning incl. ET/pens, so
+      //   P(adv) = w + d*[w/(w+a)] = w*(w+a+d)/(w+a) = w/(w+a) = DNB   (since w+a+d=1)
+      // PX's own book confirms it — Moneyline (2 Way) ENG -117/ARG +116 vs
+      // To Advance ENG -118/ARG +115, one tick apart (verified 2026-07-15).
+      const isSoccerAdvance = m.type === 'sup_moneyline'
+        && !isSeriesMarket
+        && /soccer|fifa/i.test(sportKey || '')
+        && ADVANCE_MARKET_RE.test(m.name || '');
+      if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
+      // Advance bypasses the sub-game/prop name filter below ("Next Round"
+      // would otherwise look prop-ish) — it is a full-event market.
+      if (isSoccerAdvance) return true;
       // Series markets bypass the sub-game/prop filter and the name-
       // allowlist + bounds checks. Each variant must match one of:
       //   Series Winner      → type='moneyline'
@@ -1391,7 +1471,18 @@ async function seedAllLines() {
         }
         continue; // K-prop market done — skip standard processing
       }
-      const parsed = px.parseMarketSelections(market);
+      // "To Advance To The Next Round" needs its own parser: px's returns 0
+      // selections for it (outcomes are bare abbreviations "ENG"/"ARG" with no
+      // competitor_id, not team-named like a normal moneyline).
+      const _isAdvanceMkt = market.type === 'sup_moneyline'
+        && /soccer|fifa/i.test(sportKey || '')
+        && ADVANCE_MARKET_RE.test(market.name || '');
+      const parsed = _isAdvanceMkt
+        ? _parseAdvanceSelections(market, homeComp, awayComp)
+        : px.parseMarketSelections(market);
+      if (_isAdvanceMkt) {
+        log.info('Lines', `Advance market "${market.name}" (${event.name}) → ${parsed.length} selections`);
+      }
       if (isGolfSport) {
         log.info('Lines', `[golf-debug] Parsed market "${market.name}" type=${market.type} → ${parsed.length} selections`);
         golfTrace.marketsPassedFilter++;
@@ -1401,7 +1492,11 @@ async function seedAllLines() {
       // Detect 2-way / Draw No Bet soccer moneylines.
       // PX labels the 2-way soccer ML market as "Moneyline (2 Way)".
       // Also catch explicit "Draw No Bet" / "DNB" / "Moneyline 2W" variants.
-      const isDNB = market.type === 'moneyline' && /\b2\s*[\s\-_]?way\b|draw\s*no\s*bet|\bdnb\b|\b2w\b/i.test(market.name || '');
+      // Advance is draw-no-bet BY CONSTRUCTION (P(adv) = w/(w+a)), so flag it
+      // too — otherwise the pricer would compare our 2-way offer against a
+      // 3-way book fair and the leg would price ~35% low.
+      const isDNB = (market.type === 'moneyline' && /\b2\s*[\s\-_]?way\b|draw\s*no\s*bet|\bdnb\b|\b2w\b/i.test(market.name || ''))
+        || (market.type === 'sup_moneyline' && ADVANCE_MARKET_RE.test(market.name || ''));
       const mName = market.name || '';
       const isSeriesWinnerMarket = seriesWinnerNamePat.test(mName);
       const isSeriesSpreadMarket = seriesSpreadNamePat.test(mName);
@@ -1478,6 +1573,17 @@ async function seedAllLines() {
           // over/under to query DK.
           oddsApiSelection = sel.selection; // 'over' or 'under'
           oddsApiMarket = 'series_total';
+        } else if (sel.marketType === 'advance') {
+          // "To Advance To The Next Round". _parseAdvanceSelections already
+          // resolved each side to 'home'/'away' against the event competitors
+          // (PX names these selections by ABBREVIATION — "ENG"/"ARG" — with no
+          // competitor_id, so the moneyline branch's matchTeamName cannot do
+          // it). Without this branch oddsApiSelection stays null and every
+          // advance selection is silently dropped by the gate below.
+          // oddsApiMarket is already 'h2h' via MARKET_TYPE_MAP; combined with
+          // isDNB the pricer renormalises the 3-way to 2-way, which IS
+          // P(advance).
+          oddsApiSelection = sel.selection; // 'home' | 'away'
         } else if (sel.marketType === 'moneyline') {
           // Reject YES/NO selections — these are PX-tagged 'moneyline' but
           // are actually yes/no prop markets ("Player To Win At Least One

@@ -3530,6 +3530,48 @@ function shouldDecline(legs, parlayId) {
   }
 
   // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // SOCCER "TO ADVANCE" vs the 2-WAY MONEYLINE — same event, SAME BET.
+  // PX's "Moneyline (2 Way)" is draw-no-bet, and P(advance) IS the DNB
+  // probability (advance == win incl. ET/pens ⇒ w + d·w/(w+a) = w/(w+a)).
+  // So "England to advance" and "England DNB" are the SAME wager priced twice —
+  // both resolve ~54.9% off the same 3-way. Multiplying them gives 0.549² = 30%
+  // against a true 54.9%: a ~1.8x underprice on a leg pair a bettor can build
+  // in two clicks. The generic SGP machinery would classify it as an unknown
+  // moneyline_advance combo, and the golf guard keys on PLAYER so it can't see
+  // this. Block same-event, same-team advance+moneyline outright.
+  // OPPOSITE teams (ENG advance + ARG DNB) are near-mutually-exclusive, so
+  // independent multiplication OVERSTATES them — conservative, left allowed.
+  {
+    const legInfos = [];
+    for (const l of (legs || [])) {
+      if (!l) continue;
+      const lid = l.line_id || l.lineId || l;
+      let li = l.lineInfo;
+      if (!li) { try { li = lineManager.lookupLine(lid); } catch (_) { li = null; } }
+      if (li) legInfos.push(li);
+    }
+    const advLegs = legInfos.filter(li => li.marketType === 'advance');
+    if (advLegs.length) {
+      const norm = s => String(s || '').toLowerCase().trim();
+      // Two advance legs on the same event = the two sides of one market.
+      for (const a of advLegs) {
+        for (const b of legInfos) {
+          if (a === b) continue;
+          if (String(a.pxEventId) !== String(b.pxEventId)) continue;
+          const sameTeam = norm(a.teamName) && norm(a.teamName) === norm(b.teamName);
+          if (b.marketType === 'advance' || (b.marketType === 'moneyline' && sameTeam)) {
+            return {
+              declined: true,
+              reason: 'advance_dnb_duplicate',
+              detail: `${a.teamName} advance + ${b.teamName} ${b.marketType} on event ${a.pxEventId} — PX's 2-way moneyline IS draw-no-bet and P(advance)==DNB, so these are the SAME bet; independent pricing underprices ~1.8x`,
+            };
+          }
+        }
+      }
+    }
+  }
+
   // GOLF OUTRIGHT structural guards. MUST run before anything that could
   // approve the parlay.
   //
