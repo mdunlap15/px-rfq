@@ -3171,6 +3171,48 @@ const GOLF_OUTRIGHT_SUBCATEGORIES = [
   'tournament',
 ];
 
+// Accordion labels whose boards DK lazy-loads (absent from the default XHR).
+// LOOSE regexes on purpose — DK writes "Top 5 (Including Ties)" but
+// "Top 20 (Inc. Ties)", and an exact-string match on the spelled-out form is
+// exactly why Top 20 never loaded. Anchored on the NUMBER so "Top 20" can't be
+// matched by a "Top 2"-style label, and 20 is tried before 10 before 5 for the
+// same shadowing reason as GOLF_OUTRIGHT_MARKETS.
+const GOLF_LAZY_TAB_RES = [
+  /^top\s*20\b.*\bties\b/i,
+  /^top\s*10\b.*\bties\b/i,
+  /^top\s*5\b.*\bties\b/i,
+  /^to\s+make\s+the\s+cut$/i,
+];
+
+/**
+ * Click each lazy-loaded golf outright accordion so its markets XHR fires.
+ * Best-effort and never throws: a tab that isn't present (DK doesn't post Top 20
+ * for every tournament) simply isn't clicked, and the caller's existing
+ * "which keys did we capture" logic decides what registers. Clicking only makes
+ * a payload VISIBLE — it never changes how a market is categorized or priced.
+ */
+async function _clickLazyGolfTabs(page) {
+  try {
+    const labels = await page.evaluate((sources) => {
+      const res = sources.map(s => new RegExp(s.src, s.flags));
+      const els = Array.from(document.querySelectorAll('button,[role="tab"],a,h2,h3'));
+      const hit = [];
+      for (const re of res) {
+        const el = els.find(e => re.test((e.textContent || '').trim()) && e.offsetParent !== null);
+        if (el) { try { el.scrollIntoView(); el.click(); hit.push((el.textContent || '').trim()); } catch (_) { /* ignore */ } }
+      }
+      return hit;
+    }, GOLF_LAZY_TAB_RES.map(r => ({ src: r.source, flags: r.flags })));
+    if (labels.length) {
+      log.debug('DkScraper', `Golf: clicked lazy tabs [${labels.join(' | ')}]`);
+      // Give each clicked accordion time to fire + return its markets XHR.
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  } catch (err) {
+    log.debug('DkScraper', `Golf lazy-tab click failed (non-fatal): ${err.message}`);
+  }
+}
+
 async function fetchGolfOutrights(slug, { force = false } = {}) {
   if (!slug || typeof slug !== 'string') throw new Error('fetchGolfOutrights: slug required (DK tournament URL segment, e.g. "the-memorial-tournament")');
   const cacheKey = 'golf_outright_' + slug;
@@ -3227,6 +3269,21 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
           await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
+          // Top 20 (and Make Cut) are LAZY-LOADED behind their own accordion
+          // buttons — they are NOT in any tab's default XHR payload, so URL
+          // navigation alone can never see them. That is why this scraper only
+          // ever reported [top_1, top_5, top_10] and we wrongly concluded "DK
+          // doesn't post Top 20" (operator corrected 2026-07-15: it does).
+          //
+          // Match LOOSELY, never by exact text: DK is inconsistent about the
+          // label — "Top 5 (Including Ties)" and "Top 10 (Including Ties)" are
+          // spelled out but "Top 20 (Inc. Ties)" / "Top 30 (Inc. Ties)" are
+          // abbreviated. scripts/dk-golf-outrights.js clicks by exact string
+          // 'Top 20 (Including Ties)' and so silently returns top20: 0.
+          // categorizeOutrightMarketName still decides what we KEEP, and
+          // golf-topn.js still refuses any board whose name lacks a ties
+          // qualifier — clicking only makes the payload visible.
+          await _clickLazyGolfTabs(page);
         } catch (err) {
           lastErr = err;
           log.debug('DkScraper', `Golf outright ${slug} nav failed (${url}): ${err.message}`);
