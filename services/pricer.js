@@ -3531,15 +3531,29 @@ function shouldDecline(legs, parlayId) {
 
   // ---------------------------------------------------------------------
   // ---------------------------------------------------------------------
-  // SOCCER "TO ADVANCE" vs the 2-WAY MONEYLINE — same event, SAME BET.
-  // PX's "Moneyline (2 Way)" is draw-no-bet, and P(advance) IS the DNB
-  // probability (advance == win incl. ET/pens ⇒ w + d·w/(w+a) = w/(w+a)).
-  // So "England to advance" and "England DNB" are the SAME wager priced twice —
-  // both resolve ~54.9% off the same 3-way. Multiplying them gives 0.549² = 30%
-  // against a true 54.9%: a ~1.8x underprice on a leg pair a bettor can build
-  // in two clicks. The generic SGP machinery would classify it as an unknown
-  // moneyline_advance combo, and the golf guard keys on PLAYER so it can't see
-  // this. Block same-event, same-team advance+moneyline outright.
+  // SOCCER "TO ADVANCE" vs the 2-WAY MONEYLINE — same event, near-nested.
+  //
+  // They are DIFFERENT BETS (operator correction 2026-07-15 — do not conflate):
+  //   Moneyline (2 Way) = DNB: 90-MINUTE regulation only; a draw REFUNDS.
+  //   To Advance        = the whole tie INCLUDING extra time + penalties; no push.
+  // Their fair PROBABILITIES coincide only because ET/pens track 90-min relative
+  // strength: P(adv) = w + d·q equals DNB = w/(w+a) iff q = w/(w+a). PX's own
+  // book agrees (ML 2-Way -117/+116 vs Advance -118/+115) — which is why pricing
+  // advance off the DNB fair is sound. Same number, different settlement.
+  //
+  // But that difference is exactly what makes parlaying them DANGEROUS, not safe.
+  // Take ENG advance + ENG DNB (each ~54.9%):
+  //   ENG wins in 90  -> both win
+  //   Draw            -> DNB PUSHES (leg voided, parlay reduces to advance),
+  //                      advance carries into ET/pens
+  //   ARG wins in 90  -> both lose
+  // So the parlay effectively pays whenever ENG advances: true ≈ 54.9%, while
+  // independent multiplication quotes 0.549² ≈ 30% — a ~1.8x UNDERPRICE on a
+  // pair a bettor can build in two clicks. The DNB push means the second leg
+  // adds almost no extra risk while we charge as if it did.
+  //
+  // Nothing else catches this: the SGP machinery sees an unrecognised
+  // moneyline_advance combo, and the golf guard keys on PLAYER.
   // OPPOSITE teams (ENG advance + ARG DNB) are near-mutually-exclusive, so
   // independent multiplication OVERSTATES them — conservative, left allowed.
   {
@@ -3564,7 +3578,7 @@ function shouldDecline(legs, parlayId) {
             return {
               declined: true,
               reason: 'advance_dnb_duplicate',
-              detail: `${a.teamName} advance + ${b.teamName} ${b.marketType} on event ${a.pxEventId} — PX's 2-way moneyline IS draw-no-bet and P(advance)==DNB, so these are the SAME bet; independent pricing underprices ~1.8x`,
+              detail: `${a.teamName} advance + ${b.teamName} ${b.marketType} on event ${a.pxEventId} — advance (incl. ET/pens) and the 2-way DNB (90 min, draw refunds) are near-nested: on a draw the DNB leg PUSHES and the parlay reduces to advance, so true ≈ P(advance) ≈ 54.9% vs an independent 0.549² ≈ 30% (~1.8x underprice)`,
             };
           }
         }
