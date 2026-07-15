@@ -103,12 +103,16 @@ const config = {
     //     sides, and top-N rides a derived ties uplift.
     //  3) We are almost certainly the only SP quoting these, so a wider spread
     //     costs little flow.
-    // 0.05 puts ~+1.28pp on a coinflip — comfortably clear of the 0.53pp error —
+    // 0.12 puts ~6.4pp two-sided on a coinflip, just ABOVE the sharpest book on
+    // this market (bet365 6.2%, betway 5.8%, unibet 5.7% measured) — correct,
+    // since our fair is WORSE than theirs. 0.05 was too timid: it left only
+    // 2.6pp, and near 50% the American ladder has NO rung between +100 and -100,
+    // so the NO side snapped to +100 and lost its vig ENTIRELY.
     // while longshot `win` legs (~2% fair) take only ~5% relative, so the winner
     // market stays quotable. This is a FLOOR: the favorite ramp can still go
     // higher. Set VIG_GOLF_OUTRIGHT_MIN=0 to disable.
     vigGolfOutrightMin: process.env.VIG_GOLF_OUTRIGHT_MIN !== undefined && process.env.VIG_GOLF_OUTRIGHT_MIN !== ''
-      ? parseFloat(process.env.VIG_GOLF_OUTRIGHT_MIN) : 0.05,
+      ? parseFloat(process.env.VIG_GOLF_OUTRIGHT_MIN) : 0.12,
     // Pitcher strikeouts prop floor — minimum per-leg vig applied to
     // marketType='player_strikeouts' legs. Skips the favorite-slope
     // ramp that game-line legs use because props don't have favorites
