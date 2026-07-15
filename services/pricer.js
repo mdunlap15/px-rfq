@@ -2897,7 +2897,16 @@ function priceParlay(legs, opts = {}) {
   // normal cap. Risk is still bounded by maxRisk/stake caps, which is the real
   // control on payout size — this cap is about odds shape, not exposure.
   const _allOutright = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'golf_outrights');
-  const maxOdds = (_allOutright ? (config.pricing.maxOddsGolfOutrights || 6000) : (config.pricing.maxOdds || 1000));
+  const _globalMaxOdds = config.pricing.maxOdds || 1000;
+  // RAISES the cap for all-outright parlays, never LOWERS it. Must be a
+  // Math.max against the global: the operator raised MAX_ODDS to 15000
+  // (2026-07-15) and the outright branch — which exists to be MORE permissive —
+  // silently overrode it back down to 6000 for exactly the parlays it was meant
+  // to help. A per-sport override that can undercut the global is a trap; if
+  // someone sets MAX_ODDS above the outright default, honour it.
+  const maxOdds = _allOutright
+    ? Math.max(_globalMaxOdds, config.pricing.maxOddsGolfOutrights || 6000)
+    : _globalMaxOdds;
   if (americanOdds > maxOdds) {
     log.debug('Pricing', `Declined: odds +${americanOdds} exceed max +${maxOdds}`);
     priceParlay._lastFailure = {
