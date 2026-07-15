@@ -1520,6 +1520,12 @@ function priceParlay(legs, opts = {}) {
   for (const pl of pricedLegs) {
     const eid = pl.lineInfo.pxEventId;
     if (!eid) continue;
+    // Golf outrights share a pxEventId across the WHOLE FIELD (one PX event per
+    // market holds all 156 players), so they are never "same game". Counting
+    // them here would apply the SGP vig amplifier + correlation factor to two
+    // unrelated players. Mirrors the identical exemption in shouldDecline's
+    // byEvent grouping — keep the two in lockstep.
+    if (pl.lineInfo.sport === 'golf_outrights') continue;
     _eventCounts[eid] = (_eventCounts[eid] || 0) + 1;
   }
   const isSGPParlay = Object.values(_eventCounts).some(c => c >= 2);
@@ -3939,6 +3945,18 @@ function shouldDecline(legs, parlayId) {
   for (const l of resolvedLegs) {
     const eid = l.lineInfo.pxEventId;
     if (!eid) continue;
+    // GOLF OUTRIGHTS ARE NOT SAME-GAME. PX models an outright as ONE event
+    // holding the ENTIRE FIELD ("2026 The Open - To Make The Cut" = all 156
+    // players), so a shared pxEventId here means "same market type", NOT "same
+    // game". Grouping them made every 2-leg outright parlay look like an SGP and
+    // get blocked as an unrecognized combo — operator hit exactly this on PX:
+    // "Cameron Young YES + Ludvig Aberg YES" -> No Offers Available, tagged SGP.
+    // Two DIFFERENT players are near-independent (mildly NEGATIVE: they compete
+    // for the same ~70 cut spots / finishing slots), so independent
+    // multiplication OVERSTATES the parlay = conservative for us. The real
+    // correlation risk — the SAME player across nested markets — is caught by
+    // the golf_same_player_nested pre-pass above, which keys on PLAYER, not event.
+    if (l.lineInfo.sport === 'golf_outrights') continue;
     if (!byEvent[eid]) byEvent[eid] = [];
     byEvent[eid].push({ market: l.lineInfo.marketType, team: l.lineInfo.teamName, home: l.lineInfo.homeTeam, away: l.lineInfo.awayTeam, sport: l.lineInfo.sport, li: l.lineInfo });
   }
