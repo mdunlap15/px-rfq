@@ -866,7 +866,13 @@ async function seedAllLines() {
   const events = allEvents.filter(e => {
     if (!pxSportNames.includes(e.sport_name)) return false;
     if (e.status && e.status === 'settled') return false;
-    if (!e.competitors || e.competitors.length < 2) return false;
+    // Golf OUTRIGHTS legitimately carry competitors: [] — PX models them as one
+    // event per market ("2026 The Open - Tournament Winner") whose MARKETS are
+    // the players, not a two-competitor matchup. This <2 guard silently dropped
+    // them before the main loop, so _registerGolfOutrightEvent never ran and the
+    // Lines table showed zero outrights (operator report 2026-07-15).
+    const _isGolfOutright = e.sport_name === 'Golf' && e.sub_type === 'outrights';
+    if (!_isGolfOutright && (!e.competitors || e.competitors.length < 2)) return false;
     if (e.scheduled) {
       const startMs = new Date(e.scheduled).getTime();
       const cutoffHours = POST_GAME_CUTOFF_HOURS_BY_SPORT[e.sport_name] ?? DEFAULT_CUTOFF_HOURS;
