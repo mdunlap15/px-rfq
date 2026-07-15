@@ -623,6 +623,11 @@ function computeSingleLegVig(fairProb, sport, marketType) {
   // ~1.5% pair vig on golf while RFQs would have offered ~2.5% pair.
   const golfMatchupMinVig = config.pricing.vigGolfMatchupMin || 0;
   if (sport === 'golf_matchups' && golfMatchupMinVig > 0) vig = Math.max(vig, golfMatchupMinVig);
+  // Golf outrights: floor per vigGolfOutrightMin. MUST mirror getEffectiveVig's
+  // copy below, or the Lines tab shows a margin we would never actually offer —
+  // which is exactly how the too-narrow spreads got noticed.
+  const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
+  if (sport === 'golf_outrights' && golfOutrightMinVig > 0) vig = Math.max(vig, golfOutrightMinVig);
   return vig;
 }
 
@@ -2080,6 +2085,13 @@ function priceParlay(legs, opts = {}) {
     const golfMatchupMinVig = config.pricing.vigGolfMatchupMin || 0;
     if (sport === 'golf_matchups' && golfMatchupMinVig > 0) {
       vig = Math.max(vig, golfMatchupMinVig);
+    }
+    // Golf outrights floor — the RFQ-path twin of the computeSingleLegVig copy.
+    // Our fair has a measured ~0.53pp error and payout-vig at defaultVig 1.6%
+    // yields only +0.41pp at a coinflip => negative EV on make_cut coinflips.
+    const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
+    if (sport === 'golf_outrights' && golfOutrightMinVig > 0) {
+      vig = Math.max(vig, golfOutrightMinVig);
     }
     // First-5-innings (F5) floor — the settlement analysis found F5 totals
     // under-won by 7.6pp and F5 run lines by 12.8pp (our fair runs

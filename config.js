@@ -90,6 +90,25 @@ const config = {
     // baseVig + favorite ramp, so extreme favorites still pay more.
     // Default 0.05 (5%); tunable via VIG_SERIES_MIN env var.
     vigSeriesMin: parseFloat(process.env.VIG_SERIES_MIN) || 0.05,
+    // Minimum per-leg vig for golf OUTRIGHT legs (win / top 5-10-20 / make cut).
+    // Same rationale as vigSeriesMin, but the need is sharper and measurable:
+    //  1) Our fair carries a MEASURED ~0.53pp error (power de-vig vs DataGolf's
+    //     model over 118 players). Vig is applied to the PAYOUT, so at a coinflip
+    //     the margin is only ~fair×vig/2: at defaultVig 1.6% that is +0.41pp —
+    //     SMALLER than our own fair error, i.e. NEGATIVE EV. make_cut boards are
+    //     full of coinflips, so this is the common case, not the tail.
+    //     (Operator caught this on the live board: Novak -107/+104 = 0.71pp
+    //     TOTAL two-sided margin.)
+    //  2) Thin sourcing — a player prices off as few as 2 books quoting both
+    //     sides, and top-N rides a derived ties uplift.
+    //  3) We are almost certainly the only SP quoting these, so a wider spread
+    //     costs little flow.
+    // 0.05 puts ~+1.28pp on a coinflip — comfortably clear of the 0.53pp error —
+    // while longshot `win` legs (~2% fair) take only ~5% relative, so the winner
+    // market stays quotable. This is a FLOOR: the favorite ramp can still go
+    // higher. Set VIG_GOLF_OUTRIGHT_MIN=0 to disable.
+    vigGolfOutrightMin: process.env.VIG_GOLF_OUTRIGHT_MIN !== undefined && process.env.VIG_GOLF_OUTRIGHT_MIN !== ''
+      ? parseFloat(process.env.VIG_GOLF_OUTRIGHT_MIN) : 0.05,
     // Pitcher strikeouts prop floor — minimum per-leg vig applied to
     // marketType='player_strikeouts' legs. Skips the favorite-slope
     // ramp that game-line legs use because props don't have favorites
