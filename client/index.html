@@ -1245,7 +1245,8 @@
                   <option value="soccer_usa_nwsl">NWSL</option>
                   <option value="mma_mixed_martial_arts">MMA</option>
                   <option value="boxing_boxing">Boxing</option>
-                  <option value="golf_matchups">Golf</option>
+                  <option value="golf_matchups">Golf (Matchups)</option>
+                  <option value="golf_outrights">Golf (Outrights)</option>
                 </select>
               </label>
               <label style="font-size:12px; color:var(--text2);">Market:
@@ -2618,7 +2619,7 @@
       'soccer_spain_la_liga', 'soccer_italy_serie_a',
       'soccer_germany_bundesliga', 'soccer_france_ligue_one',
       'soccer_uefa_champs_league', 'soccer_uefa_europa_league',
-      'golf_matchups', 'mma_mixed_martial_arts', 'boxing_boxing',
+      'golf_matchups', 'golf_outrights', 'mma_mixed_martial_arts', 'boxing_boxing',
     ];
 
     html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
@@ -8372,6 +8373,10 @@
       'soccer_france_ligue_one': 'Ligue 1',
       'soccer_usa_nwsl': 'NWSL',
       'golf_matchups': 'Golf',
+      // Distinct key, NOT collapsed into golf_matchups: outright legs are
+      // nested YES/NO player markets with their own pricing + correlation
+      // rules, and the Lines filter needs to select them separately.
+      'golf_outrights': 'Golf Outrights',
       'golf_pga_championship': 'PGA',
       'mma_mixed_martial_arts': 'MMA',
       'boxing_boxing': 'Boxing',
@@ -8433,7 +8438,11 @@
     if (s === 'icehockey_nhl' || s === 'nhl' || s === 'hockey' || s === 'ice hockey') return 'NHL';
     // Tennis
     if (s === 'tennis') return 'Tennis';
-    // Golf — matchups AND tournament outrights both roll up to Golf
+    // Golf. Outrights get their OWN label — they are a separate registered
+    // sport key ('golf_outrights': winner / top 5-10-20 / make cut, one YES/NO
+    // market per player), not matchups, and rolling them into "Golf" hid 780
+    // lines behind the matchup filter (operator report 2026-07-15).
+    if (s === 'golf_outrights') return 'Golf Outrights';
     if (s === 'golf_matchups' || s === 'golf_pga_championship' || s === 'golf' || s === 'pga' || s === 'lpga') return 'Golf';
     // Combat sports
     if (s === 'mma_mixed_martial_arts' || s === 'mma' || s === 'ufc') return 'MMA';

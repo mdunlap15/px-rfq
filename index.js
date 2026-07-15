@@ -11488,6 +11488,25 @@ function startStatusServer() {
             fairProb = golfRes;
           }
         }
+        // Golf outrights (winner / top 5-10 / make cut). Own fair-prob paths —
+        // top-N from DK's "Including Ties" board, make_cut/win from DataGolf —
+        // so the generic oddsFeed.getFairProb knows nothing about them and the
+        // column would read "-". Mirrors exactly what priceParlay resolves at
+        // RFQ time, including the NO-side complement for make_cut.
+        else if (info.sport === 'golf_outrights') {
+          try {
+            const topN = require('./services/golf-topn');
+            const dataGolf = require('./services/datagolf');
+            let hit = topN.getTopNFairProbSync(info.playerName || info.teamName, info.marketType, info.tournamentName);
+            if (!hit && !/^outright_top_/.test(info.marketType || '')) {
+              hit = dataGolf.getOutrightFairProbSync(info.playerName || info.teamName, info.marketType,
+                [info.tournamentName, info.pxEventName]);
+            }
+            if (hit && hit.fairProb > 0 && hit.fairProb < 1) {
+              fairProb = info.selection === 'no' ? (1 - hit.fairProb) : hit.fairProb;
+            }
+          } catch (_) { /* leave null — the row just shows "-" */ }
+        }
         // Player-prop lines (K-prop + Phase-2 NBA/NHL props) carry their
         // resolved fair prob directly on lineInfo because the seed-time
         // bridge already paid the SharpAPI / TOA lookup cost. Read it
