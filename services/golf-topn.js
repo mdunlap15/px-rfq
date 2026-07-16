@@ -215,17 +215,48 @@ async function warmTopN(tournaments, { force = false } = {}) {
   _inflight = (async () => {
     const bySlug = {};
     const seen = new Set();
+    let freshMarkets = false;   // true only if a scrape actually returned markets
     for (const t of (tournaments || [])) {
       const slug = resolveDkSlug(t.tournamentName);
       if (!slug) { log.warn('GolfTopN', `No DK slug for "${t.tournamentName}" — top-N will not quote (add to GOLF_DK_SLUG_MAP)`); continue; }
       if (seen.has(slug)) continue;
       seen.add(slug);
-      try { bySlug[slug] = await warmTopNForSlug(slug, t.tournamentName, { force }); }
+      // NEVER let an empty/failed scrape destroy a good board. Previously this
+      // assigned the result unconditionally and then stamped _cache.at = now, so
+      // one bad DK scrape replaced a working board with { markets: {} } that
+      // still looked FRESH — /golf-topn reported priceable:true, ageMs 46min,
+      // markets:{} while every top-N leg silently declined no_fair_value
+      // (operator caught this live 2026-07-16; it is also why an earlier
+      // "top_5 priced 0/156" reading was real and I wrongly dismissed it).
+      // A stale-but-real board is strictly better than an empty one: these are
+      // 4-day tournament outrights that barely move, and MAX_AGE_MS still
+      // enforces the hard freshness floor.
+      let built = null;
+      try { built = await warmTopNForSlug(slug, t.tournamentName, { force }); }
       catch (e) { log.warn('GolfTopN', `warm ${slug} failed: ${e.message}`); }
+      const gotMarkets = built && built.markets && Object.keys(built.markets).length > 0;
+      const prev = _cache.bySlug[slug];
+      const prevHadMarkets = prev && prev.markets && Object.keys(prev.markets).length > 0;
+      if (gotMarkets) {
+        bySlug[slug] = built;
+        freshMarkets = true;
+      } else if (prevHadMarkets) {
+        bySlug[slug] = prev; // KEEP the last good board; do NOT regress to empty
+        log.warn('GolfTopN', `${slug}: scrape returned NO top-N markets — keeping previous board (${Object.keys(prev.markets).join(',')}). It will AGE OUT normally; top-N declines once past MAX_AGE.`);
+      } else {
+        log.warn('GolfTopN', `${slug}: scrape returned NO top-N markets and no previous board — top-N will DECLINE until a scrape succeeds`);
+      }
     }
-    _cache = { at: Date.now(), bySlug };
+    // Advance the freshness stamp ONLY on a genuinely fresh scrape. Retaining a
+    // previous board must NOT re-stamp it: otherwise a persistently failing
+    // scrape would refresh `at` every cycle and serve a stale board forever,
+    // defeating MAX_AGE. Retained boards keep their original age and expire.
+    _cache = { at: freshMarkets ? Date.now() : _cache.at, bySlug };
     const summary = Object.entries(bySlug).map(([s, b]) => `${s}:[${Object.keys(b.markets).join(',') || 'none'}]`).join(' ');
-    log.info('GolfTopN', `Warmed ${Object.keys(bySlug).length} tournament(s): ${summary || 'none'}`);
+    const heldMarkets = Object.values(bySlug).some(b => b && b.markets && Object.keys(b.markets).length > 0);
+    log.info('GolfTopN', `Warmed ${Object.keys(bySlug).length} tournament(s): ${summary || 'none'}`
+      + (heldMarkets ? (freshMarkets ? '' : '  (retained previous board — scrape returned nothing)')
+                     : '  ** NO MARKETS — top-N DECLINING **'));
     return _cache;
   })().finally(() => { _inflight = null; });
   return _inflight;
@@ -254,7 +285,16 @@ function getTopNFairProbSync(playerName, marketType, tournamentName) {
 }
 
 function __debugCache() {
-  return { at: _cache.at, ageMs: _cache.at ? Date.now() - _cache.at : null, ttlMs: TTL_MS, maxAgeMs: MAX_AGE_MS, priceable: !!(_cache.at && Date.now() - _cache.at <= MAX_AGE_MS),
+  // priceable must mean "top-N legs can actually price RIGHT NOW", i.e. we hold
+  // real markets AND they're within MAX_AGE. Reporting it on age alone made a
+  // dead board (markets:{}) advertise priceable:true for 3h while every leg
+  // declined — the operator had to spot the empty `markets` by eye.
+  // marketCount is surfaced so an outage is obvious at a glance.
+  const _marketCount = Object.values(_cache.bySlug || {})
+    .reduce((n, b) => n + ((b && b.markets) ? Object.keys(b.markets).length : 0), 0);
+  return { at: _cache.at, ageMs: _cache.at ? Date.now() - _cache.at : null, ttlMs: TTL_MS, maxAgeMs: MAX_AGE_MS,
+    marketCount: _marketCount,
+    priceable: !!(_cache.at && _marketCount > 0 && Date.now() - _cache.at <= MAX_AGE_MS),
     bySlug: Object.fromEntries(Object.entries(_cache.bySlug).map(([s, b]) => [s, {
       tournament: b.tournament, eventName: b.eventName,
       markets: Object.fromEntries(Object.entries(b.markets).map(([m, x]) => [m, { T: x.T, uplift: x.uplift, k: x.k, overround: x.overround, players: x.players.size }])),
