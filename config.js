@@ -1409,13 +1409,30 @@ const config = {
     // bounded by maxRisk, which is the real payout control.
     maxOddsGolfOutrights: parseInt(process.env.MAX_ODDS_GOLF_OUTRIGHTS) || 6000,
   },
-  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf')
+  // NOTE: basketball_nba_summer_league added 2026-07-16 — PX runs a full Summer
+  // League slate in July while basketball_nba is dead, and without this key we
+  // fetch no odds for it and drop every game (see sportNameMap).
+  // If SUPPORTED_SPORTS is set in Railway it OVERRIDES this default entirely —
+  // the env value must also include basketball_nba_summer_league.
+  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf')
     .split(',').map(s => s.trim()),
   // Maps our sport keys to ProphetX sport_name values
   // Note: NBA and NCAAB both map to 'Basketball' — line manager handles both
   // Note: MLS and EPL both map to 'Soccer' — line manager tries all matching keys
   sportNameMap: {
     'basketball_nba': 'Basketball',
+    // NBA Summer League. PX lists these as sport_name='Basketball' with REAL NBA
+    // team names ("Dallas Mavericks at Oklahoma City Thunder", tournament_name=
+    // "NBA Summer League"), so they resolve to a Basketball sportKey — but
+    // basketball_nba is OUT OF SEASON (TOA returns 0 events for it in July), so
+    // every Summer League game failed team-matching and was silently dropped.
+    // TOA carries them under a SEPARATE, ACTIVE key: basketball_nba_summer_league
+    // (verified 2026-07-16: 8 events, 9 books each — FD/DK/Fanatics/Bovada —
+    // with h2h+spreads+totals, and team names matching PX EXACTLY).
+    // Listing it here lets the seed's possibleSportKeys try it for Basketball
+    // events; the team-match loop picks whichever key actually has the event, so
+    // WNBA/NBA/NCAAB are unaffected.
+    'basketball_nba_summer_league': 'Basketball',
     'basketball_ncaab': 'Basketball',
     'basketball_wnba': 'Basketball',
     'baseball_mlb': 'Baseball',

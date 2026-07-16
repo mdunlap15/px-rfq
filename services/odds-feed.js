@@ -237,6 +237,23 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // NBA Summer League. PX runs a full July slate (9 games on 2026-07-16) tagged
+  // sport_name='Basketball' with REAL NBA team names, so they resolve to a
+  // Basketball sportKey — but basketball_nba is OUT OF SEASON and TOA returns 0
+  // events for it, so every Summer League game failed team-matching and was
+  // dropped. TOA carries them under a separate ACTIVE key
+  // (basketball_nba_summer_league, active=true while basketball_nba is
+  // active=false). NOT flipGated: SharpAPI is retired and never had this league,
+  // so TOA is the only source — gating it behind TOA_PRIMARY_SPORTS would just
+  // leave it dark.
+  // Verified 2026-07-16: 8 events, 9 books each (FD/DK/Fanatics/Bovada),
+  // h2h+spreads+totals, and TOA team names match PX EXACTLY (no override map
+  // needed).
+  'basketball_nba_summer_league': {
+    oddsApiSport: 'basketball_nba_summer_league',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
   'americanfootball_nfl': {
     oddsApiSport: 'americanfootball_nfl',
     markets: 'h2h,spreads,totals',
