@@ -3264,8 +3264,24 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
       // five are in hand (avoids navigating every tab when the first few cover
       // everything).
       const haveKeys = () => new Set(parseGolfOutrightData(payloads).map(m => m.marketType));
+      // Stop once the three ties boards golf-topn actually consumes (top_5/10/20)
+      // are in hand. The OLD condition waited for 5 keys INCLUDING make_cut — but
+      // DK drops make_cut from the outrights page once the tournament is under
+      // way (it's DataGolf-priced regardless), so mid-event only 4 keys ever
+      // exist and this early-break NEVER fired. Every scrape then did the full
+      // 13-nav walk (~193s locally), and that heavier walk is what silently
+      // killed the scrape on the constrained prod container from Round 1 onward
+      // (board went stale ~15h, exactly at R1 tee-off; MMA/other lighter DK
+      // scrapes stayed healthy). The lazy tabs are clicked on EVERY nav, so
+      // top_5/10/20 all land on the first page load — this now typically stops
+      // after nav #1. Winner (top_1) and make_cut from this scrape are unused:
+      // golf-topn reads only TOPN_MARKETS, and the winner parlay fair comes from
+      // DataGolf. If a board is genuinely absent the break won't fire and we
+      // fall through to the full walk exactly as before — no regression.
+      const NEEDED_TIES = ['top_5', 'top_10', 'top_20'];
       for (const url of navTargets) {
-        if (haveKeys().size >= 5) break; // all of top_1/5/10/20/make_cut found
+        const keys = haveKeys();
+        if (NEEDED_TIES.every(k => keys.has(k))) break;
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
           await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
