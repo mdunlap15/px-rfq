@@ -1267,6 +1267,16 @@
                   <option value="first_half_">1st Half (all)</option>
                   <option value="btts">Both Teams to Score</option>
                   <option value="double_chance">Double Chance</option>
+                  <!-- Golf outrights. "outright_" uses the endpoint's trailing-
+                       underscore PREFIX match to catch every outright family at
+                       once (778 lines), same trick as "series_"/"player_". -->
+                  <option value="outright_">Golf Outrights (all)</option>
+                  <option value="outright_win">— Tournament Winner</option>
+                  <option value="outright_top_5">— Top 5 Finish (Ties Incl.)</option>
+                  <option value="outright_top_10">— Top 10 Finish (Ties Incl.)</option>
+                  <option value="outright_top_20">— Top 20 Finish (Ties Incl.)</option>
+                  <option value="outright_make_cut">— To Make the Cut</option>
+                  <option value="advance">To Advance (soccer)</option>
                   <!-- Player props — matches against marketType prefix
                        so "player_" catches every prop family (K-prop,
                        NBA points/rebounds/assists/threes, NHL SoG,
@@ -17286,6 +17296,44 @@
     return html;
   }
 
+  // Human labels for internal marketType keys. The Lines table printed the raw
+  // key ("outright_make_cut"), which is fine for markets whose key already reads
+  // like English ("moneyline", "spread") but not for the golf outrights added
+  // 2026-07-15. Falls through to a generic prettifier so a NEW marketType is
+  // never worse than the raw key, and unknown keys degrade to Title Case rather
+  // than disappearing.
+  const MARKET_LABELS = {
+    outright_win: 'Tournament Winner',
+    outright_top_5: 'Top 5 Finish (Ties Incl.)',
+    outright_top_10: 'Top 10 Finish (Ties Incl.)',
+    outright_top_20: 'Top 20 Finish (Ties Incl.)',
+    outright_make_cut: 'To Make the Cut',
+    advance: 'To Advance',
+    moneyline: 'Moneyline',
+    spread: 'Spread',
+    total: 'Total',
+    team_total: 'Team Total',
+    btts: 'Both Teams to Score',
+    double_chance: 'Double Chance',
+    run_first_inning: 'Run First Inning',
+    series_winner: 'Series Winner',
+    series_spread: 'Series Spread',
+    series_total: 'Series Total',
+    first_5_innings_moneyline: 'F5 Moneyline',
+    first_5_innings_run_line: 'F5 Run Line',
+    first_5_innings_total: 'F5 Total',
+    first_half_moneyline: '1st Half Moneyline',
+    first_half_spread: '1st Half Spread',
+    first_half_total: '1st Half Total',
+  };
+  function marketLabel(mt) {
+    if (!mt) return '-';
+    if (MARKET_LABELS[mt]) return MARKET_LABELS[mt];
+    // Generic fallback: player_threes_made -> "Threes Made", sot_1 -> "Sot 1".
+    return String(mt).replace(/^player_/, '').replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  }
+
   async function loadLines() {
     const el = document.getElementById('lines-table');
     if (!el) return;
@@ -17561,7 +17609,8 @@
     const dir = linesState.sortDir || 1;
     const getter = {
       sport: (r) => r.sport || '',
-      market: (r) => r.marketType || '',
+      // Sort on the DISPLAYED label so the column orders the way it reads.
+      market: (r) => marketLabel(r.marketType) || '',
       team: (r) => r.teamName || r.selection || '',
       line: (r) => r.line,
       event: (r) => r.pxEventName || '',
@@ -17735,7 +17784,7 @@
         +   ' onclick="event.stopPropagation(); window.toggleLineSelection(\'' + r.lineId + '\', this.checked)"'
         +   ' style="cursor:pointer;"></td>'
         + '<td style="padding:4px 8px;">' + escapeHtml(sportLbl) + '</td>'
-        + '<td style="padding:4px 8px; font-family:monospace; color:var(--text2);">' + escapeHtml(r.marketType || '-') + '</td>'
+        + '<td style="padding:4px 8px; color:var(--text2);" title="' + escapeHtml(r.marketType || '') + '">' + escapeHtml(marketLabel(r.marketType)) + '</td>'
         + '<td style="padding:4px 8px; text-decoration:none;">' + disabledBadge + overrideBadge + escapeHtml(team) + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace;">' + lineDisp + '</td>'
         + '<td style="padding:4px 8px; color:var(--text2);">' + escapeHtml(event) + '</td>'
