@@ -1250,51 +1250,14 @@
                 </select>
               </label>
               <label style="font-size:12px; color:var(--text2);">Market:
-                <select id="lines-market" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; margin-left:4px;" onchange="linesState.market=this.value; loadLines()">
-                  <option value="">All markets</option>
-                  <option value="moneyline">Moneyline</option>
-                  <option value="spread">Spread</option>
-                  <option value="total">Total</option>
-                  <option value="team_total">Team Total</option>
-                  <option value="series_">Series (all)</option>
-                  <option value="series_winner">Series Winner</option>
-                  <option value="series_spread">Series Spread</option>
-                  <option value="series_total">Series Total</option>
-                  <option value="first_5_innings_">First 5 Innings (all)</option>
-                  <option value="first_5_innings_moneyline">F5 Moneyline</option>
-                  <option value="first_5_innings_run_line">F5 Run Line</option>
-                  <option value="first_5_innings_total">F5 Total</option>
-                  <option value="first_half_">1st Half (all)</option>
-                  <option value="btts">Both Teams to Score</option>
-                  <option value="double_chance">Double Chance</option>
-                  <!-- Golf outrights. "outright_" uses the endpoint's trailing-
-                       underscore PREFIX match to catch every outright family at
-                       once (778 lines), same trick as "series_"/"player_". -->
-                  <option value="outright_">Golf Outrights (all)</option>
-                  <option value="outright_win">— Tournament Winner</option>
-                  <option value="outright_top_5">— Top 5 Finish (Ties Incl.)</option>
-                  <option value="outright_top_10">— Top 10 Finish (Ties Incl.)</option>
-                  <option value="outright_top_20">— Top 20 Finish (Ties Incl.)</option>
-                  <option value="outright_make_cut">— To Make the Cut</option>
-                  <option value="advance">To Advance (soccer)</option>
-                  <!-- Player props — matches against marketType prefix
-                       so "player_" catches every prop family (K-prop,
-                       NBA points/rebounds/assists/threes, NHL SoG,
-                       MLB hitter hits/HR/TB/RBI). Useful when sport=MLB
-                       hits the 500-row limit and pushes prop rows past
-                       the cap. -->
-                  <option value="player_">Player Props (all)</option>
-                  <option value="player_strikeouts">MLB Pitcher Strikeouts</option>
-                  <option value="player_hitter_hits">MLB Hitter Hits</option>
-                  <option value="player_hitter_hr">MLB Hitter HR</option>
-                  <option value="player_hitter_total_bases">MLB Hitter Total Bases</option>
-                  <option value="player_hitter_rbi_runs">MLB Hitter RBIs</option>
-                  <option value="player_points">NBA Points</option>
-                  <option value="player_rebounds">NBA Rebounds</option>
-                  <option value="player_assists">NBA Assists</option>
-                  <option value="player_threes_made">NBA Threes Made</option>
-                  <option value="player_shots_on_goal">NHL Shots on Goal</option>
-                </select>
+                <!-- Multi-select market filter. A native <select multiple> renders
+                     as an always-expanded listbox, which does not fit a one-line
+                     toolbar, so this is a button + checkbox popup. Options live in
+                     LINES_MARKET_OPTIONS (JS) — add new markets there, not here. -->
+                <span style="position:relative; display:inline-block; margin-left:4px;">
+                  <button type="button" id="lines-market-btn" onclick="toggleMarketPanel(event)" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer; min-width:150px; text-align:left;">All markets ▾</button>
+                  <div id="lines-market-panel" style="display:none; position:absolute; top:100%; left:0; margin-top:2px; z-index:60; background:var(--surface2); border:1px solid var(--border); border-radius:4px; max-height:320px; overflow-y:auto; box-shadow:0 4px 16px rgba(0,0,0,0.5); min-width:230px;"></div>
+                </span>
               </label>
               <input type="text" id="lines-team" placeholder="Search team..." oninput="linesState.team=this.value; debounceLoadLines()" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; width:180px;">
               <input type="text" id="lines-event" placeholder="PX event ID..." oninput="linesState.event=this.value; debounceLoadLines()" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; width:140px;">
@@ -16303,6 +16266,115 @@
   function switchTab(tab, btn) { switchSection(tab, btn); }
 
   // --- Lines tab: browse the registered lineIndex via /lines/detail ---
+  // Market filter options for the Registered Lines table. A trailing `_` is a
+  // PREFIX match server-side ("outright_" catches every outright family at
+  // once); anything else is an exact marketType match. `group:true` just indents
+  // the members under their family header.
+  const LINES_MARKET_OPTIONS = [
+    { value: 'moneyline', label: 'Moneyline' },
+    { value: 'spread', label: 'Spread' },
+    { value: 'total', label: 'Total' },
+    { value: 'team_total', label: 'Team Total' },
+    { value: 'series_', label: 'Series (all)' },
+    { value: 'series_winner', label: 'Series Winner', group: true },
+    { value: 'series_spread', label: 'Series Spread', group: true },
+    { value: 'series_total', label: 'Series Total', group: true },
+    { value: 'first_5_innings_', label: 'First 5 Innings (all)' },
+    { value: 'first_5_innings_moneyline', label: 'F5 Moneyline', group: true },
+    { value: 'first_5_innings_run_line', label: 'F5 Run Line', group: true },
+    { value: 'first_5_innings_total', label: 'F5 Total', group: true },
+    { value: 'first_half_', label: '1st Half (all)' },
+    { value: 'btts', label: 'Both Teams to Score' },
+    { value: 'double_chance', label: 'Double Chance' },
+    { value: 'advance', label: 'To Advance (soccer)' },
+    { value: 'outright_', label: 'Golf Outrights (all)' },
+    { value: 'outright_win', label: 'Tournament Winner', group: true },
+    { value: 'outright_top_5', label: 'Top 5 Finish (Ties Incl.)', group: true },
+    { value: 'outright_top_10', label: 'Top 10 Finish (Ties Incl.)', group: true },
+    { value: 'outright_top_20', label: 'Top 20 Finish (Ties Incl.)', group: true },
+    { value: 'outright_make_cut', label: 'To Make the Cut', group: true },
+    { value: 'player_', label: 'Player Props (all)' },
+    { value: 'player_strikeouts', label: 'MLB Pitcher Strikeouts', group: true },
+    { value: 'player_hitter_hits', label: 'MLB Hitter Hits', group: true },
+    { value: 'player_hitter_hr', label: 'MLB Hitter HR', group: true },
+    { value: 'player_hitter_total_bases', label: 'MLB Hitter Total Bases', group: true },
+    { value: 'player_hitter_rbi_runs', label: 'MLB Hitter RBIs', group: true },
+    { value: 'player_points', label: 'NBA Points', group: true },
+    { value: 'player_rebounds', label: 'NBA Rebounds', group: true },
+    { value: 'player_assists', label: 'NBA Assists', group: true },
+    { value: 'player_threes_made', label: 'NBA Threes Made', group: true },
+    { value: 'player_shots_on_goal', label: 'NHL Shots on Goal', group: true },
+  ];
+  const linesMarketSel = new Set();
+
+  function renderMarketPanel() {
+    const panel = document.getElementById('lines-market-panel');
+    if (!panel) return;
+    const rows = LINES_MARKET_OPTIONS.map((o) => {
+      const checked = linesMarketSel.has(o.value) ? ' checked' : '';
+      const pad = o.group ? '22px' : '8px';
+      return '<label style="display:flex; align-items:center; gap:6px; padding:3px 8px 3px ' + pad +
+        '; cursor:pointer; white-space:nowrap; font-size:12px; color:var(--text);">' +
+        '<input type="checkbox" value="' + o.value + '"' + checked + ' onchange="onMarketToggle(this)">' +
+        '<span>' + o.label + '</span></label>';
+    }).join('');
+    panel.innerHTML =
+      '<div style="padding:5px 8px; border-bottom:1px solid var(--border);">' +
+      '<button type="button" onclick="clearMarketFilter()" style="background:none; border:none; color:var(--accent, #6aa9ff); font-size:11px; cursor:pointer; padding:0;">Clear (all markets)</button>' +
+      '</div>' + rows;
+  }
+
+  function syncMarketBtn() {
+    // linesState.market is the canonical value loadLines() sends; the endpoint
+    // splits it on commas and matches a line against ANY entry.
+    linesState.market = Array.from(linesMarketSel).join(',');
+    const btn = document.getElementById('lines-market-btn');
+    if (!btn) return;
+    const n = linesMarketSel.size;
+    let txt = 'All markets';
+    if (n === 1) {
+      const only = Array.from(linesMarketSel)[0];
+      const opt = LINES_MARKET_OPTIONS.find((o) => o.value === only);
+      txt = opt ? opt.label : only;
+    } else if (n > 1) {
+      txt = n + ' markets';
+    }
+    btn.textContent = txt + ' ▾';
+  }
+
+  function onMarketToggle(cb) {
+    if (cb.checked) linesMarketSel.add(cb.value);
+    else linesMarketSel.delete(cb.value);
+    syncMarketBtn();
+    loadLines();
+  }
+
+  function clearMarketFilter() {
+    linesMarketSel.clear();
+    renderMarketPanel();
+    syncMarketBtn();
+    loadLines();
+  }
+
+  function toggleMarketPanel(e) {
+    if (e) e.stopPropagation();
+    const panel = document.getElementById('lines-market-panel');
+    if (!panel) return;
+    const isOpen = panel.style.display !== 'none';
+    if (isOpen) { panel.style.display = 'none'; return; }
+    renderMarketPanel();
+    panel.style.display = 'block';
+  }
+
+  // Close the popup on any outside click.
+  document.addEventListener('click', (e) => {
+    const panel = document.getElementById('lines-market-panel');
+    if (!panel || panel.style.display === 'none') return;
+    if (panel.contains(e.target)) return;
+    if (e.target && e.target.id === 'lines-market-btn') return;
+    panel.style.display = 'none';
+  });
+
   const linesState = {
     sport: '',
     market: '',

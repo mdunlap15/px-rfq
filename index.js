@@ -11439,8 +11439,15 @@ function startStatusServer() {
     const idx = lineManager.__debugGetLineIndex();
     const q = req.query || {};
     const sportFilter = q.sport ? String(q.sport).toLowerCase() : null;
-    const marketFilter = q.market ? String(q.market).toLowerCase() : null;
-    const marketIsPrefix = marketFilter && marketFilter.endsWith('_');
+    // `market` accepts a comma-separated list (dashboard multi-select). A line
+    // matches if ANY entry matches. A trailing `_` means prefix-match (group
+    // selectors like `player_` / `outright_`); anything else is exact.
+    const marketFilters = String(q.market || '')
+      .toLowerCase()
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((value) => ({ value, isPrefix: value.endsWith('_') }));
     const teamFilter = q.team ? String(q.team).toLowerCase() : null;
     const eventFilter = q.event ? String(q.event) : null;
     const limit = Math.min(parseInt(q.limit) || 200, 10000);
@@ -11449,9 +11456,10 @@ function startStatusServer() {
     for (const [lineId, info] of Object.entries(idx)) {
       if (!info) continue;
       if (sportFilter && String(info.sport || '').toLowerCase() !== sportFilter) continue;
-      if (marketFilter) {
+      if (marketFilters.length) {
         const mt = String(info.marketType || '').toLowerCase();
-        if (marketIsPrefix ? !mt.startsWith(marketFilter) : mt !== marketFilter) continue;
+        const hit = marketFilters.some((f) => (f.isPrefix ? mt.startsWith(f.value) : mt === f.value));
+        if (!hit) continue;
       }
       if (teamFilter) {
         const hay = [info.teamName, info.homeTeam, info.awayTeam, info.pxEventName]
