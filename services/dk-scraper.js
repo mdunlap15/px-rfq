@@ -3348,8 +3348,19 @@ function parseGolfOutrightData(payloads) {
       const name = (s.label || s.displayName || s.name || '').trim();
       if (!name || seenSel.has(name)) continue;
       seenSel.add(name);
-      const american = Number(s.displayOdds?.american || s.odds?.american);
-      if (!isFinite(american)) continue;
+      // MUST go through _dkParseAmerican: DK serves the minus as U+2212, so a
+      // naked Number("−575") is NaN and the player was silently DROPPED. Every
+      // other parser in this file already normalizes; golf was the lone
+      // outlier. The bug is invisible pre-tournament (nobody is odds-on, so
+      // every price is "+NNN") and only appears once play starts and the
+      // leaders go negative — which is exactly when the board matters. Live at
+      // The Open between R1 and R2 it removed the 9 shortest prices from Top
+      // 20 (Scheffler −575, Young −245, …) = 5.9 units of probability, and
+      // Scheffler/Young from Top 5/10. Top 20's derived uplift fell to 0.911 —
+      // below the impossible-value floor of 1.0 — which is the ONLY reason this
+      // failed closed instead of quoting a corrupted field.
+      const american = _dkParseAmerican(s.displayOdds?.american || s.odds?.american);
+      if (american == null) continue;
       cleanSels.push({ playerName: name, americanOdds: american, dkSelectionId: s.id });
     }
     out.push({

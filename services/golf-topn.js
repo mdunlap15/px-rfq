@@ -47,9 +47,21 @@
 // unmatched player, or a failed T derivation all return null and the leg
 // declines. A missed fill is free; a mispriced fill is not.
 //
-// Coverage note: DK served Winner + Top 5 + Top 10 for The Open but NO Top 20
-// and NO Make Cut. Top 20 simply won't price until DK posts it (we never
-// register it). make_cut stays on DataGolf (binary — no dead-heat ambiguity).
+// Coverage note: DK serves Winner + Top 5 + Top 10 + Top 20 for The Open (Top
+// 20 lazy-loads behind a tab — see dk-scraper _clickLazyGolfTabs). make_cut
+// stays on DataGolf (binary — no dead-heat ambiguity).
+//
+// TWO name-matching failure modes were live here on 2026-07-16, both fixed:
+//   1. dk-scraper parsed odds with a naked Number(), so DK's U+2212 minus made
+//      every ODDS-ON favorite NaN → dropped. Invisible until players go
+//      negative mid-tournament; then Top 20 lost its 9 shortest prices (5.9
+//      units), the derived uplift fell to 0.911 (< 1.0, impossible), and the
+//      board failed closed. Fixed in dk-scraper via _dkParseAmerican.
+//   2. DK and DataGolf disagree on given names (DK "Daniel Brown" vs DG "Dan
+//      Brown"). Exact-match dropped those from the overround intersection,
+//      biasing it. Fixed via _anchorProb (surname + unique first-name prefix).
+// Both narrowed the DK↔DataGolf intersection, and BOTH bit Top 20 hardest
+// because that field carries the most probability in the shortlist tail.
 // ============================================================================
 
 const log = require('./logger');
@@ -113,6 +125,60 @@ function resolveDkSlug(tournamentName) {
 
 const _aImpl = a => { if (a == null || a === '') return null; const n = Number(a); if (!isFinite(n) || n === 0) return null; return n >= 0 ? 100 / (n + 100) : (-n) / (-n + 100); };
 
+// ---------------------------------------------------------------------------
+// DK ↔ DataGolf name reconciliation.
+//
+// The books disagree on GIVEN names: DK "Daniel Brown" vs DataGolf "Dan Brown",
+// "John Keefer" vs "Johnny Keefer", "Nicolas Echavarria" vs "Nico Echavarria".
+// Exact-match dropped 9 of 147 players from the intersection (live, 2026-07-16).
+//
+// That is not cosmetic. `overround = dhRaw / n` is only meaningful when dhRaw
+// covers the WHOLE field — a dead-heat board sums to exactly n by construction.
+// Every unmatched player silently removes his probability from dhRaw, biasing
+// the overround DOWN. Top 20 is where it bites: those 9 carried ~2 units (Dan
+// Brown alone is +150 ≈ 40% to make the top 20), so dhRaw came in at 18.88 vs
+// n=20 → overround 0.944 → the >1.0001 guard refused the board. The guard was
+// RIGHT; the matching was wrong. Top 5/10 survived only because the same 9 are
+// cheap that shallow — i.e. their overrounds were quietly biased too.
+//
+// Match on surname + a first-name PREFIX relation (dan⊂daniel, nico⊂nicolas,
+// john⊂johnny), and only when exactly ONE candidate fits. Ambiguity must never
+// guess: this field has two Fitzpatricks and two Hojgaards, and pairing the
+// wrong brother would corrupt a real player's price.
+// ---------------------------------------------------------------------------
+function _splitName(n) {
+  const parts = String(n || '').split(' ').filter(Boolean);
+  if (parts.length < 2) return null;
+  return { first: parts[0], last: parts.slice(1).join(' ') };  // "de castro piera" stays intact
+}
+
+function _anchorByLast(anchor) {
+  if (anchor._byLast) return anchor._byLast;
+  const idx = new Map();
+  for (const [k, v] of anchor.byName) {
+    const s = _splitName(k);
+    if (!s) continue;
+    if (!idx.has(s.last)) idx.set(s.last, []);
+    idx.get(s.last).push({ first: s.first, prob: v });
+  }
+  Object.defineProperty(anchor, '_byLast', { value: idx, enumerable: false });
+  return idx;
+}
+
+/** Dead-heat prob for a DK name, or null. Exact first, then unique-nickname. */
+function _anchorProb(anchor, dkName) {
+  const exact = anchor.byName.get(dkName);
+  if (exact != null) return exact;
+  const s = _splitName(dkName);
+  if (!s) return null;
+  const cands = _anchorByLast(anchor).get(s.last);
+  if (!cands || cands.length === 0) return null;
+  const fits = cands.filter(c => c.first === s.first
+    || c.first.startsWith(s.first) || s.first.startsWith(c.first));
+  if (fits.length !== 1) return null; // 0 = no match, 2+ = ambiguous → never guess
+  return fits[0].prob;
+}
+
 /** Power-normalize a field so Σ pᵢ^k = target; returns k (null if unbracketable). */
 function _solvePower(probs, target) {
   const ps = probs.filter(p => p > 0 && p < 1);
@@ -138,10 +204,18 @@ function _buildTopNMarket(dkSel, anchor, n, label) {
   }
   // Intersection ONLY — summing different player sets makes the ratio garbage.
   let tiesRaw = 0, dhRaw = 0, matched = 0;
+  const unmatched = [];
   for (const [name, p] of dkByName) {
-    const dh = anchor.byName.get(name);
-    if (dh == null) continue;
+    const dh = _anchorProb(anchor, name);
+    if (dh == null) { unmatched.push(name); continue; }
     tiesRaw += p; dhRaw += dh; matched++;
+  }
+  // Surface what fell out. An unmatched player is not free — he silently
+  // biases the overround (see _anchorProb). If this list ever grows, the
+  // derivation is drifting and the board should be distrusted.
+  if (unmatched.length) {
+    log.warn('GolfTopN', `${label}: ${unmatched.length}/${dkByName.size} DK players have no DataGolf counterpart `
+      + `(${unmatched.slice(0, 5).join(', ')}${unmatched.length > 5 ? ', …' : ''}) — their probability is missing from the overround`);
   }
   if (matched < MIN_PLAYERS) { log.warn('GolfTopN', `${label}: only ${matched} players intersect DK↔DataGolf — refusing`); return null; }
   const overround = dhRaw / n;              // dead-heat FAIR sum is exactly n
@@ -301,4 +375,4 @@ function __debugCache() {
     }])) };
 }
 
-module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, resolveDkSlug, __debugCache, _buildTopNMarket };
+module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, resolveDkSlug, __debugCache, _buildTopNMarket, __anchorProb: _anchorProb };
