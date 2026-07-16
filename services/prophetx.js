@@ -595,6 +595,29 @@ function parseMarketSelections(market) {
     marketType = 'team_total';
   }
 
+  // Both Teams To Score. PX types this `moneyline` — IDENTICAL to the real
+  // team moneyline and to the 3-way "<Team> to Win (90 Min)" markets (live
+  // probe 2026-07-16, Toronto FC at CF Montréal: BTTS is id=1318
+  // type='moneyline', the same type as id=11 "Moneyline (2 Way)"). So the
+  // btts branch below, which keyed on `marketType === 'btts'`, could never
+  // fire: PX has no such type. Name detection is the only signal.
+  //
+  // Until now this parsed as a moneyline whose selections are named YES/NO.
+  // That was harmless ONLY by accident — line-manager tried to match "YES"
+  // against the competitor names, failed, and dropped the line. Getting this
+  // wrong in the other direction would price BTTS off the team moneyline, so
+  // the name test is anchored (not a loose /both teams/ substring) and the
+  // period guard below keeps a half/period variant from stealing the
+  // full-game type.
+  const isBttsByName = /^both\s*teams\s*to\s*score\b/i.test(marketName.trim());
+  // "Both Teams To Score in the 1st Half" is a DIFFERENT market with a
+  // different fair — we have no odds for it, so leave it unclassified and
+  // let it drop rather than quote it off the full-game BTTS consensus.
+  const isPeriodQualified = /\b(1st|2nd|first|second)\s*(half|period)\b|\bhalf\b|\bperiod\b/i.test(marketName);
+  if (isBttsByName && !isPeriodQualified && !isF5ByName && !isH1ByName) {
+    marketType = 'btts';
+  }
+
   // F5 moneyline uses same structure as full-game moneyline (selections array)
   const isF5Moneyline = /first_5_innings_moneyline|first_five_innings_moneyline/.test(marketType);
   // F5 spread/total uses same structure as full-game spread/total (market_lines)

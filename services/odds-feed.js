@@ -1184,6 +1184,16 @@ async function _runPostParseSupplements(sport, parsed) {
     }
     _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
   }
+
+  // BTTS for soccer. Per-event only — the bulk endpoint 422s on `btts`.
+  if (BTTS_SPORTS.has(sport)) {
+    try {
+      await supplementBtts(parsed, sport);
+    } catch (err) {
+      log.warn('OddsFeed', `${sport} btts supplement failed: ${err.message}`);
+    }
+    _scheduleSupplementRetry(sport, `${sport} btts`, supplementBtts, parsed, sport);
+  }
 }
 
 // Merge a freshly-supplemented sub-game market (h2h_f5/spreads_f5/
@@ -1771,6 +1781,222 @@ const TEAM_TOTAL_BOOKMAKERS = process.env.TEAM_TOTAL_BOOKMAKERS || 'pinnacle,dra
 const TEAM_TOTAL_TTL_MS = (parseInt(process.env.TEAM_TOTAL_TTL_SECONDS) || 240) * 1000;
 const _teamTotalCache = {};    // key -> { at, tt|null, toaHome, toaAway }
 const _teamTotalInflight = {}; // key -> Promise
+
+// ---------------------------------------------------------------------------
+// BTTS (Both Teams To Score) — soccer.
+//
+// SAME endpoint gotcha as team_totals / F5 / H1: the BULK /odds endpoint
+// rejects it outright ("Markets not supported by this endpoint: btts",
+// INVALID_MARKET, probed 2026-07-16). btts lives ONLY on the per-event
+// endpoint. This is why the btts parser in fetchFromTheOddsApi — which scans
+// the bulk response for `m.key === 'btts'` — has never once matched: it is
+// dead code on a payload that cannot contain the market.
+//
+// Coverage probe 2026-07-16 (Toronto FC @ CF Montréal, regions=us,eu): 8
+// two-sided books — fanduel, draftkings, betmgm, betrivers, williamhill,
+// pinnacle, onexbet, matchbook. Pinnacle and matchbook are eu-region, so
+// dropping to regions=us would lose the sharpest book here; keep us,eu.
+// Quota is a non-issue: 1 credit per region per event against 15.6M
+// remaining, and the TTL below collapses the 2-min refresh cadence.
+//
+// Unlike team_totals, BTTS is ORIENTATION-FREE: Yes/No means the same thing
+// regardless of which side the cache stored as home, so the attach can't
+// mis-assign a side the way a home/away team total could.
+// ---------------------------------------------------------------------------
+// Deliberately MLS-only by default, NOT every soccer key. btts is per-event,
+// so each extra league multiplies calls against the SAME TOA key the main
+// bulk odds path uses — and that key enforces a request-FREQUENCY limit
+// distinct from quota (429 EXCEEDED_FREQ_LIMIT, hit while probing this on
+// 2026-07-16). A 429 storm would degrade the markets we already quote, so
+// widen this one league at a time via BTTS_SPORTS after watching the
+// `btts supplement:` attach ratio hold up.
+const BTTS_SPORTS = new Set(
+  (process.env.BTTS_SPORTS || 'soccer_usa_mls')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+const BTTS_BOOKMAKERS = process.env.BTTS_BOOKMAKERS
+  || 'pinnacle,draftkings,fanduel,betmgm,betrivers,williamhill,matchbook';
+const BTTS_TTL_MS = (parseInt(process.env.BTTS_TTL_SECONDS) || 240) * 1000;
+const BTTS_MIN_BOOKS = parseInt(process.env.BTTS_MIN_BOOKS) || 2;
+// Gap between per-event calls in the supplement fan-out. The TOA key enforces
+// a request-FREQUENCY limit; an unpaced burst of ~21 events returned 429s for
+// roughly a third of the slate on the first probe. Those 429s are invisible
+// unless you look — they present as "this game has no BTTS", not as an error.
+// 250ms × ~21 MLS games ≈ 5s per cycle — free on a 2-min background refresh,
+// and cheap insurance against the freq limit. Any game still missed rides the
+// _scheduleSupplementRetry chain (60/120/240s); transient failures are NOT
+// cached as misses, so those retries actually refill the gap.
+const BTTS_FETCH_SPACING_MS = parseInt(process.env.BTTS_FETCH_SPACING_MS) || 250;
+const _bttsCache = {};    // key -> { at, btts|null, toaHome, toaAway }
+const _bttsInflight = {}; // key -> Promise
+const _bttsStats = { transientFails: 0, attached: 0, candidates: 0, lastRunAt: null };
+
+function _attachBttsToCache(sport, toaHome, toaAway, btts) {
+  const cache = oddsCache[sport];
+  if (!cache || !cache.events || !btts) return 0;
+  let attached = 0;
+  const keys = new Set([normalizeEventKey(toaHome, toaAway), normalizeEventKey(toaAway, toaHome)]);
+  for (const key of keys) {
+    const entry = cache.events[key];
+    if (!entry) continue;
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.markets) continue;
+      // Orientation-free (see header) — no home/away remap needed.
+      ev.markets.btts = btts;
+      attached++;
+    }
+  }
+  return attached;
+}
+
+/**
+ * Fetch + de-vig BTTS for one game and attach it to the odds cache.
+ * Mirrors ensureTeamTotals: timeout-bounded, single-flighted, TTL-cached,
+ * fail-closed on started/unknown-start games.
+ */
+async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
+  const theOddsApiKey = process.env.THE_ODDS_API_KEY;
+  if (!theOddsApiKey || !BTTS_SPORTS.has(sport)) return null;
+  const startMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
+  if (!Number.isFinite(startMs) || startMs <= Date.now()) return null; // fail-closed on started/unknown
+
+  const key = `${sport}|${normalizeEventKey(homeTeam, awayTeam)}`;
+  const now = Date.now();
+  const cached = _bttsCache[key];
+  if (cached && (now - cached.at) < BTTS_TTL_MS) {
+    // Re-attach: the odds cache may have been rebuilt since we fetched.
+    if (cached.btts) _attachBttsToCache(sport, cached.toaHome, cached.toaAway, cached.btts);
+    return cached.btts;
+  }
+  if (_bttsInflight[key]) return _bttsInflight[key];
+
+  _bttsInflight[key] = (async () => {
+    try {
+      const resolved = await resolveOddsApiEventId(sport, homeTeam, awayTeam, commenceTime);
+      if (!resolved || !resolved.eventId) { _bttsCache[key] = { at: now, btts: null }; return null; }
+
+      const url = `https://api.the-odds-api.com/v4/sports/${sport}/events/${resolved.eventId}/odds`
+        + `?apiKey=${theOddsApiKey}`
+        + `&regions=us,eu`
+        + `&markets=btts`
+        + `&bookmakers=${BTTS_BOOKMAKERS}`
+        + `&oddsFormat=american`;
+
+      let data;
+      try {
+        const resp = await abortableFetch(url);
+        if (!resp.ok) {
+          // A 429 (EXCEEDED_FREQ_LIMIT — this key rate-limits by request
+          // frequency, not just quota) or a 5xx is TRANSIENT. Caching it as a
+          // miss would blind the game for a full TTL and, worse, read as
+          // "books don't post BTTS for this game" — which is exactly how a
+          // fetch failure masquerades as a coverage gap. Leave it uncached so
+          // the next cycle retries; only a genuine 4xx answer is cached.
+          if (resp.status === 429 || resp.status >= 500) {
+            _bttsStats.transientFails++;
+            return null;
+          }
+          _bttsCache[key] = { at: now, btts: null };
+          return null;
+        }
+        data = await safeJsonFetch(resp);
+      } catch (err) {
+        // Transient (timeout / network): do NOT cache the miss — retry next call.
+        if (err && err.name === 'AbortError') {
+          toaStaleServeStats.fetchTimeouts++;
+          toaStaleServeStats.lastFetchTimeoutAt = new Date().toISOString();
+        }
+        _bttsStats.transientFails++;
+        return null;
+      }
+      if (!data) return null;
+
+      // One de-vigged pair per two-sided book, then average the fairs —
+      // same shape the (unreachable) bulk parser built, so the pricer's
+      // existing markets.btts lookup reads this unchanged.
+      const fairYes = [], fairNo = [];
+      const rawYes = [], rawNo = [];
+      const books = [];
+      for (const book of (data.bookmakers || [])) {
+        const m = (book.markets || []).find(x => x.key === 'btts');
+        if (!m) continue;
+        const yes = (m.outcomes || []).find(o => /^yes$/i.test(o.name || ''));
+        const no  = (m.outcomes || []).find(o => /^no$/i.test(o.name || ''));
+        if (!yes || !no) continue; // one-sided book can't be de-vigged — skip
+        const pY = americanToImpliedProb(yes.price);
+        const pN = americanToImpliedProb(no.price);
+        if (!(pY > 0) || !(pN > 0)) continue;
+        const [fy, fn] = deVig2Way(pY, pN);
+        if (!(fy > 0) || !(fn > 0)) continue;
+        fairYes.push(fy); fairNo.push(fn);
+        rawYes.push(yes.price); rawNo.push(no.price);
+        books.push(book.key);
+      }
+      // Thin boards are noise — fail closed rather than quote off one book.
+      if (books.length < BTTS_MIN_BOOKS) { _bttsCache[key] = { at: now, btts: null }; return null; }
+
+      const dvYes = avg(fairYes), dvNo = avg(fairNo);
+      if (!(dvYes > 0) || !(dvNo > 0)) { _bttsCache[key] = { at: now, btts: null }; return null; }
+      const btts = {
+        yes: { rawOdds: rawYes[0], impliedProb: americanToImpliedProb(rawYes[0]), fairProb: dvYes, displayFairProb: dvYes },
+        no:  { rawOdds: rawNo[0],  impliedProb: americanToImpliedProb(rawNo[0]),  fairProb: dvNo,  displayFairProb: dvNo },
+        books: books.length,
+      };
+
+      _bttsCache[key] = { at: now, btts, toaHome: data.home_team, toaAway: data.away_team };
+      _attachBttsToCache(sport, data.home_team, data.away_team, btts);
+      return btts;
+    } finally {
+      delete _bttsInflight[key];
+    }
+  })();
+  return _bttsInflight[key];
+}
+
+/**
+ * Refresh-cycle gap-fill for BTTS, mirroring supplementTeamTotals.
+ */
+async function supplementBtts(parsedEvents, sport) {
+  if (!process.env.THE_ODDS_API_KEY || !BTTS_SPORTS.has(sport)) return;
+  const candidates = [];
+  for (const entry of Object.values(parsedEvents)) {
+    const arr = Array.isArray(entry) ? entry : [entry];
+    for (const ev of arr) {
+      if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
+      if (ev.markets && ev.markets.btts) continue; // still-fresh TTL re-attach
+      candidates.push(ev);
+    }
+  }
+  if (candidates.length === 0) return;
+
+  // Warm the shared per-sport TOA events-list cache with ONE call before
+  // fanning out. Without this the first N workers all miss the empty cache and
+  // fire identical events-list requests simultaneously — a self-inflicted
+  // thundering herd that 429s itself (observed 2026-07-16).
+  const first = candidates[0];
+  try {
+    await resolveOddsApiEventId(sport, first.homeTeam, first.awayTeam, first.commenceTime);
+  } catch (_) { /* non-fatal: workers will retry through their own path */ }
+
+  const before = _bttsStats.transientFails;
+  let attached = 0;
+  // Serial + spaced, NOT concurrent. This runs on the background refresh
+  // cycle, never the RFQ hot path, so latency here is free — whereas a 429
+  // silently costs a whole game's BTTS coverage.
+  for (const ev of candidates) {
+    const b = await ensureBtts(sport, ev.homeTeam, ev.awayTeam, ev.commenceTime);
+    if (b) attached++;
+    if (BTTS_FETCH_SPACING_MS > 0) await new Promise(r => setTimeout(r, BTTS_FETCH_SPACING_MS));
+  }
+  const transient = _bttsStats.transientFails - before;
+  _bttsStats.attached = attached;
+  _bttsStats.candidates = candidates.length;
+  _bttsStats.lastRunAt = new Date().toISOString();
+  // Surface transient failures explicitly: a low attach ratio with transient>0
+  // is a rate-limit problem (retry/pace), NOT missing book coverage.
+  log.info('OddsFeed', `${sport} btts supplement: ${attached}/${candidates.length} attached`
+    + (transient ? ` (${transient} transient fetch failures — rate limit, not coverage)` : ''));
+}
 
 // Attach a team-total consensus (keyed to TOA's home/away) onto every cached
 // event object for this matchup, in that event's OWN orientation so getFairProb
@@ -9229,6 +9455,7 @@ module.exports = {
   americanToImpliedProb,
   getRfiFair,
   ensureTeamTotals,
+  ensureBtts,
   // Internal consensus builders exposed for unit testing / debug (pure fns).
   buildConsensusTotals,
   buildConsensusSpread,

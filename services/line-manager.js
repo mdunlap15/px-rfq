@@ -651,6 +651,16 @@ const GOLF_OUTRIGHTS_PARLAY_ENABLED = String(process.env.GOLF_OUTRIGHTS_PARLAY_E
 // price pure DNB.
 const ADVANCE_MARKET_RE = /to\s+advance\s+to\s+the\s+next\s+round|to\s+advance\b|to\s+qualify\b/i;
 
+// "Both Teams To Score". PX types this `moneyline` (live probe 2026-07-16),
+// so the seed's name allowlist — which demands a type='moneyline' market be
+// NAMED like a moneyline ("Moneyline (2 Way)", "Draw No Bet", ...) — rejected
+// it before registration. Same carve-out shape as ADVANCE_MARKET_RE above.
+// Anchored so a half/period variant ("Both Teams to Score - 1st Half") can't
+// ride the full-game BTTS consensus; that market has its own fair we don't
+// carry. parseMarketSelections retags marketType='btts' for these.
+const BTTS_MARKET_RE = /^both\s+teams\s+to\s+score\b/i;
+const BTTS_PERIOD_RE = /\b(1st|2nd|first|second)\s*(half|period)\b|\bhalf\b|\bperiod\b/i;
+
 /**
  * Parse PX's advance market into our selection shape.
  * Maps each selection to home/away by matching its name against the event's
@@ -1306,10 +1316,19 @@ async function seedAllLines() {
         && !isSeriesMarket
         && /soccer|fifa/i.test(sportKey || '')
         && ADVANCE_MARKET_RE.test(m.name || '');
+      // "Both Teams To Score" — PX types it 'moneyline', so it clears
+      // supportedBase but would then die on the fullGameNames allowlist for
+      // 'moneyline' (it isn't named like a moneyline). Full-game market, so
+      // bypass that name check the same way advance does.
+      const isSoccerBtts = /soccer|fifa/i.test(sportKey || '')
+        && m.type === 'moneyline'
+        && BTTS_MARKET_RE.test(name)
+        && !BTTS_PERIOD_RE.test(name);
       if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
       // Advance bypasses the sub-game/prop name filter below ("Next Round"
       // would otherwise look prop-ish) — it is a full-event market.
       if (isSoccerAdvance) return true;
+      if (isSoccerBtts) return true;
       // Series markets bypass the sub-game/prop filter and the name-
       // allowlist + bounds checks. Each variant must match one of:
       //   Series Winner      → type='moneyline'
@@ -2174,6 +2193,23 @@ async function seedAllLines() {
         await oddsFeed.ensureTeamTotals(sportKey, matchedHome, matchedAway, event.scheduled || null);
       } catch (err) {
         log.warn('Lines', `team-total pre-seed error for ${event.name}: ${err.message}`);
+      }
+    }
+
+    // ----- PRE-SEED BTTS (same guarantee, same reason) -----
+    // PX's "Both Teams To Score" registers through the main-market loop above
+    // (parser now detects it by name — PX types it 'moneyline'), but it prices
+    // via getFairProb reading oddsCache[...].markets.btts. Rely on the
+    // refresh-cycle supplement alone and BTTS inherits the exact failure the
+    // team-total pre-seed above exists to fix: silent gap → empty cache →
+    // every BTTS RFQ declines "no fair value". ensureBtts is single-flighted
+    // + TTL-cached and self-gates on BTTS_SPORTS, so this is cheap and shares
+    // work with the supplement. Fail-open.
+    if (matchedHome && matchedAway) {
+      try {
+        await oddsFeed.ensureBtts(sportKey, matchedHome, matchedAway, event.scheduled || null);
+      } catch (err) {
+        log.warn('Lines', `btts pre-seed error for ${event.name}: ${err.message}`);
       }
     }
 
