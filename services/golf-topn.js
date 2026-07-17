@@ -90,6 +90,12 @@ const UPLIFT_MIN = 1.0, UPLIFT_MAX = 1.6;
 
 let _cache = { at: 0, bySlug: {} };  // slug -> { tournament, eventName, markets: { outright_top_5: {T, uplift, k, players: Map} } }
 let _inflight = null;
+// Last-attempt telemetry, exposed via /golf-topn. The warm is fire-and-forget
+// from the seed, so when it dies on prod the ONLY trace is a log line inside
+// Railway — from the outside an outage is indistinguishable from "DK has no
+// boards". (Cost us ~15h of top-N downtime at The Open R1: the scrape was
+// failing every cycle and /golf-topn could only show the board getting older.)
+const _lastWarm = { at: null, ok: null, error: null, tookMs: null, scrape: {} }; // scrape: slug -> {keys, selections}
 
 // PX tournament name -> DK league slug. PX says "2026 The Open"; DK's slug is
 // "the-open-championship", so a naive slugify does NOT work. Operator-extendable
@@ -242,6 +248,9 @@ function _buildTopNMarket(dkSel, anchor, n, label) {
  */
 async function warmTopNForSlug(slug, tournamentName, { force = false } = {}) {
   const dk = await dkScraper.fetchGolfOutrights(slug, { force });
+  // Record the raw scrape shape even when the board build below refuses —
+  // distinguishes "scrape came back empty" from "scrape fine, guard tripped".
+  _lastWarm.scrape[slug] = (dk.markets || []).map(m => `${m.marketType}:${(m.selections || []).length}`).join(',') || 'EMPTY';
   const out = { tournament: tournamentName, slug, eventName: null, markets: {} };
   for (const [mt, cfg] of Object.entries(TOPN_MARKETS)) {
     const dkM = (dk.markets || []).find(m => m.marketType === cfg.dk);
@@ -287,6 +296,9 @@ async function warmTopN(tournaments, { force = false } = {}) {
   if (!force && Date.now() - _cache.at < TTL_MS && Object.keys(_cache.bySlug).length) return _cache;
   if (_inflight) return _inflight;
   _inflight = (async () => {
+    const warmStarted = Date.now();
+    _lastWarm.at = new Date().toISOString();
+    _lastWarm.ok = null; _lastWarm.error = null; _lastWarm.tookMs = null; _lastWarm.scrape = {};
     const bySlug = {};
     const seen = new Set();
     let freshMarkets = false;   // true only if a scrape actually returned markets
@@ -307,7 +319,12 @@ async function warmTopN(tournaments, { force = false } = {}) {
       // enforces the hard freshness floor.
       let built = null;
       try { built = await warmTopNForSlug(slug, t.tournamentName, { force }); }
-      catch (e) { log.warn('GolfTopN', `warm ${slug} failed: ${e.message}`); }
+      catch (e) {
+        // First error wins — it's almost always the root cause (a Puppeteer
+        // launch failure repeats identically for every slug).
+        if (!_lastWarm.error) _lastWarm.error = e.message;
+        log.warn('GolfTopN', `warm ${slug} failed: ${e.message}`);
+      }
       const gotMarkets = built && built.markets && Object.keys(built.markets).length > 0;
       const prev = _cache.bySlug[slug];
       const prevHadMarkets = prev && prev.markets && Object.keys(prev.markets).length > 0;
@@ -325,6 +342,8 @@ async function warmTopN(tournaments, { force = false } = {}) {
     // previous board must NOT re-stamp it: otherwise a persistently failing
     // scrape would refresh `at` every cycle and serve a stale board forever,
     // defeating MAX_AGE. Retained boards keep their original age and expire.
+    _lastWarm.ok = freshMarkets;
+    _lastWarm.tookMs = Date.now() - warmStarted;
     _cache = { at: freshMarkets ? Date.now() : _cache.at, bySlug };
     const summary = Object.entries(bySlug).map(([s, b]) => `${s}:[${Object.keys(b.markets).join(',') || 'none'}]`).join(' ');
     const heldMarkets = Object.values(bySlug).some(b => b && b.markets && Object.keys(b.markets).length > 0);
@@ -369,6 +388,7 @@ function __debugCache() {
   return { at: _cache.at, ageMs: _cache.at ? Date.now() - _cache.at : null, ttlMs: TTL_MS, maxAgeMs: MAX_AGE_MS,
     marketCount: _marketCount,
     priceable: !!(_cache.at && _marketCount > 0 && Date.now() - _cache.at <= MAX_AGE_MS),
+    lastWarm: { ..._lastWarm },
     bySlug: Object.fromEntries(Object.entries(_cache.bySlug).map(([s, b]) => [s, {
       tournament: b.tournament, eventName: b.eventName,
       markets: Object.fromEntries(Object.entries(b.markets).map(([m, x]) => [m, { T: x.T, uplift: x.uplift, k: x.k, overround: x.overround, players: x.players.size }])),
