@@ -303,12 +303,18 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
   (mutually exclusive). DK has no ITD market, and a composite from another book is a
   known trap ("KO/TKO, DQ or Submission" once masqueraded as a -115 submission vs a
   real +325).
-- **Same-fight MoV combos are ALL invalid** — every method pair on one fight is
-  mutually exclusive (Usman by KO + Usman by SUB can't both happen; only one fighter
-  wins) or nested (ko ⊂ itd; mov ⊂ moneyline). The generic SGP gate catches them:
-  they share a `pxEventId`, classify `unclassified`, and decline. **Verified live** —
-  unlike golf outrights, where PX puts each market in its OWN event and the gate
-  could not see them. Only CROSS-fight MoV parlays quote.
+- **MoV legs may NEVER be parlayed same-fight** (`mov_sgp_blocked`, operator
+  directive). Every method pair on one fight is mutually exclusive (Usman by KO +
+  Usman by SUB can't both happen; only one fighter wins at all) or nested (ko ⊂ itd;
+  mov ⊂ moneyline), so independent multiplication prices a P=0 parlay as if it were
+  live. This is an **explicit, unconditional** pre-pass in `shouldDecline` that does
+  NOT rely on the generic SGP gate: that gate blocks these today only because no key
+  in `SGP_ALLOWED_COMBOS` happens to match a MoV pair — incidental protection that
+  evaporates the moment someone adds a combo key. It blocks a MoV leg against ANY
+  other leg on the same `pxEventId` (other MoV, moneyline, total rounds, either
+  side). Locked by `test/mov-sgp-block.test.js`, including adversarial cases that
+  force MoV combos INTO `SGP_ALLOWED_COMBOS` and assert it still declines. Only
+  CROSS-fight MoV parlays quote.
 - **No odds-range limits** (operator directive): all-MoV parlays bypass `MAX_ODDS`
   entirely and use `MOV_MIN_PARLAY_PROB` (default 1e-6) instead of the 0.1% floor.
   Both gates require EVERY leg to be MoV so a method leg can't smuggle a mixed

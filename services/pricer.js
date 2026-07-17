@@ -3615,6 +3615,39 @@ function shouldDecline(legs, parlayId) {
       if (!li) { try { li = lineManager.lookupLine(lid); } catch (_) { li = null; } }
       if (li) legInfos.push(li);
     }
+    // ---- METHOD OF VICTORY: never allowed in an SGP ----------------------
+    // Operator directive 2026-07-17: "Do not allow parlaying of SGPs with
+    // method of victory lines."
+    //
+    // This is an EXPLICIT, UNCONDITIONAL block, deliberately NOT relying on the
+    // generic SGP gate further down. That gate declines these today only
+    // because no key in SGP_ALLOWED_COMBOS happens to match a MoV pair — an
+    // incidental protection that evaporates the moment someone adds a combo
+    // key, and the failure would be silent AND expensive: every same-fight
+    // method pair is either mutually exclusive (Usman by KO + Usman by SUB
+    // can't both happen; only one fighter wins at all) or nested (ko ⊂ itd,
+    // mov ⊂ moneyline). Independent multiplication of mutually exclusive legs
+    // prices a P=0 parlay as if it were live.
+    //
+    // Runs on RAW {line_id} legs via the resolution above — production sends
+    // unresolved legs, which is exactly how the golf nesting guard silently
+    // never fired for weeks.
+    const movLegs = legInfos.filter(li => MOV_MARKET_TYPES.has(li.marketType));
+    if (movLegs.length) {
+      for (const a of movLegs) {
+        for (const b of legInfos) {
+          if (a === b) continue;
+          if (!a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+          const bDesc = `${b.playerName || b.teamName || '?'} ${b.marketType}${b.selection ? ':' + b.selection : ''}`;
+          return {
+            declined: true,
+            reason: 'mov_sgp_blocked',
+            detail: `method-of-victory legs cannot be parlayed same-game: ${a.playerName || a.teamName} ${a.marketType}:${a.selection} + ${bDesc} on event ${a.pxEventId} — method outcomes are mutually exclusive or nested within the same fight`,
+          };
+        }
+      }
+    }
+
     const advLegs = legInfos.filter(li => li.marketType === 'advance');
     if (advLegs.length) {
       const norm = s => String(s || '').toLowerCase().trim();
