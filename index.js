@@ -11438,7 +11438,13 @@ function startStatusServer() {
   app.get('/lines/detail', (req, res) => {
     const idx = lineManager.__debugGetLineIndex();
     const q = req.query || {};
-    const sportFilter = q.sport ? String(q.sport).toLowerCase() : null;
+    // `sport` accepts a comma-separated list (dashboard multi-select),
+    // same contract as `market` below. Exact key match on any entry.
+    const sportFilters = String(q.sport || '')
+      .toLowerCase()
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
     // `market` accepts a comma-separated list (dashboard multi-select). A line
     // matches if ANY entry matches. A trailing `_` means prefix-match (group
     // selectors like `player_` / `outright_`); anything else is exact.
@@ -11455,7 +11461,7 @@ function startStatusServer() {
     const out = [];
     for (const [lineId, info] of Object.entries(idx)) {
       if (!info) continue;
-      if (sportFilter && String(info.sport || '').toLowerCase() !== sportFilter) continue;
+      if (sportFilters.length && !sportFilters.includes(String(info.sport || '').toLowerCase())) continue;
       if (marketFilters.length) {
         const mt = String(info.marketType || '').toLowerCase();
         const hit = marketFilters.some((f) => (f.isPrefix ? mt.startsWith(f.value) : mt === f.value));

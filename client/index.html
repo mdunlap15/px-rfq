@@ -1223,31 +1223,12 @@
           <div class="card-body">
             <div style="padding:8px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">
               <label style="font-size:12px; color:var(--text2);">Sport:
-                <select id="lines-sport" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; margin-left:4px;" onchange="linesState.sport=this.value; loadLines()">
-                  <option value="">All sports</option>
-                  <option value="basketball_nba">NBA</option>
-                  <option value="basketball_ncaab">NCAAB</option>
-                  <option value="basketball_wnba">WNBA</option>
-                  <option value="baseball_mlb">MLB</option>
-                  <option value="icehockey_nhl">NHL</option>
-                  <option value="tennis">Tennis</option>
-                  <option value="soccer">Soccer (generic)</option>
-                  <option value="soccer_usa_mls">MLS</option>
-                  <option value="soccer_epl">EPL</option>
-                  <option value="soccer_spain_la_liga">La Liga</option>
-                  <option value="soccer_italy_serie_a">Serie A</option>
-                  <option value="soccer_germany_bundesliga">Bundesliga</option>
-                  <option value="soccer_france_ligue_one">Ligue 1</option>
-                  <option value="soccer_uefa_champs_league">UCL</option>
-                  <option value="soccer_uefa_europa_league">UEL</option>
-                  <option value="soccer_brazil_campeonato">Brasileirão</option>
-                  <option value="soccer_mexico_ligamx">Liga MX</option>
-                  <option value="soccer_usa_nwsl">NWSL</option>
-                  <option value="mma_mixed_martial_arts">MMA</option>
-                  <option value="boxing_boxing">Boxing</option>
-                  <option value="golf_matchups">Golf (Matchups)</option>
-                  <option value="golf_outrights">Golf (Outrights)</option>
-                </select>
+                <!-- Multi-select sport filter. Values are RAW sport keys (this
+                     drives a server-side /lines/detail query, which speaks
+                     keys, not labels — unlike the label-keyed order-table
+                     filters). Options live in LINES_SPORT_OPTIONS (JS),
+                     alphabetized by label. -->
+                <span id="lines-sport-mount"></span>
               </label>
               <label style="font-size:12px; color:var(--text2);">Market:
                 <!-- Multi-select market filter. A native <select multiple> renders
@@ -3301,8 +3282,8 @@
           f === 'lost' ? (m.outcome === 'lost' || m.outcome === 'other_sp') : m.outcome === f);
       }
       // Sport filter
-      if (window._intelSportFilter) {
-        filteredMatched = filteredMatched.filter(m => (m.legs || []).some(l => l.sport === window._intelSportFilter));
+      if ((window._intelSportFilter || []).length) {
+        filteredMatched = filteredMatched.filter(m => (m.legs || []).some(l => sportSelMatch(window._intelSportFilter, l.sport)));
       }
       // Advanced range filters
       filteredMatched = filteredMatched.filter(m => {
@@ -3346,11 +3327,7 @@
           <option value="tied_lost" ${window._intelResultFilter==='tied_lost'?'selected':''}>Lost (tie)</option>
           <option value="missed" ${window._intelResultFilter==='missed'?'selected':''}>No Quote</option>
         </select>
-        <select onchange="window._intelSportFilter=this.value; renderMarketIntel(window._lastIntelData||{})"
-          style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px;">
-          <option value="">All sports</option>
-          ${mpSports.map(s => '<option value="' + s + '"' + (window._intelSportFilter === s ? ' selected' : '') + '>' + sportLabel(s) + '</option>').join('')}
-        </select>
+        ${(() => { mfRegister('intel-sport', { allLabel: 'All sports', options: sportFilterOptions(mpSports), get: () => window._intelSportFilter || [], set: (v) => { window._intelSportFilter = v; }, apply: () => renderMarketIntel(window._lastIntelData||{}) }); return mfHtml('intel-sport'); })()}
         <button onclick="window._intelShowAdvanced=!window._intelShowAdvanced; renderMarketIntel(window._lastIntelData||{})" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer;">${window._intelShowAdvanced ? '&#9652;' : '&#9662;'} Advanced</button>
         <span style="font-size:11px; color:var(--text3); margin-left:auto;">${filteredMatched.length} of ${matched.length}</span>
       </div>`;
@@ -3980,7 +3957,7 @@
     el.innerHTML = html;
   }
 
-  const posState = { sortCol: 'time', sortDir: -1, search: '', statusFilter: '', typeFilters: { sgp: false, prop: false }, sportFilter: '', legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', showHidden: false, _name: 'posState' };
+  const posState = { sortCol: 'time', sortDir: -1, search: '', statusFilter: '', typeFilters: { sgp: false, prop: false }, sportFilter: [], legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', towinMin: '', towinMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', showHidden: false, _name: 'posState' };
   window.posRerender = () => renderPositions(window._lastPosData || { recentOrders: [] });
   window.togglePosSort = (col) => {
     if (posState.sortCol === col) posState.sortDir *= -1;
@@ -4161,9 +4138,9 @@
         const teams = legs.map(l => (l.team || l.teamName || '')).join(' ').toLowerCase();
         if (!teams.includes(q) && !(o.parlayId || '').toLowerCase().includes(q)) return false;
       }
-      if (posState.sportFilter) {
+      if (posState.sportFilter.length) {
         const legs = o.legs || o.meta?.legs || [];
-        if (!legs.some(l => l.sport === posState.sportFilter)) return false;
+        if (!legs.some(l => sportSelMatch(posState.sportFilter, l.sport))) return false;
       }
       if (!passesDateFilter(o.confirmedAt, posState.dateFrom, posState.dateTo)) return false;
       // Advanced range filters
@@ -4304,10 +4281,7 @@
         <option value="awaiting"${posState.statusFilter==='awaiting'?' selected':''}>Awaiting Settle</option>
       </select>
       ${renderTypeFilterCheckboxes(posState, 'posState', 'posRerender()')}
-      <select onchange="posState.sportFilter=this.value; posRerender()" style="${pFSel}" title="Filter by sport (matches if any leg is in the chosen sport)">
-        <option value="">All sports</option>
-        ${posSports.map(s => `<option value="${s}"${posState.sportFilter===s?' selected':''}>${sportLabel(s)}</option>`).join('')}
-      </select>
+      ${(() => { mfRegister('pos-sport', { allLabel: 'All sports', options: sportFilterOptions(posSports), get: () => posState.sportFilter, set: (v) => { posState.sportFilter = v; }, apply: () => posRerender() }); return mfHtml('pos-sport'); })()}
       ${dateFilterHtml(posState, 'posRerender', dStyle)}
       <button onclick="posState.showAdvanced=!posState.showAdvanced; posRerender()" style="${pFSel} cursor:pointer;">${posState.showAdvanced ? '&#9652;' : '&#9662;'} Advanced</button>
       <label style="font-size:11px; color:var(--text2); display:inline-flex; align-items:center; gap:4px; cursor:pointer;" title="Show parlays hidden by the stale-confirmed heuristic — those where at least one leg already has a known result (inferredResult or settlement_status) while other legs are still in play or the game finished >12h ago.">
@@ -4492,7 +4466,7 @@
     orders: {},
     sortCol: 'settled', sortDir: -1,
     search: '',
-    sportFilter: '',
+    sportFilter: [],   // array of sport LABELS (multi-select; see sportSelMatch)
     resultFilter: '',
     legsFilter: '',
     typeFilters: { sgp: false, prop: false }, // multi-select; union semantic when both checked
@@ -4575,9 +4549,9 @@
         const teams = (o.legs||o.meta?.legs||[]).map(l=>l.team||l.teamName||'').join(' ').toLowerCase();
         if (!teams.includes(q) && !(o.parlayId||'').toLowerCase().includes(q)) return false;
       }
-      if (settledState.sportFilter) {
+      if (settledState.sportFilter.length) {
         const legs = o.legs || o.meta?.legs || [];
-        if (!legs.some(l => l.sport === settledState.sportFilter)) return false;
+        if (!legs.some(l => sportSelMatch(settledState.sportFilter, l.sport))) return false;
       }
       if (settledState.resultFilter === 'won' && !(o.pnl > 0)) return false;
       if (settledState.resultFilter === 'lost' && !(o.pnl < 0)) return false;
@@ -4634,9 +4608,7 @@
     const rerend = "rerenderWithFocus(function(){renderSettled({recentOrders:[]})})";
     let html = '<div style="padding:8px 12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">'
       + '<input type="text" id="settled-search" placeholder="Search team or parlay ID..." value="' + settledState.search + '" oninput="settledState.search=this.value; ' + rerend + '" style="' + sFSel + ' width:170px;">'
-      + '<select onchange="settledState.sportFilter=this.value; ' + rerend + '" style="' + sFSel + '"><option value="">All sports</option>'
-      + sports.map(s => '<option value="' + s + '"' + (settledState.sportFilter === s ? ' selected' : '') + '>' + sportLabel(s) + '</option>').join('')
-      + '</select>'
+      + (() => { mfRegister('settled-sport', { allLabel: 'All sports', options: sportFilterOptions(sports), get: () => settledState.sportFilter, set: (v) => { settledState.sportFilter = v; }, apply: () => rerenderWithFocus(function(){renderSettled({recentOrders:[]});}) }); return mfHtml('settled-sport'); })()
       + '<select onchange="settledState.resultFilter=this.value; ' + rerend + '" style="' + sFSel + '">'
       + '<option value="">All results</option>'
       + '<option value="won"' + (settledState.resultFilter === 'won' ? ' selected' : '') + '>Won (parlay lost)</option>'
@@ -5055,7 +5027,7 @@
   // -----------------------------------------------------------------------
 
   // Persistent state for Game Exposure table
-  const gameExpState = { sortCol: 'netExposure', sortDir: -1, search: '', sportFilter: '', started: '', parlaysMin: '', parlaysMax: '', grossMin: '', grossMax: '', netMin: '', netMax: '', stakesMin: '', stakesMax: '', showAdvanced: false, pageSize: 20, showAll: false };
+  const gameExpState = { sortCol: 'netExposure', sortDir: -1, search: '', sportFilter: [], started: '', parlaysMin: '', parlaysMax: '', grossMin: '', grossMax: '', netMin: '', netMax: '', stakesMin: '', stakesMax: '', showAdvanced: false, pageSize: 20, showAll: false };
   window.gameExpRerender = () => renderGameExposure(window._lastExposureData || {});
   window.toggleGameExpSort = (col) => {
     if (gameExpState.sortCol === col) gameExpState.sortDir *= -1;
@@ -5756,7 +5728,7 @@
         const q = gameExpState.search.toLowerCase();
         if (!(g.name || '').toLowerCase().includes(q)) return false;
       }
-      if (gameExpState.sportFilter && g.sport !== gameExpState.sportFilter) return false;
+      if (!sportSelMatch(gameExpState.sportFilter, g.sport)) return false;
       if (gameExpState.started) {
         const st = g.startTime ? new Date(g.startTime).getTime() : null;
         if (!st) return false;
@@ -5794,9 +5766,7 @@
     const fSel = 'background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px;';
     let html = '<div style="padding:8px 12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">'
       + '<input type="text" placeholder="Search game..." value="' + gameExpState.search + '" id="gameexp-search" oninput="gameExpState.search=this.value; rerenderWithFocus(()=>gameExpRerender())" style="' + fSel + ' width:160px;">'
-      + '<select onchange="gameExpState.sportFilter=this.value; gameExpRerender()" style="' + fSel + '"><option value="">All sports</option>'
-      + sports.map(s => '<option value="' + s + '"' + (gameExpState.sportFilter === s ? ' selected' : '') + '>' + sportLabel(s) + '</option>').join('')
-      + '</select>'
+      + (() => { mfRegister('gameexp-sport', { allLabel: 'All sports', options: sportFilterOptions(sports), get: () => gameExpState.sportFilter, set: (v) => { gameExpState.sportFilter = v; }, apply: () => gameExpRerender() }); return mfHtml('gameexp-sport'); })()
       + '<select onchange="gameExpState.started=this.value; gameExpRerender()" style="' + fSel + '">'
       + '<option value="">All games</option>'
       + '<option value="upcoming"' + (gameExpState.started === 'upcoming' ? ' selected' : '') + '>Upcoming only</option>'
@@ -5832,7 +5802,7 @@
     if (maxPerGame > 0) html += '<th style="text-align:right">% of Limit</th>';
     html += '<th style="width:100px;"></th></tr>';
 
-    const isFiltering = gameExpState.search || gameExpState.sportFilter || gameExpState.started;
+    const isFiltering = gameExpState.search || gameExpState.sportFilter.length > 0 || gameExpState.started;
     const limit = (gameExpState.showAll || isFiltering) ? games.length : gameExpState.pageSize;
     const displayed = games.slice(0, limit);
     const hasMore = games.length > limit;
@@ -6441,7 +6411,7 @@
   // PORTFOLIO TAB
   // -----------------------------------------------------------------------
 
-  const portfolioState = { sortCol: 'settled', sortDir: -1, search: '', sportFilter: '', resultFilter: '', typeFilters: { sgp: false, prop: false }, legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', pnlMin: '', pnlMax: '', roiMin: '', roiMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', _name: 'portfolioState' };
+  const portfolioState = { sortCol: 'settled', sortDir: -1, search: '', sportFilter: [], resultFilter: '', typeFilters: { sgp: false, prop: false }, legsMin: '', legsMax: '', oddsMin: '', oddsMax: '', riskMin: '', riskMax: '', pnlMin: '', pnlMax: '', roiMin: '', roiMax: '', showAdvanced: false, pageSize: 15, page: 0, _lastFilterHash: '', dateFrom: '', dateTo: '', _name: 'portfolioState' };
   window.portfolioRerender = () => renderPortfolio(window._lastPortfolioData || { recentOrders: [], stats: {}, pnlBySport: {} });
   window.togglePortfolioSort = (col) => {
     if (portfolioState.sortCol === col) portfolioState.sortDir *= -1;
@@ -7368,10 +7338,10 @@
         return teams.includes(q) || (o.parlayId || '').toLowerCase().includes(q);
       });
     }
-    if (portfolioState.sportFilter) {
+    if (portfolioState.sportFilter.length) {
       filtered = filtered.filter(o => {
         const legs = o.legs || o.meta?.legs || [];
-        return legs.some(l => l.sport === portfolioState.sportFilter);
+        return legs.some(l => sportSelMatch(portfolioState.sportFilter, l.sport));
       });
     }
     if (portfolioState.resultFilter) {
@@ -7466,7 +7436,7 @@
     // and leaves the user with no way to clear their query. Instead, render
     // the toolbar normally and drop the empty-state message below it.
     const hasAnySettled = settled.length > 0;
-    const hasActiveFilter = !!(portfolioState.search || portfolioState.sportFilter || portfolioState.resultFilter);
+    const hasActiveFilter = !!(portfolioState.search || portfolioState.sportFilter.length || portfolioState.resultFilter);
 
     const pSortArrow = (col) => portfolioState.sortCol === col ? (portfolioState.sortDir > 0 ? ' &#9650;' : ' &#9660;') : '';
     const pSortClick = (col, align) => 'onclick="event.stopPropagation(); togglePortfolioSort(\'' + col + '\')" style="cursor:pointer;' + (align?'text-align:'+align+';':'') + '"';
@@ -7476,10 +7446,8 @@
 
     let html = '<div style="padding:8px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--border);">';
     html += '<input type="text" placeholder="Search team..." value="' + portfolioState.search + '" id="portfolio-search" oninput="portfolioState.search=this.value; rerenderWithFocus(()=>portfolioRerender())" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; width:150px;">';
-    html += '<select onchange="portfolioState.sportFilter=this.value; portfolioRerender()" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px;">';
-    html += '<option value="">All sports</option>';
-    for (const s of sports) html += '<option value="' + s + '"' + (portfolioState.sportFilter === s ? ' selected' : '') + '>' + sportLabel(s) + '</option>';
-    html += '</select>';
+    mfRegister('portfolio-sport', { allLabel: 'All sports', options: sportFilterOptions(sports), get: () => portfolioState.sportFilter, set: (v) => { portfolioState.sportFilter = v; }, apply: () => portfolioRerender() });
+    html += mfHtml('portfolio-sport');
     html += renderTypeFilterCheckboxes(portfolioState, 'portfolioState', 'portfolioRerender()');
     html += '<select onchange="portfolioState.resultFilter=this.value; portfolioRerender()" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px;">';
     html += '<option value="">All settlements</option>';
@@ -8353,8 +8321,27 @@
       'golf_pga_championship': 'PGA',
       'mma_mixed_martial_arts': 'MMA',
       'boxing_boxing': 'Boxing',
+      // Legacy/PX-variant keys — must share the canonical label so the
+      // label-keyed sport filters collapse them into one row.
+      'golf': 'Golf',
+      'basketball_nba_summer_league': 'NBA Summer League',
+      'soccer_brazil_campeonato': 'Brasileirão',
+      'soccer_mexico_ligamx': 'Liga MX',
+      'soccer_conmebol_libertadores': 'Libertadores',
+      'soccer_efl_champ': 'EFL Championship',
+      'soccer_fifa_world_cup': 'World Cup',
+      'americanfootball_cfl': 'CFL',
     };
-    return map[sport] || (sport === 'unknown' ? 'Unknown' : sport);
+    if (map[sport]) return map[sport];
+    if (sport === 'unknown') return 'Unknown';
+    // Case-insensitive second pass: PX sometimes stamps legs with its display
+    // sport name ('Soccer', 'Golf') rather than an odds-feed key. Lowercasing
+    // lets those merge with the canonical label instead of dodging the map.
+    const lc = String(sport || '').toLowerCase();
+    if (map[lc]) return map[lc];
+    // Prettify anything still unmapped ('icehockey_khl' → 'Icehockey Khl') so
+    // the filter never shows a raw snake_case key.
+    return String(sport).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
   /**
@@ -16266,6 +16253,118 @@
   function switchTab(tab, btn) { switchSection(tab, btn); }
 
   // --- Lines tab: browse the registered lineIndex via /lines/detail ---
+  // ---------------------------------------------------------------------------
+  // Generic multi-select filter (button + checkbox popup) for table toolbars.
+  //
+  // Native <select multiple> renders as an always-expanded listbox that doesn't
+  // fit a one-line toolbar, so every multi filter is a button + popup. Unlike
+  // the hand-rolled lines-market widget (static HTML, never re-rendered), most
+  // tables rebuild their whole toolbar as an HTML string on every rerender —
+  // which would destroy an open popup mid-click. The registry + _mfOpenId keep
+  // the open panel alive across re-renders: mfHtml() re-emits the panel opened
+  // whenever its id is the currently-open one.
+  //
+  // Usage per table render:
+  //   mfRegister('pos-sport', { allLabel:'All sports', options, get:()=>state.x,
+  //                             set:(v)=>{state.x=v}, apply:()=>rerender() });
+  //   html += mfHtml('pos-sport');
+  // State is an ARRAY owned by the table's state object; empty = no filter.
+  // ---------------------------------------------------------------------------
+  const _mfReg = {};
+  let _mfOpenId = null;
+  function mfRegister(id, cfg) { _mfReg[id] = cfg; }
+  function _mfBtnLabel(id) {
+    const c = _mfReg[id];
+    const sel = c.get() || [];
+    if (!sel.length) return c.allLabel;
+    if (sel.length === 1) {
+      const o = c.options.find(o => String(o.value) === String(sel[0]));
+      return o ? o.label : String(sel[0]);
+    }
+    return sel.length + ' selected';
+  }
+  function _mfPanelHtml(id) {
+    const c = _mfReg[id];
+    const sel = new Set((c.get() || []).map(String));
+    const rows = c.options.map(o => {
+      const v = escapeHtml(String(o.value));
+      const checked = sel.has(String(o.value)) ? ' checked' : '';
+      const pad = o.group ? '22px' : '8px';
+      return '<label style="display:flex; align-items:center; gap:6px; padding:3px 8px 3px ' + pad + '; cursor:pointer; white-space:nowrap; font-size:12px; color:var(--text);">'
+        + '<input type="checkbox" value="' + v + '"' + checked + ' onchange="mfCbChange(\'' + id + '\', this)">'
+        + '<span>' + escapeHtml(o.label) + '</span></label>';
+    }).join('');
+    return '<div style="padding:5px 8px; border-bottom:1px solid var(--border);">'
+      + '<button type="button" onclick="mfClear(\'' + id + '\')" style="background:none; border:none; color:var(--accent, #6aa9ff); font-size:11px; cursor:pointer; padding:0;">Clear (' + escapeHtml(c.allLabel.toLowerCase()) + ')</button>'
+      + '</div>' + rows;
+  }
+  function mfHtml(id) {
+    const c = _mfReg[id];
+    if (!c) return '';
+    const open = _mfOpenId === id;
+    return '<span style="position:relative; display:inline-block;">'
+      + '<button type="button" id="mf-btn-' + id + '" onclick="mfToggle(\'' + id + '\', event)" style="background:var(--surface3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer; min-width:110px; text-align:left;">' + escapeHtml(_mfBtnLabel(id)) + ' &#9662;</button>'
+      + '<div id="mf-panel-' + id + '" style="display:' + (open ? 'block' : 'none') + '; position:absolute; top:100%; left:0; margin-top:2px; z-index:60; background:var(--surface2); border:1px solid var(--border); border-radius:4px; max-height:320px; overflow-y:auto; box-shadow:0 4px 16px rgba(0,0,0,0.5); min-width:200px;">'
+      + (open ? _mfPanelHtml(id) : '') + '</div></span>';
+  }
+  function mfToggle(id, e) {
+    if (e) e.stopPropagation();
+    const panel = document.getElementById('mf-panel-' + id);
+    if (!panel) return;
+    if (_mfOpenId === id) { _mfOpenId = null; panel.style.display = 'none'; return; }
+    // close any other open one
+    if (_mfOpenId) { const p = document.getElementById('mf-panel-' + _mfOpenId); if (p) p.style.display = 'none'; }
+    _mfOpenId = id;
+    panel.innerHTML = _mfPanelHtml(id);
+    panel.style.display = 'block';
+  }
+  function mfCbChange(id, cb) {
+    const c = _mfReg[id];
+    const sel = new Set((c.get() || []).map(String));
+    if (cb.checked) sel.add(cb.value); else sel.delete(cb.value);
+    c.set([...sel]);
+    // apply() usually rerenders the table (rebuilding this widget via mfHtml,
+    // which re-opens the panel because _mfOpenId is still this id). For static
+    // widgets that don't rerender, sync the button text directly too.
+    const btn = document.getElementById('mf-btn-' + id);
+    if (btn) btn.innerHTML = escapeHtml(_mfBtnLabel(id)) + ' &#9662;';
+    c.apply();
+  }
+  function mfClear(id) {
+    const c = _mfReg[id];
+    c.set([]);
+    const panel = document.getElementById('mf-panel-' + id);
+    if (panel && _mfOpenId === id) panel.innerHTML = _mfPanelHtml(id);
+    const btn = document.getElementById('mf-btn-' + id);
+    if (btn) btn.innerHTML = escapeHtml(_mfBtnLabel(id)) + ' &#9662;';
+    c.apply();
+  }
+  document.addEventListener('click', (e) => {
+    if (!_mfOpenId) return;
+    const panel = document.getElementById('mf-panel-' + _mfOpenId);
+    const btn = document.getElementById('mf-btn-' + _mfOpenId);
+    if (panel && panel.contains(e.target)) return;
+    if (btn && (e.target === btn || btn.contains(e.target))) return;
+    if (panel) panel.style.display = 'none';
+    _mfOpenId = null;
+  });
+
+  // Sport filters match on LABEL, not raw key. Several raw keys map to one
+  // display label (golf_matchups + legacy 'golf' → "Golf"; 'soccer' + PX's
+  // capitalized 'Soccer' → "Soccer") — matching on the raw key is exactly what
+  // produced duplicate "Golf"/"Soccer" rows in the Orders sport dropdown.
+  // Options = unique labels, alphabetized; selecting a label matches every
+  // key that carries it.
+  function sportFilterOptions(rawKeys) {
+    const labels = [...new Set((rawKeys || []).filter(Boolean).map(k => sportLabel(k)))];
+    labels.sort((a, b) => a.localeCompare(b));
+    return labels.map(l => ({ value: l, label: l }));
+  }
+  function sportSelMatch(selLabels, sportKey) {
+    if (!selLabels || !selLabels.length) return true;
+    return selLabels.includes(sportLabel(sportKey));
+  }
+
   // Market filter options for the Registered Lines table. A trailing `_` is a
   // PREFIX match server-side ("outright_" catches every outright family at
   // once); anything else is an exact marketType match. `group:true` just indents
@@ -16375,8 +16474,39 @@
     panel.style.display = 'none';
   });
 
+  // Registered Lines sport options — raw keys, alphabetized by label. Curated
+  // rather than derived from data because the server filters on exact keys.
+  const LINES_SPORT_OPTIONS = [
+    { value: 'boxing_boxing', label: 'Boxing' },
+    { value: 'soccer_brazil_campeonato', label: 'Brasileirão' },
+    { value: 'soccer_germany_bundesliga', label: 'Bundesliga' },
+    { value: 'soccer_epl', label: 'EPL' },
+    { value: 'golf_matchups', label: 'Golf (Matchups)' },
+    { value: 'golf_outrights', label: 'Golf (Outrights)' },
+    { value: 'soccer_spain_la_liga', label: 'La Liga' },
+    { value: 'soccer_conmebol_libertadores', label: 'Libertadores' },
+    { value: 'soccer_mexico_ligamx', label: 'Liga MX' },
+    { value: 'soccer_france_ligue_one', label: 'Ligue 1' },
+    { value: 'baseball_mlb', label: 'MLB' },
+    { value: 'soccer_usa_mls', label: 'MLS' },
+    { value: 'mma_mixed_martial_arts', label: 'MMA' },
+    { value: 'basketball_nba', label: 'NBA' },
+    { value: 'basketball_nba_summer_league', label: 'NBA Summer League' },
+    { value: 'basketball_ncaab', label: 'NCAAB' },
+    { value: 'americanfootball_ncaaf', label: 'NCAAF' },
+    { value: 'americanfootball_nfl', label: 'NFL' },
+    { value: 'icehockey_nhl', label: 'NHL' },
+    { value: 'soccer_usa_nwsl', label: 'NWSL' },
+    { value: 'soccer_italy_serie_a', label: 'Serie A' },
+    { value: 'soccer', label: 'Soccer (generic)' },
+    { value: 'tennis', label: 'Tennis' },
+    { value: 'soccer_uefa_champs_league', label: 'UCL' },
+    { value: 'soccer_uefa_europa_league', label: 'UEL' },
+    { value: 'basketball_wnba', label: 'WNBA' },
+  ];
+
   const linesState = {
-    sport: '',
+    sport: [],
     market: '',
     team: '',
     event: '',
@@ -16399,6 +16529,14 @@
     _rows: [],
   };
   window.linesState = linesState;
+  // Lines toolbar is static HTML (never re-rendered), so mount the sport
+  // multi-select once at startup. The market filter next to it keeps its
+  // original hand-rolled widget.
+  mfRegister('lines-sport', { allLabel: 'All sports', options: LINES_SPORT_OPTIONS, get: () => linesState.sport, set: (v) => { linesState.sport = v; }, apply: () => loadLines() });
+  (function () {
+    const mount = document.getElementById('lines-sport-mount');
+    if (mount) mount.innerHTML = mfHtml('lines-sport');
+  })();
   // NOTE: do NOT do `window.renderLinesTable = () => renderLinesTable()`.
   // At script top-level in a classic <script>, assigning window.X
   // overwrites the same binding the top-level `function X()` creates,
@@ -17431,7 +17569,7 @@
     let stage = 'fetch';
     try {
       const qs = new URLSearchParams();
-      if (linesState.sport) qs.set('sport', linesState.sport);
+      if (linesState.sport.length) qs.set('sport', linesState.sport.join(','));
       if (linesState.market) qs.set('market', linesState.market);
       if (linesState.team) qs.set('team', linesState.team);
       if (linesState.event) qs.set('event', linesState.event);
@@ -17996,7 +18134,7 @@
     sortCol: 'time', sortDir: -1,
     search: '',
     statusFilter: [],
-    sportFilter: '',
+    sportFilter: [],   // array of sport LABELS (multi-select; see sportSelMatch)
     legsFilter: '',
     oddsMinFilter: '',
     oddsMaxFilter: '',
@@ -18067,9 +18205,9 @@
         if (s.startsWith('settled_')) s = s.replace('settled_', '');
         if (!historyState.statusFilter.includes(s)) return false;
       }
-      if (historyState.sportFilter) {
+      if (historyState.sportFilter.length) {
         const legs = (o.legs || o.meta?.legs || []);
-        if (!legs.some(l => l.sport === historyState.sportFilter)) return false;
+        if (!legs.some(l => sportSelMatch(historyState.sportFilter, l.sport))) return false;
       }
       if (historyState.legsFilter) {
         const n = (o.legs || o.meta?.legs || []).length;
@@ -18154,10 +18292,7 @@
           return `<option value="${s}" ${historyState.statusFilter.includes(s)?'selected':''}>${label}</option>`;
         }).join('')}
       </select>
-      <select onchange="historyState.sportFilter=this.value; historyRerender()" style="${fSel}">
-        <option value="">All sports</option>
-        ${allSports.map(s => `<option value="${s}" ${historyState.sportFilter===s?'selected':''}>${sportLabel(s)}</option>`).join('')}
-      </select>
+      ${(() => { mfRegister('history-sport', { allLabel: 'All sports', options: sportFilterOptions(allSports), get: () => historyState.sportFilter, set: (v) => { historyState.sportFilter = v; }, apply: () => historyRerender() }); return mfHtml('history-sport'); })()}
       <select onchange="historyState.legsFilter=this.value; historyRerender()" style="${fSel}">
         <option value="">All legs</option>
         ${[2,3,4,5,6,7,8].map(n => `<option value="${n}" ${historyState.legsFilter===String(n)?'selected':''}>${n}-leg</option>`).join('')}
@@ -18187,7 +18322,7 @@
     }
 
     // Pagination
-    const isFiltering = historyState.search || historyState.statusFilter.length > 0 || historyState.sportFilter || historyState.legsFilter || historyState.oddsMinFilter || historyState.oddsMaxFilter || historyState.dateFrom || historyState.dateTo || historyState.legsMin || historyState.legsMax || historyState.fairMin || historyState.fairMax || historyState.riskMin || historyState.riskMax || historyState.towinMin || historyState.towinMax || historyState.pnlMin || historyState.pnlMax;
+    const isFiltering = historyState.search || historyState.statusFilter.length > 0 || historyState.sportFilter.length > 0 || historyState.legsFilter || historyState.oddsMinFilter || historyState.oddsMaxFilter || historyState.dateFrom || historyState.dateTo || historyState.legsMin || historyState.legsMax || historyState.fairMin || historyState.fairMax || historyState.riskMin || historyState.riskMax || historyState.towinMin || historyState.towinMax || historyState.pnlMin || historyState.pnlMax;
     // Visible-count handling. When the user is actively filtering, show
     // every match (filters are usually narrow enough that all results
     // fit). Otherwise honor showAll, then visibleCount (which the user
