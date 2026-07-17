@@ -1276,8 +1276,21 @@ const GAME_LINE_CONFIGS = {
     teamTotalName: /^team\s+total(?:\s+points)?$/i,
   },
   tennis: {
-    leaguePath: 'tennis',  // multi-tournament; we may need to adapt URL
+    // DK organizes tennis PER TOURNAMENT (/leagues/tennis/atp-gstaad, …); the
+    // bare /leagues/tennis hub carries NO match odds — a single nav there
+    // returned 1 junk event with null players and zero markets (probed
+    // 2026-07-17), which is why this config never produced a tennis line.
+    // dynamicLeagues: harvest the hub's /leagues/tennis/<slug> links and visit
+    // each singles tournament, accumulating intercepted payloads across navs.
+    leaguePath: 'tennis',
     label: 'Tennis',
+    dynamicLeagues: {
+      linkRe: /^\/leagues\/tennis\/[a-z0-9-]+$/i,   // singles only — doubles slugs carry an encoded ",-doubles" suffix that fails this anchor
+      maxLeagues: 8,
+    },
+    // DK tennis names the winner market "Moneyline" on league pages, but keep
+    // "Winner"/"Match Winner" as alternates in case a tournament page differs.
+    moneylineName: /^(?:moneyline|winner|match\s+winner)$/i,
     spreadName: /^game\s+spread$/i,
     altSpreadName: /^alt(?:ernate)?\s+game\s+spread$/i,
     totalName: /^total(?:\s+games)?$/i,
@@ -1455,12 +1468,31 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
                 startTime: ev.startEventDate || null,
                 homeTeam: ev.team1 || ev.homeTeam || null,
                 awayTeam: ev.team2 || ev.awayTeam || null,
+                // Live matches must never merge into the pre-game odds cache —
+                // their prices move point-by-point. Tennis league pages list
+                // in-progress matches alongside today's (status STARTED vs
+                // NOT_STARTED, probed 2026-07-17).
+                started: ev.status === 'STARTED',
               };
+              // Tennis (and other DK "TwoTeam" events) carry no team1/team2 —
+              // the players live in participants[] with venueRole Home/Away.
+              if ((!eventsById[ev.id].homeTeam || !eventsById[ev.id].awayTeam) && Array.isArray(ev.participants)) {
+                for (const p of ev.participants) {
+                  if (!p || !p.name) continue;
+                  if (/^home$/i.test(p.venueRole || '')) eventsById[ev.id].homeTeam = eventsById[ev.id].homeTeam || p.name;
+                  else if (/^away$/i.test(p.venueRole || '')) eventsById[ev.id].awayTeam = eventsById[ev.id].awayTeam || p.name;
+                }
+              }
               if ((!eventsById[ev.id].homeTeam || !eventsById[ev.id].awayTeam) && ev.name) {
-                const m = ev.name.match(/^(.+?)\s+@\s+(.+)$/);
+                // "A @ B" (US team sports) — away first. "A vs B" (tennis,
+                // combat) — DK lists the HOME/first participant first.
+                let m = ev.name.match(/^(.+?)\s+@\s+(.+)$/);
                 if (m) {
                   eventsById[ev.id].awayTeam = eventsById[ev.id].awayTeam || m[1].trim();
                   eventsById[ev.id].homeTeam = eventsById[ev.id].homeTeam || m[2].trim();
+                } else if ((m = ev.name.match(/^(.+?)\s+vs\.?\s+(.+)$/i))) {
+                  eventsById[ev.id].homeTeam = eventsById[ev.id].homeTeam || m[1].trim();
+                  eventsById[ev.id].awayTeam = eventsById[ev.id].awayTeam || m[2].trim();
                 }
               }
             }
@@ -1492,7 +1524,7 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
             if (
               cfg.threeWayMoneyline
                 ? /^(?:three\s+way\s+moneyline|match\s+result|match\s+winner|moneyline|1x2)$/i.test(name)
-                : /^moneyline$/i.test(name)
+                : (cfg.moneylineName || /^moneyline$/i).test(name)
             ) {
               for (const sel of data.selections) {
                 if (sel.marketId !== m.id) continue;
@@ -1554,16 +1586,43 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
       });
 
       // Navigate to the league page + scroll to trigger lazy XHRs
-      const url = `https://sportsbook.draftkings.com/leagues/${cfg.leaguePath}`;
-      try {
+      const _navAndScroll = async (url, scrolls) => {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
         await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
-        for (let i = 0; i < 8; i++) {
+        for (let i = 0; i < scrolls; i++) {
           await page.evaluate(() => window.scrollBy(0, window.innerHeight));
           await new Promise(r => setTimeout(r, 500));
         }
         await page.evaluate(() => window.scrollTo(0, 0));
         await new Promise(r => setTimeout(r, 3000));
+      };
+      const url = `https://sportsbook.draftkings.com/leagues/${cfg.leaguePath}`;
+      try {
+        await _navAndScroll(url, 8);
+        // Multi-tournament sports (tennis): the top-level page is a HUB with
+        // no match odds — the real boards live on per-tournament league pages
+        // linked from it. Harvest those links and visit each; the response
+        // interceptor above stays attached across navigations, so payloads
+        // accumulate into the same eventsById/marketsByEvent.
+        if (cfg.dynamicLeagues) {
+          const links = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href')));
+          const seen = new Set();
+          const leagues = [];
+          for (const l of (links || [])) {
+            if (!l || !cfg.dynamicLeagues.linkRe.test(l)) continue;
+            const norm = l.replace(/\/+$/, '');
+            if (norm === '/leagues/' + cfg.leaguePath) continue; // the hub itself
+            if (seen.has(norm)) continue;
+            seen.add(norm);
+            leagues.push(norm);
+            if (leagues.length >= (cfg.dynamicLeagues.maxLeagues || 8)) break;
+          }
+          log.info('DkScraper', `${cfg.label}: hub lists ${leagues.length} tournament page(s): ${leagues.join(', ') || '(none)'}`);
+          for (const path of leagues) {
+            try { await _navAndScroll('https://sportsbook.draftkings.com' + path, 3); }
+            catch (err) { log.debug('DkScraper', `${cfg.label} league nav failed (${path}): ${err.message}`); }
+          }
+        }
       } catch (err) {
         log.debug('DKScraper', `${cfg.label} game-line nav error: ${err.message}`);
       }
@@ -1663,6 +1722,7 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
           startTime: ev.startTime,
           homeTeam: ev.homeTeam,
           awayTeam: ev.awayTeam,
+          started: !!ev.started,
           h2h, spreadsByLine, totalsByLine, teamTotalsByLine,
         });
       }

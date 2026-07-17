@@ -1715,6 +1715,20 @@ async function seedAllLines() {
         }
         const startTime = event.scheduled || oddsEvt?.commenceTime || null;
 
+        // Tennis spread/total lines only register when the matched odds event
+        // actually CARRIES that market. When TOA has an active tournament it
+        // serves h2h+spreads+totals and everything registers as before — but
+        // in TOA's off-weeks tennis is DK-merged MONEYLINE-ONLY
+        // (mergeDkTennisMatches), and registering spread/total lines with no
+        // odds behind them means lines PX advertises that we decline 100% of
+        // the time — exactly the supported-lines-sync compliance violation
+        // (PX Rule 2) the 5b33e36 work closed. Fail closed at registration.
+        if (sportKey === 'tennis'
+            && (oddsApiMarket === 'spreads' || oddsApiMarket === 'totals')
+            && !(oddsEvt && oddsEvt.markets && oddsEvt.markets[oddsApiMarket])) {
+          continue;
+        }
+
         if (isGolfSport) golfTrace.linesRegistered++;
         const info = _setSeedLine(sel.lineId, {
           sport: sportKey,

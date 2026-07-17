@@ -4646,6 +4646,90 @@ async function mergeOddsApiLive(sport) {
   return { merged: evCount, sport };
 }
 
+/**
+ * Merge DK tennis moneylines into oddsCache['tennis'].
+ *
+ * WHY DK: tennis odds come exclusively from TOA's dynamic tournament keys,
+ * and TOA only ever lists majors + Masters-level events. In any off-week
+ * (post-Wimbledon, 2026-07-17: all 41 TOA tennis keys inactive) the tour is
+ * playing 250-level events TOA has never heard of — PX listed 17 matches
+ * across ATP Gstaad/Bastad/Umag + WTA Iasi/Athens while our tennis cache had
+ * zero events, so every tennis RFQ declined as an unknown leg. DK's
+ * sportsbook carries all of them (per-tournament league pages discovered from
+ * the /leagues/tennis hub; see dk-scraper GAME_LINE_CONFIGS.tennis).
+ *
+ * ADDITIVE ONLY: an existing cache pair (from TOA when a covered tournament
+ * is active) always wins — multi-book consensus beats a single-book de-vig.
+ * Live matches (started=true) never merge; their prices move per point.
+ * Moneyline only for now: the league pages' default payload carries no Game
+ * Spread / Total Games markets, so PX tennis spread/total legs keep declining
+ * (they did before too — no regression).
+ */
+async function mergeDkTennisMatches() {
+  const dk = require('./dk-scraper');
+  let data;
+  try {
+    data = await dk.fetchDkGameLines('tennis');
+  } catch (err) {
+    log.warn('OddsFeed', `DK tennis fetch failed: ${err.message}`);
+    return { merged: 0, added: 0, err: err.message };
+  }
+  if (!data || !Array.isArray(data.games) || data.games.length === 0) return { merged: 0, added: 0 };
+
+  const sport = 'tennis';
+  if (!oddsCache[sport]) oddsCache[sport] = { fetchedAt: Date.now(), events: {} };
+  const cache = oddsCache[sport];
+
+  // Same last-word fuzzy pair index as the MMA merge — DK and PX/TOA can
+  // disagree on given-name spelling, but tennis surnames are stable.
+  const lw = (n) => (n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean).pop() || '';
+  const existingPairs = new Set();
+  for (const entry of Object.values(cache.events || {})) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
+      const a = lw(ev.homeTeam), b = lw(ev.awayTeam);
+      if (a && b) { existingPairs.add(a + '|' + b); existingPairs.add(b + '|' + a); }
+    }
+  }
+
+  let added = 0, skippedLive = 0, skippedExisting = 0;
+  for (const g of data.games) {
+    if (!g.homeTeam || !g.awayTeam || !g.h2h || !g.h2h.home || !g.h2h.away) continue;
+    if (g.started) { skippedLive++; continue; }
+    if (!(g.h2h.home.fairProb > 0) || !(g.h2h.away.fairProb > 0)) continue;
+    const p1 = lw(g.homeTeam), p2 = lw(g.awayTeam);
+    if (!p1 || !p2) continue;
+    if (existingPairs.has(p1 + '|' + p2)) { skippedExisting++; continue; }
+
+    const key = normalizeEventKey(g.homeTeam, g.awayTeam);
+    const newEvent = {
+      homeTeam: g.homeTeam,
+      awayTeam: g.awayTeam,
+      commenceTime: g.startTime || null,
+      eventId: 'dk-tennis-' + g.eventId,
+      markets: {
+        h2h: {
+          home: { rawOdds: g.h2h.home.americanOdds, impliedProb: g.h2h.home.impliedProb, fairProb: g.h2h.home.fairProb, displayFairProb: g.h2h.home.fairProb },
+          away: { rawOdds: g.h2h.away.americanOdds, impliedProb: g.h2h.away.impliedProb, fairProb: g.h2h.away.fairProb, displayFairProb: g.h2h.away.fairProb },
+          books: 1,
+          pinnacle: null, fanduel: null,
+          draftkings: { home: g.h2h.home.americanOdds, away: g.h2h.away.americanOdds },
+          kalshi: null,
+          dkScraped: true,
+        },
+      },
+    };
+    if (!cache.events[key]) cache.events[key] = [];
+    if (Array.isArray(cache.events[key])) cache.events[key].push(newEvent);
+    else cache.events[key] = [cache.events[key], newEvent];
+    existingPairs.add(p1 + '|' + p2); existingPairs.add(p2 + '|' + p1);
+    added++;
+  }
+  if (added > 0) cache.fetchedAt = Date.now();
+  log.info('OddsFeed', `Tennis DK merge: added ${added}, skipped ${skippedLive} live + ${skippedExisting} already-covered (DK games: ${data.games.length})`);
+  return { merged: added, added };
+}
+
 async function mergeDkMmaFights() {
   const dk = require('./dk-scraper');
   let fightData;
@@ -7629,6 +7713,17 @@ async function refreshAllSports() {
     });
   }
 
+  // Fire-and-forget DK tennis merge — covers the 250-level tournaments TOA
+  // never lists (all 41 TOA tennis keys go inactive between big events, and
+  // tennis goes completely dark without this). Additive-only: when a TOA
+  // tournament IS active its multi-book consensus wins. Same 15-min DK cache
+  // economics as the MMA merge above.
+  if (sportsToRefresh.includes('tennis')) {
+    mergeDkTennisMatches().catch(err => {
+      log.warn('OddsFeed', `DK tennis merge failed: ${err.message}`);
+    });
+  }
+
   return results;
 }
 
@@ -9417,6 +9512,7 @@ module.exports = {
   fetchAltLines,
   backfillMissingH2h,
   mergeDkMmaFights,
+  mergeDkTennisMatches,
   mergeDkLiveOdds,
   mergeOddsApiLive,
   warmAltLines,
