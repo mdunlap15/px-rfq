@@ -89,6 +89,12 @@ function categorizeMarketName(name) {
 // Per-sport cache & in-flight dedupe.
 const cacheBySport = {}; // sport -> { at, data }
 const inFlightBySport = {};
+// Per-scrape start timestamps (used as abandon tokens for hung golf scrapes).
+const _inFlightStartedBySport = {};
+// A golf outright scrape past this is treated as hung and abandoned so the next
+// call starts fresh (Puppeteer launch / browser.close() can wedge on Railway
+// with no NAV_TIMEOUT to save them). Generous vs the normal ~45-150s runtime.
+const GOLF_SCRAPE_MAX_RUN_MS = (Number(process.env.GOLF_SCRAPE_MAX_RUN_SEC) || 240) * 1000;
 
 let _puppeteer = null;
 function puppeteer() {
@@ -3407,8 +3413,30 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
   if (!force && cacheBySport[cacheKey] && Date.now() - cacheBySport[cacheKey].at < CACHE_TTL_MS) {
     return cacheBySport[cacheKey].data;
   }
-  if (inFlightBySport[cacheKey]) return inFlightBySport[cacheKey];
+  // Abandon a hung scrape rather than returning it forever. A Puppeteer launch
+  // or browser.close() can wedge on Railway with no NAV_TIMEOUT to save it,
+  // and the golf-topn warm that awaits this would then hang too (permanent
+  // top-N death until reboot — observed at The Open R2/R3 2026-07-17). Past
+  // GOLF_SCRAPE_MAX_RUN_MS, drop the stale in-flight ref so this call starts
+  // fresh. The old scrape's finally still runs and closes its own browser.
+  if (inFlightBySport[cacheKey]) {
+    const startedAt = _inFlightStartedBySport[cacheKey] || 0;
+    if (Date.now() - startedAt < GOLF_SCRAPE_MAX_RUN_MS) return inFlightBySport[cacheKey];
+    log.warn('DkScraper', `golf outright scrape for ${slug} overran ${Math.round((Date.now() - startedAt) / 1000)}s — abandoning hung scrape, starting fresh`);
+    delete inFlightBySport[cacheKey];
+  }
 
+  // Token identifies THIS scrape run so its finally/catch only clears the map
+  // when it's still the current one — a scrape that overran and was abandoned
+  // must not delete the fresh scrape that replaced it.
+  const _token = Date.now();
+  _inFlightStartedBySport[cacheKey] = _token;
+  const _clearIfOurs = () => {
+    if (_inFlightStartedBySport[cacheKey] === _token) {
+      delete inFlightBySport[cacheKey];
+      delete _inFlightStartedBySport[cacheKey];
+    }
+  };
   inFlightBySport[cacheKey] = (async () => {
     const startedAt = Date.now();
     const browser = await _launchBrowser({
@@ -3515,10 +3543,10 @@ async function fetchGolfOutrights(slug, { force = false } = {}) {
       log.info('DkScraper', `Golf outrights [${slug}]: ${markets.length} markets [${capturedKeys.join(',') || 'none'}] / ${totalSelections} selections (${payload.scrapeMs}ms, ${payloads.length} payloads)` + (uncategorized.length ? ` · uncategorized DK names: ${uncategorized.slice(0, 12).join(' | ')}` : ''));
       return payload;
     } finally {
-      await browser.close();
-      delete inFlightBySport[cacheKey];
+      try { await browser.close(); } catch (_) { /* close can hang/throw on a wedged browser */ }
+      _clearIfOurs();
     }
-  })().catch(err => { delete inFlightBySport[cacheKey]; throw err; });
+  })().catch(err => { _clearIfOurs(); throw err; });
   return inFlightBySport[cacheKey];
 }
 

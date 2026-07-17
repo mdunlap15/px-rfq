@@ -388,10 +388,23 @@ async function warmTopNForSlug(slug, tournamentName, { force = false } = {}) {
  * Warm every tournament PX currently lists a top-N board for.
  * `tournaments`: [{ tournamentName }]. Single-flight; TTL-gated.
  */
+// A warm should never take longer than the DK scrape (~45-150s) plus slack.
+// Past this, treat the in-flight warm as HUNG (Puppeteer launch or
+// browser.close() wedged on Railway — both observed) and abandon it so the
+// next call starts a fresh scrape instead of returning the stuck promise
+// forever. Without this, ONE hung scrape kills top-N until the process
+// restarts (operator hit exactly this between The Open R2/R3, 2026-07-17:
+// lastWarm.at frozen, ok=null, board empty, every outright RFQ declining).
+const WARM_MAX_RUN_MS = (Number(process.env.GOLF_TOPN_WARM_MAX_RUN_SEC) || 240) * 1000;
+let _inflightStarted = 0;
+
 async function warmTopN(tournaments, { force = false } = {}) {
   if (!force && Date.now() - _cache.at < TTL_MS && Object.keys(_cache.bySlug).length) return _cache;
-  if (_inflight) return _inflight;
-  _inflight = (async () => {
+  // Return the running warm ONLY if it hasn't overrun — otherwise abandon the
+  // hung one and fall through to start a fresh scrape.
+  if (_inflight && Date.now() - _inflightStarted < WARM_MAX_RUN_MS) return _inflight;
+  _inflightStarted = Date.now();
+  const _p = (async () => {
     const warmStarted = Date.now();
     _lastWarm.at = new Date().toISOString();
     _lastWarm.ok = null; _lastWarm.error = null; _lastWarm.tookMs = null; _lastWarm.scrape = {};
@@ -447,8 +460,12 @@ async function warmTopN(tournaments, { force = false } = {}) {
       + (heldMarkets ? (freshMarkets ? '' : '  (retained previous board — scrape returned nothing)')
                      : '  ** NO MARKETS — top-N DECLINING **'));
     return _cache;
-  })().finally(() => { _inflight = null; });
-  return _inflight;
+  })();
+  _inflight = _p;
+  // Only clear if we're still the current warm — if this one overran and was
+  // abandoned, a newer warm now owns _inflight and must not be clobbered.
+  _p.finally(() => { if (_inflight === _p) _inflight = null; });
+  return _p;
 }
 
 /**
