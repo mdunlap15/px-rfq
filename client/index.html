@@ -5185,7 +5185,7 @@
       if (mkt === 'h2h' || mkt === 'moneyline')
         return l.team || l.teamName || (side === 'home' ? l.homeTeam : l.awayTeam) || l.selection || '?';
       const tn = String(l.team || l.teamName || '').trim();
-      if (/^(yes|no)$/i.test(tn) && l.marketName) return l.marketName + ': ' + tn.toUpperCase();
+      if (/^(yes|no)$/i.test(tn) && l.marketName) return ynLegLabel(l, tn.toUpperCase());
       return l.team || l.teamName || l.name || l.selection || '?';
     };
     // eventLabel: the matchup, or '—' when there's no two-team game.
@@ -8164,7 +8164,7 @@
         // market name so the bet is identifiable.
         if (/^(yes|no)$/i.test(String(name).trim()) && l.marketName) {
           const yn = String(name).trim().toUpperCase();
-          return l.marketName + ': ' + yn;
+          return ynLegLabel(l, yn);
         }
         // F5 / H1 period indicator — prepend to the leg label so it's
         // obvious this isn't a full-game leg. Matches any variant of
@@ -14951,7 +14951,7 @@
         // Surface the marketName so the operator sees the actual bet
         // ("Adrian Mannarino To Win At Least One Set: NO") instead of
         // bare "No".
-        teamLabel = l.marketName + ': ' + _rawTeamForLabel.trim().toUpperCase();
+        teamLabel = ynLegLabel(l, _rawTeamForLabel.trim().toUpperCase());
       } else {
         teamLabel = formatSelection(_rawTeamForLabel, mkt, l.line, l.selection);
       }
@@ -17404,6 +17404,23 @@
     // Generic fallback: player_threes_made -> "Threes Made", sot_1 -> "Sot 1".
     return String(mt).replace(/^player_/, '').replace(/_/g, ' ')
       .replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // Label for a YES/NO leg (PX types these 'moneyline' with teamName literally
+  // "YES"/"NO"). marketName alone identifies player-specific bets ("Mannarino
+  // To Win At Least One Set: NO") but is AMBIGUOUS for game-level YES/NO
+  // markets like "Both Teams To Score" — a 2-leg BTTS parlay rendered as
+  // "Both Teams To Score: YES, Both Teams To Score: YES" with no way to tell
+  // which games (operator hit exactly this on the first BTTS fill). Append the
+  // matchup unless the marketName already names one of the teams.
+  function ynLegLabel(l, yn) {
+    const base = (l.marketName || 'YES/NO') + ': ' + yn;
+    const home = l.homeTeam, away = l.awayTeam;
+    const ev = (home && away) ? (away + ' @ ' + home) : (l.pxEventName || '');
+    if (!ev) return base;
+    const mn = String(l.marketName || '').toLowerCase();
+    if ([home, away].some(t => t && mn.includes(String(t).toLowerCase()))) return base;
+    return base + ' — ' + ev;
   }
 
   async function loadLines() {
