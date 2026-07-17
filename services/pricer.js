@@ -866,6 +866,9 @@ function priceParlay(legs, opts = {}) {
     // Golf matchups exempt (no commenceTime from DataGolf; isStale check covers).
     // Uses pre-computed lineInfo.startTimeMs (cached by lookupLine).
     const isGolfMatchup = lineInfo.sport === 'golf_matchups' || lineInfo.oddsApiSport === 'golf_matchups';
+    // Golf outrights quote LIVE — same exemption + rationale as shouldDecline's
+    // started check (freshness is the DK board age, not the tournament start).
+    const isGolfOutright = lineInfo.sport === 'golf_outrights';
     const startMs = lineInfo.startTimeMs;
     if (startMs != null) {
       if (isNaN(startMs)) {
@@ -873,7 +876,7 @@ function priceParlay(legs, opts = {}) {
         priceParlay._lastFailure = { reason: 'unknown start time', detail: `${legLabel} has invalid startTime ${lineInfo.startTime}`, blockerLeg: legDescriptor };
         return null;
       }
-      if (nowMs > startMs) {
+      if (nowMs > startMs && !isGolfOutright) {
         log.debug('Pricing', `Declined: event already started (${lineInfo.teamName}, started ${lineInfo.startTime})`);
         priceParlay._lastFailure = { reason: 'event started', detail: `${legLabel} already in progress`, blockerLeg: legDescriptor };
         return null;
@@ -3940,12 +3943,20 @@ function shouldDecline(legs, parlayId) {
     }
 
     const isGolfMatchup = lineInfo.sport === 'golf_matchups' || lineInfo.oddsApiSport === 'golf_matchups';
+    // Golf OUTRIGHTS quote LIVE by design (operator directive 2026-07-16: "these
+    // are live lines in between Round 1 and Round 2"). "Started" is the wrong
+    // staleness model for a 4-day event — the real freshness gate is the DK
+    // board's age (golf-topn MAX_AGE / GOLF_OUTRIGHT_MAX_AGE_MIN), which fails
+    // closed when the live board stops refreshing. Without this exemption the
+    // tournament teeing off silently killed every outright quote for its
+    // remaining 3.5 days.
+    const isGolfOutright = lineInfo.sport === 'golf_outrights';
     const startMs = lineInfo.startTimeMs;
     if (startMs != null) {
       if (isNaN(startMs)) {
         return { declined: true, reason: 'unknown start time', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) has invalid startTime ${lineInfo.startTime} — cannot verify game hasn't started` };
       }
-      if (nowMs > startMs) {
+      if (nowMs > startMs && !isGolfOutright) {
         return { declined: true, reason: 'event started', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) already in progress` };
       }
     } else if (!isGolfMatchup) {

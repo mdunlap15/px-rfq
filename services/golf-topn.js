@@ -69,6 +69,55 @@ const dkScraper = require('./dk-scraper');
 const dataGolf = require('./datagolf');
 
 const TOPN_MARKETS = { outright_top_5: { dk: 'top_5', dg: 'top_5', n: 5 }, outright_top_10: { dk: 'top_10', dg: 'top_10', n: 10 }, outright_top_20: { dk: 'top_20', dg: 'top_20', n: 20 } };
+
+// ---------------------------------------------------------------------------
+// MAKE-THE-CUT from DK's one-sided board.
+//
+// DataGolf (the normal make_cut source, real 2-way de-vig) STOPS OFFERING
+// make-cut boards once the tournament goes live ("Make-cut boards: none
+// offered" from R1 onward) — exactly when the operator wants to quote it. DK
+// keeps a live make-cut board, but MAKE-SIDE ONLY, so 2-way de-vig is
+// impossible.
+//
+// A one-sided cut board still has a hard field constraint, the same trick as
+// top-N: the cut is "top N and ties", so Σ P(make) over the WHOLE field =
+// E[# making the cut] = N + E[extra from ties at Nth place]. That target is
+// KNOWN (unlike top-N's T, which needs the dead-heat anchor to derive), so we
+// power-normalize DK's raw make-side field straight to it. Power, not
+// proportional — cut boards are favorite-heavy and proportional de-vig
+// underrates favorites (measured -4.15pp favs; see services/datagolf.js).
+//
+// The cut RULE varies by tournament and getting it wrong shifts every fair by
+// ~N_wrong/N_true, so an unknown slug FAILS CLOSED rather than guessing:
+// only slugs in DEFAULT_CUT_N_MAP / GOLF_CUT_N_MAP price. (The Open = top 70
+// and ties; PGA Champ = 70; US Open = 60; Masters = 50; regular PGA/DP World
+// Tour events = 65.)
+// GOLF_CUT_TIE_EXTRA is E[extra players tied at the cut line], default 1.5 —
+// a ±1.5 error in T moves fairs ~2% relative, small next to the ~10% overround
+// this normalization removes and the 12% golf-outright vig floor.
+// ---------------------------------------------------------------------------
+const DEFAULT_CUT_N_MAP = {
+  'the-open-championship': 70,
+  'pga-championship': 70,
+  'us-open': 60,
+  'the-masters': 50,
+  'the-players-championship': 65,
+  'the-memorial-tournament': 65,
+};
+function _cutNFor(slug) {
+  let extra = {};
+  try { extra = JSON.parse(process.env.GOLF_CUT_N_MAP || '{}'); } catch (_) { /* ignore bad JSON */ }
+  const map = { ...DEFAULT_CUT_N_MAP, ...extra };
+  const n = Number(map[slug]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+const CUT_TIE_EXTRA = Number(process.env.GOLF_CUT_TIE_EXTRA) || 1.5;
+// Sanity band on the one-sided board's raw overround (rawSum / T). Below 1.0
+// means the board sums UNDER the cut count — impossible for a vig-carrying
+// make-side board (it's how the U+2212 favorite-drop bug announced itself on
+// top_20). Above 1.35 means the field is missing players or DK repriced
+// mid-scrape.
+const CUT_OVERROUND_MIN = 1.0001, CUT_OVERROUND_MAX = 1.35;
 // WARM cadence: how often we kick a fresh DK scrape.
 const TTL_MS = (Number(process.env.GOLF_TOPN_TTL_MIN) || 30) * 60 * 1000;
 // READ tolerance: how old a board may be and still PRICE. Deliberately much
@@ -243,6 +292,33 @@ function _buildTopNMarket(dkSel, anchor, n, label) {
 }
 
 /**
+ * Build the make-cut market from DK's one-sided make board by power-normalizing
+ * the whole field to T = cutN + tie extra. No DataGolf anchor involved.
+ */
+function _buildCutMarket(dkSel, cutN, label) {
+  const dkByName = new Map();
+  for (const s of dkSel) {
+    const p = _aImpl(s.americanOdds);
+    if (p != null && p > 0 && p < 1) dkByName.set(_normName(s.playerName), p);
+  }
+  if (dkByName.size < MIN_PLAYERS) { log.warn('GolfTopN', `${label}: only ${dkByName.size} priced players — refusing`); return null; }
+  const T = cutN + CUT_TIE_EXTRA;
+  let rawSum = 0;
+  for (const p of dkByName.values()) rawSum += p;
+  const overround = rawSum / T;
+  if (!(overround >= CUT_OVERROUND_MIN && overround <= CUT_OVERROUND_MAX)) {
+    log.warn('GolfTopN', `${label}: raw make-side sum ${rawSum.toFixed(2)} vs T=${T} → overround x${overround.toFixed(3)} outside [${CUT_OVERROUND_MIN}, ${CUT_OVERROUND_MAX}] — refusing (missing players or wrong cut rule)`);
+    return null;
+  }
+  const k = _solvePower(Array.from(dkByName.values()), T);
+  if (k == null) { log.warn('GolfTopN', `${label}: power normalization failed`); return null; }
+  const players = new Map();
+  for (const [name, p] of dkByName) players.set(name, Math.pow(p, k));
+  log.info('GolfTopN', `${label}: make-side rawSum=${rawSum.toFixed(2)} → T=${T} (cut ${cutN} + ${CUT_TIE_EXTRA} ties), overround x${overround.toFixed(3)}, k=${k.toFixed(3)}, ${players.size} players`);
+  return { T, uplift: T / cutN, k, overround, players };
+}
+
+/**
  * Refresh the DK ties-included top-N board for one tournament.
  * SLOW (~142s, Puppeteer) — background only.
  */
@@ -284,6 +360,26 @@ async function warmTopNForSlug(slug, tournamentName, { force = false } = {}) {
     if (!anchor) { log.warn('GolfTopN', `${slug} ${cfg.dk}: no DataGolf dead-heat anchor matching "${tournamentName}" on any tour — refusing`); continue; }
     const built = _buildTopNMarket(dkM.selections, anchor, cfg.n, `${slug}/${cfg.dk}`);
     if (built) { out.markets[mt] = built; out.eventName = anchor.eventName; }
+  }
+  // MAKE-CUT — separate path from top-N on purpose: no ties-name guard (DK
+  // names it "To Make the Cut"; there IS no dead-heat variant of a binary
+  // market to mistake it for) and no DataGolf anchor (the normalization
+  // target is the cut rule itself). Unknown cut rule → fails closed above.
+  const cutM = (dk.markets || []).find(m => m.marketType === 'make_cut');
+  const cutN = _cutNFor(slug);
+  if (cutM && cutM.selections && cutM.selections.length >= MIN_PLAYERS) {
+    if (!cutN) {
+      log.warn('GolfTopN', `${slug} make_cut: no cut rule configured (GOLF_CUT_N_MAP) — refusing to guess; make_cut stays on DataGolf only`);
+    } else {
+      const built = _buildCutMarket(cutM.selections, cutN, `${slug}/make_cut`);
+      if (built) {
+        out.markets.outright_make_cut = built;
+        // eventName normally comes from the DataGolf anchor; if only the cut
+        // board built (e.g. DK dropped top-N late in a tournament), fall back
+        // to the tournament name so the board isn't unaddressable.
+        if (!out.eventName) out.eventName = tournamentName;
+      }
+    }
   }
   return out;
 }
@@ -361,7 +457,8 @@ async function warmTopN(tournaments, { force = false } = {}) {
  * served by DK, or player not on the board.
  */
 function getTopNFairProbSync(playerName, marketType, tournamentName) {
-  if (!TOPN_MARKETS[marketType]) return null;
+  const isCut = marketType === 'outright_make_cut';
+  if (!TOPN_MARKETS[marketType] && !isCut) return null;
   // MAX_AGE_MS, not TTL_MS — see the constant. TTL only governs when we kick a
   // re-scrape; a board between TTL and MAX_AGE is still perfectly priceable and
   // a re-warm is already in flight. Beyond MAX_AGE we fail closed.
@@ -374,7 +471,10 @@ function getTopNFairProbSync(playerName, marketType, tournamentName) {
   if (!mkt) return null;
   const p = mkt.players.get(_normName(playerName));
   if (p == null || !(p > 0 && p < 1)) return null;
-  return { fairProb: p, basis: `DK "Including Ties" board, power-de-vigged to derived T=${mkt.T.toFixed(2)} (uplift x${mkt.uplift.toFixed(3)})`, eventName: board.eventName, T: mkt.T, uplift: mkt.uplift };
+  const basis = isCut
+    ? `DK live make-side board, power-normalized to T=${mkt.T.toFixed(1)} (cut + ties)`
+    : `DK "Including Ties" board, power-de-vigged to derived T=${mkt.T.toFixed(2)} (uplift x${mkt.uplift.toFixed(3)})`;
+  return { fairProb: p, basis, eventName: board.eventName, T: mkt.T, uplift: mkt.uplift };
 }
 
 function __debugCache() {
