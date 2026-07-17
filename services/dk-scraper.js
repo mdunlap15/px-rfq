@@ -323,6 +323,134 @@ function fetchNbaSeriesTotals(opts) { return fetchSeriesMarkets('nba', opts); }
 function fetchNhlSeriesTotals(opts) { return fetchSeriesMarkets('nhl', opts); }
 
 /**
+ * Fetch UFC Method-of-Victory (per-fighter KO/TKO/DQ, Submission, Decision).
+ *
+ * SOURCE OF RECORD: SharpAPI's method_of_victory feed DIED 2026-07-11 — it
+ * returns an empty board rather than erroring, so anything built on it fails
+ * SILENTLY. DK is the only live source. Its sportscontent JSON API is
+ * Akamai-gated (403 to any plain client) AND CORS-locked, so headless
+ * Puppeteer passing the JS challenge and passively intercepting the SPA's own
+ * markets XHRs is the ONLY working path — never try to call the API directly.
+ *
+ * SLOW (~3-5 min/card: one nav per fight). Background warm only — this must
+ * never sit on the RFQ hot path. Ported from the operator's standalone
+ * C:/Users/mdunl/dk-ufc-mov.js so it deploys with the service.
+ *
+ * Traps already paid for (do NOT rediscover):
+ *  - DK lists THREE separate per-fighter YES markets, matched by EXACT regex.
+ *    The exactness is load-bearing: it excludes the fight-level "Exact Method
+ *    of Victory" market (selections labelled BY METHOD, not by fighter, so
+ *    they cannot be attributed) and drops "... in Round N" rows.
+ *  - The fighter-name filter MUST be exact-match: a substring 'no' test
+ *    silently drops coNOr McGregor and beNOit Saint Denis.
+ *  - DK serves a Unicode minus (U+2212) — _dkParseAmerican normalizes it.
+ *  - Chromium needs --disable-dev-shm-usage or it segfaults on Railway and
+ *    returns 0 fights SILENTLY (cost a full day + a whole card's board once).
+ *  - Prelims often carry no method markets at all — 0 prices on an undercard
+ *    fight is normal, not a scrape failure.
+ *
+ * Returns { fetchedAt, fights: [{ slug, fighters: [{ name, KO, SUB, DEC }] }] }
+ * with American ints (null when DK doesn't list that method).
+ */
+const _MOV_METHODS = [[/^ko\/tko(\/dq)?$/i, 'KO'], [/^submission$/i, 'SUB'], [/^(decision|points)$/i, 'DEC']];
+
+async function fetchUfcMethodOfVictory({ force = false } = {}) {
+  const cacheKey = 'ufc_mov';
+  if (!force && cacheBySport[cacheKey] && Date.now() - cacheBySport[cacheKey].at < CACHE_TTL_MS) {
+    return cacheBySport[cacheKey].data;
+  }
+  if (inFlightBySport[cacheKey]) return inFlightBySport[cacheKey];
+
+  inFlightBySport[cacheKey] = (async () => {
+    const startedAt = Date.now();
+    const browser = await _launchBrowser({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-blink-features=AutomationControlled'],
+    });
+    try {
+      const page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
+
+      // Buffer EVERY markets-shaped JSON body; we re-read per fight below.
+      let bodies = [];
+      page.on('response', async (resp) => {
+        try {
+          const ct = resp.headers()['content-type'] || '';
+          if (!/json/.test(ct)) return;
+          const t = await resp.text();
+          if (/"markets"/.test(t) && /"selections"/.test(t) && t.length > 400) bodies.push(t);
+        } catch (_) { /* body already consumed / non-text */ }
+      });
+
+      await page.goto('https://sportsbook.draftkings.com/leagues/mma/ufc', { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
+      await new Promise(r => setTimeout(r, 4000));
+      for (let i = 0; i < 5; i++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 800)); }
+      const links = await page.evaluate(() =>
+        [...new Set(Array.from(document.querySelectorAll('a[href*="/event/"]')).map(a => a.href.split('?')[0]))]);
+      log.info('DkScraper', `UFC MoV: ${links.length} fight page(s) to walk`);
+
+      const byFight = new Map(); // slug -> Map(fighterName -> {name, KO, SUB, DEC})
+      for (const link of links) {
+        try {
+          bodies = [];
+          await page.goto(link, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
+          await new Promise(r => setTimeout(r, 3500));
+          // Method markets lazy-load behind a tab on some cards.
+          await page.evaluate(() => {
+            for (const e of document.querySelectorAll('button,[role="tab"],a,div')) {
+              const t = (e.textContent || '').trim();
+              if (/method|finish|props|by (ko|tko|submission|decision)/i.test(t) && t.length < 40 && e.offsetParent !== null) {
+                try { e.scrollIntoView(); e.click(); } catch (_) { /* not clickable */ }
+              }
+            }
+          });
+          await new Promise(r => setTimeout(r, 2500));
+          for (let i = 0; i < 4; i++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 700)); }
+
+          const slug = decodeURIComponent(link.split('/event/')[1].split('/')[0]);
+          const fighters = byFight.get(slug) || new Map();
+          let found = 0;
+          for (const b of bodies) {
+            let doc; try { doc = JSON.parse(b); } catch (_) { continue; }
+            const selsByMarket = {};
+            for (const s of (doc.selections || [])) (selsByMarket[s.marketId] = selsByMarket[s.marketId] || []).push(s);
+            for (const m of (doc.markets || [])) {
+              const nm = (m.name || (m.marketType && m.marketType.name) || '').trim();
+              const slot = _MOV_METHODS.find(([re]) => re.test(nm));
+              if (!slot) continue;
+              for (const s of (selsByMarket[m.id] || [])) {
+                const fname = (s.label || (s.participants && s.participants[0] && s.participants[0].name) || '').trim();
+                // EXACT-match exclusions only — see header (coNOr/beNOit).
+                if (!fname || /\d/.test(fname) || /^(over|under|yes|no|draw|tie)$/i.test(fname)) continue;
+                if (!fighters.has(fname)) fighters.set(fname, { name: fname, KO: null, SUB: null, DEC: null });
+                const rec = fighters.get(fname);
+                const od = _dkParseAmerican((s.displayOdds && s.displayOdds.american) || s.oddsAmerican);
+                if (od != null && rec[slot[1]] == null) { rec[slot[1]] = od; found++; }
+              }
+            }
+          }
+          if (fighters.size) byFight.set(slug, fighters);
+          log.debug('DkScraper', `UFC MoV ${slug}: ${found} method prices`);
+        } catch (err) {
+          log.debug('DkScraper', `UFC MoV fight nav failed (${link}): ${err.message}`);
+        }
+      }
+
+      const fights = [...byFight.entries()].map(([slug, m]) => ({ slug, fighters: [...m.values()] }));
+      const payload = { fetchedAt: new Date().toISOString(), fights };
+      cacheBySport[cacheKey] = { at: Date.now(), data: payload };
+      const priced = fights.reduce((s, f) => s + f.fighters.length, 0);
+      log.info('DkScraper', `UFC MoV: ${fights.length} fight(s) / ${priced} fighter(s) with method prices (${Date.now() - startedAt}ms)`);
+      return payload;
+    } finally {
+      await browser.close();
+      delete inFlightBySport[cacheKey];
+    }
+  })().catch(err => { delete inFlightBySport[cacheKey]; throw err; });
+  return inFlightBySport[cacheKey];
+}
+
+/**
  * Fetch MMA fight moneylines from DK. Structure differs from series:
  * DK's /leagues/mma/ufc page fires ONE primaryMarkets XHR per event
  * (not a bulk subcategory call), each containing Moneyline + Point
@@ -3459,6 +3587,7 @@ module.exports = {
   fetchNbaSeriesTotals,
   fetchNhlSeriesTotals,
   fetchMmaFightOdds,
+  fetchUfcMethodOfVictory,
   fetchMlbF5Odds,
   fetchDkPlayerProps,
   lookupDkPlayerPropFairProb,

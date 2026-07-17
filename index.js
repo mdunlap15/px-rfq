@@ -6378,6 +6378,22 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // UFC method-of-victory board state. FIRST STOP when a MoV leg won't quote:
+  //   priceable:false + fightCount:0  -> scrape failing or never warmed
+  //   ageMs > maxAgeMs                -> board stale, legs fail closed
+  //   fight present but a fighter absent -> DK had a partial board for it
+  // ?force=1 kicks a fresh scrape (SLOW ~3-5 min, background) and returns the
+  // CURRENT board immediately rather than waiting on it.
+  app.get('/ufc-mov', (req, res) => {
+    try {
+      const mov = require('./services/ufc-mov');
+      if (req.query.force) {
+        mov.warmMovBoards({ force: true }).catch(() => { /* logged inside */ });
+      }
+      res.json({ ok: true, forcedWarm: !!req.query.force, ...mov.__debugCache() });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   // Make-the-cut dry-run: price PX's cut board off DataGolf and return exactly
   // what a sync WOULD write, WITHOUT touching Supabase or PX order entry.
   // Read-only review step — make_cut is DataGolf-priced (DK serves no cut

@@ -609,6 +609,51 @@ function parseMarketSelections(market) {
   // the name test is anchored (not a loose /both teams/ substring) and the
   // period guard below keeps a half/period variant from stealing the
   // full-game type.
+  // UFC Method of Victory. PX posts FOUR per-fighter YES/NO markets, all typed
+  // 'moneyline' (live probe 2026-07-17, Usman/Du Plessis — same shape trap as
+  // BTTS above):
+  //   "<Fighter> To Win By KO/TKO/DQ"        id 1060xxxxx
+  //   "<Fighter> To Win By Submission"       id 1020xxxxx
+  //   "<Fighter> To Win By Decision"         id 1070xxxxx
+  //   "<Fighter> To Win Inside The Distance" id 1050xxxxx  (KO+SUB composite)
+  // Without this they parse as a moneyline whose teamName is literally
+  // "YES"/"NO" and get dropped when that fails competitor matching — safe only
+  // by accident, and the failure mode if it ever matched would be pricing
+  // "Usman by KO" off Usman's straight moneyline.
+  //
+  // The fighter is captured into playerName; the market NAME is the only place
+  // it appears (selections are just YES/NO). "Fight To Go The Distance" is a
+  // fight-level market with no fighter and deliberately does NOT match here.
+  const movMatch = /^(.+?)\s+to\s+win\s+(?:by\s+(ko\/tko\/dq|ko\/tko|submission|decision)|(inside\s+the\s+distance))\s*$/i.exec(marketName.trim());
+  if (movMatch) {
+    const who = (movMatch[1] || '').trim();
+    const how = (movMatch[2] || '').toLowerCase();
+    marketType = movMatch[3] ? 'mov_itd'
+      : /^ko/.test(how) ? 'mov_ko'
+      : how === 'submission' ? 'mov_sub'
+      : 'mov_dec';
+    const results = [];
+    for (const selGroup of (market.selections || [])) {
+      for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
+        if (!sel || !sel.line_id) continue;
+        const nameLC = (sel.name || sel.display_name || '').toLowerCase();
+        const selection = nameLC.includes('yes') ? 'yes' : nameLC.includes('no') ? 'no' : 'unknown';
+        if (selection === 'unknown') continue;
+        results.push({
+          lineId: sel.line_id,
+          marketType,
+          selection,
+          playerName: who,
+          teamName: who,
+          line: null,
+          competitorId: sel.competitor_id || null,
+          outcomeName: sel.name,
+        });
+      }
+    }
+    return results;
+  }
+
   const isBttsByName = /^both\s*teams\s*to\s*score\b/i.test(marketName.trim());
   // "Both Teams To Score in the 1st Half" is a DIFFERENT market with a
   // different fair — we have no odds for it, so leave it unclassified and

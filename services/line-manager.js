@@ -129,6 +129,7 @@ const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
 const dataGolf = require('./datagolf');
 const golfTopN = require('./golf-topn');
+const ufcMov = require('./ufc-mov');
 const db = require('./db');
 // Lazy require for orderTracker to avoid circular dependency
 let orderTracker = null;
@@ -571,6 +572,13 @@ const MARKET_TYPE_MAP = {
   'team_total': 'team_totals',
   'btts': 'btts',
   'both_teams_to_score': 'btts',
+  // Method of victory — identity-mapped: the fair comes from services/ufc-mov
+  // (DK 6-way board), not from an odds-feed market key, but oddsApiMarket must
+  // be set or the registration gate below drops the selection.
+  'mov_ko': 'mov_ko',
+  'mov_sub': 'mov_sub',
+  'mov_dec': 'mov_dec',
+  'mov_itd': 'mov_itd',
   'double_chance': 'double_chance',
   // First 5 Innings (MLB) — PX market.type guesses; adjust based on decline-audit log
   'first_5_innings_moneyline': 'h2h_f5',
@@ -658,6 +666,14 @@ const ADVANCE_MARKET_RE = /to\s+advance\s+to\s+the\s+next\s+round|to\s+advance\b
 // Anchored so a half/period variant ("Both Teams to Score - 1st Half") can't
 // ride the full-game BTTS consensus; that market has its own fair we don't
 // carry. parseMarketSelections retags marketType='btts' for these.
+// UFC Method of Victory. Like BTTS, PX types these 'moneyline', so the seed's
+// fullGameNames allowlist (which demands a type='moneyline' market be NAMED
+// like a moneyline) rejects them before registration. parseMarketSelections
+// retags marketType to mov_ko / mov_sub / mov_dec / mov_itd and puts the
+// fighter in playerName.
+const MOV_MARKET_RE = /\bto\s+win\s+(?:by\s+(?:ko\/tko(?:\/dq)?|submission|decision)|inside\s+the\s+distance)\s*$/i;
+const MOV_MARKET_TYPES = ['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd'];
+
 const BTTS_MARKET_RE = /^both\s+teams\s+to\s+score\b/i;
 const BTTS_PERIOD_RE = /\b(1st|2nd|first|second)\s*(half|period)\b|\bhalf\b|\bperiod\b/i;
 
@@ -1008,6 +1024,19 @@ async function seedAllLines() {
     }
   }
 
+  // Kick the UFC method-of-victory warm when PX lists any MMA event. Same
+  // shape and same reasoning as the golf top-N warm above: the DK scrape walks
+  // one page per fight (~3-5 min), so it is fire-and-forget and must never
+  // block seeding or the RFQ path. Cold-start is BY DESIGN — the first seed
+  // registers MoV lines that decline until the board lands, and the next seed
+  // cycle prices them. TTL-gated + single-flight inside warmMovBoards, so
+  // calling it every seed is cheap.
+  if (events.some(e => /mma|mixed martial/i.test(e.sport_name || ''))) {
+    ufcMov.warmMovBoards().catch(err => {
+      log.warn('Lines', `UFC MoV warm swallowed error: ${err.message}`);
+    });
+  }
+
   for (const event of events) {
     const _isGolfTrace = event.sport_name === 'Golf';
     if (_isGolfTrace) {
@@ -1324,11 +1353,14 @@ async function seedAllLines() {
         && m.type === 'moneyline'
         && BTTS_MARKET_RE.test(name)
         && !BTTS_PERIOD_RE.test(name);
+      // MMA method-of-victory — full-fight market, same bypass shape as BTTS.
+      const isMmaMov = isMmaSport && m.type === 'moneyline' && MOV_MARKET_RE.test(name);
       if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
       // Advance bypasses the sub-game/prop name filter below ("Next Round"
       // would otherwise look prop-ish) — it is a full-event market.
       if (isSoccerAdvance) return true;
       if (isSoccerBtts) return true;
+      if (isMmaMov) return true;
       // Series markets bypass the sub-game/prop filter and the name-
       // allowlist + bounds checks. Each variant must match one of:
       //   Series Winner      → type='moneyline'
@@ -1643,6 +1675,13 @@ async function seedAllLines() {
         } else if (sel.marketType === 'btts' || sel.marketType === 'both_teams_to_score') {
           // Yes/No selection from parseMarketSelections
           oddsApiSelection = (sel.selection || '').toLowerCase();
+        } else if (MOV_MARKET_TYPES.includes(sel.marketType)) {
+          // Method of victory — YES/NO on a per-fighter market. The fighter is
+          // in sel.playerName (parsed from the market NAME; the selections are
+          // just YES/NO). Do NOT run team matching here: matching the fighter
+          // to a competitor would resolve to home/away and the pricer would
+          // then read the leg as a straight moneyline.
+          oddsApiSelection = (sel.selection || '').toLowerCase();
         } else if (sel.marketType === 'double_chance') {
           // '1X', 'X2', or '12' selection
           oddsApiSelection = sel.selection;
@@ -1739,6 +1778,11 @@ async function seedAllLines() {
           isDNB,
           selection: oddsApiSelection,
           teamName: resolveDisplayTeamName(sel, matchedHome, matchedAway),
+          // Carried for markets whose subject is a PERSON parsed out of the
+          // market NAME rather than a competitor — currently MoV ("<Fighter>
+          // To Win By KO/TKO/DQ"). ufc-mov keys the fair on it. Undefined for
+          // every other market type, which is harmless.
+          playerName: sel.playerName || null,
           line: sel.line,
           homeTeam: matchedHome,
           awayTeam: matchedAway,
@@ -2806,7 +2850,7 @@ async function resolveUnknownLine(rfqLeg) {
 
       // First pass: find which market contains this line_id (any type)
       // so we can log unsupported market types for diagnostics.
-      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES];
+      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...MOV_MARKET_TYPES, ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES];
       // Series markets (winner/spread/total) are structurally
       // moneyline/spread/total but named "Series Winner/Spread/Total
       // Games". resolveUnknownLine accepts the regular PX types and

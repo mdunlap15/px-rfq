@@ -4,6 +4,10 @@ const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
+const ufcMov = require('./ufc-mov');
+// UFC method-of-victory market types. PX posts them typed 'moneyline'; the
+// parser retags by market NAME (see prophetx.parseMarketSelections).
+const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
 const templateExposure = require('./template-exposure');
 const { performance } = require('perf_hooks');
 const crypto = require('crypto');
@@ -1044,6 +1048,26 @@ function priceParlay(legs, opts = {}) {
     // boards are warmed at line-seed time. Fails CLOSED: a cold/stale board or
     // an unknown player returns null here and the leg declines rather than
     // quoting off nothing. Nesting + YES-only are enforced in shouldDecline.
+    // UFC method of victory (KO/TKO/DQ, submission, decision, inside-the-
+    // distance). Sync cache read of the DK 6-way board, warmed in the
+    // background (the scrape walks one page per fight, ~3-5 min). Fails
+    // CLOSED: cold/stale board, unknown fighter, or a partial DK board all
+    // return null here and the leg declines rather than quoting off nothing.
+    // Same-fight correlation is handled by the SGP gate in shouldDecline —
+    // every method pair on one fight is mutually exclusive or nested.
+    if (s.lineInfo && MOV_MARKET_TYPES.has(s.lineInfo.marketType)) {
+      const hit = ufcMov.getMovFairForLine(s.lineInfo);
+      if (hit == null) {
+        priceParlay._lastFailure = {
+          reason: 'no_fair_value',
+          detail: `${s.lineInfo.playerName || '?'} ${s.lineInfo.marketType}:${s.lineInfo.selection} — no fresh DK method board (stale/uncovered fight)`,
+          blockerLeg: { team: s.lineInfo.playerName, market: s.lineInfo.marketType, sport: s.lineInfo.sport },
+        };
+        return null;
+      }
+      fairProbs[i] = hit.fairProb;   // getMovFairForLine already applied the yes/no side
+      continue;
+    }
     if (s.lineInfo && s.lineInfo.sport === 'golf_outrights') {
       const hit = golfOutrightFair(s.lineInfo);
       if (hit == null) {
@@ -1522,12 +1546,24 @@ function priceParlay(legs, opts = {}) {
   // defense in depth here is cheap — NaN comparisons are always false so
   // without the explicit finite check it would silently slip through this
   // sub-0.001 guard as well).
-  if (!Number.isFinite(fairParlayProb) || fairParlayProb < 0.001) {
+  // All-MoV parlays get a far lower probability floor (operator directive
+  // 2026-07-17: no odds-range limits on method-of-victory parlays). Method YES
+  // prices are longshots by nature — two deep tails on one card (+2800 KO x
+  // +1800 KO) combine to 0.067%, which the 0.1% floor refused. Only when EVERY
+  // leg is MoV, so a method leg can't drag a mixed parlay under the floor.
+  // The NaN check below is NEVER relaxed: a non-finite prob is a pipeline
+  // failure, not a longshot, and must always decline.
+  const _movOnlyProbFloor = pricedLegs.length > 0
+    && pricedLegs.every(l => l.lineInfo && MOV_MARKET_TYPES.has(l.lineInfo.marketType));
+  const _minParlayProb = _movOnlyProbFloor
+    ? (Number(process.env.MOV_MIN_PARLAY_PROB) || 0.000001)
+    : 0.001;
+  if (!Number.isFinite(fairParlayProb) || fairParlayProb < _minParlayProb) {
     log.debug('Pricing', `Declined: fair parlay prob invalid (${fairParlayProb})`);
     priceParlay._lastFailure = {
       reason: 'parlay too unlikely',
       detail: Number.isFinite(fairParlayProb)
-        ? `combined fair prob ${(fairParlayProb * 100).toFixed(3)}% < 0.1% threshold`
+        ? `combined fair prob ${(fairParlayProb * 100).toFixed(4)}% < ${(_minParlayProb * 100).toFixed(4)}% threshold`
         : `combined fair prob non-finite (${fairParlayProb}) — pricing pipeline failure`,
       blockerLeg: null,
     };
@@ -2924,6 +2960,15 @@ function priceParlay(legs, opts = {}) {
   // normal cap. Risk is still bounded by maxRisk/stake caps, which is the real
   // control on payout size — this cap is about odds shape, not exposure.
   const _allOutright = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'golf_outrights');
+  // Method-of-victory parlays are exempt from the odds cap entirely (operator
+  // directive 2026-07-17: "we do not need to keep to any odds range limits for
+  // quoting method of victory markets for parlays"). MoV YES prices are
+  // longshots BY NATURE — a single card ran +110 to +3500, and any 2-leg
+  // combination blows past even the raised +15000 global. Same containment as
+  // the outright branch: only when EVERY leg is MoV, so a method leg can't
+  // smuggle a mixed parlay past the normal cap. Exposure stays bounded by
+  // maxRisk/stake caps, which are the real control on payout size.
+  const _allMov = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && MOV_MARKET_TYPES.has(l.lineInfo.marketType));
   const _globalMaxOdds = config.pricing.maxOdds || 1000;
   // RAISES the cap for all-outright parlays, never LOWERS it. Must be a
   // Math.max against the global: the operator raised MAX_ODDS to 15000
@@ -2931,9 +2976,11 @@ function priceParlay(legs, opts = {}) {
   // silently overrode it back down to 6000 for exactly the parlays it was meant
   // to help. A per-sport override that can undercut the global is a trap; if
   // someone sets MAX_ODDS above the outright default, honour it.
-  const maxOdds = _allOutright
-    ? Math.max(_globalMaxOdds, config.pricing.maxOddsGolfOutrights || 6000)
-    : _globalMaxOdds;
+  const maxOdds = _allMov
+    ? Infinity
+    : _allOutright
+      ? Math.max(_globalMaxOdds, config.pricing.maxOddsGolfOutrights || 6000)
+      : _globalMaxOdds;
   if (americanOdds > maxOdds) {
     log.debug('Pricing', `Declined: odds +${americanOdds} exceed max +${maxOdds}`);
     priceParlay._lastFailure = {

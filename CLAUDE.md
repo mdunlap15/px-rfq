@@ -59,6 +59,10 @@ client/
 | `GOLF_DK_SLUG_MAP` | No | JSON PX-tournament → DK-league-slug overrides, e.g. `{"the open":"the-open-championship"}`. PX says "2026 The Open" but DK's slug is `the-open-championship`, so slugify does NOT work. A tournament with no slug simply never registers top-N (logged). |
 | `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
 | `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
+| `MOV_TTL_MIN` | No | Default: 45. Warm cadence for the DK method-of-victory scrape (~3-5 min/card, background only — never on the RFQ path). |
+| `MOV_MAX_AGE_MIN` | No | Default: 180. Max board age that still prices; beyond it MoV legs fail closed. |
+| `MOV_DRAW_PROB` | No | Default: 0.005. The unpriced 7th outcome; the 6-way de-vig normalizes to `1 - this`. |
+| `MOV_MIN_PARLAY_PROB` | No | Default: 0.000001. Probability floor for **all-MoV** parlays, replacing the standard 0.1%. Raise it to re-impose a tail limit. |
 | `BTTS_SPORTS` | No | Default: `soccer_usa_mls`. Sport keys eligible for Both-Teams-To-Score. Deliberately NOT every soccer key: `btts` is a per-event fetch, so each league multiplies calls against the same TOA key the main odds path uses, and that key rate-limits by frequency. Widen one league at a time. |
 | `BTTS_BOOKMAKERS` | No | Default: `pinnacle,draftkings,fanduel,betmgm,betrivers,williamhill,matchbook`. Two-sided books only — a make-side-only book can't be de-vigged. |
 | `BTTS_MIN_BOOKS` | No | Default: 2. Minimum two-sided books before a game is priced. |
@@ -243,6 +247,7 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
+| `/ufc-mov` | GET | UFC method-of-victory board: per-fight de-vigged KO/SUB/DEC/ITD fairs, age, `priceable`. **First stop when a MoV leg won't quote.** `?force=1` kicks a fresh scrape. |
 | `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. **First stop when top-N isn't quoting**: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. |
 | `/single-leg/golf-outrights/make-cut-dryrun/:slug` | GET | Dry-run the DataGolf-priced make_cut board (no DB/PX writes). `?name=<tournament>` helps match DataGolf's event. Check `lay_ev_violations` = 0 before enabling. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
@@ -266,6 +271,60 @@ PX and odds APIs use different team names. Matching strategies (in order):
   - **The TOA key rate-limits by request FREQUENCY** (429 `EXCEEDED_FREQ_LIMIT`), separate from quota. An unpaced fan-out 429'd ~30% of the slate — and a 429 reads as *"this game has no BTTS"*, not as an error. Hence `BTTS_FETCH_SPACING_MS`, the serial loop, the events-list pre-warm, and: **transient (429/5xx) failures are never cached as misses**. If attach ratio drops, read the `(N transient fetch failures)` suffix on the `btts supplement:` log line before blaming book coverage.
   - Same-game BTTS combos (BTTS+ML, BTTS+total, and the impossible BTTS yes+no) classify as `unclassified` and are **declined** by the existing SGP gate — correct, since BTTS is correlated with both ML and totals. Only cross-game BTTS parlays quote.
   - **BTTS YES is usually a favourite** (~62%), so a *single* YES leg trips the negative-odds guard (`allowed only for all-golf-outright parlays`) and declines. YES quotes fine inside a multi-leg parlay; NO quotes standalone.
+
+## UFC Method of Victory (parlays)
+
+PX posts **FOUR** per-fighter markets per fight, all typed `moneyline` with YES/NO
+selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
+
+| PX market name | marketType | PX market id |
+|---|---|---|
+| `<Fighter> To Win By KO/TKO/DQ` | `mov_ko` | 1060xxxxx |
+| `<Fighter> To Win By Submission` | `mov_sub` | 1020xxxxx |
+| `<Fighter> To Win By Decision` | `mov_dec` | 1070xxxxx |
+| `<Fighter> To Win Inside The Distance` | `mov_itd` | 1050xxxxx |
+
+- **SharpAPI's method_of_victory feed is DEAD** (2026-07-11) and returns an EMPTY
+  board rather than erroring — anything built on it fails SILENTLY. DK is the only
+  source (`dk-scraper.fetchUfcMethodOfVictory`, ported from the operator's
+  standalone so it deploys). DK's API is Akamai-gated AND CORS-locked: passive
+  Puppeteer interception is the ONLY path — never call the API directly.
+- **The fighter only exists in the market NAME** — the selections are literally
+  YES/NO. `parseMarketSelections` parses it out into `playerName`. Do NOT team-match
+  the fighter to a competitor: that resolves to home/away and the pricer would read
+  the leg as a straight moneyline.
+- **De-vig the whole 6-way, never one fighter's 3 methods.** The vig lives across
+  all six outcomes (2 fighters x KO/SUB/DEC); DK's six sum to ~110-120% (measured
+  119.7% on Du Plessis/Usman). Target is `1 - MOV_DRAW_PROB`, not 1 — the draw is a
+  real 7th outcome DK never prices. **Power** de-vig, not proportional: the board
+  spans +110 to +3500 and proportional underrates the favorite (measured -4.15pp on
+  the same-shaped golf make-cut board), which means quoting its YES too CHEAP.
+- **ITD is DERIVED**: `P(A inside distance) = P(A by KO) + P(A by SUB)` exactly
+  (mutually exclusive). DK has no ITD market, and a composite from another book is a
+  known trap ("KO/TKO, DQ or Submission" once masqueraded as a -115 submission vs a
+  real +325).
+- **Same-fight MoV combos are ALL invalid** — every method pair on one fight is
+  mutually exclusive (Usman by KO + Usman by SUB can't both happen; only one fighter
+  wins) or nested (ko ⊂ itd; mov ⊂ moneyline). The generic SGP gate catches them:
+  they share a `pxEventId`, classify `unclassified`, and decline. **Verified live** —
+  unlike golf outrights, where PX puts each market in its OWN event and the gate
+  could not see them. Only CROSS-fight MoV parlays quote.
+- **No odds-range limits** (operator directive): all-MoV parlays bypass `MAX_ODDS`
+  entirely and use `MOV_MIN_PARLAY_PROB` (default 1e-6) instead of the 0.1% floor.
+  Both gates require EVERY leg to be MoV so a method leg can't smuggle a mixed
+  parlay past the normal caps. The NaN guard is never relaxed. ⚠ This lets two deep
+  tails quote at **+131,516** and three at **+4,047,488** — if PX's odds ladder
+  rejects those (it reportedly caps near ±25000), they'll surface as submit errors,
+  not bad fills.
+- **Name matching**: surnames COLLIDE (one card had BOTH Abus and Shara Magomedov,
+  and surname keying stamped one's prices onto the other). Key on a sorted-token
+  signature of the FULL name; token-SUBSET fallback tolerates middle names
+  (DK "Jose Delgado" = PX "Jose Miguel Delgado") while still failing closed on the
+  Magomedov case. Lookups are scoped to ONE fight by passing both competitors.
+- **`/ufc-mov`** = first stop when a MoV leg won't quote (board age, per-fight
+  fairs, `priceable`). `?force=1` kicks a fresh scrape.
+- Prelims often carry NO method markets — 0 prices on an undercard fight is normal,
+  not a scrape failure. A fight missing any of its 6 outcomes fails closed.
 
 ## Key Gotchas
 
