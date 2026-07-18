@@ -4692,7 +4692,39 @@ async function mergeDkTennisMatches() {
     }
   }
 
-  let added = 0, skippedLive = 0, skippedExisting = 0;
+  // Build a totals/spreads cache block from the scraper's per-line map. The
+  // scrape already de-vigged each line (fairProb on over/under & home/away);
+  // we reshape into the {primary + byLine} form getFairProb reads (primary =
+  // the middle line so the pricer's line-match falls back sensibly). Returns
+  // null when DK served no lines (e.g. 250-level matches with no Game Spread).
+  const buildTotalsBlock = (byLineData) => {
+    const arr = Object.values(byLineData || {}).filter(t => t && t.over && t.under && t.over.fairProb > 0 && t.under.fairProb > 0).sort((a, b) => a.line - b.line);
+    if (!arr.length) return null;
+    const mk = (o, ln) => ({ rawOdds: o.americanOdds, impliedProb: o.impliedProb, fairProb: o.fairProb, displayFairProb: o.fairProb, line: ln });
+    const byLine = {};
+    for (const t of arr) byLine[String(t.line)] = { line: t.line, over: mk(t.over, t.line), under: mk(t.under, t.line) };
+    const primary = arr[Math.floor(arr.length / 2)];
+    return { line: primary.line, over: mk(primary.over, primary.line), under: mk(primary.under, primary.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, dkScraped: true };
+  };
+  const buildSpreadsBlock = (byLineData) => {
+    const arr = Object.values(byLineData || {}).filter(s => s && s.home && s.away && s.home.fairProb > 0 && s.away.fairProb > 0).sort((a, b) => Math.abs(a.line) - Math.abs(b.line));
+    if (!arr.length) return null;
+    const mk = (o, ln) => ({ rawOdds: o.americanOdds, impliedProb: o.impliedProb, fairProb: o.fairProb, displayFairProb: o.fairProb, line: ln });
+    // byLine must use getFairProb's signed-selection key format
+    // (`'home|'+signedHomeLine`, `'away|'+signedAwayLine` -> { fairProb }),
+    // NOT a bare line key — that's what buildConsensusSpread emits and what
+    // getFairProb's spread alt-line path looks up. `s.line` is DK's home line
+    // (signed); the away line is its negation.
+    const byLine = {};
+    for (const s of arr) {
+      byLine['home|' + s.line] = { fairProb: s.home.fairProb };
+      byLine['away|' + (-s.line)] = { fairProb: s.away.fairProb };
+    }
+    const primary = arr[0]; // tightest handicap as primary
+    return { line: primary.line, home: mk(primary.home, primary.line), away: mk(primary.away, primary.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, dkScraped: true };
+  };
+
+  let added = 0, skippedLive = 0, skippedExisting = 0, withTot = 0, withSp = 0;
   for (const g of data.games) {
     if (!g.homeTeam || !g.awayTeam || !g.h2h || !g.h2h.home || !g.h2h.away) continue;
     if (g.started) { skippedLive++; continue; }
@@ -4702,22 +4734,27 @@ async function mergeDkTennisMatches() {
     if (existingPairs.has(p1 + '|' + p2)) { skippedExisting++; continue; }
 
     const key = normalizeEventKey(g.homeTeam, g.awayTeam);
+    const markets = {
+      h2h: {
+        home: { rawOdds: g.h2h.home.americanOdds, impliedProb: g.h2h.home.impliedProb, fairProb: g.h2h.home.fairProb, displayFairProb: g.h2h.home.fairProb },
+        away: { rawOdds: g.h2h.away.americanOdds, impliedProb: g.h2h.away.impliedProb, fairProb: g.h2h.away.fairProb, displayFairProb: g.h2h.away.fairProb },
+        books: 1,
+        pinnacle: null, fanduel: null,
+        draftkings: { home: g.h2h.home.americanOdds, away: g.h2h.away.americanOdds },
+        kalshi: null,
+        dkScraped: true,
+      },
+    };
+    const totBlock = buildTotalsBlock(g.totalsByLine);
+    if (totBlock) { markets.totals = totBlock; withTot++; }
+    const spBlock = buildSpreadsBlock(g.spreadsByLine);
+    if (spBlock) { markets.spreads = spBlock; withSp++; }
     const newEvent = {
       homeTeam: g.homeTeam,
       awayTeam: g.awayTeam,
       commenceTime: g.startTime || null,
       eventId: 'dk-tennis-' + g.eventId,
-      markets: {
-        h2h: {
-          home: { rawOdds: g.h2h.home.americanOdds, impliedProb: g.h2h.home.impliedProb, fairProb: g.h2h.home.fairProb, displayFairProb: g.h2h.home.fairProb },
-          away: { rawOdds: g.h2h.away.americanOdds, impliedProb: g.h2h.away.impliedProb, fairProb: g.h2h.away.fairProb, displayFairProb: g.h2h.away.fairProb },
-          books: 1,
-          pinnacle: null, fanduel: null,
-          draftkings: { home: g.h2h.home.americanOdds, away: g.h2h.away.americanOdds },
-          kalshi: null,
-          dkScraped: true,
-        },
-      },
+      markets,
     };
     if (!cache.events[key]) cache.events[key] = [];
     if (Array.isArray(cache.events[key])) cache.events[key].push(newEvent);
@@ -4726,7 +4763,7 @@ async function mergeDkTennisMatches() {
     added++;
   }
   if (added > 0) cache.fetchedAt = Date.now();
-  log.info('OddsFeed', `Tennis DK merge: added ${added}, skipped ${skippedLive} live + ${skippedExisting} already-covered (DK games: ${data.games.length})`);
+  log.info('OddsFeed', `Tennis DK merge: added ${added} (${withTot} w/totals, ${withSp} w/spreads), skipped ${skippedLive} live + ${skippedExisting} already-covered (DK games: ${data.games.length})`);
   return { merged: added, added };
 }
 

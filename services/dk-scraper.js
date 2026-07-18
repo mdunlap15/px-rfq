@@ -1422,11 +1422,22 @@ const GAME_LINE_CONFIGS = {
       linkRe: /^\/leagues\/tennis\/[a-z0-9-]+$/i,   // singles only — doubles slugs carry an encoded ",-doubles" suffix that fails this anchor
       maxLeagues: 8,
     },
+    // Game Spread + Total Games are NOT in the league page's DEFAULT payload
+    // (which carries only Moneyline) — DK lazy-loads them behind category tabs.
+    // But clicking those tabs ON THE LEAGUE PAGE fires a league/leagueSubcategory
+    // XHR carrying that market for EVERY match in the tournament at once (probed
+    // 2026-07-18 — same one-shot pattern as golf outrights), so there's no need
+    // to walk each event page. leagueTabs: click these labels on each league
+    // page; the shared interceptor + the spread/total parsers pick them up.
+    leagueTabs: [/^total\s+games$/i, /^games?\s+spread$/i, /^match\s+lines$/i],
     // DK tennis names the winner market "Moneyline" on league pages, but keep
     // "Winner"/"Match Winner" as alternates in case a tournament page differs.
     moneylineName: /^(?:moneyline|winner|match\s+winner)$/i,
-    spreadName: /^game\s+spread$/i,
-    altSpreadName: /^alt(?:ernate)?\s+game\s+spread$/i,
+    // DK labels the tennis game handicap "Games Spread" (with the S), not
+    // "Game Spread" (probed 2026-07-18) — the singular regex silently matched
+    // nothing.
+    spreadName: /^games?\s+spread$/i,
+    altSpreadName: /^alt(?:ernate)?\s+games?\s+spread$/i,
     totalName: /^total(?:\s+games)?$/i,
     altTotalName: /^alt(?:ernate)?\s+total(?:\s+games)?$/i,
     teamTotalName: null,  // tennis doesn't have team_total
@@ -1592,9 +1603,10 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
           const ct = resp.headers()['content-type'] || '';
           if (!ct.includes('json')) return;
           const data = await resp.json();
-          if (!data.events || !data.markets || !data.selections) return;
+          // eventSubcategory payloads (tennis Total Games / Game Spread behind a tab) carry markets+selections but NO events — the eventId lives on each market and resolves against eventsById populated by the moneyline. Requiring data.events silently dropped every tabbed market.
+          if (!data.markets || !data.selections) return;
 
-          for (const ev of data.events) {
+          for (const ev of (data.events || [])) {
             if (!eventsById[ev.id]) {
               eventsById[ev.id] = {
                 eventId: ev.id,
@@ -1752,9 +1764,31 @@ async function fetchDkGameLines(sport, { force = false } = {}) {
             if (leagues.length >= (cfg.dynamicLeagues.maxLeagues || 8)) break;
           }
           log.info('DkScraper', `${cfg.label}: hub lists ${leagues.length} tournament page(s): ${leagues.join(', ') || '(none)'}`);
+          const tabRes = (cfg.leagueTabs || []).map(r => ({ source: r.source, flags: r.flags }));
           for (const path of leagues) {
-            try { await _navAndScroll('https://sportsbook.draftkings.com' + path, 3); }
-            catch (err) { log.debug('DkScraper', `${cfg.label} league nav failed (${path}): ${err.message}`); }
+            try {
+              await _navAndScroll('https://sportsbook.draftkings.com' + path, 3);
+              // Click the category tabs ON THE LEAGUE PAGE (Total Games, Games
+              // Spread, ...). Each fires a league/leagueSubcategory XHR carrying
+              // that market for EVERY match in the tournament — one shot, no
+              // per-event walk. networkidle2 isn't needed here (the league page
+              // is already settled from _navAndScroll); the tabs are interactive.
+              if (tabRes.length) {
+                const clicked = await page.evaluate(async (patterns) => {
+                  const res = patterns.map(p => new RegExp(p.source, p.flags));
+                  const hit = [];
+                  for (const el of document.querySelectorAll('button,[role="tab"],[role="button"],a,div,span,li')) {
+                    const t = (el.textContent || '').trim();
+                    if (t && t.length < 24 && res.some(r => r.test(t)) && el.offsetParent !== null) {
+                      try { el.scrollIntoView(); el.click(); hit.push(t); await new Promise(r => setTimeout(r, 1400)); } catch (_) { /* not clickable */ }
+                    }
+                  }
+                  return [...new Set(hit)];
+                }, tabRes);
+                if (clicked.length) log.debug('DkScraper', `${cfg.label} league ${path.split('/').pop()}: clicked ${JSON.stringify(clicked)}`);
+                await new Promise(r => setTimeout(r, 2000));
+              }
+            } catch (err) { log.debug('DkScraper', `${cfg.label} league nav failed (${path}): ${err.message}`); }
           }
         }
       } catch (err) {
