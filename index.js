@@ -6378,6 +6378,24 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // Runtime kill-switch for golf OUTRIGHT parlay quoting. POST /golf-outrights/pause
+  // makes every parlay containing a golf-outright leg decline (golf_outrights_paused)
+  // without touching any other market — used to hard-stop between-rounds outright
+  // quoting before the next round tees off. /resume clears it. In-memory (resets on
+  // restart). GET reports current state.
+  app.post('/golf-outrights/pause', (req, res) => {
+    try { const pricer = require('./services/pricer'); res.json({ ok: true, paused: pricer.setGolfOutrightsPaused(true) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.post('/golf-outrights/resume', (req, res) => {
+    try { const pricer = require('./services/pricer'); res.json({ ok: true, paused: pricer.setGolfOutrightsPaused(false) }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.get('/golf-outrights/pause-state', (req, res) => {
+    try { const pricer = require('./services/pricer'); res.json({ ok: true, paused: pricer.isGolfOutrightsPaused() }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   // UFC method-of-victory board state. FIRST STOP when a MoV leg won't quote:
   //   priceable:false + fightCount:0  -> scrape failing or never warmed
   //   ageMs > maxAgeMs                -> board stale, legs fail closed

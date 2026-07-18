@@ -8,6 +8,10 @@ const ufcMov = require('./ufc-mov');
 // UFC method-of-victory market types. PX posts them typed 'moneyline'; the
 // parser retags by market NAME (see prophetx.parseMarketSelections).
 const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
+// Runtime kill-switch for golf outright parlay quoting (see shouldDecline).
+let _golfOutrightsPaused = false;
+function setGolfOutrightsPaused(v) { _golfOutrightsPaused = !!v; return _golfOutrightsPaused; }
+function isGolfOutrightsPaused() { return _golfOutrightsPaused; }
 const templateExposure = require('./template-exposure');
 const { performance } = require('perf_hooks');
 const crypto = require('crypto');
@@ -3707,6 +3711,16 @@ function shouldDecline(legs, parlayId) {
       if (!li) continue;
       if (li.sport === 'golf_outrights' || li.sport === 'golf_matchups') golfLegs.push({ lineInfo: li });
     }
+    // Runtime kill-switch for golf OUTRIGHT parlay quoting (not matchups).
+    // Set via POST /golf-outrights/pause — used to hard-stop between-rounds
+    // outright quoting before the next round tees off, so a stale board can't
+    // be picked off during live play (operator directive for The Open R3,
+    // 2026-07-18: stop at 4am ET, R3 tees 4:10am). In-memory: resets on
+    // restart, which is fine — it's a same-session operational toggle, and the
+    // board also fails closed on its own once DK stops serving the ties boards.
+    if (_golfOutrightsPaused && golfLegs.some(l => l.lineInfo.sport === 'golf_outrights')) {
+      return { declined: true, reason: 'golf_outrights_paused', detail: 'golf outright parlay quoting is paused (kill-switch active)' };
+    }
     if (golfLegs.length) {
       const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
         .toLowerCase().replace(/[.'’`\-]/g, '').replace(/\b(jr|sr|ii|iii|iv)\b/g, '').replace(/\s+/g, ' ').trim();
@@ -4645,6 +4659,8 @@ function getLastPriceFailure() {
 }
 
 module.exports = {
+  setGolfOutrightsPaused,
+  isGolfOutrightsPaused,
   priceParlay,
   shouldDecline,
   validateForConfirmation,
