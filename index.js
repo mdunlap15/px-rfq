@@ -6383,6 +6383,22 @@ function startStatusServer() {
   // without touching any other market — used to hard-stop between-rounds outright
   // quoting before the next round tees off. /resume clears it. In-memory (resets on
   // restart). GET reports current state.
+  // Ingest the operator's DK "(Including Ties)" outright paste as the
+  // authoritative board (operator rule 2026-07-18: mirror the paste, not the
+  // flaky prod scrape). Body: { text: "<pasted DK board>", tournament: "2026 The Open" }.
+  // Prices winner + top 5/10/20 off the raw DK implied with only the mirror
+  // cushion (option B). Marks the board manual so the scrape won't clobber it.
+  app.post('/golf-outrights/paste', express.json({ limit: '512kb' }), (req, res) => {
+    try {
+      const topN = require('./services/golf-topn');
+      const text = (req.body && req.body.text) || '';
+      const tournament = (req.body && req.body.tournament) || '2026 The Open';
+      if (!text || text.length < 20) return res.status(400).json({ ok: false, error: 'missing/short text' });
+      const r = topN.ingestPaste(text, tournament);
+      res.json({ ok: true, ...r });
+    } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+  });
+
   app.post('/golf-outrights/pause', (req, res) => {
     try { const pricer = require('./services/pricer'); res.json({ ok: true, paused: pricer.setGolfOutrightsPaused(true) }); }
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }

@@ -111,6 +111,11 @@ const config = {
     // while longshot `win` legs (~2% fair) take only ~5% relative, so the winner
     // market stays quotable. This is a FLOOR: the favorite ramp can still go
     // higher. Set VIG_GOLF_OUTRIGHT_MIN=0 to disable.
+    // Cushion over the operator's pasted RAW DK '(Including Ties)' implied for
+    // outright parlays (option B, 2026-07-18): the raw price already carries
+    // DK's overround, so we mirror the board with only a small margin instead
+    // of the 12% floor (which was for the de-vigged-fair basis).
+    vigGolfOutrightMirror: parseFloat(process.env.VIG_GOLF_OUTRIGHT_MIRROR) || 0.02,
     vigGolfOutrightMin: process.env.VIG_GOLF_OUTRIGHT_MIN !== undefined && process.env.VIG_GOLF_OUTRIGHT_MIN !== ''
       ? parseFloat(process.env.VIG_GOLF_OUTRIGHT_MIN) : 0.12,
     // Pitcher strikeouts prop floor — minimum per-leg vig applied to

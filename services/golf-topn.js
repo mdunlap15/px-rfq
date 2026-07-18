@@ -137,7 +137,13 @@ const MIN_PLAYERS = 30;         // a partial field makes normalization invalid
 // player sets, DK repricing mid-scrape) rather than a real tie structure.
 const UPLIFT_MIN = 1.0, UPLIFT_MAX = 1.6;
 
-let _cache = { at: 0, bySlug: {} };  // slug -> { tournament, eventName, markets: { outright_top_5: {T, uplift, k, players: Map} } }
+// Operator paste boards get a longer freshness ceiling than scraped boards —
+// the operator pastes deliberately and stops via the kill-switch, so we don't
+// force a re-paste on the tight scrape MAX_AGE. Default 12h; beyond it, fail
+// closed so a forgotten paste can't quote day-old odds.
+const MANUAL_MAX_AGE_MS = (Number(process.env.GOLF_OUTRIGHT_PASTE_MAX_AGE_MIN) || 720) * 60 * 1000;
+
+let _cache = { at: 0, bySlug: {} };  // slug -> { tournament, eventName, markets: { outright_top_5: {T, uplift, k, players: Map} }, manual? }
 let _inflight = null;
 // Last-attempt telemetry, exposed via /golf-topn. The warm is fire-and-forget
 // from the seed, so when it dies on prod the ONLY trace is a log line inside
@@ -399,6 +405,11 @@ const WARM_MAX_RUN_MS = (Number(process.env.GOLF_TOPN_WARM_MAX_RUN_SEC) || 240) 
 let _inflightStarted = 0;
 
 async function warmTopN(tournaments, { force = false } = {}) {
+  // NEVER let a scrape clobber a fresh operator paste board — the paste is
+  // authoritative (operator rule 2026-07-18) and the prod scrape is unreliable.
+  const manualFresh = Object.values(_cache.bySlug || {}).some(b => b && b.manual)
+    && _cache.at && Date.now() - _cache.at < MANUAL_MAX_AGE_MS;
+  if (manualFresh) return _cache;
   if (!force && Date.now() - _cache.at < TTL_MS && Object.keys(_cache.bySlug).length) return _cache;
   // Return the running warm ONLY if it hasn't overrun — otherwise abandon the
   // hung one and fall through to start a fresh scrape.
@@ -475,23 +486,95 @@ async function warmTopN(tournaments, { force = false } = {}) {
  */
 function getTopNFairProbSync(playerName, marketType, tournamentName) {
   const isCut = marketType === 'outright_make_cut';
-  if (!TOPN_MARKETS[marketType] && !isCut) return null;
-  // MAX_AGE_MS, not TTL_MS — see the constant. TTL only governs when we kick a
-  // re-scrape; a board between TTL and MAX_AGE is still perfectly priceable and
-  // a re-warm is already in flight. Beyond MAX_AGE we fail closed.
-  if (!_cache.at || Date.now() - _cache.at > MAX_AGE_MS) return null;
+  // outright_win is priceable ONLY from a manual paste board (the scrape/anchor
+  // path never built a winner market). TOPN_MARKETS covers top_5/10/20.
+  const isWin = marketType === 'outright_win';
+  if (!TOPN_MARKETS[marketType] && !isCut && !isWin) return null;
   const slug = resolveDkSlug(tournamentName);
   if (!slug) return null;
   const board = _cache.bySlug[slug];
   if (!board) return null;
   const mkt = board.markets[marketType];
   if (!mkt) return null;
+  // Paste boards carry their OWN (longer) freshness ceiling: the operator
+  // pastes deliberately and stops via the kill-switch, so we don't force a
+  // re-paste every MAX_AGE. Scraped boards keep the tight MAX_AGE. A win market
+  // ONLY comes from a paste, so it always uses the manual ceiling.
+  const ceiling = (board.manual || isWin) ? MANUAL_MAX_AGE_MS : MAX_AGE_MS;
+  if (!_cache.at || Date.now() - _cache.at > ceiling) return null;
   const p = mkt.players.get(_normName(playerName));
   if (p == null || !(p > 0 && p < 1)) return null;
-  const basis = isCut
-    ? `DK live make-side board, power-normalized to T=${mkt.T.toFixed(1)} (cut + ties)`
-    : `DK "Including Ties" board, power-de-vigged to derived T=${mkt.T.toFixed(2)} (uplift x${mkt.uplift.toFixed(3)})`;
-  return { fairProb: p, basis, eventName: board.eventName, T: mkt.T, uplift: mkt.uplift };
+  const basis = board.manual
+    ? `operator DK "Including Ties" paste (raw implied, mirror)`
+    : isCut
+      ? `DK live make-side board, power-normalized to T=${mkt.T.toFixed(1)} (cut + ties)`
+      : `DK "Including Ties" board, power-de-vigged to derived T=${mkt.T.toFixed(2)} (uplift x${mkt.uplift.toFixed(3)})`;
+  return { fairProb: p, basis, eventName: board.eventName, T: mkt.T, uplift: mkt.uplift, manual: !!board.manual };
+}
+
+// American -> implied prob (paste values are American ints incl. U+2212).
+const _aImplPaste = a => { const n = Number(a); if (!isFinite(n) || n === 0) return null; return n >= 0 ? 100 / (n + 100) : (-n) / (-n + 100); };
+
+// Parse the operator's DK outright "(Including Ties)" paste into
+// { winner, top5, top10, top20 } player->americanOdds maps. Structure: a main
+// block (rows = player then Winner/Top5/Top10 numbers; deep-tail rows drop
+// Winner -> 2 numbers = Top5/Top10), then a "Top 20 (Including Ties)" block
+// (rows = player then ONE number). Numbers may carry U+2212. Parse by counting
+// numbers per row, never by fixed column (operator format note 2026-07-18).
+function parseDkOutrightPaste(text) {
+  const rawLines = String(text || '').replace(/−/g, '-').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const isNum = (l) => /^[+-]?\d{2,6}$/.test(l);
+  const isTop20Header = (l) => /^top\s*20\s*\(including ties\)/i.test(l);
+  const isOddsHeader = (l) => /outright winner|top\s*\d+\s*\(including ties\)|including ties/i.test(l);
+  const out = { winner: {}, top5: {}, top10: {}, top20: {} };
+  let section = 'main', i = 0;
+  while (i < rawLines.length && isOddsHeader(rawLines[i]) && !isTop20Header(rawLines[i])) i++;
+  while (i < rawLines.length) {
+    const line = rawLines[i];
+    if (isTop20Header(line)) { section = 'top20'; i++; continue; }
+    if (isOddsHeader(line) || isNum(line)) { i++; continue; }
+    const player = line; const nums = []; let j = i + 1;
+    while (j < rawLines.length && isNum(rawLines[j])) { nums.push(parseInt(rawLines[j], 10)); j++; }
+    i = j;
+    if (section === 'top20') { if (nums.length >= 1) out.top20[player] = nums[0]; }
+    else if (nums.length === 3) { out.winner[player] = nums[0]; out.top5[player] = nums[1]; out.top10[player] = nums[2]; }
+    else if (nums.length === 2) { out.top5[player] = nums[0]; out.top10[player] = nums[1]; }
+    else if (nums.length === 1) { out.winner[player] = nums[0]; }
+  }
+  return out;
+}
+
+/**
+ * Ingest an operator DK "(Including Ties)" paste as the AUTHORITATIVE outright
+ * board (operator rule 2026-07-18: mirror the paste, not the scrape — the prod
+ * scrape is Akamai-gated/unreliable). Stores RAW DK implied per player per
+ * market (winner/top5/10/20); the pricer mirrors it with only a small cushion
+ * (option B). Marks the board manual so warmTopN won't clobber it with a scrape.
+ * Returns per-market player counts.
+ */
+function ingestPaste(text, tournamentName) {
+  const slug = resolveDkSlug(tournamentName);
+  if (!slug) throw new Error(`no DK slug for "${tournamentName}" — add to GOLF_DK_SLUG_MAP`);
+  const parsed = parseDkOutrightPaste(text);
+  const marketMap = { outright_win: parsed.winner, outright_top_5: parsed.top5, outright_top_10: parsed.top10, outright_top_20: parsed.top20 };
+  const markets = {};
+  const counts = {};
+  for (const [mt, odds] of Object.entries(marketMap)) {
+    const players = new Map();
+    for (const [name, american] of Object.entries(odds || {})) {
+      const p = _aImplPaste(american);
+      if (p == null || !(p > 0 && p < 1)) continue;
+      players.set(_normName(name), p);
+    }
+    if (players.size) { markets[mt] = { players, source: 'paste' }; counts[mt] = players.size; }
+  }
+  if (!Object.keys(markets).length) throw new Error('paste parsed to zero priceable markets — check format');
+  _cache = {
+    at: Date.now(),
+    bySlug: { [slug]: { tournament: tournamentName, eventName: tournamentName, markets, manual: true } },
+  };
+  log.info('GolfTopN', `Ingested operator paste for ${slug}: ${Object.entries(counts).map(([k, v]) => k + '=' + v).join(' ')}`);
+  return { slug, counts };
 }
 
 function __debugCache() {
@@ -512,4 +595,4 @@ function __debugCache() {
     }])) };
 }
 
-module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, resolveDkSlug, __debugCache, _buildTopNMarket, __anchorProb: _anchorProb };
+module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, ingestPaste, parseDkOutrightPaste, resolveDkSlug, __debugCache, _buildTopNMarket, __anchorProb: _anchorProb };

@@ -8,6 +8,11 @@ const ufcMov = require('./ufc-mov');
 // UFC method-of-victory market types. PX posts them typed 'moneyline'; the
 // parser retags by market NAME (see prophetx.parseMarketSelections).
 const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
+// Golf outright markets whose fair is the RAW DK "(Including Ties)" implied
+// (operator paste / scrape, option B basis) — these get the thin mirror-cushion
+// vig OVERRIDE. make_cut is deliberately excluded: its fair is de-vigged, so it
+// keeps the wider vigGolfOutrightMin floor. See the two vig sites below.
+const GOLF_RAW_DK_OUTRIGHT_MARKETS = new Set(['outright_win', 'outright_top_5', 'outright_top_10', 'outright_top_20']);
 // Runtime kill-switch for golf outright parlay quoting (see shouldDecline).
 let _golfOutrightsPaused = false;
 function setGolfOutrightsPaused(v) { _golfOutrightsPaused = !!v; return _golfOutrightsPaused; }
@@ -341,23 +346,19 @@ function getSeriesFairProb(lineInfo) {
 function golfOutrightFair(lineInfo) {
   try {
     const player = lineInfo.playerName || lineInfo.teamName;
-    // Top 5/10/20 come from DK's "(Including Ties)" board — the ONLY source on
-    // PX's settlement basis. DataGolf publishes top-N on the DEAD-HEAT basis
-    // (~25% low vs DK's ties board), so it must never price these. See
-    // services/golf-topn.js.
+    // ALL outright markets (winner + top 5/10/20) come from the DK
+    // "(Including Ties)" board via golf-topn — either the operator's paste
+    // (authoritative, mirror basis) or the scrape. DataGolf is NO LONGER a
+    // source for outrights (operator directive 2026-07-18): it publishes top-N
+    // on the DEAD-HEAT basis (~25% low vs ties) and its live boards flap in/out
+    // mid-tournament, and the operator prices off his DK paste, not DataGolf.
+    // Fails closed — a leg with no DK/paste board declines, never falls back.
     const topN = require('./golf-topn');
     if (topN.getTopNFairProbSync) {
       const t = topN.getTopNFairProbSync(player, lineInfo.marketType, lineInfo.tournamentName);
       if (t && t.fairProb > 0 && t.fairProb < 1) return t;
-      // A top-N leg with no DK board declines — never fall through to DataGolf.
-      if (lineInfo.marketType === 'outright_top_5' || lineInfo.marketType === 'outright_top_10' || lineInfo.marketType === 'outright_top_20') return null;
     }
-    const dataGolf = require('./datagolf');
-    if (!dataGolf.getOutrightFairProbSync) return null;
-    const hit = dataGolf.getOutrightFairProbSync(player, lineInfo.marketType,
-      [lineInfo.tournamentName, lineInfo.pxEventName]);
-    if (!hit || !(hit.fairProb > 0 && hit.fairProb < 1)) return null;
-    return hit;
+    return null;
   } catch (err) {
     log.warn('Pricing', `golfOutrightFair threw: ${err.message}`);
     return null;
@@ -631,11 +632,22 @@ function computeSingleLegVig(fairProb, sport, marketType) {
   // ~1.5% pair vig on golf while RFQs would have offered ~2.5% pair.
   const golfMatchupMinVig = config.pricing.vigGolfMatchupMin || 0;
   if (sport === 'golf_matchups' && golfMatchupMinVig > 0) vig = Math.max(vig, golfMatchupMinVig);
-  // Golf outrights: floor per vigGolfOutrightMin. MUST mirror getEffectiveVig's
-  // copy below, or the Lines tab shows a margin we would never actually offer —
-  // which is exactly how the too-narrow spreads got noticed.
-  const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
-  if (sport === 'golf_outrights' && golfOutrightMinVig > 0) vig = Math.max(vig, golfOutrightMinVig);
+  // Golf outrights (option B): win/top_5/top_10/top_20 fairs ARE the RAW DK
+  // "(Including Ties)" implied, which already carries DK's full margin — so we
+  // OVERRIDE (not Math.max) the 6% default sport vig with exactly the thin
+  // mirror cushion, landing our legs ~2% worse than DK's posted price. make_cut
+  // is DIFFERENT: its fair is a DE-VIGGED make-side board (power-normalized in
+  // golf-topn), so it keeps the wider vigGolfOutrightMin floor — applying the
+  // 2% mirror to a de-vigged fair would quote it far too cheap. MUST mirror
+  // getEffectiveVig's copy below.
+  if (sport === 'golf_outrights') {
+    if (GOLF_RAW_DK_OUTRIGHT_MARKETS.has(marketType)) {
+      vig = config.pricing.vigGolfOutrightMirror || 0.02;
+    } else {
+      const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
+      if (golfOutrightMinVig > 0) vig = Math.max(vig, golfOutrightMinVig);
+    }
+  }
   return vig;
 }
 
@@ -2129,12 +2141,19 @@ function priceParlay(legs, opts = {}) {
     if (sport === 'golf_matchups' && golfMatchupMinVig > 0) {
       vig = Math.max(vig, golfMatchupMinVig);
     }
-    // Golf outrights floor — the RFQ-path twin of the computeSingleLegVig copy.
-    // Our fair has a measured ~0.53pp error and payout-vig at defaultVig 1.6%
-    // yields only +0.41pp at a coinflip => negative EV on make_cut coinflips.
-    const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
-    if (sport === 'golf_outrights' && golfOutrightMinVig > 0) {
-      vig = Math.max(vig, golfOutrightMinVig);
+    // Golf outrights (option B) — the RFQ-path twin of the computeSingleLegVig
+    // copy. win/top_5/top_10/top_20 fairs are RAW DK implied (already vig-loaded
+    // by DK) → OVERRIDE the 6% default vig with the thin mirror cushion. make_cut
+    // is a DE-VIGGED fair (golf-topn power-normalizes the make-side board) → keep
+    // the wider vigGolfOutrightMin floor; the 2% mirror would quote it far too
+    // cheap.
+    if (sport === 'golf_outrights') {
+      if (GOLF_RAW_DK_OUTRIGHT_MARKETS.has(marketType)) {
+        vig = config.pricing.vigGolfOutrightMirror || 0.02;
+      } else {
+        const golfOutrightMinVig = config.pricing.vigGolfOutrightMin || 0;
+        if (golfOutrightMinVig > 0) vig = Math.max(vig, golfOutrightMinVig);
+      }
     }
     // First-5-innings (F5) floor — the settlement analysis found F5 totals
     // under-won by 7.6pp and F5 run lines by 12.8pp (our fair runs
