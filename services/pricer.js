@@ -436,15 +436,19 @@ function getGolfMatchupFairProb(lineInfo) {
     } catch (_) { /* scraper unavailable — fall through to DataGolf book lookup */ }
   }
 
-  // PRIORITY 2 + 3: BetOnline → Bovada raw posted odds from the DataGolf
-  // feed. Operator preference 2026-05-19: golf matchup spreads off de-
-  // vigged consensus end up narrower than any tradeable book (we strip
-  // each book's edge before re-applying our own vig); quote at the
-  // BOOK's raw posted line instead. BetOnline first (operator's preferred
-  // book), Bovada second when BetOnline isn't in DataGolf's response for
-  // a given matchup. fairProb is still the de-vigged consensus across
-  // all books — used only for downstream sanity checks (decline-if-stale,
-  // fair-value validation); the quoted price is bookPriceOverride.
+  // Raw posted odds from the DataGolf feed. Operator preference 2026-05-19:
+  // golf matchup lines off de-vigged consensus end up narrower than any
+  // tradeable book (we strip each book's edge before re-applying our own vig);
+  // quote at the BOOK's raw posted line instead. Operator directive 2026-07-19:
+  // ANY one book is fine for golf — do NOT gate on betonline/bovada only.
+  // Gating on 2 books silently dropped 41/42 The Open R4 pairings (only
+  // Scheffler/Rahm had BetOnline) and, before the strict-mode removal, killed
+  // all matchup quoting. So the priority spans every book DataGolf populates in
+  // byBook (see datagolf.CONSENSUS_BOOKS); first present wins, sharp/preferred
+  // first. The clampOverride floor makes taking any single book's raw line safe
+  // — a generous book (bet365 +100/+110) lifts to -110, a fatter one is kept.
+  // fairProb stays the de-vigged consensus across all books (downstream sanity
+  // checks only); the quoted price is bookPriceOverride.
   try {
     const oddsFeed = require('./odds-feed');
     const event = oddsFeed.getGolfMatchupEvent(lineInfo.homeTeam, lineInfo.awayTeam, roundNum);
@@ -462,10 +466,10 @@ function getGolfMatchupFairProb(lineInfo) {
       else if (lineInfo.oddsApiSelection === 'away' || lineInfo.selection === 'away') side = h2h.away;
       if (side && side.fairProb != null && side.fairProb > 0 && side.fairProb < 1) {
         const byBook = side.byBook || {};
-        // Priority order — first book with an odds entry wins. Add more
-        // books here (e.g. 'betmgm', 'caesars') if operator preference
-        // changes. Each value is American odds; convert to implied prob.
-        const priority = ['betonline', 'bovada'];
+        // First book with an odds entry wins — sharp/operator-preferred first,
+        // then the rest. Must stay within datagolf.CONSENSUS_BOOKS (the only
+        // books populated into byBook). Each value is American odds.
+        const priority = ['betonline', 'bovada', 'pinnacle', 'bet365', 'betmgm', 'caesars', 'betcris', 'draftkings', 'fanduel', 'unibet'];
         for (const book of priority) {
           const am = byBook[book];
           if (!Number.isFinite(am)) continue;
