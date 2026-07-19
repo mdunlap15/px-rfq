@@ -191,13 +191,20 @@ const config = {
     // uncertainty round-to-round. Mike caught this 2026-05-14 on R2
     // PGA Championship matchups quoted pre-upload at -106/+103 ties.
     //
-    // Floor applies ONLY to DataGolf-sourced legs; manual uploads
-    // (via /betonline-zurich/upload) use bookPriceOverride and bypass
-    // vig entirely. Set 0 to disable the floor.
+    // Applies on BOTH paths: the de-vig fallback (Math.max in the vig sites)
+    // AND raw book overrides (getGolfMatchupFairProb's clampOverride lifts a
+    // too-thin/generous book line up to fair × (1 + this)). So a golf matchup
+    // is NEVER quoted tighter than this margin regardless of source. Set 0 to
+    // disable.
     //
-    // 0.04 starting recommendation (= 4% per side, ~2% pair vig on
-    // coinflip matchups). Tune up if win-rate stays elevated.
-    vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.04,
+    // PAYOUT-MULTIPLICATIVE vig: offered = 1/(1 + (1/fair - 1)(1 - v)). On a
+    // coinflip that makes v=0.0909 → offered 52.38% → −110/−110 (operator
+    // directive 2026-07-19). NOTE the payout convention: a prob-space 4.76%
+    // would only reach −105 here, so this reads higher than the two-way pair
+    // vig it produces. Tune up if win-rate stays elevated. WARNING: env
+    // VIG_GOLF_MATCHUP_MIN overrides this — prod quoting ~1.4% two-way on
+    // 2026-07-19 implies the env is set low/0; clear it so this default applies.
+    vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.0909,
     // First-5-innings (F5) min per-leg vig. The settlement analysis found F5
     // totals under-won by 7.6pp and F5 run lines by 12.8pp — our fair runs
     // optimistic on this thin sub-market. Floors the vig on any first_5_*

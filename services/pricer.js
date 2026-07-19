@@ -371,6 +371,24 @@ function getGolfMatchupFairProb(lineInfo) {
   const mt = lineInfo?.marketType || '';
   if (mt !== 'moneyline') return null; // golf matchups are h2h only
 
+  // Min-margin clamp for a RAW book override. DataGolf's per-book matchup
+  // odds are inconsistent — some books post juiced two-way (betcris -115/-115,
+  // ~7%), others post generous/near-no-vig (bet365 +100/+110, NEGATIVE
+  // overround). Quoting a generous book raw would offer legs tighter than our
+  // floor (2026-07-19: 41/42 Open R4 pairings had no betonline/bovada and fell
+  // to ~1.4% two-way). This clamps the offered implied UP to at least the
+  // payout-vig floor (same PAYOUT-MULTIPLICATIVE convention the de-vig fallback
+  // uses in computeSingleLegVig/getEffectiveVig, so ONE constant drives both
+  // paths to the same target — vigGolfMatchupMin=0.0909 → -110/-110 coinflip).
+  // We NEVER quote a matchup tighter than that, while still keeping a fatter
+  // book line when one exists.
+  const clampOverride = (fair, override) => {
+    if (!(fair > 0 && fair < 1) || override == null) return override;
+    const floor = config.pricing.vigGolfMatchupMin || 0;
+    const minOffered = 1 / (1 + (1 / fair - 1) * (1 - floor)); // payout-vig floor
+    return Math.max(override, Math.min(0.999, minOffered));
+  };
+
   // Resolve roundNum with a parse-from-name fallback. Some golf matchup
   // lines were registered with lineInfo.roundNum=null (older seed paths,
   // or PX event.name fields without "Round N" populated at seed time);
@@ -411,7 +429,7 @@ function getGolfMatchupFairProb(lineInfo) {
           rawImplied = rawAm >= 0 ? 100 / (rawAm + 100) : -rawAm / (-rawAm + 100);
         }
         if (rawImplied != null && rawImplied > 0 && rawImplied < 1) {
-          return { fairProb: boHit.fairProb, bookPriceOverride: rawImplied };
+          return { fairProb: boHit.fairProb, bookPriceOverride: clampOverride(boHit.fairProb, rawImplied) };
         }
         return boHit.fairProb;
       }
@@ -453,7 +471,7 @@ function getGolfMatchupFairProb(lineInfo) {
           if (!Number.isFinite(am)) continue;
           const rawImplied = am >= 0 ? 100 / (am + 100) : -am / (-am + 100);
           if (rawImplied > 0 && rawImplied < 1) {
-            return { fairProb: side.fairProb, bookPriceOverride: rawImplied };
+            return { fairProb: side.fairProb, bookPriceOverride: clampOverride(side.fairProb, rawImplied) };
           }
         }
       }
