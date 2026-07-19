@@ -1116,7 +1116,6 @@ function priceParlay(legs, opts = {}) {
       fairProbs[i] = s.lineInfo.selection === 'no' ? (1 - hit.fairProb) : hit.fairProb;
       continue;
     }
-    const isGolfMatchupLeg = (s.lineInfo?.sport || s.lineInfo?.oddsApiSport || '').toLowerCase().includes('golf');
     const golfFair = getGolfMatchupFairProb(s.lineInfo);
     if (golfFair != null) {
       // Handle object-form return (carries bookPriceOverride when fair
@@ -1130,20 +1129,20 @@ function priceParlay(legs, opts = {}) {
       }
       continue;
     }
-    // STRICT MODE for golf matchups (2026-05-19): when none of
-    // Bookmaker manual / BetOnline raw / Bovada raw is available, do NOT
-    // fall through to the de-vigged consensus path — leave fairProbs[i]
-    // undefined so the standard 'no fair value' decline fires below.
-    // Operator explicitly chose strict mode: tighter-than-book consensus
-    // pricing on golf was producing -EV fills.
-    if (isGolfMatchupLeg) {
-      priceParlay._lastFailure = priceParlay._lastFailure || {
-        reason: 'no fair value',
-        detail: 'golf matchup: no Bookmaker manual / BetOnline / Bovada price available',
-        blockerLeg: s.lineInfo ? { team: s.lineInfo.teamName, market: s.lineInfo.marketType, line: s.lineInfo.line } : null,
-      };
-      continue;
-    }
+    // Golf matchups with no Bookmaker manual / BetOnline / Bovada raw line
+    // FALL THROUGH to the generic de-vig consensus path below (getFairProb
+    // on the golf_matchups cache). Superseded strict mode (2026-05-19), which
+    // declined outright here: that was chosen because tighter-than-book
+    // consensus pricing produced -EV fills — but the vigGolfMatchupMin floor
+    // (2026-07-19, payout-vig 0.0909 => -110/-110 on a coinflip) now guarantees
+    // a real ~7% two-way margin on consensus legs, removing that objection.
+    // Strict mode had also silently DROPPED all matchup quoting whenever
+    // DataGolf's book coverage thinned: The Open R4 carried BetOnline for only
+    // 1 of 42 pairings, so 41/42 parlays declined and golf quoting stopped
+    // (2026-07-18 morning). Fatter raw book lines (betcris/betonline/bovada)
+    // are still preferred when present via getGolfMatchupFairProb + clampOverride;
+    // this is only the fallback when none exists. If consensus is ALSO missing,
+    // the standard 'no fair value' decline still fires at the generic path.
     if (s.lineInfo.isDNB) {
       fairProbs[i] = oddsFeed.getDNBFairProb(
         s.lineInfo.oddsApiSport, s.lineInfo.homeTeam, s.lineInfo.awayTeam,
