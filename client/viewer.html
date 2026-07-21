@@ -6962,7 +6962,12 @@
     const balanceStr = cashBalance != null ? fmtDollar(cashBalance) : '-';
     const balanceCls = cashBalance != null ? 'positive' : '';
 
-    const deployedAmt = filledNum;   // "Filled" — matched wager stake
+    // Deployed spans TWO DISJOINT pools — see client/index.html for the full
+    // rationale. filledNum (PX matched_wager_balance) is SINGLE-LEG-ONLY; PX
+    // excludes parlay stake from it, so it alone hides all parlay capital
+    // (read $44.94 vs $2,891.15 in open parlays, 2026-07-21). portRisk is the
+    // open parlay stake. Neither is in PX `balance`, so no double-count.
+    const deployedAmt = filledNum + portRisk;
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
@@ -7018,7 +7023,7 @@
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
         ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Filled (matched wager stake), per PX. Cash Balance = PX balance − GEC − promotional (both excluded). Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
-        ${stat('Total Deployed', deployedStr, portCls, 'Filled — matched wager stake locked in open positions (PX matched_wager_balance). Resting offers are notional and shown separately as Open Orders. (% of account equity)')}
+        ${stat('Total Deployed', deployedStr, portCls, `All capital locked in open positions = single-leg matched stake (PX matched_wager_balance, ${fmtDollar(filledNum)}) + open parlay stake (${fmtDollar(portRisk)}). Two DISJOINT pools — matched_wager_balance excludes parlays entirely, so it alone understates deployed. Resting offers are notional and shown separately as Open Orders. (% of account equity)`)}
         ${stat('Cash Available', cashAvailStr, balanceCls, 'Cash Balance — PX balance minus GEC and promotional balances. Free cash for new wagers.')}
         ${stat('To Win', fmtDollar(totalToWin), 'positive')}
         ${stat(pnlLabel, pnlStr, pnlCls, pnlTitle)}
