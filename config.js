@@ -1431,7 +1431,11 @@ const config = {
   // fetch no odds for it and drop every game (see sportNameMap).
   // If SUPPORTED_SPORTS is set in Railway it OVERRIDES this default entirely —
   // the env value must also include basketball_nba_summer_league.
-  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf')
+  // americanfootball_cfl added 2026-07-24 — PX runs a full CFL slate in summer
+  // (typed 'American Football', tournament 'CFL') and TOA's key is active.
+  // ⚠ If SUPPORTED_SPORTS is set in Railway it OVERRIDES this default entirely
+  // — the env value must also include americanfootball_cfl.
+  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl')
     .split(',').map(s => s.trim()),
   // Maps our sport keys to ProphetX sport_name values
   // Note: NBA and NCAAB both map to 'Basketball' — line manager handles both
@@ -1456,6 +1460,12 @@ const config = {
     'icehockey_nhl': 'Ice Hockey',
     'tennis': 'Tennis',
     'americanfootball_nfl': 'American Football',
+    // CFL shares PX sport_name 'American Football' with NFL/NCAAF. The seed's
+    // possibleSportKeys tries all three; the team-match loop picks whichever
+    // key's odds cache actually has the game (CFL teams never collide with
+    // NFL/NCAAF rosters — 'Lions' is last-word but per-key caches keep
+    // Detroit and BC apart), so NFL/NCAAF matching is unaffected.
+    'americanfootball_cfl': 'American Football',
     'americanfootball_ncaaf': 'American Football',
     'soccer': 'Soccer',
     'soccer_usa_mls': 'Soccer',

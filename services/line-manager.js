@@ -371,6 +371,8 @@ function isValidFullGameLine(sport, marketType, line) {
 // Known overrides for team name mismatches between PX and The Odds API
 // Add entries here if matching fails for specific teams
 const TEAM_NAME_OVERRIDES = {
+  // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
+  'british columbia lions': 'BC Lions',
   // SharpAPI abbreviates some NHL city names
   'washington capitals': 'WAS Capitals',
   'columbus blue jackets': 'CBJ Blue Jackets',

@@ -254,6 +254,19 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // Canadian Football League (added 2026-07-24). PX lists CFL games as
+  // sport_name='American Football' with tournament_name='CFL' — they resolved
+  // only to nfl/ncaab keys (whose caches are offseason futures), so every CFL
+  // game failed team-matching and was dropped. TOA's americanfootball_cfl key
+  // is ACTIVE in summer (verified 2026-07-24: all 3 PX-listed games, 22 books
+  // incl. DK/FD, h2h+spreads+totals; team names match PX except
+  // 'British Columbia Lions' vs TOA 'BC Lions' — last-word matching handles
+  // it). Not flipGated: SharpAPI is retired and never carried CFL.
+  'americanfootball_cfl': {
+    oddsApiSport: 'americanfootball_cfl',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
   'americanfootball_nfl': {
     oddsApiSport: 'americanfootball_nfl',
     markets: 'h2h,spreads,totals',
