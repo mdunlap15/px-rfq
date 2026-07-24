@@ -1179,6 +1179,24 @@ async function seedAllLines() {
     // names directly so the line lives in our index; if pricing still
     // fails at RFQ time, we decline cleanly — no harm done.
     const isGolfEvent = event.sport_name === 'Golf';
+    // Near-term fallback registration for team-sport events that failed odds
+    // matching. 2026-07-23: five real MLB games (MIN@CLE, KC@DET, ARI@STL,
+    // TB@TOR, SD@ATL) sat unregistered ALL DAY — other SPs filled ~$43K on
+    // them while every RFQ here declined 'unknown legs'. Root cause: the odds
+    // cache intermittently lacks a real game (TOA 429 freq-limit leaves a
+    // stale/partial event list), and an unmatched event was simply skipped —
+    // permanently dark until the cache happened to heal. For events starting
+    // within the next 48h on a supported sport with two real competitors,
+    // that's almost certainly a data glitch, not an unpriceable event: so
+    // register the lines with PX's own competitor names (matchDeferred).
+    // Pricing then works whenever ANY fair source resolves (bulk cache after
+    // it heals, alt-line per-event fetch, async event-id resolution); if none
+    // does, the RFQ declines 'no fair value' — same net decline as before,
+    // but self-healing instead of permanently dark.
+    const _schedMs = event.scheduled ? Date.parse(event.scheduled) : NaN;
+    const _isNearTerm = Number.isFinite(_schedMs)
+      && _schedMs > Date.now()
+      && _schedMs - Date.now() < 48 * 60 * 60 * 1000;
     if (!matchedHome || !matchedAway) {
       if (isSeriesEvent) {
         matchedHome = homeComp.name;
@@ -1189,6 +1207,21 @@ async function seedAllLines() {
         sportKey = 'golf_matchups';
         golfTrace.bypassFired++;
         log.info('Lines', `[golf-debug] Event-level bypass fired: ${event.name} → home="${matchedHome}" away="${matchedAway}" sportKey="${sportKey}"`);
+      } else if (_isNearTerm && possibleSportKeys.length === 1 && sportKey && homeComp.name && awayComp.name) {
+        // Single-key sports only (baseball_mlb, tennis, mma, boxing): a
+        // multi-key sport_name (Basketball → nba/wnba/ncaab, Soccer → many)
+        // can't be safely keyed without an odds-cache match, and a wrong key
+        // poisons vig-by-sport + dashboards. MLB — the sport that went dark —
+        // is single-key.
+        matchedHome = homeComp.name;
+        matchedAway = awayComp.name;
+        log.warn('Lines', `Deferred-match registration: "${event.name}" (${sportKey}, starts ${event.scheduled}) — no odds-cache event matched; registering with PX names so RFQs can price via per-event/alt-line fallbacks instead of going dark`);
+        unmatchedEvents.push({
+          pxEvent: event.name,
+          pxHome: homeComp.name,
+          pxAway: awayComp.name,
+          deferred: true,
+        });
       } else {
         unmatchedEvents.push({
           pxEvent: event.name,
@@ -1199,10 +1232,16 @@ async function seedAllLines() {
       }
     }
 
-    // Verify this home/away pair exists as an actual Odds API event
+    // Verify this home/away pair exists as an actual Odds API event.
+    // Deferred-match events (near-term single-key games the odds cache is
+    // missing, registered above with PX names) are exempt — the whole point
+    // is to register them WITHOUT an odds-cache event and let RFQ-time
+    // fallbacks price them.
+    const _isDeferredMatch = _isNearTerm && possibleSportKeys.length === 1
+      && !matchedOddsEvent && !isSeriesEvent && !isGolfEvent;
     const pxScheduled = event.scheduled || null;
     const oddsEvent = matchedOddsEvent || oddsFeed.getEventMarkets(sportKey, matchedHome, matchedAway, pxScheduled);
-    if (!oddsEvent && !isSeriesEvent && !isGolfEvent) {
+    if (!oddsEvent && !isSeriesEvent && !isGolfEvent && !_isDeferredMatch) {
       const oddsEventReversed = oddsFeed.getEventMarkets(sportKey, matchedAway, matchedHome, pxScheduled);
       if (!oddsEventReversed) {
         unmatchedEvents.push({
@@ -1216,6 +1255,9 @@ async function seedAllLines() {
       // Swap for correct orientation
       const temp = matchedHome;
       // Note: we'll handle the swap in line indexing below
+    }
+    if (_isDeferredMatch && !oddsEvent) {
+      log.warn('Lines', `Deferred-match registration (post-name-match): "${event.name}" (${sportKey}) — teams resolved but no odds-cache event; registering with deferred pricing fallbacks`);
     }
 
     // Store event metadata with the FINAL (team-matched) sportKey. Only matched
@@ -2369,6 +2411,11 @@ async function seedAllLines() {
     matchedLines,
     registeredLines: lineIds.length,
     unmatchedEvents: unmatchedEvents.length,
+    // Detail sample so /status shows WHICH events failed matching — the 7/23
+    // five-dark-MLB-games incident was invisible because only the count
+    // surfaced. `deferred: true` entries did register (with pricing
+    // fallbacks); entries without it were skipped entirely.
+    unmatchedEventDetails: unmatchedEvents.slice(0, 25),
     golfTrace,
   };
 

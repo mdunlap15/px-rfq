@@ -2677,7 +2677,21 @@ async function fetchFromTheOddsApi(sport) {
 
   log.info('OddsFeed', `Fetching ${sport} from The Odds API (fallback)...`);
 
-  const resp = await fetch(url);
+  // TOA rate-limits by request FREQUENCY (429 EXCEEDED_FREQ_LIMIT), separate
+  // from quota — the same trap the BTTS supplement hit. The refresh loop fires
+  // ~17 sport fetches per cycle plus prop/per-event calls on the same key, so
+  // intermittent 429s are routine. Without a retry, a 429 threw, the loop
+  // skipped the sport for a whole cycle, and the cache silently served the
+  // prior (possibly partial) event list — the mechanism behind sports going
+  // stale and real games missing from the cache at seed time (5 MLB games
+  // dark all day 2026-07-23, ~$43K of network fills missed). One bounded
+  // retry after a short backoff absorbs the transient collisions.
+  let resp = await fetch(url);
+  if (resp.status === 429) {
+    log.warn('OddsFeed', `TOA 429 (freq limit) for ${sport} — retrying once in 3s`);
+    await new Promise(r => setTimeout(r, 3000));
+    resp = await fetch(url);
+  }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`The Odds API ${resp.status} for ${sport}: ${text}`);
@@ -4724,13 +4738,58 @@ async function mergeDkTennisMatches() {
     return { line: primary.line, home: mk(primary.home, primary.line), away: mk(primary.away, primary.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, dkScraped: true };
   };
 
-  let added = 0, skippedLive = 0, skippedExisting = 0, withTot = 0, withSp = 0;
+  // Index existing DK-SCRAPED events by fuzzy pair so re-runs UPDATE them in
+  // place instead of skipping. The original merge skipped every already-known
+  // pair and only stamped cache.fetchedAt when added > 0 — so after the boot
+  // merge populated the cache, every later cycle added 0, odds never moved,
+  // freshness never advanced, and the 4-min tennis stale gate declined 100%
+  // of tennis RFQs while the scrape itself was working fine (dark 35h on
+  // 7/21 and 17h on 7/23). TOA-sourced events are still never clobbered —
+  // update-in-place applies ONLY to events this merge created (dk-tennis-*).
+  const dkEventByPair = {};
+  for (const entry of Object.values(cache.events || {})) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
+      if (!String(ev.eventId || '').startsWith('dk-tennis-')) continue;
+      const a = lw(ev.homeTeam), b = lw(ev.awayTeam);
+      if (a && b) { dkEventByPair[a + '|' + b] = ev; dkEventByPair[b + '|' + a] = ev; }
+    }
+  }
+
+  let added = 0, updated = 0, skippedLive = 0, skippedExisting = 0, withTot = 0, withSp = 0;
   for (const g of data.games) {
     if (!g.homeTeam || !g.awayTeam || !g.h2h || !g.h2h.home || !g.h2h.away) continue;
     if (g.started) { skippedLive++; continue; }
     if (!(g.h2h.home.fairProb > 0) || !(g.h2h.away.fairProb > 0)) continue;
     const p1 = lw(g.homeTeam), p2 = lw(g.awayTeam);
     if (!p1 || !p2) continue;
+    const dkExisting = dkEventByPair[p1 + '|' + p2];
+    if (dkExisting) {
+      // Refresh the DK-scraped event's odds in place (orientation-aware: the
+      // cached event may store the pair flipped vs this scrape run).
+      const sameOrientation = lw(dkExisting.homeTeam) === p1;
+      const h = sameOrientation ? g.h2h.home : g.h2h.away;
+      const a = sameOrientation ? g.h2h.away : g.h2h.home;
+      const mkSide = (o) => ({ rawOdds: o.americanOdds, impliedProb: o.impliedProb, fairProb: o.fairProb, displayFairProb: o.fairProb });
+      dkExisting.markets = dkExisting.markets || {};
+      dkExisting.markets.h2h = {
+        home: mkSide(h), away: mkSide(a), books: 1,
+        pinnacle: null, fanduel: null,
+        draftkings: { home: h.americanOdds, away: a.americanOdds },
+        kalshi: null, dkScraped: true,
+      };
+      const totBlock2 = buildTotalsBlock(g.totalsByLine);
+      const spBlock2 = buildSpreadsBlock(g.spreadsByLine);
+      // Note: totals/spreads blocks are built in the scrape run's orientation.
+      // Totals are side-symmetric (over/under). Spreads for a flipped pair
+      // would need sign inversion — skip the update in that rare case and
+      // keep the prior block rather than store a wrong-signed one.
+      if (totBlock2) { dkExisting.markets.totals = totBlock2; }
+      if (spBlock2 && sameOrientation) { dkExisting.markets.spreads = spBlock2; }
+      if (g.startTime) dkExisting.commenceTime = g.startTime;
+      updated++;
+      continue;
+    }
     if (existingPairs.has(p1 + '|' + p2)) { skippedExisting++; continue; }
 
     const key = normalizeEventKey(g.homeTeam, g.awayTeam);
@@ -4762,9 +4821,11 @@ async function mergeDkTennisMatches() {
     existingPairs.add(p1 + '|' + p2); existingPairs.add(p2 + '|' + p1);
     added++;
   }
-  if (added > 0) cache.fetchedAt = Date.now();
-  log.info('OddsFeed', `Tennis DK merge: added ${added} (${withTot} w/totals, ${withSp} w/spreads), skipped ${skippedLive} live + ${skippedExisting} already-covered (DK games: ${data.games.length})`);
-  return { merged: added, added };
+  // Stamp freshness whenever the scrape produced a usable board — updates
+  // count as much as adds. (added>0-only stamping was the tennis-dark bug.)
+  if (added > 0 || updated > 0) cache.fetchedAt = Date.now();
+  log.info('OddsFeed', `Tennis DK merge: added ${added}, updated ${updated} (${withTot} w/totals, ${withSp} w/spreads), skipped ${skippedLive} live + ${skippedExisting} toa-covered (DK games: ${data.games.length})`);
+  return { merged: added + updated, added, updated };
 }
 
 async function mergeDkMmaFights() {
@@ -7700,6 +7761,24 @@ function getSharpEvents(sport) {
   return sharpEventsIndex[sport]?.events || [];
 }
 
+// Stale-sport watchdog state: sport -> last alert ms (throttle to 1/15min).
+const _staleAlertAt = {};
+const STALE_ALERT_AGE_MS = 30 * 60 * 1000;
+const STALE_ALERT_THROTTLE_MS = 15 * 60 * 1000;
+function _alertStaleSports() {
+  const now = Date.now();
+  for (const [sport, cache] of Object.entries(oddsCache)) {
+    if (!cache || !cache.fetchedAt) continue;
+    const evCount = Object.keys(cache.events || {}).length;
+    if (evCount === 0) continue; // empty cache = sport legitimately idle
+    const age = now - cache.fetchedAt;
+    if (age < STALE_ALERT_AGE_MS) continue;
+    if (_staleAlertAt[sport] && now - _staleAlertAt[sport] < STALE_ALERT_THROTTLE_MS) continue;
+    _staleAlertAt[sport] = now;
+    log.error('OddsFeed', `STALE-SPORT ALERT: ${sport} cache is ${Math.round(age / 60000)} min old with ${evCount} events — every RFQ on this sport is being declined by the stale-price gate. Pipeline for this sport is likely dead (TOA inactive/429s or DK scrape failing).`);
+  }
+}
+
 async function refreshAllSports() {
   // Refresh events index first — line-manager uses it for matching
   await refreshEventsIndex();
@@ -7718,8 +7797,18 @@ async function refreshAllSports() {
       log.error('OddsFeed', `Failed to fetch ${sport}: ${err.message}`);
       results[sport] = { ok: false, error: err.message };
     }
-    await new Promise(r => setTimeout(r, 300));
+    // 500ms spacing (was 300) — TOA rate-limits by request frequency and this
+    // loop shares the key with prop refreshes and per-event supplements.
+    await new Promise(r => setTimeout(r, 500));
   }
+
+  // Loud staleness watchdog. A sport whose cache has events but hasn't
+  // successfully refreshed in >30 min is silently declining 100% of its RFQs
+  // via the stale-price gate — tennis sat dark 35h (7/21) and 17h (7/23)
+  // before anyone noticed, and nothing in the logs distinguished "quiet
+  // sport" from "dead pipeline". log.error once per sport per 15 min so it
+  // shows up in Railway logs / alerting without spamming.
+  _alertStaleSports();
 
   // Fire-and-forget alt-line pre-warm per sport — don't block the main refresh
   // cycle on this. Keeps the critical RFQ path hitting cache instead of The

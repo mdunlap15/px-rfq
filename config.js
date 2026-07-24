@@ -812,8 +812,13 @@ const config = {
     // tune live without a redeploy.
     stalePriceMinutesBySport: (() => {
       const defaults = {
-        'mma_mixed_martial_arts': 3,
-        'boxing_boxing': 3,
+        // 5, not 3: the refresh loop itself runs every REFRESH_INTERVAL_MINUTES
+        // (3 in prod) and iterates ~17 sports with spacing, so a 3-min gate is
+        // mathematically guaranteed to flap stale between cycles (observed:
+        // mma age 3.9m, boxing 3.8m flagged stale on 7/24 with a healthy
+        // pipeline). 5 keeps news-move protection while clearing the cadence.
+        'mma_mixed_martial_arts': 5,
+        'boxing_boxing': 5,
         'americanfootball_nfl': 4,
         'americanfootball_ncaaf': 4,
         'basketball_ncaab': 5,

@@ -13,6 +13,10 @@ const ordersByUuid = {}; // secondary index: orderUuid → parlayId
 // MARKET INTELLIGENCE — tracks all matched parlays across all SPs
 // ---------------------------------------------------------------------------
 const matchedParlays = []; // array of { parlayId, matchedOdds, matchedStake, legs, matchedAt, weQuoted, ourOdds, outcome }
+// Network fills on events we have NO registered line for (the 7/23 dark-game
+// class of miss). Per-event counters + session totals, surfaced on
+// /market-intel and log.error-alerted (throttled) in recordMatchedParlay.
+const _unquotedNetworkFills = { totalFills: 0, totalStake: 0, byEvent: {} };
 const marketStats = {
   totalMatched: 0,
   weQuoted: 0,
@@ -1590,6 +1594,30 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
     };
   });
 
+  // LOUD alert: the network just FILLED a parlay containing legs we had no
+  // line for. This is real money other SPs captured on events/markets we
+  // couldn't quote — the signal that caught the 2026-07-23 incident (5 MLB
+  // games dark all day, ~$43K missed) only in postmortem. Throttled per
+  // event name (10 min) so a hot dark game logs loudly but not on every fill.
+  // Tracked in _unquotedNetworkFills for /market-intel.
+  try {
+    const unregLegs = resolvedLegs.filter(l => l.wasUnregistered);
+    if (unregLegs.length > 0 && !weQuoted) {
+      const evNames = [...new Set((declineInfo?.unknownCategories || [])
+        .map(uc => uc && uc.eventName).filter(Boolean))];
+      const label = evNames[0] || unregLegs[0].marketName || unregLegs[0].team || 'unknown event';
+      const st = Number(matchedStake) || 0;
+      const e = _unquotedNetworkFills.byEvent[label] = _unquotedNetworkFills.byEvent[label]
+        || { fills: 0, stake: 0, firstAt: Date.now(), lastAlertAt: 0 };
+      e.fills++; e.stake += st;
+      _unquotedNetworkFills.totalFills++; _unquotedNetworkFills.totalStake += st;
+      if (Date.now() - e.lastAlertAt > 10 * 60 * 1000) {
+        e.lastAlertAt = Date.now();
+        log.error('Market', `UNQUOTED-FILL ALERT: network filled $${st.toFixed(0)} on "${label}" which we have NO registered line for (${e.fills} fills / $${e.stake.toFixed(0)} total on this event since ${new Date(e.firstAt).toISOString()}). Check /status lastSeed.unmatchedEventDetails — this event is likely failing seed matching.`);
+      }
+    }
+  } catch (_) { /* alerting must never break intel recording */ }
+
   // Classification under PX's order.matched broadcast model (corrected
   // Apr 25, 2026):
   //   PX broadcasts order.matched to ALL SPs that quoted on the RFQ, not
@@ -2711,6 +2739,16 @@ function getMarketIntel(limit = 50) {
       ? cachedRollup7d.riskLimitMissed
       : buildRiskLimitMissedVolume(),
     recentMatched: matchedParlays.slice(0, limit),
+    // Network fills on events with zero registered lines (session-scoped).
+    // Non-zero here = we are leaving specific, identifiable events dark —
+    // check /status lastSeed.unmatchedEventDetails for the seed-side reason.
+    unquotedNetworkFills: {
+      totalFills: _unquotedNetworkFills.totalFills,
+      totalStake: Math.round(_unquotedNetworkFills.totalStake * 100) / 100,
+      byEvent: Object.fromEntries(Object.entries(_unquotedNetworkFills.byEvent)
+        .sort((a, b) => b[1].stake - a[1].stake).slice(0, 20)
+        .map(([k, v]) => [k, { fills: v.fills, stake: Math.round(v.stake * 100) / 100 }])),
+    },
     quoteWinRate: marketStats.weQuoted > 0 ? (marketStats.weWon / marketStats.weQuoted * 100).toFixed(1) + '%' : '-',
     coverageRate: marketStats.totalMatched > 0 ? (marketStats.weQuoted / marketStats.totalMatched * 100).toFixed(1) + '%' : '-',
     // Sport breakdown of matched parlays
