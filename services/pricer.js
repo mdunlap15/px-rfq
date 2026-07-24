@@ -4339,14 +4339,26 @@ function shouldDecline(legs, parlayId) {
         detail: `${entries.length} legs on same game: ${gameLabel0} (combo=${combo || 'unclassified'} not in SGP_ALLOWED_COMBOS=${[...allowedCombos].join(',') || 'empty'})`,
       };
     }
-    // More than one SGP pair on the same parlay (e.g. two distinct
-    // same-game pairs on different events) — don't try to price.
-    if (sgpEventId != null) {
-      log.info('Pricing', `Declined SGP: multiple same-game pairs across events`);
-      return { declined: true, reason: 'SGP not allowed', detail: `multiple same-game pairs not supported` };
+    // Multiple same-game pairs on DIFFERENT events are allowed (2026-07-24):
+    // every pair reaching this point has individually passed the allowed-combo
+    // check above, the pairs are on independent games, and the pricing engine
+    // already applies per-combo correlation factors MULTIPLICATIVELY across
+    // all detected components (see the eventLegs loop in priceParlay). The
+    // old blanket decline here turned away $11.5K of network-filled volume in
+    // one 2-day sample (avg $2.3K tickets — multi-SGP bettors run big).
+    // For parlay-level metadata (experiment budgets/stop-loss key on it),
+    // prefer an EXPERIMENTAL combo over a standard one so the sgp-guard
+    // budget + stop-loss checks bind whenever any component is experimental.
+    if (sgpEventId == null) {
+      sgpEventId = eid;
+      sgpCombo = combo;
+    } else {
+      const expSet = config.pricing.experimentalSgpCombos;
+      const comboIsExp = !!(expSet && (expSet.has ? expSet.has(combo) : Array.isArray(expSet) && expSet.includes(combo)));
+      const currentIsExp = !!(expSet && (expSet.has ? expSet.has(sgpCombo) : Array.isArray(expSet) && expSet.includes(sgpCombo)));
+      if (comboIsExp && !currentIsExp) sgpCombo = combo;
+      log.info('Pricing', `Multi-SGP parlay: additional same-game pair (${combo}) on event ${eid} alongside ${sgpEventId} — pricing with compounded correlation factors`);
     }
-    sgpEventId = eid;
-    sgpCombo = combo;
   }
   // ---- CROSS-EVENT SERIES CORRELATION ----
   // Series events and the underlying game events have DIFFERENT pxEventIds
