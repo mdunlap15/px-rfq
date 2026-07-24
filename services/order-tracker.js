@@ -17,6 +17,25 @@ const matchedParlays = []; // array of { parlayId, matchedOdds, matchedStake, le
 // class of miss). Per-event counters + session totals, surfaced on
 // /market-intel and log.error-alerted (throttled) in recordMatchedParlay.
 const _unquotedNetworkFills = { totalFills: 0, totalStake: 0, byEvent: {} };
+// Tie-break diagnostics: when we lose an auction AT OUR OWN PRICE (tied_lost)
+// versus when we canonically win, record our submit latency. Accumulated over
+// days this answers whether submit speed decides equal-price ties (19% of
+// lost bids in the 7/24 sample had equal-or-better prices). Bounded buffers.
+const _tieBreakStats = {
+  tiedLost: { n: 0, latencies: [] },
+  won: { n: 0, latencies: [] },
+};
+function _recordTieBreakSample(bucket, ourQuote) {
+  try {
+    const lat = ourQuote && ourQuote.meta && ourQuote.meta.submitLatencyMs;
+    const b = _tieBreakStats[bucket];
+    b.n++;
+    if (lat != null && Number.isFinite(lat)) {
+      b.latencies.push(lat);
+      if (b.latencies.length > 500) b.latencies.shift();
+    }
+  } catch (_) { /* diagnostics only */ }
+}
 const marketStats = {
   totalMatched: 0,
   weQuoted: 0,
@@ -818,6 +837,50 @@ function reconcileMatchedWin(parlayId) {
   log.debug('Market', `Reconciled matched ${parlayId.substring(0, 8)} ${prior} → won on canonical confirm`);
 }
 
+/**
+ * Count a REAL fill exactly once per order — the first time an orderUuid is
+ * known, regardless of WHICH event carried it.
+ *
+ * Why this exists (2026-07-24): the fill counters used to live inside
+ * recordConfirmation gated on `order.orderUuid == null` at entry. But PX's
+ * order.finalized event routinely RACES the accept-POST response — the
+ * finalized handler (recordFinalized) stamped order.orderUuid directly, so by
+ * the time recordConfirmation ran its gate saw a uuid already present and
+ * skipped EVERYTHING: sessionFills stayed 0 forever, the Win Rate heatmap's
+ * fill buckets stayed 0, market-intel weWon read 2 while 73 real fills sat in
+ * the DB, and template-exposure never recorded the confirm. (Exposure tables
+ * looked right only because a periodic rebuild re-derives them.)
+ *
+ * Idempotence is an explicit flag (meta.fillCounted), NOT uuid-presence, so
+ * whichever of recordConfirmation / recordFinalized runs first does the
+ * counting and the other no-ops. DB hydration stamps the flag on any loaded
+ * order that already has a uuid, so restarts never double-count history.
+ */
+function _countFillOnce(order, parlayId) {
+  if (!order) return false;
+  order.meta = order.meta || {};
+  if (order.meta.fillCounted) return false;
+  order.meta.fillCounted = true;
+  stats.totalConfirmations++;
+  stats.sessionFills++;
+  // Per-bucket fill count for the Win Rate by Sport & Leg Count heatmap.
+  const legs = order.legs || (order.meta && order.meta.legs) || [];
+  if (legs.length > 0) recordFillBucketFill(legs);
+  // Reconcile market intel on the canonical win signal (fixes weWon).
+  reconcileMatchedWin(parlayId);
+  // Exposure — first real commit signal only (order.matched must not add).
+  try { addExposure(order); } catch (err) {
+    log.warn('Exposure', `addExposure on fill-count failed for ${parlayId}: ${err.message}`);
+  }
+  // Template-exposure signature for the pricer's template ramp.
+  try {
+    templateExposure.recordConfirmation(legs, parlayId, order.confirmedStake, order.confirmedAt);
+  } catch (err) {
+    log.warn('TemplateExposure', `recordConfirmation failed: ${err.message}`);
+  }
+  return true;
+}
+
 function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) {
   const order = orders[parlayId];
   if (order) {
@@ -840,31 +903,14 @@ function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) 
     // (~76% of matched events on 2026-04-22). Status still promotes to
     // 'confirmed' on order.matched for exposure tracking during the
     // review window — the 10-min isStalePhantom sweep cleans up orphans.
-    const wasCountedAsFill = order.orderUuid != null;
-    if (!wasCountedAsFill && orderUuid != null) {
-      stats.totalConfirmations++;
-      stats.sessionFills++;
-      // Per-bucket fill count for the Win Rate by Sport & Leg Count
-      // heatmap. Previously this only fired in the recordMatchedParlay
-      // 'won' branch — but that branch is the OPPORTUNISTIC backup
-      // path (order.matched), not the canonical fill signal. Real fills
-      // arrive here via order.finalized → orderUuid; without this hook
-      // the heatmap shows 0 fills despite stats.sessionFills counting
-      // them correctly. Operator caught this 2026-05-08 with a 1996/0
-      // matrix despite ~30+ confirmed parlays in the same window.
-      const legs = order.legs || (order.meta && order.meta.legs) || [];
-      if (legs.length > 0) recordFillBucketFill(legs);
-
-      // Reconcile market intel on the canonical win signal (shared helper —
-      // also called from importPxBookedOrder for the recovery/verify paths).
-      reconcileMatchedWin(parlayId);
-    }
-
     order.status = 'confirmed';
     order.confirmedAt = new Date().toISOString();
     order.confirmedOdds = confirmedOdds;
     order.confirmedStake = confirmedStake;
     order.orderUuid = orderUuid;
+    // Count AFTER the confirmed fields are stamped — _countFillOnce reads
+    // confirmedStake/confirmedAt for exposure + template recording.
+    if (orderUuid != null) _countFillOnce(order, parlayId);
     // Leak detector: a confirm should NEVER reach here for a blocklisted
     // creator — the confirm-time gate (websocket resolveConfirmBlock) rejects
     // them first. If one slips through, a residual fail-open edge fired (e.g.
@@ -909,27 +955,8 @@ function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) 
       ordersByUuid[orderUuid] = parlayId;
     }
 
-    // Track exposure per team/selection — ONLY on real fills (orderUuid
-    // first arrival). Previously addExposure fired on order.matched too,
-    // which inflated Team/Game Exposure with tentative matches the
-    // bettor later walked away from. Surfaced as a visible bug: the
-    // Team Exposure table would show a team with $1,465 net exposure
-    // across 4 parlays, but clicking the drill-down found "No matching
-    // confirmed orders" because the filter there requires real fills.
-    // Ties exposure accounting to the same commit signal as sessionFills.
-    if (!wasCountedAsFill && orderUuid != null) {
-      addExposure(order);
-      // Template-exposure dimension: hash legs into a canonical signature
-      // and record this confirmed bet against the rolling window. Feeds
-      // the pricer's template ramp on subsequent RFQs with the same
-      // signature. See services/template-exposure.js.
-      try {
-        const legs = order.meta?.legs || order.legs || [];
-        templateExposure.recordConfirmation(legs, parlayId, confirmedStake, order.confirmedAt);
-      } catch (err) {
-        log.warn('TemplateExposure', `recordConfirmation failed: ${err.message}`);
-      }
-    }
+    // Exposure + template-signature recording moved into _countFillOnce —
+    // same first-uuid commit signal as the fill counters, now race-proof.
     releasePending(parlayId);
 
     log.info('Orders', `Confirmed: parlay=${parlayId}, order=${orderUuid}, odds=${confirmedOdds}, stake=$${confirmedStake}`);
@@ -1293,6 +1320,12 @@ function recordFinalized(parlayId, orderUuid, payload) {
     if (payload.confirmed_stake && !order.confirmedStake) order.confirmedStake = payload.confirmed_stake;
     if (payload.confirmed_odds && !order.confirmedOdds) order.confirmedOdds = payload.confirmed_odds;
   }
+
+  // order.finalized routinely RACES the accept-POST response. When it wins,
+  // this is the first time the uuid is known — count the fill HERE, or (as
+  // before 2026-07-24) recordConfirmation's gate sees a uuid already present
+  // and every session/fill/intel counter silently stays 0.
+  if (orderUuid != null) _countFillOnce(order, parlayId);
 
   log.info('Orders', `Finalized: parlay=${parlayId}, order=${orderUuid}`);
   db.saveOrder(order).catch(() => {});
@@ -1690,8 +1723,10 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
       // (now canonical-only) wins.
       marketStats.weWon++;
       marketStats.weQuoted++;
+      _recordTieBreakSample('won', ourQuote);
     } else {
       outcome = 'tied_lost';
+      _recordTieBreakSample('tiedLost', ourQuote);
       // Provisional loss tally (symmetric with the outbid 'other_sp' path) —
       // a same-price match is most likely another SP's win. If recordConfirmation
       // later proves it was our own win (order.matched raced ahead of confirm),
@@ -2749,6 +2784,22 @@ function getMarketIntel(limit = 50) {
         .sort((a, b) => b[1].stake - a[1].stake).slice(0, 20)
         .map(([k, v]) => [k, { fills: v.fills, stake: Math.round(v.stake * 100) / 100 }])),
     },
+    // Equal-price auction outcomes vs our submit latency. If tiedLost median
+    // latency sits meaningfully above won median over a decent sample, submit
+    // speed is deciding ties and latency work has direct fill-rate ROI; if
+    // they're indistinguishable, ties are bettor-choice and the lever is
+    // price (one-tick improvement), not speed.
+    tieBreakDiagnostics: (() => {
+      const med = (a) => {
+        if (!a.length) return null;
+        const s = [...a].sort((x, y) => x - y);
+        return s[Math.floor(s.length / 2)];
+      };
+      return {
+        tiedLost: { n: _tieBreakStats.tiedLost.n, medianSubmitMs: med(_tieBreakStats.tiedLost.latencies) },
+        won: { n: _tieBreakStats.won.n, medianSubmitMs: med(_tieBreakStats.won.latencies) },
+      };
+    })(),
     quoteWinRate: marketStats.weQuoted > 0 ? (marketStats.weWon / marketStats.weQuoted * 100).toFixed(1) + '%' : '-',
     coverageRate: marketStats.totalMatched > 0 ? (marketStats.weQuoted / marketStats.totalMatched * 100).toFixed(1) + '%' : '-',
     // Sport breakdown of matched parlays
@@ -7931,6 +7982,14 @@ async function loadFromDb() {
   }
 
   for (const o of dbOrders.concat(hydratedQuotes)) {
+    // Historical fills must never re-count: _countFillOnce's idempotence flag
+    // is meta.fillCounted, so stamp it on every hydrated order that already
+    // carries a uuid. Without this, a duplicate/late confirm or finalized
+    // event for an old order after a restart would double-count.
+    if (o.orderUuid != null) {
+      o.meta = o.meta || {};
+      o.meta.fillCounted = true;
+    }
     // Hoist winning-quote info out of meta (stored there to avoid DB schema change)
     if (o.meta) {
       if (o.meta.winningOdds != null && o.winningOdds == null) o.winningOdds = o.meta.winningOdds;
