@@ -8486,7 +8486,17 @@ async function getGameResult(sport, homeTeam, awayTeam, startTime) {
 
   const games = await fetchScores(sport);
   if (games.length === 0) return null;
+  return _matchScoreGame(games, homeTeam, awayTeam, startTime);
+}
 
+/**
+ * Pure matcher: find `games` entry for this matchup and return its result in
+ * the CALLER's home/away orientation. Extracted from getGameResult so the
+ * orientation logic is unit-testable without a network round-trip (the
+ * flipped-feed inversion bug shipped precisely because nothing covered it).
+ * Exported as _matchScoreGame for tests; not part of the public API.
+ */
+function _matchScoreGame(games, homeTeam, awayTeam, startTime) {
   // Match by team names (normalize for comparison)
   const normHome = normalizeTeamName(homeTeam);
   const normAway = normalizeTeamName(awayTeam);
@@ -8494,6 +8504,10 @@ async function getGameResult(sport, homeTeam, awayTeam, startTime) {
 
   let bestMatch = null;
   let bestDiff = Infinity;
+  // Whether the chosen match is stored in the OPPOSITE home/away orientation
+  // from the caller's. MUST be tracked, not just used to accept the match:
+  // see the flip-back below.
+  let bestFlipped = false;
 
   for (const g of games) {
     const gHome = normalizeTeamName(g.homeTeam);
@@ -8506,6 +8520,9 @@ async function getGameResult(sport, homeTeam, awayTeam, startTime) {
                          (gAway.includes(normHome) || normHome.includes(gAway));
 
     if (!match && !matchReverse) continue;
+    // Prefer the forward reading when BOTH orderings match (self-matching
+    // name pairs) — only treat as flipped when reverse is the sole match.
+    const flipped = !match && matchReverse;
 
     // If multiple matches (doubleheader), pick closest by time
     if (targetTime && g.commenceTime) {
@@ -8513,9 +8530,11 @@ async function getGameResult(sport, homeTeam, awayTeam, startTime) {
       if (diff < bestDiff) {
         bestDiff = diff;
         bestMatch = g;
+        bestFlipped = flipped;
       }
     } else {
       bestMatch = g;
+      bestFlipped = flipped;
     }
   }
 
@@ -8524,15 +8543,32 @@ async function getGameResult(sport, homeTeam, awayTeam, startTime) {
     return { completed: bestMatch.completed, homeScore: null, awayScore: null, winner: null };
   }
 
+  // Re-orient to the CALLER's home/away before deriving anything. This block
+  // accepted a reverse-orientation match but then reported winner/scores in
+  // the FEED's orientation — silently INVERTING every result whose feed
+  // orientation differed from ours. MMA/boxing have no true home/away, so
+  // sources disagree routinely: on 2026-07-25 TOA listed
+  // "Ponzinibbio (home) vs Patterson (away)" while our line had Patterson as
+  // home, so Patterson's WIN graded as a LOSS (same for Sola, Said). The
+  // operator saw settled parlays whose legs showed ✗ yet were charged as SP
+  // losses. P&L itself was safe (PX settlementStatus is authoritative in
+  // reconcileSettlements), but inferredResult also drives isParlayAlreadyDead
+  // — which RELEASES EXPOSURE on a live parlay — and the dashboard's leg
+  // marks, which deliberately prefer inferredResult over PX on disagreement.
+  // espn-scores.getEspnGameResult already did this correctly (bestFlipped);
+  // this is the TOA-fallback twin of that logic.
+  const homeScore = bestFlipped ? bestMatch.awayScore : bestMatch.homeScore;
+  const awayScore = bestFlipped ? bestMatch.homeScore : bestMatch.awayScore;
+
   let winner = null;
-  if (bestMatch.homeScore > bestMatch.awayScore) winner = 'home';
-  else if (bestMatch.awayScore > bestMatch.homeScore) winner = 'away';
+  if (homeScore > awayScore) winner = 'home';
+  else if (awayScore > homeScore) winner = 'away';
   else winner = 'tie';
 
   return {
     completed: bestMatch.completed,
-    homeScore: bestMatch.homeScore,
-    awayScore: bestMatch.awayScore,
+    homeScore,
+    awayScore,
     winner,
   };
 }
@@ -9705,6 +9741,8 @@ module.exports = {
   buildConsensusSpread,
   fetchScores,
   getGameResult,
+  // Test seam for the score-orientation logic (see game-result-orientation.test.js).
+  _matchScoreGame,
   checkLineupFreshness,
   getLineupCache,
   getPitcherSide,
