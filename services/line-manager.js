@@ -371,6 +371,11 @@ function isValidFullGameLine(sport, marketType, line) {
 // Known overrides for team name mismatches between PX and The Odds API
 // Add entries here if matching fails for specific teams
 const TEAM_NAME_OVERRIDES = {
+  // PFL: PX and TOA disagree on this fighter's surname. Same fight either way
+  // — same opponent (Tyson Pedro), same card, same 2026-07-26T03:00 start —
+  // and getEventMarkets requires BOTH names to resolve to one event, so this
+  // maps the non-Pedro side of a single real fight, not a different bout.
+  'rafael xavier': 'Rafael Alves',
   // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
   'british columbia lions': 'BC Lions',
   // Argentine Primera (verified against TOA 2026-07-24). Most PX club
