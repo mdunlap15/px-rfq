@@ -1435,7 +1435,7 @@ const config = {
   // (typed 'American Football', tournament 'CFL') and TOA's key is active.
   // ⚠ If SUPPORTED_SPORTS is set in Railway it OVERRIDES this default entirely
   // — the env value must also include americanfootball_cfl.
-  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl')
+  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,soccer_argentina_primera_division,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl')
     .split(',').map(s => s.trim()),
   // Maps our sport keys to ProphetX sport_name values
   // Note: NBA and NCAAB both map to 'Basketball' — line manager handles both
@@ -1479,6 +1479,7 @@ const config = {
     'soccer_usa_nwsl': 'Soccer',
     'soccer_mexico_ligamx': 'Soccer',
     'soccer_brazil_campeonato': 'Soccer',
+    'soccer_argentina_primera_division': 'Soccer',
     'soccer_conmebol_libertadores': 'Soccer',
     'soccer_efl_champ': 'Soccer',
     'golf_pga_championship': 'Golf',

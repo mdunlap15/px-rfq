@@ -373,6 +373,20 @@ function isValidFullGameLine(sport, marketType, line) {
 const TEAM_NAME_OVERRIDES = {
   // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
   'british columbia lions': 'BC Lions',
+  // Argentine Primera (verified against TOA 2026-07-24). Most PX club
+  // prefixes (CA/SC/CR) fall out of the substring matcher fine — these two
+  // do not:
+  //   • "CA Unión" has no TOA substring overlap with "Union Santa Fe".
+  //   • "AA Estudiantes" is Asociación Atlética Estudiantes (RÍO CUARTO),
+  //     but the substring matcher resolved it to plain "Estudiantes" — a
+  //     DIFFERENT club (La Plata). Confirmed by fixture time: PX's
+  //     "CA Tigre at AA Estudiantes" 07-25 17:45 is TOA's "CA Tigre BA @
+  //     Estudiantes de Río Cuarto" at the same minute, while "Estudiantes"
+  //     plays Independiente on 07-26. Without this override we'd resolve
+  //     the wrong club (the event lookup then failed closed, but a
+  //     same-name pairing could have priced the wrong game).
+  'ca union': 'Union Santa Fe',
+  'aa estudiantes': 'Estudiantes de Río Cuarto',
   // SharpAPI abbreviates some NHL city names
   'washington capitals': 'WAS Capitals',
   'columbus blue jackets': 'CBJ Blue Jackets',

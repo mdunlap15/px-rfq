@@ -7506,9 +7506,20 @@
       'soccer_france_ligue_one': 'Ligue 1',
       'soccer_usa_nwsl': 'NWSL',
       'golf_matchups': 'Golf',
+      'golf_outrights': 'Golf Outrights',
       'golf_pga_championship': 'PGA',
       'mma_mixed_martial_arts': 'MMA',
       'boxing_boxing': 'Boxing',
+      // Leagues the viewer map had drifted behind on — without an entry the
+      // cell renders the raw key ('soccer_brazil_campeonato'). Keep in sync
+      // with client/index.html's sportLabel map.
+      'soccer_brazil_campeonato': 'Brasileirão',
+      'soccer_argentina_primera_division': 'Argentina Primera',
+      'soccer_mexico_ligamx': 'Liga MX',
+      'soccer_conmebol_libertadores': 'Libertadores',
+      'soccer_efl_champ': 'EFL Champ',
+      'soccer_fifa_world_cup': 'World Cup',
+      'basketball_nba_summer_league': 'NBA Summer League',
     };
     return map[sport] || (sport === 'unknown' ? 'Unknown' : sport);
   }

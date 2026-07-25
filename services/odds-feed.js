@@ -344,6 +344,15 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // Argentine Primera División (added 2026-07-24). PX runs a steady slate
+  // (tournament_name='Argentinian Primera Division', 6-7 games/wk) that
+  // showed up as ~$5.6K of network-filled 'unknown legs' misses in a 2-day
+  // market-intel sample — the league was simply never wired.
+  'soccer_argentina_primera_division': {
+    oddsApiSport: 'soccer_argentina_primera_division',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
   // English Championship (EFL Championship — second tier below EPL).
   // Added 2026-05-11 after operator caught Hull City @ Millwall registered
   // under the generic 'soccer' bucket with fairProb=null because SharpAPI's
