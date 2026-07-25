@@ -5681,6 +5681,46 @@ async function checkLegResults() {
       if (!result || !result.completed) continue;
       if (result.homeScore == null || result.awayScore == null) continue;
 
+      // COMBAT SPORTS: the "score" here is a 1/0 WIN FLAG, not a points/rounds
+      // tally — TOA and ESPN both report a finished fight as 1-0. That makes
+      // homeScore+awayScore always 1, so the totals branch below graded EVERY
+      // MMA/boxing Under as WON and EVERY Over as LOST regardless of how long
+      // the fight actually lasted (operator caught Ankalaev @ Guskov "U 2.5"
+      // marked ✓ after the fight went OVER, 2026-07-25). The spread branch is
+      // equally meaningless on a 1-0 flag.
+      //
+      // Rounds/duration is not available from either scoreboard, so there is
+      // no correct score-based grading for these markets: fail CLOSED and let
+      // PX's settlementStatus (authoritative, and correct here) grade them.
+      // Moneyline is still safe — a 1-0 flag is exactly a winner.
+      //
+      // This mattered beyond display: a wrongly-'lost' leg makes
+      // isParlayAlreadyDead() true, which SKIPS addExposure — so every live
+      // parlay holding an MMA/boxing OVER leg was under-reporting exposure.
+      const _isCombat = typeof l.sport === 'string'
+        && (l.sport.includes('mma') || l.sport.includes('boxing'));
+      if (_isCombat && market !== 'moneyline') {
+        // Self-heal, scoped to the two markets the buggy branch could actually
+        // write. MoV legs (mov_ko/sub/dec/itd) also land here, but no branch
+        // below ever graded them, so their inferredResult came from PX — leave
+        // it alone rather than churn a correct value.
+        //
+        // A value written by the buggy path is worse than no value (it drives
+        // the leg marks AND the exposure release), so clear it and let PX's
+        // settlementStatus show through.
+        if ((market === 'total' || market === 'spread') && l.inferredResult != null) {
+          log.warn('Results', `Clearing bogus score-derived ${market} result for ${l.team} (${l.sport}): combat-sport scores are 1-0 win flags, not rounds — deferring to PX settlement`);
+          l.inferredResult = null;
+          if (o.legs) {
+            const ml = o.legs.find(ol => ol.lineId === l.lineId
+              || ((ol.team || ol.teamName) === (l.team || l.teamName) && (ol.market || ol.marketType) === market));
+            if (ml) ml.inferredResult = null;
+          }
+          db.saveOrder(o).catch(() => {});
+        }
+        continue;
+      }
+
       checked++;
 
       // Compute the fresh result from this score-based lookup.
