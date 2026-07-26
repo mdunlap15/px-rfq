@@ -4448,7 +4448,7 @@
           <div style="font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 8px;">PARLAY LEGS</div>
           ${buildLegTable(legs, { vig: order.meta?.vig || order.vig || 0 })}
           <div style="margin-top: 8px; font-size: 11px; color: var(--text3);">
-            Vig: ${((order.meta?.vig || order.vig || 0) * 100).toFixed(1)}% · Max Risk: $${order.maxRisk || '-'} · Decimal: ${order.meta?.decimalOdds || '-'}x · ID: ${order.parlayId || '-'}
+            Vig: ${((order.meta?.vig || order.vig || 0) * 100).toFixed(1)}% · Max Risk: $${order.maxRisk || '-'} · Decimal: ${order.meta?.decimalOdds || '-'}x · ID: ${order.parlayId || '-'}<br>${counterpartyChip(order)}
           </div>
         </td>
       </tr>`;
@@ -6176,7 +6176,7 @@
               Vig: ${((order.meta?.vig || order.vig || 0) * 100).toFixed(1)}% ·
               Max Risk: $${order.maxRisk || 0} ·
               Decimal: ${order.meta?.decimalOdds ? order.meta.decimalOdds.toFixed(2) + 'x' : '-'} ·
-              ID: ${order.parlayId || '-'}
+              ID: ${order.parlayId || '-'}<br>${counterpartyChip(order)}
             </div>
           </td>
         </tr>`;
@@ -14784,6 +14784,22 @@
    * @param {Array} legs - array of leg objects
    * @param {Object} opts - { showStatus, showSport, showFairOdds, showOddsColumns, vig, pad }
    */
+  /** Counterparty (PX creator_id) chip for a parlay's drill-down footer.
+   * Surfacing this inline is what lets the operator answer "have I traded
+   * against this account before?" without cross-referencing Market Intel —
+   * the workflow that caught the 2026-07-25 Rosario prop sharp.
+   * PX omits creator_id on some RFQs (and pre-2026-06 rows predate capture),
+   * so render an explicit "not provided" rather than a bare dash. */
+  function counterpartyChip(order) {
+    const cid = (order && (order.meta?.creatorId || order.meta?.creator_id || order.creatorId)) || null;
+    if (!cid) {
+      return '<span title="PX did not supply a creator_id for this parlay">Counterparty: <span style="color:var(--text3);">not provided</span></span>';
+    }
+    return 'Counterparty: <span style="font-family:monospace; color:var(--text2); user-select:all;" '
+      + 'title="PX creator_id — click-drag to select. Use Market Intel &rsaquo; Creators to see full history or block.">'
+      + escapeHtml(cid) + '</span>';
+  }
+
   function buildLegTable(legs, opts = {}) {
     const pad = opts.pad || '4px 8px';
     const showStatus = opts.showStatus !== false;
