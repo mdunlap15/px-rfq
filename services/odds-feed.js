@@ -4850,6 +4850,125 @@ async function mergeDkTennisMatches() {
   return { merged: added + updated, added, updated };
 }
 
+/**
+ * Bovada tennis merge — the SERVER-SIDE tennis backstop.
+ *
+ * Runs after mergeDkTennisMatches and is strictly ADDITIVE: it only creates
+ * events for player pairs no existing source already covers, so a TOA
+ * multi-book consensus or a DK board always wins. Bovada is one book, so its
+ * "fair" is a 2-way de-vig of its own two sides (books:1) — same basis the DK
+ * tennis merge uses.
+ *
+ * It exists because the other two sources structurally cannot cover PX's
+ * tennis slate: TOA catalogs only Slams/Masters (all 41 keys inactive on
+ * 2026-07-26, with no key at all for ATP Washington / Los Cabos / WTA
+ * Washington — the entire 30-event slate), and the DK Puppeteer scrape
+ * returns EMPTY from Railway's datacenter IP while succeeding locally.
+ * Bovada's coupon is plain HTTPS JSON, so it actually runs in production.
+ */
+async function mergeBovadaTennisMatches() {
+  let data;
+  try {
+    data = await require('./bovada-tennis').fetchBovadaTennis();
+  } catch (err) {
+    log.warn('OddsFeed', `Bovada tennis fetch failed: ${err.message}`);
+    return { added: 0, updated: 0, err: err.message };
+  }
+  if (!data || !Array.isArray(data.games) || data.games.length === 0) return { added: 0, updated: 0 };
+
+  const sport = 'tennis';
+  if (!oddsCache[sport]) oddsCache[sport] = { fetchedAt: Date.now(), events: {} };
+  const cache = oddsCache[sport];
+
+  const lw = (n) => (n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean).pop() || '';
+  const existingPairs = new Set();
+  const bovEventByPair = {};
+  for (const entry of Object.values(cache.events || {})) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
+      const a = lw(ev.homeTeam), b = lw(ev.awayTeam);
+      if (!a || !b) continue;
+      existingPairs.add(a + '|' + b); existingPairs.add(b + '|' + a);
+      if (String(ev.eventId || '').startsWith('bov-tennis-')) {
+        bovEventByPair[a + '|' + b] = ev; bovEventByPair[b + '|' + a] = ev;
+      }
+    }
+  }
+
+  const mk = (o, ln) => ({ rawOdds: o.americanOdds, impliedProb: o.impliedProb, fairProb: o.fairProb, displayFairProb: o.fairProb, line: ln });
+  const totalsBlock = (byLineData) => {
+    const arr = Object.values(byLineData || {}).filter(t => t && t.over && t.under && t.over.fairProb > 0 && t.under.fairProb > 0).sort((a, b) => a.line - b.line);
+    if (!arr.length) return null;
+    const byLine = {};
+    for (const t of arr) byLine[String(t.line)] = { line: t.line, over: mk(t.over, t.line), under: mk(t.under, t.line) };
+    const p = arr[Math.floor(arr.length / 2)];
+    return { line: p.line, over: mk(p.over, p.line), under: mk(p.under, p.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true };
+  };
+  const spreadsBlock = (byLineData) => {
+    const arr = Object.values(byLineData || {}).filter(s => s && s.home && s.away && s.home.fairProb > 0 && s.away.fairProb > 0).sort((a, b) => Math.abs(a.line) - Math.abs(b.line));
+    if (!arr.length) return null;
+    // Same signed-selection key format buildConsensusSpread emits and
+    // getFairProb's alt-line path looks up — a bare line key would never match.
+    const byLine = {};
+    for (const s of arr) {
+      byLine['home|' + s.line] = { fairProb: s.home.fairProb };
+      byLine['away|' + (-s.line)] = { fairProb: s.away.fairProb };
+    }
+    const p = arr[0];
+    return { line: p.line, home: mk(p.home, p.line), away: mk(p.away, p.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true };
+  };
+
+  let added = 0, updated = 0, skippedCovered = 0, withTot = 0, withSp = 0;
+  for (const g of data.games) {
+    if (!g.homeTeam || !g.awayTeam || !g.h2h) continue;
+    const a = lw(g.homeTeam), b = lw(g.awayTeam);
+    if (!a || !b) continue;
+
+    const markets = {
+      h2h: {
+        home: mk(g.h2h.home, null), away: mk(g.h2h.away, null),
+        books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true,
+      },
+    };
+    const tb = totalsBlock(g.totalsByLine); if (tb) { markets.totals = tb; withTot++; }
+    const sb = spreadsBlock(g.spreadsByLine); if (sb) { markets.spreads = sb; withSp++; }
+
+    // Refresh our own prior entry in place (keeps freshness advancing across
+    // cycles — the bug that kept the DK tennis merge permanently stale).
+    const own = bovEventByPair[a + '|' + b];
+    if (own) {
+      if (lw(own.homeTeam) === a) {
+        own.markets = markets;
+        if (g.startTime) own.commenceTime = g.startTime;
+        updated++;
+      }
+      continue;
+    }
+    // Never clobber a TOA/DK-covered pair.
+    if (existingPairs.has(a + '|' + b)) { skippedCovered++; continue; }
+
+    const key = normalizeEventKey(g.homeTeam, g.awayTeam);
+    const newEvent = {
+      homeTeam: g.homeTeam, awayTeam: g.awayTeam,
+      commenceTime: g.startTime || null,
+      eventId: 'bov-tennis-' + g.eventId,
+      markets,
+    };
+    if (!cache.events[key]) cache.events[key] = [];
+    if (Array.isArray(cache.events[key])) cache.events[key].push(newEvent);
+    else cache.events[key] = [cache.events[key], newEvent];
+    existingPairs.add(a + '|' + b); existingPairs.add(b + '|' + a);
+    bovEventByPair[a + '|' + b] = newEvent; bovEventByPair[b + '|' + a] = newEvent;
+    added++;
+  }
+
+  if (added > 0 || updated > 0) cache.fetchedAt = Date.now();
+  log.info('OddsFeed', `Bovada tennis merge: added ${added}, updated ${updated} (${withTot} w/totals, `
+    + `${withSp} w/spreads), skipped ${skippedCovered} already-covered (Bovada games: ${data.games.length})`);
+  return { added, updated };
+}
+
 async function mergeDkMmaFights() {
   const dk = require('./dk-scraper');
   let fightData;
@@ -7867,9 +7986,14 @@ async function refreshAllSports() {
   // tournament IS active its multi-book consensus wins. Same 15-min DK cache
   // economics as the MMA merge above.
   if (sportsToRefresh.includes('tennis')) {
-    mergeDkTennisMatches().catch(err => {
-      log.warn('OddsFeed', `DK tennis merge failed: ${err.message}`);
-    });
+    // DK first (richer board when it works), then Bovada as the additive
+    // server-side backstop. Chained rather than parallel so Bovada sees DK's
+    // events and only fills genuine gaps. Bovada is the one that actually
+    // runs on Railway — the DK Puppeteer scrape is Akamai-gated there.
+    mergeDkTennisMatches()
+      .catch(err => { log.warn('OddsFeed', `DK tennis merge failed: ${err.message}`); })
+      .then(() => mergeBovadaTennisMatches())
+      .catch(err => { log.warn('OddsFeed', `Bovada tennis merge failed: ${err.message}`); });
   }
 
   return results;
@@ -9743,6 +9867,9 @@ module.exports = {
   getGameResult,
   // Test seam for the score-orientation logic (see game-result-orientation.test.js).
   _matchScoreGame,
+  // Tennis backstop — exported so it can be verified end-to-end and triggered
+  // manually when the slate changes mid-cycle.
+  mergeBovadaTennisMatches,
   checkLineupFreshness,
   getLineupCache,
   getPitcherSide,
