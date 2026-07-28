@@ -897,22 +897,16 @@
     <span id="refresh-banner-text">Refreshing data&hellip;</span>
   </div>
 
-  <!-- Bankroll split — top-of-page indicator visible on both tabs.
-       Mike $17,500 base + 58.333% of P&L gain · Rick $12,500 base +
-       41.667% of P&L gain. Computed client-side in viewerRefresh()
-       from the /status portfolio.totalEquity (Cash + Deployed). -->
+  <!-- Account equity — top-of-page indicator visible on both tabs, from
+       /status portfolio.totalEquity (Cash + Deployed).
+       The Mike/Rick partner split was REMOVED 2026-07-28 (operator: the split
+       is no longer needed, the full balance is Mike's). renderBankrollSplit
+       still computes the per-partner shares harmlessly and no-ops on the
+       absent elements, so re-adding the cells would restore the display. -->
   <div class="bankroll-bar" id="bankroll-bar">
     <div class="bankroll-cell">
-      <span class="bankroll-label">Total</span>
+      <span class="bankroll-label">Account Equity</span>
       <span class="bankroll-value" id="bankroll-total">&mdash;</span>
-    </div>
-    <div class="bankroll-cell">
-      <span class="bankroll-label">Mike</span>
-      <span class="bankroll-value" id="bankroll-mike">&mdash;</span>
-    </div>
-    <div class="bankroll-cell">
-      <span class="bankroll-label">Rick</span>
-      <span class="bankroll-value" id="bankroll-rick">&mdash;</span>
     </div>
   </div>
 
@@ -13896,8 +13890,8 @@
     if (br && Number.isFinite(br.mike) && Number.isFinite(br.rick)) {
       const total = Number.isFinite(br.liveTotalEquity) ? br.liveTotalEquity : br.total;
       totalEl.textContent = fmtDollar(total);
-      mikeEl.textContent  = fmtDollar(br.mike);
-      rickEl.textContent  = fmtDollar(br.rick);
+      if (mikeEl) mikeEl.textContent = fmtDollar(br.mike);
+      if (rickEl) rickEl.textContent = fmtDollar(br.rick);
 
       // Pending-withdrawal indicator: surface "+$2K Rick pending" as a
       // small chip next to the Rick label so the operator knows the cash
@@ -13910,8 +13904,14 @@
           + escapeHtml(pending.partner) + ' withdraw pending)</span>'
         : '';
       if (driftStr) {
+        // Null-safe: the per-partner cells were removed 2026-07-28, so this
+        // pending-withdrawal badge has nowhere to render. Skip rather than
+        // throw — an exception here would abort the whole bankroll render and
+        // blank the Account Equity figure too.
         const partnerEl = (pending.partner === 'mike') ? mikeEl : rickEl;
-        partnerEl.innerHTML = fmtDollar(pending.partner === 'mike' ? br.mike : br.rick) + driftStr;
+        if (partnerEl) {
+          partnerEl.innerHTML = fmtDollar(pending.partner === 'mike' ? br.mike : br.rick) + driftStr;
+        }
       }
       return;
     }
@@ -13925,16 +13925,16 @@
     }
     if (!Number.isFinite(balance) || balance <= 0) {
       totalEl.textContent = '—';
-      mikeEl.textContent = '—';
-      rickEl.textContent = '—';
+      if (mikeEl) mikeEl.textContent = '—';
+      if (rickEl) rickEl.textContent = '—';
       return;
     }
     const gain = balance - BANKROLL_FALLBACK.baseTotal;
     const mikeShare = BANKROLL_FALLBACK.mikeBase + BANKROLL_FALLBACK.mikeShare * gain;
     const rickShare = BANKROLL_FALLBACK.rickBase + BANKROLL_FALLBACK.rickShare * gain;
     totalEl.textContent = fmtDollar(balance);
-    mikeEl.textContent = fmtDollar(mikeShare);
-    rickEl.textContent = fmtDollar(rickShare);
+    if (mikeEl) mikeEl.textContent = fmtDollar(mikeShare);
+    if (rickEl) rickEl.textContent = fmtDollar(rickShare);
   }
 
   // -----------------------------------------------------------------------

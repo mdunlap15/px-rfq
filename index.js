@@ -1124,8 +1124,22 @@ function startStatusServer() {
           ? config.pricing.liveMatchedWager
           : null;
         const filled = matchedWagerBalance != null ? matchedWagerBalance : 0;
-        const deployed = filled;
-        const totalEquity = (cashBalance != null) ? (cashBalance + filled) : null;
+        // DEPLOYED SPANS TWO DISJOINT POOLS — both must be summed:
+        //   deployedSingleLeg = PX matched_wager_balance. SINGLE-LEG ONLY —
+        //     PX excludes parlay stake from this field entirely (proven
+        //     2026-06-26: matched_wager was LESS than the parlay slice alone).
+        //   deployedParlay    = open parlay stake from our own tracker; parlay
+        //     wagers never appear in matched_wager_balance.
+        // Neither is inside `balance` (cash), so cash + both double-counts
+        // nothing. `const deployed = filled` was the 2026-07-13 over-correction
+        // that dropped the parlay pool, understating equity by the full open
+        // parlay stake (4,893.67 of 82,736.27 when the operator reported the
+        // mismatch on 2026-07-28) and disagreeing with the dashboard, which had
+        // already been corrected client-side in 8ce6d15.
+        const deployedSingleLeg = filled;
+        const deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
+        const deployed = deployedSingleLeg + deployedParlay;
+        const totalEquity = (cashBalance != null) ? (cashBalance + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
         // leave null so the dashboard falls back appropriately —
@@ -1179,6 +1193,13 @@ function startStatusServer() {
           // PX matched_wager_balance = "Filled" (real matched stake) — the
           // Deployed addend in totalEquity. null until the first balance poll.
           matchedWagerBalance,
+          // Deployed capital split so the operator can see, at a glance, how
+          // much is riding on STRAIGHT (single-leg) bets vs PARLAYS — and so
+          // Account Equity is reconcilable term by term against the PX app
+          // rather than being an opaque total.
+          deployed,
+          deployedSingleLeg,
+          deployedParlay,
           totalRisk: orderTracker.getTotalPortfolioRisk(),
           currentRisk: orderTracker.getTotalPortfolioRisk(),
           totalToWin: orderTracker.getTotalToWin(),
