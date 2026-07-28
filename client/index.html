@@ -9491,7 +9491,29 @@
    * than at 60/60. Muted + small so the date stays the primary element.
    * Renders "(0/12 settled)" for a fully-open day rather than hiding, so an
    * unsettled row is explicit instead of ambiguous. */
-  function settledChip(settled, count) {
+  // Periods before this date are NOT annotated: `settled` comes from
+  // /daily-pnl grouped by settled_at while `count` (fills) is bucketed by FILL
+  // date, so they describe different cohorts. A parlay filled 6/30 that settles
+  // 7/1 lands in June's fills and July's settled — which is how July rendered
+  // "1932/1904 settled" (settled EXCEEDING fills) and May "2313/2293".
+  // The ratio is only meaningful once both sides cover the same window, so the
+  // feature starts 2026-07-25 forward (operator directive) rather than showing
+  // a number that is arithmetically impossible.
+  const SETTLED_CHIP_FROM = '2026-07-25';
+  /**
+   * @param {string} periodKey 'YYYY-MM-DD' for a day row, 'YYYY-MM' for a month
+   *   row. A month is annotated only when the ENTIRE month is on/after the
+   *   cutoff — 2026-07 spans it, so it stays blank rather than mixing cohorts.
+   */
+  function settledChip(settled, count, periodKey) {
+    const k = String(periodKey || '');
+    if (k.length === 7) {                       // month row
+      if (k <= SETTLED_CHIP_FROM.slice(0, 7)) return '';
+    } else if (k.length === 10) {               // day row
+      if (k < SETTLED_CHIP_FROM) return '';
+    } else {
+      return '';                                // unknown shape — stay silent
+    }
     const s = Number(settled) || 0;
     const n = Number(count) || 0;
     if (n <= 0) return '';
@@ -9847,7 +9869,7 @@
       const monthExpanded = expandedRows.has(monthId)
         || (anySelected && m.days.some(d => selectedDays.has(d)));
       svg += '<tr onclick="toggleDetailRow(\'' + monthId + '\')" style="cursor:pointer;">';
-      svg += '<td style="font-weight:600;">&#9654; ' + month + settledChip(m.settled, m.count) + '</td>';
+      svg += '<td style="font-weight:600;">&#9654; ' + month + settledChip(m.settled, m.count, month) + '</td>';
       svg += '<td style="text-align:center">' + m.count + '</td>';
       svg += '<td style="text-align:center">' + fmtDollar(m.risk) + '</td>';
       svg += '<td style="text-align:center; color:var(--green);">' + fmtDollar(m.toWin) + '</td>';
@@ -9864,7 +9886,7 @@
         const dayId = 'dv-' + day.replace(/-/g, '');
         const dayExpanded = expandedRows.has(dayId);
         svg += '<tr onclick="event.stopPropagation(); window._dvToggleSettledDay(\'' + dayId + '\', \'' + day + '\', \'dv\')" style="cursor:pointer;">';
-        svg += '<td style="padding:2px 12px;">&#9654; ' + day + settledChip(d.settled, d.count) + '</td>';
+        svg += '<td style="padding:2px 12px;">&#9654; ' + day + settledChip(d.settled, d.count, day) + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;">' + d.count + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px;">' + fmtDollar(d.risk) + '</td>';
         svg += '<td style="text-align:center; padding:2px 10px; color:var(--green);">' + fmtDollar(d.toWin) + '</td>';
@@ -10063,7 +10085,7 @@
       const monthId = 'odvm-' + month.replace(/-/g, '');
       const monthExpanded = expandedRows.has(monthId);
       html += '<tr onclick="toggleDetailRow(\'' + monthId + '\')" style="cursor:pointer;">';
-      html += '<td style="padding:4px 10px; font-weight:600;">&#9654; ' + month + settledChip(m.settled, m.count) + '</td>';
+      html += '<td style="padding:4px 10px; font-weight:600;">&#9654; ' + month + settledChip(m.settled, m.count, month) + '</td>';
       html += '<td style="padding:4px 10px; text-align:center;">' + m.count + '</td>';
       html += '<td style="padding:4px 10px; text-align:center;">' + fmtDollar(m.risk) + '</td>';
       html += '<td style="padding:4px 10px; text-align:center; color:var(--green);">' + fmtDollar(m.toWin) + '</td>';
@@ -10088,7 +10110,7 @@
         const dayId = 'odvd-' + day.replace(/-/g, '');
         const dayExpanded = expandedRows.has(dayId);
         html += '<tr onclick="event.stopPropagation(); window._dvToggleSettledDay(\'' + dayId + '\', \'' + day + '\', \'odv\')" style="cursor:pointer;">';
-        html += '<td style="padding:2px 10px;">&#9654; ' + day + settledChip(d.settled, d.count) + '</td>';
+        html += '<td style="padding:2px 10px;">&#9654; ' + day + settledChip(d.settled, d.count, day) + '</td>';
         html += '<td style="padding:2px 10px; text-align:center;">' + d.count + '</td>';
         html += '<td style="padding:2px 10px; text-align:center;">' + fmtDollar(d.risk) + '</td>';
         html += '<td style="padding:2px 10px; text-align:center; color:var(--green);">' + fmtDollar(d.toWin) + '</td>';
