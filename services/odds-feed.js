@@ -503,7 +503,18 @@ async function fetchOddsForSport(sport, opts) {
   if (sport === 'tennis') {
     if (liveMode) return null;
     const toaResult = await fetchFromTheOddsApi(sport);
-    if (toaResult && Object.keys(toaResult).length > 0) return toaResult;
+    // fetchDynamicSports REPLACES oddsCache['tennis'] wholesale when TOA has
+    // active tournaments, which destroys every Bovada/DK event merged in since
+    // the last cycle. Re-apply the last Bovada board SYNCHRONOUSLY here — no
+    // network, just re-merging cached data — so coverage never dips between
+    // the overwrite and the next async merge. Without this the cache sawtooths
+    // (observed 17 -> 369 -> 16) and RFQs landing in a trough decline "no fair
+    // value" on lines that ARE registered.
+    if (toaResult && Object.keys(toaResult).length > 0) {
+      try { await mergeBovadaTennisMatches({ reapply: true }); }
+      catch (err) { log.warn('OddsFeed', `Bovada tennis re-apply failed: ${err.message}`); }
+      return toaResult;
+    }
     // SharpAPI retired (2026-06-25): TOA is authoritative for tennis. Return
     // whatever TOA gave (possibly empty) and let the staleness gate decline
     // (fail closed) — never fall through to a Sharp call.
@@ -4866,13 +4877,33 @@ async function mergeDkTennisMatches() {
  * returns EMPTY from Railway's datacenter IP while succeeding locally.
  * Bovada's coupon is plain HTTPS JSON, so it actually runs in production.
  */
-async function mergeBovadaTennisMatches() {
+const BOVADA_TENNIS_REAPPLY_MAX_AGE_MS =
+  (Number(process.env.BOVADA_TENNIS_REAPPLY_MAX_AGE_MIN) || 20) * 60 * 1000;
+
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.reapply] When true, re-merge the LAST fetched board
+ *   instead of hitting the network. Used immediately after a wholesale
+ *   oddsCache['tennis'] replacement so merged events survive the overwrite.
+ */
+async function mergeBovadaTennisMatches(opts = {}) {
+  const bov = require('./bovada-tennis');
   let data;
-  try {
-    data = await require('./bovada-tennis').fetchBovadaTennis();
-  } catch (err) {
-    log.warn('OddsFeed', `Bovada tennis fetch failed: ${err.message}`);
-    return { added: 0, updated: 0, err: err.message };
+  if (opts.reapply) {
+    data = bov.getLastBoard();
+    // Refuse to re-apply a board old enough to be misleading — better to have
+    // no tennis odds than stale ones the stale-price gate can't see through
+    // (the re-apply stamps fetchedAt, which would otherwise launder the age).
+    if (!data || (Date.now() - (data.fetchedAt || 0)) > BOVADA_TENNIS_REAPPLY_MAX_AGE_MS) {
+      return { added: 0, updated: 0, reapplied: false };
+    }
+  } else {
+    try {
+      data = bov.rememberBoard(await bov.fetchBovadaTennis());
+    } catch (err) {
+      log.warn('OddsFeed', `Bovada tennis fetch failed: ${err.message}`);
+      return { added: 0, updated: 0, err: err.message };
+    }
   }
   if (!data || !Array.isArray(data.games) || data.games.length === 0) return { added: 0, updated: 0 };
 

@@ -200,4 +200,26 @@ async function fetchBovadaTennis() {
   return { games, fetchedAt: Date.now() };
 }
 
-module.exports = { fetchBovadaTennis, __devig2: devig2, __amerToProb: amerToProb };
+// Last successful board, kept so odds-feed can RE-APPLY it after a wholesale
+// oddsCache['tennis'] replacement without paying another network round-trip.
+// Without this the merge loses a race it can never win: fetchOddsForSport
+// replaces the whole tennis cache object every refresh cycle, destroying the
+// merged events, and the fire-and-forget re-merge only refills them some
+// seconds later — producing an observed 17 -> 369 -> 16 sawtooth where RFQs
+// landing in a trough decline "no fair value" despite the line being
+// registered.
+let _lastBoard = null;
+function rememberBoard(b) {
+  if (b && Array.isArray(b.games) && b.games.length) _lastBoard = b;
+  return b;
+}
+/** Last good board, or null. Age-checked by the caller. */
+function getLastBoard() { return _lastBoard; }
+
+module.exports = {
+  fetchBovadaTennis,
+  rememberBoard,
+  getLastBoard,
+  __devig2: devig2,
+  __amerToProb: amerToProb,
+};
