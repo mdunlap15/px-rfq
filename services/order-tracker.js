@@ -2234,6 +2234,10 @@ function buildNotSeenBreakdown(missed) {
     session_active_gap:     { count: 0, totalStake: 0 },
     other:                  { count: 0, totalStake: 0 },
   };
+  // Composition of the not-seen pool — see the addTo() calls below.
+  const bySport = {};
+  const byMarket = {};
+  const byLegCount = {};
   // dailyByBucket[bucket][YYYY-MM-DD] = { count, stake }
   const dailyByBucket = {};
   const ensureDay = (bucket, day) => {
@@ -2270,6 +2274,19 @@ function buildNotSeenBreakdown(missed) {
     const d = ensureDay(bucket, day);
     d.count++;
     d.stake += stake;
+
+    // WHAT are we missing? The bucket alone says "we never saw it" but not
+    // whether that's a coverage gap worth closing. Sport + market composition
+    // turns "not seen: $2.3M" into an actionable list.
+    const addTo = (map, key) => {
+      if (!key) return;
+      if (!map[key]) map[key] = { count: 0, stake: 0 };
+      map[key].count++; map[key].stake += stake;
+    };
+    const sports = [...new Set(legs.map(l => (l.sport || 'unknown')).filter(Boolean))];
+    addTo(bySport, sports.length === 1 ? sports[0] : (sports.length ? 'multi-sport' : 'unknown'));
+    for (const l of legs) addTo(byMarket, l.market || l.marketType || 'unknown');
+    addTo(byLegCount, String(legs.length || 0) + '-leg');
   }
 
   // Round and compute averages
@@ -2298,13 +2315,30 @@ function buildNotSeenBreakdown(missed) {
     dailyTotals[day].stake = Math.round(dailyTotals[day].stake * 100) / 100;
   }
 
+  const round2 = (m) => Object.fromEntries(Object.entries(m)
+    .map(([k, v]) => [k, { count: v.count, stake: Math.round(v.stake * 100) / 100 }])
+    .sort((a, b) => b[1].stake - a[1].stake));
+
   return {
     totalCount: notSeen.length,
     totalStake: Math.round(notSeen.reduce((s, m) => s + (m.matchedStake || 0), 0) * 100) / 100,
     buckets,
+    // Composition of the not-seen pool. bySport/byLegCount count PARLAYS;
+    // byMarket counts LEGS (a parlay contributes one entry per leg), so its
+    // counts exceed the parlay total by design.
+    bySport: round2(bySport),
+    byMarket: round2(byMarket),
+    byLegCount: round2(byLegCount),
     dailyByBucket,
     dailyTotals,
     sessionStart,
+    // ⚠ This breakdown is computed from the IN-MEMORY matchedParlays buffer,
+    // while the headline "not seen" count on /market-intel comes from the 7d
+    // Supabase rollup. The buffer is smaller, so totalCount here is normally
+    // LESS than the headline (4,711 of 9,081 on 2026-07-29). Surface both so
+    // the dashboard can say what share of the pool the breakdown explains
+    // instead of implying full coverage.
+    coverageNote: 'computed from the in-memory matched-parlay buffer; the headline "not seen" total comes from the 7d rollup and is larger',
   };
 }
 

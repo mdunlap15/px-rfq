@@ -2891,9 +2891,30 @@
       if (declineRange) coverParts.push('Declines: <span style="color:var(--text2);">' + declineRange + '</span>');
       if (missedRange) coverParts.push('Missed: <span style="color:var(--text2);">' + missedRange + '</span>');
       if (coverParts.length) html += '<div style="margin-bottom:6px; font-size:11px; color:var(--text3);">' + coverParts.join(' · ') + '</div>';
+      // Sort + filter state for this table. Default: biggest MISSED STAKE
+      // first — the column that answers "what is costing me money", rather
+      // than raw decline count which is dominated by blocked-creator noise.
+      if (!window._dmv) window._dmv = { col: 'missedStake', dir: -1, q: '' };
+      const dmv = window._dmv;
+      html += '<div style="margin-bottom:6px;">'
+        + '<input id="dmv-filter" type="text" placeholder="Filter reasons&hellip;" value="' + escapeHtml(dmv.q) + '" '
+        + 'oninput="window._dmvFilter(this.value)" '
+        + 'style="background:var(--surface2); border:1px solid var(--border); color:var(--text); '
+        + 'padding:3px 8px; border-radius:4px; font-size:11px; width:220px;">'
+        + (dmv.q ? ' <span style="color:var(--text3); font-size:11px;">filtering: "' + escapeHtml(dmv.q) + '"</span>' : '')
+        + '</div>';
+      const dmvArrow = (c) => dmv.col === c ? (dmv.dir > 0 ? ' &#9650;' : ' &#9660;') : '';
+      const dmvTh = (c, label, align, title) =>
+        '<th style="text-align:' + align + '; cursor:pointer; user-select:none;"'
+        + (title ? ' title="' + title + '"' : '')
+        + ' onclick="window._dmvSort(\'' + c + '\')">' + label + dmvArrow(c) + '</th>';
       html += '<div style="overflow-x:auto;"><table style="font-size:12px;">';
-      html += '<tr><th>Reason</th><th style="text-align:right" title="Total RFQs declined for this reason">RFQ Declines</th><th style="text-align:right">%</th>';
-      if (mvTotal > 0) html += '<th style="text-align:right" title="Matched parlays we missed">Missed Fills</th><th style="text-align:right" title="Total matched stake we missed">Missed Stake</th><th style="text-align:right">Avg Stake</th>';
+      html += '<tr>' + dmvTh('reason', 'Reason', 'left', 'Click to sort')
+        + dmvTh('declineCount', 'RFQ Declines', 'right', 'Total RFQs declined for this reason')
+        + dmvTh('pct', '%', 'right');
+      if (mvTotal > 0) html += dmvTh('missedCount', 'Missed Fills', 'right', 'Matched parlays we missed')
+        + dmvTh('missedStake', 'Missed Stake', 'right', 'Total matched stake we missed')
+        + dmvTh('avgStake', 'Avg Stake', 'right');
       html += '<th style="text-align:right">By Leg Count</th></tr>';
       // Merge all reasons from both sources
       const allReasons = new Set([...Object.keys(d.reasons || {}), ...Object.keys(mv?.byReason || {})]);
@@ -2902,7 +2923,17 @@
         const missedData = mv?.byReason?.[reason];
         const vol = d.volumeByReason?.[reason];
         return { reason, declineCount, missedCount: missedData?.count || 0, missedStake: missedData?.totalStake || 0, vol };
-      }).sort((a, b) => b.declineCount - a.declineCount);
+      })
+        .filter(r => !dmv.q || String(r.reason).toLowerCase().includes(dmv.q.toLowerCase()))
+        .map(r => Object.assign(r, {
+          pct: d.total > 0 ? r.declineCount / d.total : 0,
+          avgStake: r.missedCount > 0 ? r.missedStake / r.missedCount : 0,
+        }))
+        .sort((a, b) => {
+          const c = dmv.col;
+          if (c === 'reason') return dmv.dir * String(a.reason).localeCompare(String(b.reason));
+          return dmv.dir * ((a[c] || 0) - (b[c] || 0));
+        });
       for (const r of merged) {
         const pct = d.total > 0 ? (r.declineCount / d.total * 100).toFixed(0) : '0';
         const legBreakdown = r.vol?.byLegCount ? Object.entries(r.vol.byLegCount).sort((a,b) => b[1]-a[1]).map(([k,v]) => k + '-leg: ' + v).join(', ') : '-';
@@ -2945,6 +2976,17 @@
           let sub = '<tr id="' + rowId + '" style="display:' + (nsbExpanded ? 'table-row' : 'none') + '; background:var(--surface2);">';
           sub += '<td colspan="' + colspan + '" style="padding:8px 12px;">';
           sub += '<div style="font-size:10px; color:var(--text3); margin-bottom:6px;">Session start: ' + (nsb.sessionStart || '-').substring(0,19).replace('T',' ') + ' UTC · rows with matchedAt before this are from prior sessions.</div>';
+          // Coverage caveat: the sub-buckets are computed from the IN-MEMORY
+          // matched-parlay buffer while the headline count comes from the 7d
+          // rollup, so the sub-table normally explains only part of the pool.
+          // Saying so prevents reading the remainder as a fifth hidden bucket.
+          if (nsb.totalCount != null && r.missedCount > 0 && nsb.totalCount < r.missedCount) {
+            const covPct = (nsb.totalCount / r.missedCount * 100).toFixed(0);
+            sub += '<div style="font-size:10px; color:var(--amber); margin-bottom:6px;">'
+              + 'Breakdown explains ' + nsb.totalCount.toLocaleString() + ' of ' + r.missedCount.toLocaleString()
+              + ' not-seen parlays (' + covPct + '%) — sub-buckets come from the in-memory buffer, the headline from the 7d rollup.'
+              + '</div>';
+          }
           sub += '<table style="font-size:11px; width:100%; background:var(--surface3);">';
           sub += '<tr style="color:var(--text3);"><th style="text-align:left; padding:4px 8px;">Sub-bucket</th><th style="text-align:right; padding:4px 8px;">Parlays</th><th style="text-align:right; padding:4px 8px;">Stake</th><th style="text-align:right; padding:4px 8px;">% of Not Seen</th><th style="text-align:right; padding:4px 8px;">Avg Stake</th></tr>';
           for (const [name, b] of entries) {
@@ -2959,6 +3001,32 @@
             sub += '</tr>';
           }
           sub += '</table>';
+
+          // WHAT are we missing? The buckets say "we never saw it"; these say
+          // which sports/markets/sizes it was, which is what turns the number
+          // into a coverage decision.
+          const compTable = (title, map, note, unit) => {
+            const rows = Object.entries(map || {});
+            if (!rows.length) return '';
+            const tot = rows.reduce((s, [, v]) => s + v.stake, 0);
+            let h = '<div style="margin-top:10px; font-size:10px; color:var(--text3);">' + title
+              + (note ? ' <span style="color:var(--text3);">' + note + '</span>' : '') + '</div>';
+            h += '<table style="font-size:10px; width:100%; background:var(--surface3); margin-top:4px;">';
+            h += '<tr style="color:var(--text3);"><th style="text-align:left; padding:3px 6px;">' + unit
+              + '</th><th style="text-align:right; padding:3px 6px;">Count</th>'
+              + '<th style="text-align:right; padding:3px 6px;">Missed Stake</th>'
+              + '<th style="text-align:right; padding:3px 6px;">% of Stake</th></tr>';
+            for (const [k, v] of rows.slice(0, 12)) {
+              h += '<tr><td style="padding:3px 6px;">' + escapeHtml(k) + '</td>'
+                + '<td style="text-align:right; padding:3px 6px;">' + v.count.toLocaleString() + '</td>'
+                + '<td style="text-align:right; padding:3px 6px; color:var(--amber);">$' + Math.round(v.stake).toLocaleString() + '</td>'
+                + '<td style="text-align:right; padding:3px 6px; color:var(--text3);">' + (tot > 0 ? (v.stake / tot * 100).toFixed(1) : '0') + '%</td></tr>';
+            }
+            return h + '</table>';
+          };
+          sub += compTable('Missed by SPORT', nsb.bySport, '(parlays)', 'Sport');
+          sub += compTable('Missed by MARKET', nsb.byMarket, '(counts LEGS, so exceeds the parlay total)', 'Market');
+          sub += compTable('Missed by LEG COUNT', nsb.byLegCount, '(parlays)', 'Legs');
 
           // Daily volume table — shows missed stake per day per bucket
           const allDays = new Set();
@@ -6405,6 +6473,29 @@
     else { cur.col = col; cur.dir = 1; }
     window._dvSort[dayId] = cur;
     if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
+  };
+
+  // --- Declines & Missed Volume table: sort + filter -----------------------
+  // Re-renders from the cached market-intel payload so sorting never refetches.
+  function _dmvRerender() {
+    try { renderMarketIntel(window._lastIntelData || {}); }
+    catch (e) { console.error('dmv rerender', e); }
+  }
+  window._dmvSort = function(col) {
+    if (!window._dmv) window._dmv = { col: 'missedStake', dir: -1, q: '' };
+    const s = window._dmv;
+    // Same column toggles direction; a new column starts descending, which is
+    // the useful default for every numeric column here (biggest cost first).
+    if (s.col === col) s.dir = s.dir > 0 ? -1 : 1;
+    else { s.col = col; s.dir = col === 'reason' ? 1 : -1; }
+    _dmvRerender();
+  };
+  window._dmvFilter = function(q) {
+    if (!window._dmv) window._dmv = { col: 'missedStake', dir: -1, q: '' };
+    window._dmv.q = String(q || '');
+    // rerenderWithFocus preserves focus + caret across the DOM replacement;
+    // without it the box loses focus after the first keystroke.
+    rerenderWithFocus(_dmvRerender);
   };
 
   // -----------------------------------------------------------------------
