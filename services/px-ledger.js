@@ -37,7 +37,10 @@ function summarize(orders) {
   const byStatus = {};
   const bySettlementStatus = {};
   let realizedPnL = 0;
-  let openExposure = 0;  // stakes on unsettled orders that actually debited balance
+  let openExposure = 0;  // stakes on unsettled orders = MAX LIABILITY (worst case)
+  // Cash still genuinely at risk: open parlays with every leg unresolved. See
+  // the allTbd block below for why this differs from openExposure.
+  let liveOpenExposure = 0, liveOpenCount = 0;
   let stakesOnWins = 0, stakesOnLosses = 0, stakesOnPushes = 0;
   let profitOnWins = 0, profitOnLosses = 0;
   let countWins = 0, countLosses = 0, countPushes = 0;
@@ -74,12 +77,29 @@ function summarize(orders) {
       // status = money locked up in open parlays.
       openCount++;
       openExposure += stake;
+      // LIVE subset — every leg still 'tbd', i.e. nothing has resolved yet.
+      //
+      // openExposure above is MAX LIABILITY, not cash. Once a leg has LOST the
+      // bettor's parlay cannot hit, so our payout obligation is gone and PX has
+      // effectively released it; counting those still as deployed cash is what
+      // made Account Equity read ~$101K against an actual ~$78K (2026-07-30).
+      // Splitting them lets equity use "cash genuinely still at risk" while
+      // openExposure stays available for risk/limit checks that legitimately
+      // want worst-case liability.
+      const legs = Array.isArray(po.legs) ? po.legs : [];
+      const allTbd = legs.length > 0
+        && legs.every(l => String((l && l.settlement_status) || 'tbd').toLowerCase() === 'tbd');
+      if (allTbd) { liveOpenExposure += stake; liveOpenCount++; }
     }
   }
 
   return {
     realizedPnL: round(realizedPnL),
     openExposure: round(openExposure),
+    // Deployed-cash basis for Account Equity (excludes parlays already decided
+    // in our favour, whose liability PX has effectively released).
+    liveOpenExposure: round(liveOpenExposure),
+    liveOpenCount,
     // Net balance impact vs starting bankroll = realized minus stakes still
     // locked in open parlays (those stakes are currently debited).
     netBalanceImpact: round(realizedPnL - openExposure),
@@ -122,4 +142,16 @@ function getCachedOpenExposure() {
   return cache.summary?.openExposure ?? null;
 }
 
-module.exports = { fetchLedger, summarize, getSummary, getCachedOpenExposure };
+/**
+ * Sync accessor for the CASH basis — open parlays with every leg unresolved.
+ * Account Equity uses this rather than getCachedOpenExposure(), which is
+ * worst-case liability and includes parlays we can no longer lose.
+ * Returns null when the ledger cache is cold; caller must fall back.
+ */
+function getCachedLiveOpenExposure() {
+  if (!cache) return null;
+  const v = cache.summary?.liveOpenExposure;
+  return Number.isFinite(v) ? v : null;
+}
+
+module.exports = { fetchLedger, summarize, getSummary, getCachedOpenExposure, getCachedLiveOpenExposure };

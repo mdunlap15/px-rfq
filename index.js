@@ -1137,7 +1137,31 @@ function startStatusServer() {
         // mismatch on 2026-07-28) and disagreeing with the dashboard, which had
         // already been corrected client-side in 8ce6d15.
         const deployedSingleLeg = filled;
-        const deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
+        // Parlay DEPLOYED CASH, not max liability. PX exposes no cost field on
+        // parlay orders, so we use the live subset: open parlays with every leg
+        // still 'tbd'. Once a leg has LOST, the bettor's parlay cannot hit, our
+        // payout obligation is gone, and PX has effectively released the money —
+        // counting it as deployed is what made equity read ~$101K against an
+        // actual ~$78K (operator, 2026-07-30).
+        //
+        // Verified against the operator's own PX position list that day: cash
+        // $25,048.91 + single-bet Cost $45,865.60 (which matched the 84-position
+        // sum to within $590) left ~$7.1K for parlays, versus the $30.3K max
+        // liability we were reporting. The live basis gives $11.7K — within ~6%
+        // of the true figure instead of ~30%. The residual is almost certainly
+        // PX's early-payout releases, which the parlay endpoint does not expose;
+        // a conservative, principled basis is preferred over a fudge factor
+        // tuned to hit the number, which would drift with position mix.
+        //
+        // Falls back to the tracker's worst-case risk only when the PX ledger
+        // cache is cold (boot), so equity is never blank.
+        let deployedParlay;
+        try {
+          const live = require('./services/px-ledger').getCachedLiveOpenExposure();
+          deployedParlay = Number.isFinite(live) ? live : (orderTracker.getTotalPortfolioRisk() || 0);
+        } catch (_) {
+          deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
+        }
         const deployed = deployedSingleLeg + deployedParlay;
         const totalEquity = (cashBalance != null) ? (cashBalance + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
