@@ -7833,9 +7833,24 @@
     // i.e. it hid essentially all parlay-deployed capital. Restores ccfbf84.
     // Neither pool is in `balance`, so cash + both = true account equity with
     // no double-count.
-    const deployedAmt = filledNum + portRisk;
+    // SINGLE SOURCE OF TRUTH. Account Equity = cash available + cash filled on
+    // single bets + cash filled on parlays (operator definition 2026-07-30).
+    // The server already computes exactly that in /status portfolio, so prefer
+    // its numbers verbatim; recomputing here re-introduced a split, because the
+    // client took open parlay stake from pxPnL.openExposure while the server
+    // used orderTracker.getTotalPortfolioRisk() — two different sources that
+    // disagreed by ~$300, so the dashboard never quite matched /status.
+    // Fall back to the local computation only when the server hasn't populated
+    // the fields (e.g. before the first balance poll).
+    const srvSingle = (portfolio && Number.isFinite(portfolio.deployedSingleLeg)) ? portfolio.deployedSingleLeg : null;
+    const srvParlay = (portfolio && Number.isFinite(portfolio.deployedParlay)) ? portfolio.deployedParlay : null;
+    const deployedSingle = srvSingle != null ? srvSingle : filledNum;
+    const deployedParlay = srvParlay != null ? srvParlay : portRisk;
+    const deployedAmt = deployedSingle + deployedParlay;
     const deployedAmtStr = fmtDollar(deployedAmt);
-    const totalEquity = (cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null;
+    const totalEquity = (portfolio && Number.isFinite(portfolio.totalEquity))
+      ? portfolio.totalEquity
+      : ((cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null);
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
     const totalEquityCls = totalEquity == null ? ''
       : totalEquity < 500 ? 'negative'
@@ -7852,8 +7867,10 @@
     // SINGLE-LEG ONLY; portRisk is our open parlay stake. Rendered as its own
     // stat so the operator can see what's riding on straight bets vs parlays
     // without inferring it, and so Account Equity reconciles term by term.
-    const straightStr = fmtDollar(filledNum);
-    const parlayDepStr = fmtDollar(portRisk);
+    // Use the same server-authoritative figures the equity total is built
+    // from, so the two sub-stats always add up to Total Deployed exactly.
+    const straightStr = fmtDollar(deployedSingle);
+    const parlayDepStr = fmtDollar(deployedParlay);
 
     // Net balance impact = realized P&L − open exposure. Matches the
     // delta between current PX balance and starting bankroll. Only
