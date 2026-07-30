@@ -2876,8 +2876,40 @@
     // Combined Decline Reasons & Missed Volume
     const mv = intel.missedVolume;
     if (d.total > 0) {
-      const mvTotal = mv ? mv.totalMissed : 0;
-      const mvStake = mv ? mv.totalStake : 0;
+      // "not seen" is SUPPRESSED by default (operator directive 2026-07-30).
+      // It is not an addressable opportunity: 84% of it is MLB — a sport we
+      // fully cover — bucketed pre-session simply because the process restarts
+      // on every deploy. At $2.3M it dwarfed every real row and made the table
+      // unreadable. The genuinely-missed slice inside it (legs we never
+      // registered, whose decline reason wasn't persisted) is NOT discarded —
+      // it is promoted to its own visible row below.
+      // window._dmvShowNotSeen = true restores the raw row.
+      const showNotSeen = !!window._dmvShowNotSeen;
+      const nsbForSplit = mv && mv.notSeenBreakdown;
+      const nsUnknown = (!showNotSeen && nsbForSplit && nsbForSplit.buckets
+        && nsbForSplit.buckets.had_unknown_legs) || null;
+      const nsRaw = (mv && mv.byReason && mv.byReason['not seen']) || null;
+      // Header + percentage bases must exclude whatever the table excludes,
+      // or the summary stops reconciling with the visible rows.
+      let mvTotal = mv ? mv.totalMissed : 0;
+      let mvStake = mv ? mv.totalStake : 0;
+      let suppressedNote = '';
+      if (!showNotSeen && nsRaw) {
+        const keepCount = nsUnknown ? nsUnknown.count : 0;
+        const keepStake = nsUnknown ? nsUnknown.totalStake : 0;
+        mvTotal = Math.max(0, mvTotal - (nsRaw.count || 0) + keepCount);
+        mvStake = Math.max(0, mvStake - (nsRaw.totalStake || 0) + keepStake);
+        suppressedNote = '<div style="margin-bottom:6px; font-size:11px; color:var(--text3);">'
+          + 'Excluding <strong>' + (nsRaw.count || 0).toLocaleString() + '</strong> unaddressable "not seen" fills'
+          + ' ($' + Math.round(nsRaw.totalStake || 0).toLocaleString() + ') — matched before this process booted, mostly on sports we already cover.'
+          + ' <a href="#" onclick="event.preventDefault(); window._dmvShowNotSeen=true; renderMarketIntel(window._lastIntelData||{});"'
+          + ' style="color:var(--accent);">show anyway</a></div>';
+      } else if (showNotSeen && nsRaw) {
+        suppressedNote = '<div style="margin-bottom:6px; font-size:11px; color:var(--text3);">'
+          + 'Showing unaddressable "not seen" rows. '
+          + '<a href="#" onclick="event.preventDefault(); window._dmvShowNotSeen=false; renderMarketIntel(window._lastIntelData||{});"'
+          + ' style="color:var(--accent);">hide</a></div>';
+      }
       const summaryParts = [d.total + ' RFQs declined'];
       if (mvTotal > 0) summaryParts.push(mvTotal + ' matched missed · $' + mvStake.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + ' stake');
       html += subSection('intel-declines', 'Declines & Missed Volume (7d rolling)', summaryParts.join(' · '), false);
@@ -2891,6 +2923,7 @@
       if (declineRange) coverParts.push('Declines: <span style="color:var(--text2);">' + declineRange + '</span>');
       if (missedRange) coverParts.push('Missed: <span style="color:var(--text2);">' + missedRange + '</span>');
       if (coverParts.length) html += '<div style="margin-bottom:6px; font-size:11px; color:var(--text3);">' + coverParts.join(' · ') + '</div>';
+      html += suppressedNote;
       // Sort + filter state for this table. Default: biggest MISSED STAKE
       // first — the column that answers "what is costing me money", rather
       // than raw decline count which is dominated by blocked-creator noise.
@@ -2918,12 +2951,27 @@
       html += '<th style="text-align:right">By Leg Count</th></tr>';
       // Merge all reasons from both sources
       const allReasons = new Set([...Object.keys(d.reasons || {}), ...Object.keys(mv?.byReason || {})]);
+      if (!showNotSeen) allReasons.delete('not seen');
       const merged = [...allReasons].map(reason => {
         const declineCount = d.reasons?.[reason] || 0;
         const missedData = mv?.byReason?.[reason];
         const vol = d.volumeByReason?.[reason];
         return { reason, declineCount, missedCount: missedData?.count || 0, missedStake: missedData?.totalStake || 0, vol };
       })
+        // Promote the ADDRESSABLE slice that lived inside "not seen": parlays
+        // with at least one leg we never registered, whose decline reason was
+        // never persisted. Suppressing the parent row must not bury these —
+        // they are exactly the "fills we legitimately missed" the operator
+        // wants. Kept as a distinct row rather than folded into the existing
+        // "unknown legs" row so the two data sources stay auditable.
+        .concat((!showNotSeen && nsUnknown && nsUnknown.count > 0) ? [{
+          reason: 'unknown legs (reason not persisted)',
+          declineCount: 0,
+          missedCount: nsUnknown.count,
+          missedStake: nsUnknown.totalStake || 0,
+          vol: null,
+          _promoted: true,
+        }] : [])
         .filter(r => !dmv.q || String(r.reason).toLowerCase().includes(dmv.q.toLowerCase()))
         .map(r => Object.assign(r, {
           pct: d.total > 0 ? r.declineCount / d.total : 0,
