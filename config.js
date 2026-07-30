@@ -205,6 +205,19 @@ const config = {
     // VIG_GOLF_MATCHUP_MIN overrides this — prod quoting ~1.4% two-way on
     // 2026-07-19 implies the env is set low/0; clear it so this default applies.
     vigGolfMatchupMin: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN) || 0.0909,
+    // Same-tournament golf correlation, applied per EXTRA golf leg in one
+    // tournament (factor = this ^ (legs - 1)). Multiplies fairParlayProb UP,
+    // because correlated legs hit together more often than independence
+    // implies. 1.22 is deliberately below the measured implied multipliers
+    // (~1.24x at 2 legs, ~2.8x at 3) — the 3-4 leg samples were only 50/32
+    // tickets, so we take the direction confidently and the magnitude
+    // cautiously, and re-calibrate once more settled data accumulates.
+    // Set GOLF_SAME_TOURNAMENT_CORRELATION=1 to disable.
+    golfSameTournamentCorrelation: parseFloat(process.env.GOLF_SAME_TOURNAMENT_CORRELATION) || 1.22,
+    // Hard ceiling on the compounded factor. A 6-leg same-tournament ticket
+    // would otherwise reach 1.22^5 = 2.7x; beyond ~3x we are extrapolating
+    // far past any data we have.
+    golfSameTournamentCorrelationCap: parseFloat(process.env.GOLF_SAME_TOURNAMENT_CORRELATION_CAP) || 3,
     // First-5-innings (F5) min per-leg vig. The settlement analysis found F5
     // totals under-won by 7.6pp and F5 run lines by 12.8pp — our fair runs
     // optimistic on this thin sub-market. Floors the vig on any first_5_*

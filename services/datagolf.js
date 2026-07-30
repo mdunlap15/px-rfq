@@ -755,10 +755,23 @@ const OUTRIGHT_MIN_BOOKS = 2;
 // (services/dk-scraper.js → fetchGolfOutrights). Until that's wired into the
 // parlay path, top-N returns null here and the leg DECLINES. Do not "temporarily"
 // re-add these keys — a null costs a fill; a dead-heat price costs money.
-const OUTRIGHT_MARKETS = { outright_win: 'win' };
-const OUTRIGHT_TARGET = { win: 1 };
-// Markets that exist on PX but that we refuse to price from this source.
-const OUTRIGHT_WRONG_BASIS = new Set(['outright_top_5', 'outright_top_10', 'outright_top_20']);
+const OUTRIGHT_MARKETS = {
+  outright_win: 'win',
+  // Top-N re-enabled 2026-07-30 (operator: quote outrights for every
+  // tournament from a reliable source). DataGolf serves 11-13 books per top-N
+  // market for every event pre-tournament — the coverage no scrape or paste
+  // can match. The dead-heat objection is handled by the ties uplift below,
+  // NOT ignored.
+  outright_top_5: 'top_5',
+  outright_top_10: 'top_10',
+  outright_top_20: 'top_20',
+};
+// Nominal field totals. top-N was MISSING here, so `OUTRIGHT_TARGET[market] *
+// uplift` evaluated to NaN and the uplift branch could never fire — the ties
+// correction was dead code.
+const OUTRIGHT_TARGET = { win: 1, top_5: 5, top_10: 10, top_20: 20 };
+// Nothing is refused from this source any more — see the uplift.
+const OUTRIGHT_WRONG_BASIS = new Set();
 
 let _outrightCache = null; // { fetchedAt, boards: { [tour|market]: board } }
 
@@ -792,7 +805,27 @@ function _powerNormalizeField(probs, target) {
 async function fetchOutrightBoard(tour, market) {
   const data = await _fetchDgOutrights(tour, market);
   if (!data) return null;
-  const uplift = Number(process.env.GOLF_TOPN_TIES_UPLIFT) || 0;
+  // TIES-INCLUDED BASIS CORRECTION.
+  // DataGolf serves top-N on the DEAD-HEAT basis; PX settles "Ties Included".
+  // Re-verified 2026-07-30 on the Rocket Classic board: per-book field sums
+  // divided by nominal N are 1.26-1.30, i.e. exactly the book's outright
+  // overround (win sum/1 = 1.353) — the signature of a dead-heat field, which
+  // sums to exactly N before vig. A ties board would sum ~25% higher.
+  //
+  // Uncorrected, that understates every top-N probability, so the YES price we
+  // post would be ~25% too cheap — and since the counterparty takes YES and we
+  // lay NO, that gap is our loss on every ticket. Hence the uplift is ON by
+  // default rather than opt-in.
+  //
+  // 1.27 is measured, not guessed: the derived ties-included totals were
+  // T(top_5)=6.35 (vs nominal 5) and T(top_10)=12.32 (vs 10), from a same-book
+  // same-moment comparison of DK's posted ties board against DataGolf's
+  // dead-heat one. 5×1.27 = 6.35 matches top-5 truth exactly and 10×1.27 =
+  // 12.70 sits ~3% ABOVE top-10 truth — deliberately the safe direction: a
+  // higher target means a higher YES price, which only makes our NO lay
+  // safer. Set GOLF_TOPN_TIES_UPLIFT=0 to fall back to raw consensus.
+  const _upRaw = process.env.GOLF_TOPN_TIES_UPLIFT;
+  const uplift = (_upRaw != null && _upRaw !== '') ? Number(_upRaw) : 1.27;
   const isWin = market === 'win';
   // Only `win` has an exact, knowable target. top-N gets one ONLY if the
   // operator supplied a calibrated ties uplift.

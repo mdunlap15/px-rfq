@@ -346,17 +346,30 @@ function getSeriesFairProb(lineInfo) {
 function golfOutrightFair(lineInfo) {
   try {
     const player = lineInfo.playerName || lineInfo.teamName;
-    // ALL outright markets (winner + top 5/10/20) come from the DK
-    // "(Including Ties)" board via golf-topn — either the operator's paste
-    // (authoritative, mirror basis) or the scrape. DataGolf is NO LONGER a
-    // source for outrights (operator directive 2026-07-18): it publishes top-N
-    // on the DEAD-HEAT basis (~25% low vs ties) and its live boards flap in/out
-    // mid-tournament, and the operator prices off his DK paste, not DataGolf.
-    // Fails closed — a leg with no DK/paste board declines, never falls back.
+    // PRIORITY 1 — the operator's DK "(Including Ties)" paste, when fresh.
+    // It is the literal board he prices off, on PX's exact settlement basis,
+    // so it outranks any modelled source.
     const topN = require('./golf-topn');
     if (topN.getTopNFairProbSync) {
       const t = topN.getTopNFairProbSync(player, lineInfo.marketType, lineInfo.tournamentName);
       if (t && t.fairProb > 0 && t.fairProb < 1) return t;
+    }
+    // PRIORITY 2 — DataGolf (restored 2026-07-30, operator directive: quote
+    // outrights for EVERY tournament from a reliable source). It carries 11-14
+    // books per market for every event pre-tournament, which neither the
+    // Railway-blocked DK scrape nor a manual paste can match.
+    //
+    // The 2026-07-18 removal was specifically about BASIS, not reliability:
+    // DataGolf serves top-N dead-heat while PX settles ties-included. That is
+    // now corrected inside fetchOutrightBoard via the measured ties uplift
+    // (see GOLF_TOPN_TIES_UPLIFT), so top-N no longer prices ~25% cheap.
+    // `win` needs no correction — a win is a win, and its field normalizes to
+    // an exact 1.0 target.
+    const dataGolf = require('./datagolf');
+    if (dataGolf.getOutrightFairProbSync) {
+      const hit = dataGolf.getOutrightFairProbSync(player, lineInfo.marketType,
+        [lineInfo.tournamentName, lineInfo.pxEventName]);
+      if (hit && hit.fairProb > 0 && hit.fairProb < 1) return hit;
     }
     return null;
   } catch (err) {
@@ -2015,6 +2028,55 @@ function priceParlay(legs, opts = {}) {
     const before = fairParlayProb;
     fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * sgpCorrelationFactor));
     log.debug('Pricing', `SGP correlation ${sgpCorrelationSign} — fair ${(before*100).toFixed(2)}% × ${sgpCorrelationFactor} = ${(fairParlayProb*100).toFixed(2)}%`);
+  }
+
+  // ---- SAME-TOURNAMENT GOLF CORRELATION ----
+  // Root cause of July 2026's entire -$6,541 loss. Golf matchups were -$8,299
+  // that month; EXCLUDING them July was +$1,758. Golf legs sit on separate
+  // pxEventIds, so every correlation gate above treats them as independent and
+  // simply multiplies — but 310 of 310 multi-golf tickets shared ONE
+  // tournament. Those players face the same course, weather and wave, so their
+  // outcomes are positively correlated and the true parlay probability is
+  // HIGHER than the product.
+  //
+  // Measured on settled results, the miss grows monotonically with golf leg
+  // count (predicted SP win% vs actual):
+  //     1 leg  76.0% -> 72.5%  (z -0.55)
+  //     2 legs 73.4% -> 67.1%  (z -1.69)
+  //     3 legs 87.1% -> 64.0%  (z -4.88)   <-- 23pp, not variance
+  //     4 legs 93.2% -> 84.4%  (z -1.98)
+  // Implied bettor-hit multipliers ~1.24x (2 legs), ~2.8x (3), ~2.3x (4).
+  // Samples at 3-4 legs are small (50/32), so the DIRECTION is solid but the
+  // magnitude is not; we apply a deliberately conservative compounding factor
+  // rather than the raw implied one.
+  //
+  // Applies to matchups AND outrights — outrights share the same structure
+  // (one tournament, one course) and, being YES-side legs we lay, carry the
+  // same exposure. Legs across DIFFERENT tournaments stay independent.
+  const golfCorrPerLeg = config.pricing.golfSameTournamentCorrelation;
+  if (golfCorrPerLeg > 1) {
+    const byTournament = {};
+    for (const l of pricedLegs) {
+      const li = l.lineInfo || {};
+      const sport = String(li.sport || li.oddsApiSport || '');
+      if (!sport.startsWith('golf')) continue;
+      // Group by tournament. Fall back to the sport key so legs with no
+      // tournament metadata still group (conservative: assumes same event).
+      const key = String(li.tournamentName || li.pxEventName || sport).toLowerCase().trim();
+      byTournament[key] = (byTournament[key] || 0) + 1;
+    }
+    let golfFactor = 1;
+    for (const n of Object.values(byTournament)) {
+      if (n >= 2) golfFactor *= Math.pow(golfCorrPerLeg, n - 1);
+    }
+    if (golfFactor > 1) {
+      const before = fairParlayProb;
+      const cap = config.pricing.golfSameTournamentCorrelationCap || 3;
+      const applied = Math.min(golfFactor, cap);
+      fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * applied));
+      log.info('Pricing', `Golf same-tournament correlation ×${applied.toFixed(3)} `
+        + `(groups ${JSON.stringify(byTournament)}) — fair ${(before * 100).toFixed(2)}% → ${(fairParlayProb * 100).toFixed(2)}%`);
+    }
   }
 
   // Cross-game same-market correlation. Legs of the SAME market + side across
@@ -4077,14 +4139,14 @@ function shouldDecline(legs, parlayId) {
     }
 
     const isGolfMatchup = lineInfo.sport === 'golf_matchups' || lineInfo.oddsApiSport === 'golf_matchups';
-    // Golf OUTRIGHTS quote LIVE by design (operator directive 2026-07-16: "these
-    // are live lines in between Round 1 and Round 2"). "Started" is the wrong
-    // staleness model for a 4-day event — the real freshness gate is the DK
-    // board's age (golf-topn MAX_AGE / GOLF_OUTRIGHT_MAX_AGE_MIN), which fails
-    // closed when the live board stops refreshing. Without this exemption the
-    // tournament teeing off silently killed every outright quote for its
-    // remaining 3.5 days.
-    const isGolfOutright = lineInfo.sport === 'golf_outrights';
+    // Golf OUTRIGHTS are PRE-TOURNAMENT ONLY (operator directive 2026-07-30),
+    // which REVERSES the 2026-07-16 directive that had them quote live between
+    // rounds. Once play starts, a pre-tournament board is stale in a way no
+    // freshness check can see: positions on the leaderboard move probabilities
+    // far more than the board updates, and we would be laying NO into
+    // information we don't have. So outrights now fall through to the normal
+    // started gate below and decline once the event begins.
+    const isGolfOutright = false;
     const startMs = lineInfo.startTimeMs;
     if (startMs != null) {
       if (isNaN(startMs)) {
