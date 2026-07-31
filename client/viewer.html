@@ -6956,12 +6956,16 @@
     const balanceStr = cashBalance != null ? fmtDollar(cashBalance) : '-';
     const balanceCls = cashBalance != null ? 'positive' : '';
 
-    // Deployed = Filled, full stop. PX's Filled ALREADY INCLUDES parlay stake
-    // (app breakdown: Pending = Filled + Resting), so adding open parlay risk
-    // on top double-counts it. Prefer the server's figure; see client/index.html
-    // for the full rationale.
+    // Deployed spans TWO pools: filledNum (PX matched_wager_balance, the
+    // single-leg pool) + portRisk (PX-native open parlay exposure). Neither is
+    // inside PX `balance`, so cash + both double-counts nothing.
+    //
+    // THIS is the formula the operator verified against the PX account
+    // (2026-07-31) and designated canonical for the whole app; index.js and
+    // client/index.html were changed to match it, not the other way round.
+    // Prefer the server's figure so all three stay locked together.
     const deployedAmt = (portfolio && Number.isFinite(portfolio.deployed))
-      ? portfolio.deployed : filledNum;
+      ? portfolio.deployed : (filledNum + portRisk);
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null;
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';

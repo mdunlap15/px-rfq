@@ -1124,46 +1124,40 @@ function startStatusServer() {
           ? config.pricing.liveMatchedWager
           : null;
         const filled = matchedWagerBalance != null ? matchedWagerBalance : 0;
-        // DEPLOYED = PX "Filled" (matched_wager_balance), FULL STOP.
+        // ACCOUNT EQUITY — THE /viewer FORMULA IS CANONICAL.
         //
-        // Operator directive + PX app screenshot, 2026-07-31:
-        //   Account Equity = Cash Balance + Filled
-        //   "Filled is the sum of risk I have placed on single-bet AND parlays."
-        // i.e. Filled ALREADY INCLUDES parlay stake. Adding an open-parlay term
-        // on top of it double-counts every open parlay. That is exactly what
-        // this block did until now, and it is why equity read $97,363 against a
-        // PX-app-derived $95,109 (42,167.58 + 52,941.17) — the $1.78K gap was
-        // the parlay pool counted twice.
+        // Operator directive 2026-07-31, after two failed attempts here:
+        //   "However Account Equity is being calculated in the mobile /viewer
+        //    version of the app, use that one; it is correct."
         //
-        // This supersedes the 2026-06-26 note claiming matched_wager_balance is
-        // single-leg only. That inference came from matched_wager once reading
-        // LESS than our own parlay slice — but our slice was MAX LIABILITY, not
-        // cash, so it could exceed a figure that legitimately contained it. The
-        // app's own Pending = Filled + Resting breakdown is the direct evidence
-        // and it wins over the inference.
-        const deployed = filled;
-        // The parlay/straight SPLIT is a subdivision of `deployed`, not an
-        // addend. PX gives no per-product breakdown of Filled, so we attribute
-        // the parlay share from our own ledger and treat the remainder as
-        // straight bets. Both terms therefore always sum to `deployed`, and any
-        // error in the parlay estimate moves money BETWEEN the two rows without
-        // ever changing Account Equity.
+        // /viewer computed:  cash + matched_wager_balance + pxPnL.openExposure
+        // where openExposure is the PX-native stake on all unsettled parlay
+        // orders (MAX LIABILITY basis — every non-settled, non-rejected order,
+        // regardless of whether some legs have already lost).
         //
-        // Parlay share uses DEPLOYED CASH, not max liability: open parlays with
-        // every leg still 'tbd'. Once a leg has LOST the bettor's parlay cannot
-        // hit, our payout obligation is gone, and PX has released the money.
-        // Falls back to the tracker's worst-case risk only when the PX ledger
-        // cache is cold (boot), so the split is never blank.
+        // Both dashboards and this endpoint now use exactly that, so there is
+        // one formula in the codebase instead of three. Superseded attempts,
+        // recorded so they are not re-tried:
+        //   d26feee — swapped the parlay term to the live (all-legs-tbd) cash
+        //     basis. Rejected: understates.
+        //   ccc39e0 — dropped the parlay term entirely on the reading that PX
+        //     "Filled" already contains parlay stake. Rejected: understates by
+        //     the whole parlay pool ($76,771 vs the viewer's $102,070).
+        // The operator has verified the viewer against the PX account; that
+        // observation outranks any inference from the app's stat labels.
+        const deployedSingleLeg = filled;
+        // Parlay term: PX-native open exposure, matching what /viewer read from
+        // /px-pnl. Falls back to the tracker's portfolio risk only when the PX
+        // ledger cache is cold (boot) — same fallback /viewer used via
+        // `pxPnL?.openExposure ?? portfolio?.currentRisk`.
         let deployedParlay;
         try {
-          const live = require('./services/px-ledger').getCachedLiveOpenExposure();
-          deployedParlay = Number.isFinite(live) ? live : (orderTracker.getTotalPortfolioRisk() || 0);
+          const open = require('./services/px-ledger').getCachedOpenExposure();
+          deployedParlay = Number.isFinite(open) ? open : (orderTracker.getTotalPortfolioRisk() || 0);
         } catch (_) {
           deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
         }
-        // Clamp so the split can never exceed the pool it partitions.
-        deployedParlay = Math.max(0, Math.min(deployedParlay, deployed));
-        const deployedSingleLeg = Math.max(0, deployed - deployedParlay);
+        const deployed = deployedSingleLeg + deployedParlay;
         const totalEquity = (cashBalance != null) ? (cashBalance + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise

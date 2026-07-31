@@ -1,18 +1,15 @@
-// Regression tests: Account Equity must use DEPLOYED CASH, not max liability.
+// Tests for the two exposure bases summarize() reports.
 //
-// Background (2026-07-30): equity read ~$101K against an actual ~$78K. The
-// formula was right — cash + single bets + parlays — but the parlay term used
-// max payout liability. Verified against the operator's own PX position list:
-//   cash                 $25,048.91  (matches the PX app exactly)
-//   single bets          $45,865.60  (matches the 84-position Cost sum to $590)
-//   => implied parlays   ~$7,085
-//   we were reporting    ~$30,269   <- max liability, ~4.25x too high
+// openExposure     = stake on every unsettled order          (MAX LIABILITY)
+// liveOpenExposure = stake on open parlays with all legs tbd (DEPLOYED CASH)
 //
-// Once a leg has LOST, the bettor's parlay cannot hit, our payout obligation is
-// gone, and PX has released the money. Those parlays are not deployed cash.
-//
-// openExposure (worst case) is retained for risk limits; only equity switches
-// to the live basis.
+// ⚠ Account Equity uses openExposure, NOT liveOpenExposure. Swapping equity to
+// the cash basis was tried in d26feee and rejected by the operator as
+// understating; the canonical formula is the /viewer one:
+//     cash + matched_wager_balance + openExposure
+// (see the ACCOUNT EQUITY block in index.js). liveOpenExposure remains exposed
+// on /px-pnl for analysis that genuinely wants cash-at-risk rather than worst
+// case, and these tests pin its semantics either way.
 //
 // Run: npm test   (or: node --test test/px-ledger-live-exposure.test.js)
 

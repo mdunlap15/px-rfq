@@ -7831,30 +7831,20 @@
     // Using filledNum alone (the 2026-07-13 "match the PX app" simplification,
     // cd959c4) made Total Deployed read ~$44 while ~$386 sat in open parlays —
     // i.e. it hid essentially all parlay-deployed capital. Restores ccfbf84.
-    // SINGLE SOURCE OF TRUTH. Account Equity = Cash Balance + Filled
-    // (operator definition, re-confirmed against the PX app 2026-07-31:
-    // "Filled is the sum of risk I have placed on single-bet and parlays").
-    // Filled ALREADY CONTAINS parlay stake — the app's own breakdown is
-    // Pending = Filled + Resting — so the straight/parlay figures below are a
-    // SUBDIVISION of Deployed, never addends. Adding them was the double-count
-    // that made equity read $97,363 against the app-derived $95,109.
-    // The server computes all of this in /status portfolio, so prefer its
-    // numbers verbatim; recomputing here re-introduced a split, because the
-    // client took open parlay stake from pxPnL.openExposure while the server
-    // used orderTracker.getTotalPortfolioRisk() — two different sources that
-    // disagreed by ~$300, so the dashboard never quite matched /status.
-    // Fall back to the local computation only when the server hasn't populated
-    // the fields (e.g. before the first balance poll).
+    // SINGLE SOURCE OF TRUTH — the /viewer formula, which the operator verified
+    // against the PX account (2026-07-31): "However Account Equity is being
+    // calculated in the mobile /viewer version of the app, use that one."
+    //   Account Equity = Cash Balance + Filled + open parlay exposure
+    // Filled (matched_wager_balance) is the single-leg pool; open parlay
+    // exposure is PX-native openExposure (max-liability basis). The server
+    // computes both in /status portfolio, so take its numbers verbatim —
+    // recomputing here is what let this page drift from /viewer in the first
+    // place. Fall back locally only before the first balance poll.
     const srvSingle = (portfolio && Number.isFinite(portfolio.deployedSingleLeg)) ? portfolio.deployedSingleLeg : null;
     const srvParlay = (portfolio && Number.isFinite(portfolio.deployedParlay)) ? portfolio.deployedParlay : null;
-    // Deployed is Filled itself. Cold-start fallback splits it locally using
-    // open parlay risk, clamped so the parts can't exceed the whole.
-    const deployedAmt = (portfolio && Number.isFinite(portfolio.deployed))
-      ? portfolio.deployed : filledNum;
-    const deployedParlay = srvParlay != null
-      ? srvParlay : Math.max(0, Math.min(portRisk || 0, deployedAmt));
-    const deployedSingle = srvSingle != null
-      ? srvSingle : Math.max(0, deployedAmt - deployedParlay);
+    const deployedSingle = srvSingle != null ? srvSingle : filledNum;
+    const deployedParlay = srvParlay != null ? srvParlay : (portRisk || 0);
+    const deployedAmt = deployedSingle + deployedParlay;
     const deployedAmtStr = fmtDollar(deployedAmt);
     const totalEquity = (portfolio && Number.isFinite(portfolio.totalEquity))
       ? portfolio.totalEquity
@@ -7871,13 +7861,10 @@
       ? Math.round(cashBalance / totalEquity * 1000) / 10 : null;
     const deployedStr = deployedAmtStr + (deployedPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${deployedPct}%]</span>` : '');
     const cashAvailStr = balanceStr + (cashPct != null ? ` <span style="color:var(--text3); font-size:11px;">[${cashPct}%]</span>` : '');
-    // Straight vs parlay split — a PARTITION of Total Deployed (PX gives no
-    // per-product breakdown of Filled, so the parlay share comes from our own
-    // ledger and straight is the remainder). Rendered as its own stat so the
-    // operator can see what's riding on straight bets vs parlays without
-    // inferring it. Because they partition rather than sum into equity, an
-    // error in the parlay estimate shifts money between these two rows and
-    // leaves Account Equity untouched.
+    // Straight vs parlay split — the two ADDENDS of Total Deployed, shown
+    // separately so the operator can see what's riding on straight bets vs
+    // parlays without inferring it, and so Account Equity reconciles term by
+    // term. Same server-authoritative figures the equity total is built from.
     const straightStr = fmtDollar(deployedSingle);
     const parlayDepStr = fmtDollar(deployedParlay);
 
@@ -7947,7 +7934,7 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Filled, exactly as the PX app defines it. Cash Balance = PX balance − GEC − promotional (both excluded). Filled = matched stake across BOTH single bets and parlays; the Straight/Parlay stats below split that same figure rather than adding to it. Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Total Deployed (Filled single-leg stake + open parlay exposure) — the /viewer formula, verified against the PX account. Cash Balance = PX balance − GEC − promotional (both excluded). Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
         ${stat('Total Deployed', deployedStr, portCls, `All capital locked in open positions = single-leg matched stake (PX matched_wager_balance, ${fmtDollar(filledNum)}) + open parlay stake (${fmtDollar(portRisk)}). These are two DISJOINT pools — PX's matched_wager_balance excludes parlays entirely, so it alone understates deployed. Resting offers are notional and shown separately as Open Orders. (% of account equity)`)}
         ${stat('— Straight Bets', straightStr, 'neutral', 'Deployed on SINGLE-LEG (straight) bets — PX matched_wager_balance. PX excludes parlay stake from this field entirely, which is why it must be added to the parlay figure rather than used alone.')}
         ${stat('— Parlays', parlayDepStr, 'neutral', 'Deployed on open PARLAYS — matched parlay stake from our own tracker. Parlay wagers never appear in PX matched_wager_balance, so this is the other half of Total Deployed.')}
