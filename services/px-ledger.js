@@ -144,9 +144,14 @@ function getCachedOpenExposure() {
 
 /**
  * Sync accessor for the CASH basis — open parlays with every leg unresolved.
- * Account Equity uses this rather than getCachedOpenExposure(), which is
- * worst-case liability and includes parlays we can no longer lose.
- * Returns null when the ledger cache is cold; caller must fall back.
+ * Preferred over getCachedOpenExposure() wherever deployed CASH is meant, since
+ * that one is worst-case liability and includes parlays we can no longer lose.
+ *
+ * NOTE (2026-07-31): this is NOT an addend to Account Equity. Equity is
+ * Cash Balance + PX "Filled", and Filled already contains parlay stake. This
+ * figure only attributes the PARLAY SHARE of Filled for the straight-vs-parlay
+ * split, so an error here moves money between those two rows without changing
+ * equity. Returns null when the ledger cache is cold; caller must fall back.
  */
 function getCachedLiveOpenExposure() {
   if (!cache) return null;

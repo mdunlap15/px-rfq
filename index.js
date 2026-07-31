@@ -1124,37 +1124,36 @@ function startStatusServer() {
           ? config.pricing.liveMatchedWager
           : null;
         const filled = matchedWagerBalance != null ? matchedWagerBalance : 0;
-        // DEPLOYED SPANS TWO DISJOINT POOLS — both must be summed:
-        //   deployedSingleLeg = PX matched_wager_balance. SINGLE-LEG ONLY —
-        //     PX excludes parlay stake from this field entirely (proven
-        //     2026-06-26: matched_wager was LESS than the parlay slice alone).
-        //   deployedParlay    = open parlay stake from our own tracker; parlay
-        //     wagers never appear in matched_wager_balance.
-        // Neither is inside `balance` (cash), so cash + both double-counts
-        // nothing. `const deployed = filled` was the 2026-07-13 over-correction
-        // that dropped the parlay pool, understating equity by the full open
-        // parlay stake (4,893.67 of 82,736.27 when the operator reported the
-        // mismatch on 2026-07-28) and disagreeing with the dashboard, which had
-        // already been corrected client-side in 8ce6d15.
-        const deployedSingleLeg = filled;
-        // Parlay DEPLOYED CASH, not max liability. PX exposes no cost field on
-        // parlay orders, so we use the live subset: open parlays with every leg
-        // still 'tbd'. Once a leg has LOST, the bettor's parlay cannot hit, our
-        // payout obligation is gone, and PX has effectively released the money —
-        // counting it as deployed is what made equity read ~$101K against an
-        // actual ~$78K (operator, 2026-07-30).
+        // DEPLOYED = PX "Filled" (matched_wager_balance), FULL STOP.
         //
-        // Verified against the operator's own PX position list that day: cash
-        // $25,048.91 + single-bet Cost $45,865.60 (which matched the 84-position
-        // sum to within $590) left ~$7.1K for parlays, versus the $30.3K max
-        // liability we were reporting. The live basis gives $11.7K — within ~6%
-        // of the true figure instead of ~30%. The residual is almost certainly
-        // PX's early-payout releases, which the parlay endpoint does not expose;
-        // a conservative, principled basis is preferred over a fudge factor
-        // tuned to hit the number, which would drift with position mix.
+        // Operator directive + PX app screenshot, 2026-07-31:
+        //   Account Equity = Cash Balance + Filled
+        //   "Filled is the sum of risk I have placed on single-bet AND parlays."
+        // i.e. Filled ALREADY INCLUDES parlay stake. Adding an open-parlay term
+        // on top of it double-counts every open parlay. That is exactly what
+        // this block did until now, and it is why equity read $97,363 against a
+        // PX-app-derived $95,109 (42,167.58 + 52,941.17) — the $1.78K gap was
+        // the parlay pool counted twice.
         //
+        // This supersedes the 2026-06-26 note claiming matched_wager_balance is
+        // single-leg only. That inference came from matched_wager once reading
+        // LESS than our own parlay slice — but our slice was MAX LIABILITY, not
+        // cash, so it could exceed a figure that legitimately contained it. The
+        // app's own Pending = Filled + Resting breakdown is the direct evidence
+        // and it wins over the inference.
+        const deployed = filled;
+        // The parlay/straight SPLIT is a subdivision of `deployed`, not an
+        // addend. PX gives no per-product breakdown of Filled, so we attribute
+        // the parlay share from our own ledger and treat the remainder as
+        // straight bets. Both terms therefore always sum to `deployed`, and any
+        // error in the parlay estimate moves money BETWEEN the two rows without
+        // ever changing Account Equity.
+        //
+        // Parlay share uses DEPLOYED CASH, not max liability: open parlays with
+        // every leg still 'tbd'. Once a leg has LOST the bettor's parlay cannot
+        // hit, our payout obligation is gone, and PX has released the money.
         // Falls back to the tracker's worst-case risk only when the PX ledger
-        // cache is cold (boot), so equity is never blank.
+        // cache is cold (boot), so the split is never blank.
         let deployedParlay;
         try {
           const live = require('./services/px-ledger').getCachedLiveOpenExposure();
@@ -1162,7 +1161,9 @@ function startStatusServer() {
         } catch (_) {
           deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
         }
-        const deployed = deployedSingleLeg + deployedParlay;
+        // Clamp so the split can never exceed the pool it partitions.
+        deployedParlay = Math.max(0, Math.min(deployedParlay, deployed));
+        const deployedSingleLeg = Math.max(0, deployed - deployedParlay);
         const totalEquity = (cashBalance != null) ? (cashBalance + deployed) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
