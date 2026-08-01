@@ -15207,15 +15207,37 @@
         }
       }
 
+      // Pick the competitor who ISN'T the selection.
+      //
+      // MUST be diacritic- and punctuation-insensitive. PX sends the selection
+      // with accents ("Vlasto Čepo", "Duško Todorović") while the competitor
+      // list is often ASCII-folded ("Vlasto Cepo"). A strict !== then decides
+      // the player is not himself and returns him as his own opponent — the
+      // "Vlasto Čepo vs Vlasto Cepo" leg the operator spotted 2026-08-01.
+      // Mirrors normalizeTeamName() in services/line-manager.js:404, whose
+      // comment documents the same trap on the server side.
+      // Returns null when we can't identify a distinct opponent, so a bad
+      // label is never fabricated.
+      const oppOf = (self, home, away) => {
+        const norm = s => (s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/[^a-z0-9 ]/g, '')
+          .trim();
+        const n = norm(self);
+        if (!n) return null;               // no selection team (e.g. a bare total) -> no "vs"
+        if (home && norm(home) !== n) return home;
+        if (away && norm(away) !== n) return away;
+        return null;
+      };
+
       // Golf matchups: append opponent + event + round context so the
       // display answers "who is this golfer playing against, in what
       // tournament, which round/tournament-long?"
       if (l.sport === 'golf_matchups') {
         const self = l.team || l.teamName || '';
-        // The opponent is whichever of homeTeam/awayTeam isn't the selection
-        const opponent = (l.homeTeam && l.homeTeam !== self) ? l.homeTeam
-                       : (l.awayTeam && l.awayTeam !== self) ? l.awayTeam
-                       : null;
+        const opponent = oppOf(self, l.homeTeam, l.awayTeam);
         // Round/tournament tag. Prefer l.roundNum (server-side, from line
         // seeding); fall back to l.matchupType. Always display one of
         // R1/R2/R3/R4 or "Tournament" so the leg can never be read as
@@ -15246,12 +15268,17 @@
       // the matchup context. Append "vs Opponent" pulled from homeTeam /
       // awayTeam (whichever isn't the selection). Tournament name added
       // when present.
-      else if (l.sport === 'tennis' || l.sport === 'mma_mixed_martial_arts'
-               || l.sport === 'boxing_boxing') {
+      else if ((l.sport === 'tennis' || l.sport === 'mma_mixed_martial_arts'
+               || l.sport === 'boxing_boxing')
+               // Bare Over/Under legs already render "Urbina @ Cepo U 1.5" —
+               // both competitors are in the label, and there is no selected
+               // side to be "vs" anything. Without this guard `self` is '' and
+               // the opponent lookup appends a redundant "vs <home player>"
+               // (operator screenshot, 2026-08-01). The team-sports branch
+               // below has always had this guard; this one did not.
+               && !bareOU) {
         const self = l.team || l.teamName || '';
-        const opponent = (l.homeTeam && l.homeTeam !== self) ? l.homeTeam
-                       : (l.awayTeam && l.awayTeam !== self) ? l.awayTeam
-                       : null;
+        const opponent = oppOf(self, l.homeTeam, l.awayTeam);
         if (opponent) {
           const tourn = l.tournamentName ? (' · ' + escapeHtml(l.tournamentName)) : '';
           teamLabel += ' <span style="color:var(--text3); font-size:10px;">vs '
