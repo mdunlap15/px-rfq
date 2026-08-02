@@ -511,6 +511,11 @@ async function fetchOddsForSport(sport, opts) {
     // (observed 17 -> 369 -> 16) and RFQs landing in a trough decline "no fair
     // value" on lines that ARE registered.
     if (toaResult && Object.keys(toaResult).length > 0) {
+      // Pinnacle first — merge order IS source priority (neither merge clobbers
+      // an already-covered pair), and Pinnacle is the sharper board with the
+      // only real half-point ladder.
+      try { await mergePinnacleTennisMatches({ reapply: true }); }
+      catch (err) { log.warn('OddsFeed', `Pinnacle tennis re-apply failed: ${err.message}`); }
       try { await mergeBovadaTennisMatches({ reapply: true }); }
       catch (err) { log.warn('OddsFeed', `Bovada tennis re-apply failed: ${err.message}`); }
       return toaResult;
@@ -4905,6 +4910,57 @@ async function mergeBovadaTennisMatches(opts = {}) {
       return { added: 0, updated: 0, err: err.message };
     }
   }
+  return _mergeTennisBoard(data, {
+    sourceLabel: 'Bovada', idPrefix: 'bov-tennis-', flagKey: 'bovadaScraped', withPinnacle: false,
+  });
+}
+
+/**
+ * Pinnacle tennis merge — same contract as the Bovada one above.
+ *
+ * Runs BEFORE Bovada in the refresh cycle so it claims each pair first: the
+ * shared merge never clobbers an already-covered pair, so merge order IS
+ * source priority, and Pinnacle is both sharper and the only source carrying a
+ * real half-point ladder (Bovada posts one integer spread + one total).
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.reapply] Re-merge the LAST fetched board instead of
+ *   hitting the network — same wholesale-overwrite survival trick as Bovada.
+ */
+async function mergePinnacleTennisMatches(opts = {}) {
+  const pin = require('./pinnacle-tennis');
+  let data;
+  if (opts.reapply) {
+    data = pin.getLastBoard();
+    if (!data || (Date.now() - (data.fetchedAt || 0)) > BOVADA_TENNIS_REAPPLY_MAX_AGE_MS) {
+      return { added: 0, updated: 0, reapplied: false };
+    }
+  } else {
+    try {
+      data = pin.rememberBoard(await pin.fetchPinnacleTennis());
+    } catch (err) {
+      log.warn('OddsFeed', `Pinnacle tennis fetch failed: ${err.message}`);
+      return { added: 0, updated: 0, err: err.message };
+    }
+  }
+  // withPinnacle: these ARE Pinnacle's prices, so populate the `pinnacle` field
+  // the dashboard column and the de-vig favourite floor both read. Bovada must
+  // not (its prices are not Pinnacle's).
+  return _mergeTennisBoard(data, {
+    sourceLabel: 'Pinnacle', idPrefix: 'pin-tennis-', flagKey: 'pinnacleScraped', withPinnacle: true,
+  });
+}
+
+/**
+ * Shared merge body for single-book tennis boards (Bovada, Pinnacle).
+ *
+ * Both sources produce the same { games: [...] } shape, and the merge rules —
+ * never clobber a richer source, refresh our own prior entry in place, key
+ * spreads by the signed HOME handicap — are identical. Keeping one
+ * implementation means a fix to the sawtooth/staleness handling applies to
+ * both instead of silently diverging.
+ */
+function _mergeTennisBoard(data, { sourceLabel, idPrefix, flagKey, withPinnacle }) {
   if (!data || !Array.isArray(data.games) || data.games.length === 0) return { added: 0, updated: 0 };
 
   const sport = 'tennis';
@@ -4914,15 +4970,15 @@ async function mergeBovadaTennisMatches(opts = {}) {
   const lw = (n) => (n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean).pop() || '';
   const existingPairs = new Set();
-  const bovEventByPair = {};
+  const ownEventByPair = {};
   for (const entry of Object.values(cache.events || {})) {
     for (const ev of (Array.isArray(entry) ? entry : [entry])) {
       if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
       const a = lw(ev.homeTeam), b = lw(ev.awayTeam);
       if (!a || !b) continue;
       existingPairs.add(a + '|' + b); existingPairs.add(b + '|' + a);
-      if (String(ev.eventId || '').startsWith('bov-tennis-')) {
-        bovEventByPair[a + '|' + b] = ev; bovEventByPair[b + '|' + a] = ev;
+      if (String(ev.eventId || '').startsWith(idPrefix)) {
+        ownEventByPair[a + '|' + b] = ev; ownEventByPair[b + '|' + a] = ev;
       }
     }
   }
@@ -4934,7 +4990,11 @@ async function mergeBovadaTennisMatches(opts = {}) {
     const byLine = {};
     for (const t of arr) byLine[String(t.line)] = { line: t.line, over: mk(t.over, t.line), under: mk(t.under, t.line) };
     const p = arr[Math.floor(arr.length / 2)];
-    return { line: p.line, over: mk(p.over, p.line), under: mk(p.under, p.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true };
+    return {
+      line: p.line, over: mk(p.over, p.line), under: mk(p.under, p.line), byLine, books: 1,
+      pinnacle: withPinnacle ? { over: p.over.americanOdds, under: p.under.americanOdds } : null,
+      fanduel: null, kalshi: null, [flagKey]: true,
+    };
   };
   const spreadsBlock = (byLineData) => {
     const arr = Object.values(byLineData || {}).filter(s => s && s.home && s.away && s.home.fairProb > 0 && s.away.fairProb > 0).sort((a, b) => Math.abs(a.line) - Math.abs(b.line));
@@ -4947,7 +5007,11 @@ async function mergeBovadaTennisMatches(opts = {}) {
       byLine['away|' + (-s.line)] = { fairProb: s.away.fairProb };
     }
     const p = arr[0];
-    return { line: p.line, home: mk(p.home, p.line), away: mk(p.away, p.line), byLine, books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true };
+    return {
+      line: p.line, home: mk(p.home, p.line), away: mk(p.away, p.line), byLine, books: 1,
+      pinnacle: withPinnacle ? { home: p.home.americanOdds, away: p.away.americanOdds } : null,
+      fanduel: null, kalshi: null, [flagKey]: true,
+    };
   };
 
   let added = 0, updated = 0, skippedCovered = 0, withTot = 0, withSp = 0;
@@ -4959,7 +5023,9 @@ async function mergeBovadaTennisMatches(opts = {}) {
     const markets = {
       h2h: {
         home: mk(g.h2h.home, null), away: mk(g.h2h.away, null),
-        books: 1, pinnacle: null, fanduel: null, kalshi: null, bovadaScraped: true,
+        books: 1,
+        pinnacle: withPinnacle ? { home: g.h2h.home.americanOdds, away: g.h2h.away.americanOdds } : null,
+        fanduel: null, kalshi: null, [flagKey]: true,
       },
     };
     const tb = totalsBlock(g.totalsByLine); if (tb) { markets.totals = tb; withTot++; }
@@ -4967,7 +5033,7 @@ async function mergeBovadaTennisMatches(opts = {}) {
 
     // Refresh our own prior entry in place (keeps freshness advancing across
     // cycles — the bug that kept the DK tennis merge permanently stale).
-    const own = bovEventByPair[a + '|' + b];
+    const own = ownEventByPair[a + '|' + b];
     if (own) {
       if (lw(own.homeTeam) === a) {
         own.markets = markets;
@@ -4983,20 +5049,20 @@ async function mergeBovadaTennisMatches(opts = {}) {
     const newEvent = {
       homeTeam: g.homeTeam, awayTeam: g.awayTeam,
       commenceTime: g.startTime || null,
-      eventId: 'bov-tennis-' + g.eventId,
+      eventId: idPrefix + g.eventId,
       markets,
     };
     if (!cache.events[key]) cache.events[key] = [];
     if (Array.isArray(cache.events[key])) cache.events[key].push(newEvent);
     else cache.events[key] = [cache.events[key], newEvent];
     existingPairs.add(a + '|' + b); existingPairs.add(b + '|' + a);
-    bovEventByPair[a + '|' + b] = newEvent; bovEventByPair[b + '|' + a] = newEvent;
+    ownEventByPair[a + '|' + b] = newEvent; ownEventByPair[b + '|' + a] = newEvent;
     added++;
   }
 
   if (added > 0 || updated > 0) cache.fetchedAt = Date.now();
-  log.info('OddsFeed', `Bovada tennis merge: added ${added}, updated ${updated} (${withTot} w/totals, `
-    + `${withSp} w/spreads), skipped ${skippedCovered} already-covered (Bovada games: ${data.games.length})`);
+  log.info('OddsFeed', `${sourceLabel} tennis merge: added ${added}, updated ${updated} (${withTot} w/totals, `
+    + `${withSp} w/spreads), skipped ${skippedCovered} already-covered (${sourceLabel} games: ${data.games.length})`);
   return { added, updated };
 }
 
@@ -8017,12 +8083,22 @@ async function refreshAllSports() {
   // tournament IS active its multi-book consensus wins. Same 15-min DK cache
   // economics as the MMA merge above.
   if (sportsToRefresh.includes('tennis')) {
-    // DK first (richer board when it works), then Bovada as the additive
-    // server-side backstop. Chained rather than parallel so Bovada sees DK's
-    // events and only fills genuine gaps. Bovada is the one that actually
-    // runs on Railway — the DK Puppeteer scrape is Akamai-gated there.
+    // Chained, never parallel: each merge must see the previous one's events
+    // so it only fills genuine gaps. Order IS priority — neither clobbers an
+    // already-covered pair.
+    //   DK       — richest board when it works, but Akamai-gated on Railway,
+    //              so in production it usually contributes nothing.
+    //   Pinnacle — sharpest book AND the only source with a real half-point
+    //              ladder (game spreads +/-1.5..4.5, totals 20.5..26.5). Plain
+    //              HTTPS JSON, so it actually runs in prod. Probed 2026-08-01:
+    //              84 pre-match games, 83 with spreads, 82 with totals.
+    //   Bovada   — last-resort coverage. Carries the markets but posts a single
+    //              integer game spread and one total, so on a PX half-point
+    //              ladder it contributes almost no quotable lines by itself.
     mergeDkTennisMatches()
       .catch(err => { log.warn('OddsFeed', `DK tennis merge failed: ${err.message}`); })
+      .then(() => mergePinnacleTennisMatches())
+      .catch(err => { log.warn('OddsFeed', `Pinnacle tennis merge failed: ${err.message}`); })
       .then(() => mergeBovadaTennisMatches())
       .catch(err => { log.warn('OddsFeed', `Bovada tennis merge failed: ${err.message}`); });
   }
@@ -9901,6 +9977,7 @@ module.exports = {
   // Tennis backstop — exported so it can be verified end-to-end and triggered
   // manually when the slate changes mid-cycle.
   mergeBovadaTennisMatches,
+  mergePinnacleTennisMatches,
   checkLineupFreshness,
   getLineupCache,
   getPitcherSide,
