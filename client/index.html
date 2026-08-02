@@ -6632,12 +6632,24 @@
         lostPnl -= spLoss;
         expectedPnl -= spLoss;
       } else {
+        // Same joint-adjustment recovery as the Open Positions table — see the
+        // long comment there. Multiplying leg fairs ignores the server's nested
+        // collapse / SGP / golf correlation factors, which here would bias
+        // expectedPnl and the Monte Carlo sim OPTIMISTICALLY (a correlated
+        // parlay is likelier to hit than the product implies).
+        let qProd = 1;
+        for (const l of legs) qProd *= (l.fairProb || 0.5);
+        const adj = (o.fairParlayProb > 0 && qProd > 0) ? (o.fairParlayProb / qProd) : 1;
         let hitProb = 1;
+        let resolvedLeg = false;
         for (const l of legs) {
           const lr = getLegResult(l);
-          if (lr === 'won') continue;
+          if (lr === 'won') { resolvedLeg = true; continue; }
           hitProb *= ((l.liveFairProb || l.currentFairProb || l.fairProb || 0.5));
         }
+        // Only while every leg is unresolved — adj spans all legs, so applying
+        // it after one drops out of the product would double-count.
+        if (!resolvedLeg && adj !== 1) hitProb = Math.max(0, Math.min(1, hitProb * adj));
         const winProb = 1 - hitProb;
         const exp = (winProb * spProfit) - (hitProb * spLoss);
         expectedPnl += exp;
@@ -7403,17 +7415,49 @@
 
       // Win Prob: P(SP wins) = 1 - P(all bettor legs hit)
       // Use liveFairProb for in-progress legs, fairProb for pre-game
+      //
+      // MULTIPLYING LEG FAIRS IS NOT THE PARLAY PROB. The server applies joint
+      // adjustments the legs themselves don't carry — the nested-implication
+      // collapse (pricer.js nestedFairMultiplier), SGP correlation factors, and
+      // the same-tournament golf factor. A nested MLB pair (HR 0.5 + Hits 0.5 on
+      // one batter) is the clearest case: a HR IS a hit, so the joint equals the
+      // HR leg alone, yet the naive product prices it as if independent.
+      //
+      // Observed 2026-08-01 (parlay 019fbd9d): legs 0.1876 × 0.5693 → this table
+      // showed 89.3% win prob, while the server's stored fairParlayProb was
+      // 0.18756 (correctly collapsed) = 81.2% true. An 8pp overstatement that
+      // made a correctly-priced ticket read as a giveaway.
+      //
+      // Fix: recover the server's joint adjustment as the ratio between the
+      // stored parlay fair and the naive product of the SAME leg fairs at quote
+      // time, then carry that ratio onto the live product. Ratio form (rather
+      // than using fairParlayProb directly) preserves live in-game updating.
+      let quoteProduct = 1;
+      for (const l of legs) quoteProduct *= (l.fairProb || 0.5);
+      const jointAdj = (o.fairParlayProb > 0 && quoteProduct > 0)
+        ? (o.fairParlayProb / quoteProduct) : 1;
+
       let parlayHitProb = 1;
       let hasLiveData = false;
       let alreadyDead = false; // true if any leg already settled as bettor-loss
+      let anyResolved = false; // a leg already graded 'won' (see jointAdj caveat)
       for (const l of legs) {
         const ls = getLegResult(l);
         if (ls === 'lost') { alreadyDead = true; break; } // bettor leg failed → parlay dead → SP wins
-        if (ls === 'won') continue; // bettor leg hit → still alive, skip (prob=1 for this leg)
+        if (ls === 'won') { anyResolved = true; continue; } // bettor leg hit → still alive, skip (prob=1 for this leg)
         // Use live prob if available, otherwise pre-game
         const prob = (l.liveFairProb || l.currentFairProb || l.fairProb || 0.5);
         parlayHitProb *= prob;
         if (l.liveFairProb) hasLiveData = true;
+      }
+      // Apply the joint adjustment ONLY while every leg is still unresolved.
+      // Once a leg grades 'won' it drops out of the product, but jointAdj was
+      // derived across ALL legs — re-applying it would double-count. Example:
+      // if the Hits leg of a nested pair wins, the product is already exactly
+      // P(HR); scaling by 1.757 would overstate it. Falling back to the plain
+      // product there is the conservative read.
+      if (!alreadyDead && !anyResolved && jointAdj !== 1) {
+        parlayHitProb = Math.max(0, Math.min(1, parlayHitProb * jointAdj));
       }
       const winProb = alreadyDead ? 1.0 : (1 - parlayHitProb);
       const winProbPct = (winProb * 100).toFixed(1);
