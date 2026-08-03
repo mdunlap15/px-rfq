@@ -15284,10 +15284,22 @@
         const isF5 = /first_5|first_five|_f5\b/i.test(mkt);
         const isH1 = /first_half|1st_half|_h1\b/i.test(mkt);
         const periodTag = isF5 ? 'F5 ' : isH1 ? 'H1 ' : '';
-        const side = rawTeam.charAt(0).toUpperCase() + rawTeam.slice(1).toLowerCase();
-        const lineStr = l.line != null ? ' ' + l.line : '';
-        if (ctx) {
-          teamLabel = ctx + ' ' + periodTag + side + lineStr;
+        // RFI legs are a 1st-inning total where Over 0.5 = a run scores (YRFI)
+        // and Under 0.5 = none (NRFI). Render the same compact form the
+        // top-line summary already uses (formatParlaySelections), instead of
+        // spelling out an over/under whose only possible line is 0.5.
+        const isRfi = /^run_first_inning/i.test(String(mkt));
+        if (isRfi && ctx) {
+          teamLabel = periodTag + ctx + ' ' + (/^over/i.test(rawTeam) ? 'YRFI' : 'NRFI');
+        } else if (ctx) {
+          // Take ONLY the over/under word. rawTeam may already embed the line
+          // (RFI stores teamName "Over 0.5"), and appending lineStr on top of
+          // that produced the doubled "Over 0.5 0.5" the operator caught
+          // 2026-08-03. Any leg whose teamName carries its own line hit this,
+          // not just RFI.
+          const word = /^over/i.test(rawTeam) ? 'Over' : 'Under';
+          const lineStr = l.line != null ? ' ' + l.line : '';
+          teamLabel = ctx + ' ' + periodTag + word + lineStr;
         }
       }
 
