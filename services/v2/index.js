@@ -66,10 +66,22 @@ function priceParlayV2(pricedLegs, opts = {}) {
     const raw = l.fairProb;
     const sport = l.lineInfo?.sport;
     const marketType = l.lineInfo?.marketType;
+    // DNB-AWARE. PX soccer moneyline is 2-way draw-no-bet while books post
+    // 3-way, so the raw price is a DIFFERENT PRODUCT (the draw holds ~25-30% of
+    // the mass). Feeding raw 3-way prices to the calibrator as if they were our
+    // market anchors soccer fairs ~10pp too low and would pull our quotes
+    // cheaper on exactly the product we already price thinnest.
+    // isDNB alone is insufficient — PX often names a DNB market plainly
+    // "Moneyline" — so any soccer h2h leg uses the renormalised prob when present.
+    const isSoccerH2h = typeof l.lineInfo?.sport === 'string' && l.lineInfo.sport.startsWith('soccer')
+      && (l.lineInfo?.marketType === 'moneyline' || l.lineInfo?.oddsApiMarket === 'h2h');
+    const dnb = (l.lineInfo?.isDNB || isSoccerH2h);
+    const bookProb = (oddsField, dnbField) =>
+      (dnb && l[dnbField] != null) ? l[dnbField] : americanToImplied(l[oddsField]);
     const books = [
-      americanToImplied(l.pinnacleOdds),
-      americanToImplied(l.fanduelOdds),
-      americanToImplied(l.draftkingsOdds),
+      bookProb('pinnacleOdds', 'pinnacleDNBProb'),
+      bookProb('fanduelOdds', 'fanduelDNBProb'),
+      bookProb('draftkingsOdds', 'draftkingsDNBProb'),
     ].filter(p => p != null && p > 0 && p < 1);
     const est = estimator.estimate({
       rawFairProb: raw,

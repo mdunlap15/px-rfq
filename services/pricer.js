@@ -17,6 +17,38 @@ const GOLF_RAW_DK_OUTRIGHT_MARKETS = new Set(['outright_win', 'outright_top_5', 
 let _golfOutrightsPaused = false;
 function setGolfOutrightsPaused(v) { _golfOutrightsPaused = !!v; return _golfOutrightsPaused; }
 function isGolfOutrightsPaused() { return _golfOutrightsPaused; }
+
+/**
+ * A book's implied probability for one leg, on the SAME PRODUCT we quote.
+ *
+ * PX soccer moneyline is 2-way DRAW-NO-BET; books post 3-way, where the draw
+ * takes ~25-30% of the probability mass. Comparing our DNB quote against a raw
+ * 3-way home price is a product mismatch, not a price difference — measured
+ * 2026-08-03, it makes soccer moneyline legs look ~+10pp expensive
+ * (median parlay gap soccer/moneyline +9.98pp vs -0.46..+2.63pp for every other
+ * market family). Using the stored DNB-renormalised prob collapses that to
+ * +1.61pp.
+ *
+ * `isDNB` ALONE IS NOT SUFFICIENT. It is only set when PX names the market
+ * explicitly "2 Way" / "Draw No Bet"; plenty of events just say "Moneyline"
+ * and the flag stays false while the product is still DNB. So any soccer h2h
+ * leg is treated as DNB-equivalent whenever the renormalised prob exists.
+ * (client/index.html compoundParlayOdds has carried this fuller rule for a
+ * while — this brings the server in line with it.)
+ *
+ * Falls back to the raw price when no DNB prob is available, which is correct
+ * for every non-soccer market.
+ */
+function bookImpliedForLeg(leg, oddsField, dnbField) {
+  if (!leg) return null;
+  const li = leg.lineInfo || leg;
+  const isSoccerH2h = typeof li.sport === 'string' && li.sport.startsWith('soccer')
+    && (li.marketType === 'moneyline' || li.oddsApiMarket === 'h2h');
+  if ((li.isDNB || isSoccerH2h) && leg[dnbField] != null) return leg[dnbField];
+  const raw = leg[oddsField];
+  return raw == null ? null : oddsFeed.americanToImpliedProb(raw);
+}
+const pinImplied = (l) => bookImpliedForLeg(l, 'pinnacleOdds', 'pinnacleDNBProb');
 const templateExposure = require('./template-exposure');
 const { performance } = require('perf_hooks');
 const crypto = require('crypto');
@@ -2771,9 +2803,9 @@ function priceParlay(legs, opts = {}) {
     if (havePinAll && isCrossGame) {
       let pinRawCross = 1;
       for (const l of pricedLegs) {
-        const legImpl = l.lineInfo.isDNB && l.pinnacleDNBProb != null
-          ? l.pinnacleDNBProb
-          : oddsFeed.americanToImpliedProb(l.pinnacleOdds);
+        // isDNB alone misses soccer h2h legs PX names plainly "Moneyline"
+        // — see bookImpliedForLeg.
+        const legImpl = pinImplied(l);
         pinRawCross *= legImpl;
       }
       if (pinRawCross > 0 && pinRawCross < 1) {
@@ -2835,9 +2867,9 @@ function priceParlay(legs, opts = {}) {
     if (havePinAll) {
       let pinProb = 1;
       for (const l of pricedLegs) {
-        const legImpl = l.lineInfo.isDNB && l.pinnacleDNBProb != null
-          ? l.pinnacleDNBProb
-          : oddsFeed.americanToImpliedProb(l.pinnacleOdds);
+        // isDNB alone misses soccer h2h legs PX names plainly "Moneyline"
+        // — see bookImpliedForLeg.
+        const legImpl = pinImplied(l);
         pinProb *= legImpl;
       }
       if (pinProb > 0 && pinProb < 1) {
@@ -2886,10 +2918,15 @@ function priceParlay(legs, opts = {}) {
     let bookCompound = 1;
     let allLegsHaveBooks = true;
     for (const l of pricedLegs) {
-      const probs = [l.pinnacleOdds, l.fanduelOdds, l.draftkingsOdds]
-        .filter(o => o != null)
-        .map(o => oddsFeed.americanToImpliedProb(o))
-        .filter(p => p != null && p > 0 && p < 1);
+      // DNB-aware per book. Previously this used the RAW 3-way price for every
+      // book, which on soccer makes bookCompound far too small, inflates
+      // `ratio` and so stops this guard from ever firing on DNB parlays —
+      // failing OPEN on the one product where our price diverges most.
+      const probs = [
+        bookImpliedForLeg(l, 'pinnacleOdds', 'pinnacleDNBProb'),
+        bookImpliedForLeg(l, 'fanduelOdds', 'fanduelDNBProb'),
+        bookImpliedForLeg(l, 'draftkingsOdds', 'draftkingsDNBProb'),
+      ].filter(p => p != null && p > 0 && p < 1);
       if (probs.length === 0) { allLegsHaveBooks = false; break; }
       const legAvg = probs.reduce((s, p) => s + p, 0) / probs.length;
       bookCompound *= legAvg;
@@ -3411,9 +3448,9 @@ function priceParlay(legs, opts = {}) {
         if (pinLegs.length !== pricedLegs.length) return null;
         let pinProb = 1;
         for (const l of pinLegs) {
-          const legImpl = l.lineInfo.isDNB && l.pinnacleDNBProb != null
-            ? l.pinnacleDNBProb
-            : oddsFeed.americanToImpliedProb(l.pinnacleOdds);
+          // isDNB alone misses soccer h2h legs PX names plainly "Moneyline"
+          // — see bookImpliedForLeg.
+          const legImpl = pinImplied(l);
           pinProb *= legImpl;
         }
         if (pinProb <= 0 || pinProb >= 1) return null;
@@ -4775,6 +4812,9 @@ function getLastPriceFailure() {
 module.exports = {
   setGolfOutrightsPaused,
   isGolfOutrightsPaused,
+  // Exported for test/dnb-book-comparator.test.js — pins the draw-no-bet
+  // product-matching rule that book comparisons depend on.
+  __bookImpliedForLeg: bookImpliedForLeg,
   priceParlay,
   shouldDecline,
   validateForConfirmation,
