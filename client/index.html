@@ -604,6 +604,9 @@
       <a class="nav-item" onclick="switchSection('config', this)">
         <span class="nav-icon">&#9881;</span> Config
       </a>
+      <a class="nav-item" onclick="switchSection('tuning', this)" id="nav-tuning">
+        <span class="nav-icon">&#9878;</span> Runtime Tuning
+      </a>
       <a class="nav-item" onclick="switchSection('golfSingleLeg', this)" id="nav-golfSingleLeg">
         <span class="nav-icon">&#9971;</span> Golf Single-Leg
       </a>
@@ -1261,6 +1264,38 @@
                  a re-render of the filter UI in case data has arrived. -->
             <div id="lines-advanced" style="padding:10px 12px; display:none; flex-wrap:wrap; gap:18px; align-items:center; border-bottom:1px solid var(--border); background:var(--surface2); font-size:11px;"></div>
             <div id="lines-table"><div class="empty-state"><div class="icon">-</div><div>Select filters and click Refresh</div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== SECTION: RUNTIME TUNING ===================== -->
+      <!-- Adjust pricing / risk / gating without a Railway deploy. An override
+           wins until the matching env var changes in Railway, at which point
+           env reclaims THAT key (per-key; see services/runtime-config.js). -->
+      <div id="section-tuning" class="section" style="display:none;">
+        <div class="card">
+          <div class="card-header">
+            <span>Runtime Tuning</span>
+            <span>
+              <span id="tuning-summary" style="font-size:11px; color:var(--text3); margin-right:10px;"></span>
+              <button class="btn" onclick="loadTuning(this)">Reload</button>
+            </span>
+          </div>
+          <div class="card-body">
+            <div style="font-size:11px; color:var(--text3); margin-bottom:10px; line-height:1.6;">
+              Changes take effect on the <b>next RFQ</b> and survive restarts.
+              An override holds until you change that variable in Railway &mdash; then the Railway
+              value reclaims it on the next boot. Values are bounds-checked server-side.
+              <span style="color:var(--amber);">Risk keys are marked &#9888; and ask for confirmation.</span>
+            </div>
+            <div style="margin-bottom:10px;">
+              <input id="tuning-filter" placeholder="filter by name or env var..." oninput="renderTuning()"
+                     style="background:var(--bg2); border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:4px; width:280px; font-size:12px;">
+              <label style="font-size:11px; color:var(--text3); margin-left:12px;">
+                <input type="checkbox" id="tuning-only-overridden" onchange="renderTuning()"> only overridden
+              </label>
+            </div>
+            <div id="tuning-body"><div class="empty-state"><div class="icon">...</div>Loading</div></div>
           </div>
         </div>
       </div>
@@ -15444,7 +15479,7 @@
   }
 
   // Tab switching
-  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config', golfSingleLeg: 'Golf Single-Leg', golfOutrights: 'Golf Outrights' };
+  const sectionNames = { orders: 'Orders', portfolio: 'Portfolio', exposure: 'Exposure', analytics: 'Analytics', intel: 'Market Intel', lost: 'Lost Analysis', lines: 'Lines', config: 'Config', tuning: 'Runtime Tuning', golfSingleLeg: 'Golf Single-Leg', golfOutrights: 'Golf Outrights' };
   let activeSection = 'portfolio';
   function switchPnlBreakdown(tab) {
     const sportEl = document.getElementById('chart-pnl-sport');
@@ -15538,6 +15573,146 @@
     if (liveOddsTimer) { clearInterval(liveOddsTimer); liveOddsTimer = null; }
   }
 
+  // ---------------------------------------------------------------------------
+  // RUNTIME TUNING
+  // ---------------------------------------------------------------------------
+  // Values are rendered from /config/runtime and written back one key at a time.
+  // The server is the validator — everything here is convenience only, so a
+  // stale page can never write an out-of-bounds value.
+  window._tuning = null;
+
+  async function loadTuning(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading...'; }
+    try {
+      const r = await fetch('/config/runtime');
+      const j = await r.json();
+      window._tuning = j.items || [];
+      renderTuning();
+    } catch (e) {
+      const el = document.getElementById('tuning-body');
+      if (el) el.innerHTML = '<div class="empty-state">Failed to load: ' + escapeHtml(e.message) + '</div>';
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Reload'; }
+    }
+  }
+
+  function _tuningValueString(it) {
+    if (it.value == null) return '';
+    if (it.type === 'numMap') return JSON.stringify(it.value);
+    if (it.type === 'strList') return Array.isArray(it.value) ? it.value.join(',') : String(it.value);
+    return String(it.value);
+  }
+
+  function renderTuning() {
+    const el = document.getElementById('tuning-body');
+    if (!el) return;
+    const items = window._tuning;
+    if (!items) { el.innerHTML = '<div class="empty-state">Not loaded</div>'; return; }
+    const q = (document.getElementById('tuning-filter')?.value || '').toLowerCase().trim();
+    const onlyOv = !!document.getElementById('tuning-only-overridden')?.checked;
+
+    const sum = document.getElementById('tuning-summary');
+    if (sum) {
+      const n = items.filter(i => i.overridden).length;
+      sum.textContent = n ? (n + ' override' + (n === 1 ? '' : 's') + ' active') : 'no overrides — all values from env';
+      sum.style.color = n ? 'var(--amber)' : 'var(--text3)';
+    }
+
+    const groups = { pricing: 'Pricing', risk: 'Risk caps', gating: 'Gating' };
+    let html = '';
+    for (const [g, title] of Object.entries(groups)) {
+      const rows = items.filter(i => i.group === g)
+        .filter(i => !onlyOv || i.overridden)
+        .filter(i => !q || i.key.toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q)
+          || (i.env || '').toLowerCase().includes(q));
+      if (!rows.length) continue;
+      html += '<div style="margin:14px 0 6px; font-size:12px; font-weight:600; color:var(--accent);">' + title + '</div>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
+      html += '<tr style="color:var(--text3); text-align:left;">'
+        + '<th style="padding:4px 8px;">Setting</th>'
+        + '<th style="padding:4px 8px;">Value</th>'
+        + '<th style="padding:4px 8px;">Env baseline</th>'
+        + '<th style="padding:4px 8px;"></th></tr>';
+      for (const it of rows) {
+        const id = 'tune-' + it.key;
+        const envStr = it.envValue == null ? '-'
+          : (typeof it.envValue === 'object' ? JSON.stringify(it.envValue) : String(it.envValue));
+        html += '<tr style="border-top:1px solid var(--border);">';
+        html += '<td style="padding:6px 8px; vertical-align:top;">'
+          + (it.danger ? '<span title="risk key — asks for confirmation" style="color:var(--amber);">&#9888; </span>' : '')
+          + '<b>' + escapeHtml(it.label) + '</b>'
+          + (it.overridden ? ' <span style="color:var(--amber); font-size:10px;">[override]</span>' : '')
+          + '<div style="color:var(--text3); font-size:10px; margin-top:2px;">' + escapeHtml(it.env || '') + '</div>'
+          + (it.help ? '<div style="color:var(--text3); font-size:10px; margin-top:3px; max-width:520px; line-height:1.5;">' + escapeHtml(it.help) + '</div>' : '')
+          + '</td>';
+        if (it.type === 'bool') {
+          html += '<td style="padding:6px 8px;"><select id="' + id + '" style="background:var(--bg2); border:1px solid var(--border); color:var(--text); padding:4px; border-radius:3px;">'
+            + '<option value="true"' + (it.value === true ? ' selected' : '') + '>true</option>'
+            + '<option value="false"' + (it.value === false ? ' selected' : '') + '>false</option></select></td>';
+        } else {
+          const wide = (it.type === 'numMap' || it.type === 'strList');
+          html += '<td style="padding:6px 8px;"><input id="' + id + '" value="' + escapeHtml(_tuningValueString(it)) + '"'
+            + ' style="background:var(--bg2); border:1px solid var(--border); color:var(--text); padding:4px 6px; border-radius:3px; width:' + (wide ? '340' : '120') + 'px; font-family:monospace; font-size:11px;">'
+            + '<div style="color:var(--text3); font-size:10px; margin-top:2px;">' + escapeHtml(it.expects || '') + '</div></td>';
+        }
+        html += '<td style="padding:6px 8px; color:var(--text3); font-family:monospace; font-size:10px; max-width:220px; word-break:break-all; vertical-align:top;">' + escapeHtml(envStr) + '</td>';
+        html += '<td style="padding:6px 8px; white-space:nowrap; vertical-align:top;">'
+          + '<button class="btn" style="font-size:11px; padding:3px 8px;" onclick="saveTuning(\'' + it.key + '\', this)">Save</button>'
+          + (it.overridden ? ' <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="resetTuning(\'' + it.key + '\', this)">Reset</button>' : '')
+          + '</td>';
+        html += '</tr>';
+      }
+      html += '</table>';
+    }
+    el.innerHTML = html || '<div class="empty-state">No settings match the filter</div>';
+  }
+
+  async function saveTuning(key, btn) {
+    const items = window._tuning || [];
+    const it = items.find(x => x.key === key);
+    if (!it) return;
+    const input = document.getElementById('tune-' + key);
+    if (!input) return;
+    const raw = input.value;
+    if (it.danger) {
+      const cur = _tuningValueString(it);
+      if (!confirm('RISK SETTING\n\n' + it.label + ' (' + it.env + ')\n\n'
+        + 'from: ' + cur + '\n  to: ' + raw + '\n\nThis affects real exposure. Apply?')) return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    try {
+      const r = await fetch('/config/runtime', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: raw }),
+      });
+      const j = await r.json();
+      if (!j.ok) { alert('Rejected: ' + (j.error || 'unknown error')); return; }
+      await loadTuning();
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+  }
+
+  async function resetTuning(key, btn) {
+    if (!confirm('Clear the override for "' + key + '" and restore the Railway/env value?')) return;
+    if (btn) { btn.disabled = true; }
+    try {
+      const r = await fetch('/config/runtime', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, reset: true }),
+      });
+      const j = await r.json();
+      if (!j.ok) { alert('Reset failed: ' + (j.error || 'unknown')); return; }
+      await loadTuning();
+    } catch (e) {
+      alert('Reset failed: ' + e.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function switchSection(section, navEl) {
     activeSection = section;
     document.querySelectorAll('.section').forEach(el => el.style.display = 'none');
@@ -15551,6 +15726,9 @@
     // renders the active tab, so a just-switched-to tab would otherwise show
     // stale/empty content until the next 10s tick.
     _renderSectionPanels(section, window._lastOrders, window._lastIntel, window._lastStatus);
+    // Runtime Tuning loads on demand — it is not part of the 10s refresh cycle
+    // (config rarely changes, and re-rendering would clobber a field mid-edit).
+    if (section === 'tuning' && !window._tuning) loadTuning();
     // Clear Portfolio notification badge when switching to Portfolio
     // (badge tracks newly-confirmed parlays = new open positions, which
     // is what the Portfolio tab surfaces)

@@ -319,6 +319,19 @@ async function startup() {
   } catch (err) {
     log.warn('Startup', `    ⚠ Vig-config hydrate failed: ${err.message} — using env vig`);
   }
+  // Restore persisted Runtime Tuning overrides (pricing / risk / gating knobs
+  // set from the dashboard). Same precedence rule as the vig store, but applied
+  // PER KEY: a Railway change reclaims only the var it actually touched instead
+  // of dropping every override. MUST run before websocket.connect so the first
+  // RFQs price with the operator's live settings.
+  try {
+    const rtc = require('./services/runtime-config');
+    const r = await rtc.hydrate();
+    log.info('Startup', `    ✓ Runtime Tuning: ${r.applied || 0} override(s) applied`
+      + (r.discarded && r.discarded.length ? `, ${r.discarded.length} discarded (Railway env changed: ${r.discarded.join(', ')})` : ''));
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Runtime-config hydrate failed: ${err.message} — using env values`);
+  }
   // Hydrate the signature-cooldown lock map from Supabase, then start the
   // periodic DB-sync loop. MUST run before websocket.connect so the first
   // RFQs after restart respect any cooldowns from parlays that confirmed
@@ -9688,6 +9701,49 @@ function startStatusServer() {
       res.status(out.ok ? 200 : 400).json(out);
     } catch (err) {
       log.error('API', `/admin/override-leg-result failed: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // RUNTIME TUNING — pricing / risk / gating knobs, no redeploy required
+  // ---------------------------------------------------------------------------
+  // Precedence: an override wins until the corresponding Railway env var
+  // changes, at which point env reclaims that key (per-key, see
+  // services/runtime-config.js). Validation is server-side; the UI is not the
+  // gate, and an unregistered key is refused so a typo can never write a field
+  // the pricer does not read.
+
+  app.get('/config/runtime', async (req, res) => {
+    try {
+      const items = await require('./services/runtime-config').list();
+      const groups = {};
+      for (const it of items) (groups[it.group] = groups[it.group] || []).push(it);
+      res.json({
+        ok: true,
+        overriddenCount: items.filter(i => i.overridden).length,
+        groups,
+        items,
+      });
+    } catch (err) {
+      log.error('API', `/config/runtime GET failed: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // POST { key, value }  |  { key, reset: true }
+  // Risk/gating keys are flagged `danger` in the registry; the client asks for
+  // confirmation on those. The server still bounds-checks everything.
+  app.post('/config/runtime', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (!body.key) return res.status(400).json({ ok: false, error: 'key required' });
+      const rtc = require('./services/runtime-config');
+      const out = body.reset ? await rtc.reset(body.key) : await rtc.set(body.key, body.value);
+      if (!out.ok) return res.status(400).json(out);
+      res.json(out);
+    } catch (err) {
+      log.error('API', `/config/runtime POST failed: ${err.message}`);
       res.status(500).json({ ok: false, error: err.message });
     }
   });
