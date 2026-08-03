@@ -1436,7 +1436,22 @@ async function seedAllLines() {
         return false;
       }
       // Exclude anything matching half/quarter/prop patterns
-      if (excludePatterns.test(m.name)) return false;
+      // TENNIS SETS carve-out, KILL-SWITCHED OFF BY DEFAULT.
+      // excludePatterns deliberately rejects "1st set", "set moneyline" and
+      // "to win at least", which is what has kept PX's four Sets markets
+      // unregistered. When config.pricing.tennisSetsEnabled is on we admit
+      // exactly three market NAMES — anchored, so "2nd Set Moneyline",
+      // "Set Betting", "Correct Score" and every other set derivative stay
+      // excluded (we have no source for them). Shipped dark on the golf-
+      // outrights pattern: the source, parsing and same-match block are all in
+      // place, but nothing registers until the flag is flipped.
+      const isTennisSetsMarket = (sportKey === 'tennis')
+        && config.pricing.tennisSetsEnabled
+        && (/^(?:1st|first)\s+set\s+moneyline\s*$/i.test(m.name || '')
+          || /^set\s*1\s+moneyline\s*$/i.test(m.name || '')
+          || /^total\s+sets\s*$/i.test(m.name || '')
+          || /\bto\s+win\s+at\s+least\s+(?:one|1)\s+set\s*$/i.test(m.name || ''));
+      if (!isTennisSetsMarket && excludePatterns.test(m.name)) return false;
       // Allow F5 markets by name pattern
       const isF5 = f5NamePattern.test(m.name || '');
       const isH1 = h1NamePattern.test(m.name || '') || FIRST_HALF_MARKET_TYPES.includes(m.type);

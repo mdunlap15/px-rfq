@@ -1035,6 +1035,16 @@ const config = {
     // "zero fills" filter is endogenous and invalidated a pricing study on
     // 2026-08-03. Purely a measurement/exclusion flag: nothing declines on it.
     // Reference point: the known fisher sustains ~2,890 RFQs/hour.
+    // ---- Tennis SETS markets (PX ids 1309/1328/1329/1330) ----
+    // OFF by default. Source (services/pinnacle-tennis.js sets block),
+    // parsing (prophetx.js) and the same-match SGP block (pricer.js) are all
+    // in place and tested; this only controls whether line-manager REGISTERS
+    // them, i.e. whether PX can send us an RFQ for one. Same ship-dark pattern
+    // as GOLF_OUTRIGHTS_PARLAY_ENABLED.
+    // NOTE: best-of-3 ONLY — the source infers the format and fails closed on
+    // anything else, because "+1.5 sets = wins at least one set" is a Bo3
+    // identity (Bo5 would need +2.5).
+    tennisSetsEnabled: process.env.TENNIS_SETS_ENABLED === 'true' || process.env.TENNIS_SETS_ENABLED === '1',
     fisherDetectionEnabled: process.env.FISHER_DETECTION_ENABLED !== 'false',
     fisherRfqPerHour: parseInt(process.env.FISHER_RFQ_PER_HOUR) || 400,
     fisherRefireCount: parseInt(process.env.FISHER_REFIRE_COUNT) || 4,

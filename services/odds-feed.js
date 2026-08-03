@@ -5014,7 +5014,7 @@ function _mergeTennisBoard(data, { sourceLabel, idPrefix, flagKey, withPinnacle 
     };
   };
 
-  let added = 0, updated = 0, skippedCovered = 0, withTot = 0, withSp = 0;
+  let added = 0, updated = 0, skippedCovered = 0, withTot = 0, withSp = 0, withSetsMerged = 0;
   for (const g of data.games) {
     if (!g.homeTeam || !g.awayTeam || !g.h2h) continue;
     const a = lw(g.homeTeam), b = lw(g.awayTeam);
@@ -5030,6 +5030,41 @@ function _mergeTennisBoard(data, { sourceLabel, idPrefix, flagKey, withPinnacle 
     };
     const tb = totalsBlock(g.totalsByLine); if (tb) { markets.totals = tb; withTot++; }
     const sb = spreadsBlock(g.spreadsByLine); if (sb) { markets.spreads = sb; withSp++; }
+
+    // TENNIS SETS markets (Pinnacle only — Bovada carries no sets board, and
+    // the source fails closed on anything that is not best-of-3). Kept under
+    // their own market keys so nothing can confuse a SETS total (2.5) with the
+    // GAMES total (20.5-27.5) or a first-set winner with the match winner.
+    if (g.sets) {
+      if (g.sets.firstSetMl) {
+        markets.first_set_moneyline = {
+          home: mk(g.sets.firstSetMl.home, null), away: mk(g.sets.firstSetMl.away, null),
+          books: 1,
+          pinnacle: withPinnacle ? { home: g.sets.firstSetMl.home.americanOdds, away: g.sets.firstSetMl.away.americanOdds } : null,
+          fanduel: null, kalshi: null, [flagKey]: true,
+        };
+      }
+      if (g.sets.totalSets) {
+        const t = g.sets.totalSets;
+        markets.total_sets = {
+          line: t.line, over: mk(t.over, t.line), under: mk(t.under, t.line),
+          byLine: { [String(t.line)]: { line: t.line, over: mk(t.over, t.line), under: mk(t.under, t.line) } },
+          books: 1,
+          pinnacle: withPinnacle ? { over: t.over.americanOdds, under: t.under.americanOdds } : null,
+          fanduel: null, kalshi: null, [flagKey]: true,
+        };
+      }
+      if (g.sets.atLeastOneSet) {
+        markets.set_win_at_least_one = {
+          home: mk(g.sets.atLeastOneSet.home, null), away: mk(g.sets.atLeastOneSet.away, null),
+          books: 1,
+          pinnacle: withPinnacle ? { home: g.sets.atLeastOneSet.home.americanOdds, away: g.sets.atLeastOneSet.away.americanOdds } : null,
+          fanduel: null, kalshi: null, [flagKey]: true,
+        };
+      }
+      markets._setsMeta = { format: g.sets.format, consistency: g.sets.consistency };
+      withSetsMerged++;
+    }
 
     // Refresh our own prior entry in place (keeps freshness advancing across
     // cycles — the bug that kept the DK tennis merge permanently stale).
@@ -5062,7 +5097,8 @@ function _mergeTennisBoard(data, { sourceLabel, idPrefix, flagKey, withPinnacle 
 
   if (added > 0 || updated > 0) cache.fetchedAt = Date.now();
   log.info('OddsFeed', `${sourceLabel} tennis merge: added ${added}, updated ${updated} (${withTot} w/totals, `
-    + `${withSp} w/spreads), skipped ${skippedCovered} already-covered (${sourceLabel} games: ${data.games.length})`);
+    + `${withSp} w/spreads, ${withSetsMerged} w/sets), skipped ${skippedCovered} already-covered `
+    + `(${sourceLabel} games: ${data.games.length})`);
   return { added, updated };
 }
 

@@ -152,7 +152,11 @@ async function fetchPinnacleTennis() {
     if (!row || row.matchupId == null) { unresolved++; continue; }
     if (!byId.has(row.matchupId)) { unresolved++; continue; } // never guess units
     if (row.status && row.status !== 'open') continue;
-    if (row.period !== 0) continue; // full match only; period 1 = first set
+    // Keep period 0 (full match) AND period 1 (first set). Period 1 used to be
+    // dropped here, which silently starved the 1st-Set-Moneyline block below.
+    // Every consumer filters on period explicitly — the games ladder takes only
+    // period 0, the sets block takes period 1 for the first-set moneyline.
+    if (row.period !== 0 && row.period !== 1) continue;
     if (!rowsByMatchup.has(row.matchupId)) rowsByMatchup.set(row.matchupId, []);
     rowsByMatchup.get(row.matchupId).push(row);
   }
@@ -160,6 +164,7 @@ async function fetchPinnacleTennis() {
   const now = Date.now();
   const games = [];
   let skippedLive = 0, skippedNoMl = 0, withTot = 0, withSp = 0, noGamesChild = 0;
+  let withSets = 0, setsRejected = 0, setsSkippedFormat = 0;
 
   for (const parent of matchups) {
     // The real match is the Sets-unit matchup with no parent. Its Games child
@@ -192,6 +197,10 @@ async function fetchPinnacleTennis() {
     // --- Moneyline: from the PARENT (match winner is unit-agnostic) ---------
     for (const row of (rowsByMatchup.get(parent.id) || [])) {
       if (row.type !== 'moneyline') continue;
+      // MUST filter period here. Period-1 rows are now kept during bucketing
+      // (for the 1st-set moneyline), so without this the FIRST-SET winner could
+      // be picked up as the MATCH winner — a silent, severe mispricing.
+      if (row.period !== 0) continue;
       const prices = row.prices || [];
       const h = prices.find(p => p.designation === 'home');
       const a = prices.find(p => p.designation === 'away');
@@ -213,6 +222,11 @@ async function fetchPinnacleTennis() {
       noGamesChild++;
     } else {
       for (const row of (rowsByMatchup.get(child.id) || [])) {
+        // Full match only. Period-1 rows on the Games child are FIRST-SET game
+        // spreads/totals (s;1;s;1.5, s;1;ou;10.5) — a different product from
+        // PX's full-match ladder. They reach this loop now that bucketing keeps
+        // period 1, so the guard is load-bearing.
+        if (row.period !== 0) continue;
         const prices = row.prices || [];
         if (row.type === 'spread') {
           const h = prices.find(p => p.designation === 'home');
@@ -246,14 +260,129 @@ async function fetchPinnacleTennis() {
       }
     }
 
+    // --- SETS markets, from the PARENT (units=Sets) -------------------------
+    // PX posts four of these per tennis match and we register none of them:
+    //   "1st Set Moneyline"                 <- period-1 moneyline
+    //   "Total Sets" (2.5)                  <- period-0 total on the SETS matchup
+    //   "<Player> To Win At Least One Set"  <- the +1.5 SETS spread, see below
+    //
+    // BEST-OF-3 ONLY, and the format is INFERRED, not assumed. In Bo3 the set
+    // differentials are +2 (2-0), +1 (2-1), -1 (1-2), -2 (0-2), so "+1.5 sets"
+    // covers everything except a 0-2 loss — i.e. it is EXACTLY "wins at least
+    // one set". In best-of-5 the equivalent line is +2.5, so applying the Bo3
+    // mapping to a Slam would price a completely different event. We infer the
+    // format from the posted total-sets line (2.5 => Bo3) and FAIL CLOSED when
+    // it is anything else or absent. Probed 2026-08-03: 92 of 94 matches Bo3,
+    // 0 Bo5, 2 indeterminate.
+    //
+    // The +1.5 side may sit in the PRIMARY or the ALTERNATE spread row, so we
+    // select by SIGN of the player's own points, never by |points| === 1.5.
+    // Each spread row is its own 2-way market (X +1.5 vs opponent -1.5) and is
+    // de-vigged on its own.
+    g.sets = null;
+    if (child || true) {
+      const parentRows = rowsByMatchup.get(parent.id) || [];
+      const totalRows = parentRows.filter(r => r.type === 'total');
+      const setLines = totalRows.map(r => (r.prices || [])[0])
+        .filter(Boolean).map(p => p.points).filter(v => v != null);
+      const format = setLines.some(l => Number(l) === 2.5) ? 'Bo3'
+        : setLines.some(l => Number(l) >= 3.5) ? 'Bo5' : null;
+
+      if (format === 'Bo3') {
+        const sets = { format, firstSetMl: null, totalSets: null, atLeastOneSet: null, consistency: null };
+
+        // 1st Set moneyline — period 1 on the parent.
+        for (const r of parentRows) {
+          if (r.type !== 'moneyline' || r.period !== 1) continue;
+          const h = (r.prices || []).find(p => p.designation === 'home');
+          const a = (r.prices || []).find(p => p.designation === 'away');
+          const fair = devig2(amerToProb(h && h.price), amerToProb(a && a.price));
+          if (fair) {
+            sets.firstSetMl = {
+              home: { americanOdds: h.price, impliedProb: amerToProb(h.price), fairProb: fair.a },
+              away: { americanOdds: a.price, impliedProb: amerToProb(a.price), fairProb: fair.b },
+            };
+          }
+          break;
+        }
+
+        // Total sets at 2.5 (period 0).
+        for (const r of totalRows) {
+          if (r.period !== 0) continue;
+          const ov = (r.prices || []).find(p => p.designation === 'over');
+          const un = (r.prices || []).find(p => p.designation === 'under');
+          if (!ov || !un || Number(ov.points) !== 2.5) continue;
+          const fair = devig2(amerToProb(ov.price), amerToProb(un.price));
+          if (fair) {
+            sets.totalSets = {
+              line: 2.5,
+              over: { americanOdds: ov.price, impliedProb: amerToProb(ov.price), fairProb: fair.a },
+              under: { americanOdds: un.price, impliedProb: amerToProb(un.price), fairProb: fair.b },
+            };
+          }
+          break;
+        }
+
+        // "Wins at least one set" = that player's +1.5 sets side.
+        const alos = {};
+        for (const r of parentRows) {
+          if (r.type !== 'spread' || r.period !== 0) continue;
+          const h = (r.prices || []).find(p => p.designation === 'home');
+          const a = (r.prices || []).find(p => p.designation === 'away');
+          if (!h || !a || h.points == null || a.points == null) continue;
+          const fair = devig2(amerToProb(h.price), amerToProb(a.price));
+          if (!fair) continue;
+          if (Number(h.points) === 1.5) {
+            alos.home = { americanOdds: h.price, impliedProb: amerToProb(h.price), fairProb: fair.a };
+          }
+          if (Number(a.points) === 1.5) {
+            alos.away = { americanOdds: a.price, impliedProb: amerToProb(a.price), fairProb: fair.b };
+          }
+        }
+        if (alos.home && alos.away) sets.atLeastOneSet = alos;
+
+        // CONSISTENCY CHECK. Exactly one of the two players fails to win a set
+        // unless the match goes three, so
+        //     P(home >=1) + P(away >=1) - P(over 2.5) = 1
+        // must hold. Measured ~0.985 on a live sample, i.e. de-vig noise across
+        // three separate market rows. Anything further out means we have mixed
+        // up a side or a format, so the whole block is discarded rather than
+        // priced. This is the cheapest available guard against the sets/games
+        // and Bo3/Bo5 confusions that make these markets dangerous.
+        if (sets.atLeastOneSet && sets.totalSets) {
+          const identity = sets.atLeastOneSet.home.fairProb
+            + sets.atLeastOneSet.away.fairProb
+            - sets.totalSets.over.fairProb;
+          sets.consistency = Math.abs(identity - 1);
+          const tol = Number(process.env.TENNIS_SETS_CONSISTENCY_TOL) || 0.06;
+          if (sets.consistency > tol) {
+            setsRejected++;
+            g.sets = null;
+          } else {
+            g.sets = sets;
+          }
+        } else if (sets.firstSetMl || sets.totalSets) {
+          // Partial board: keep what we have, but with no at-least-one-set the
+          // identity cannot be checked, so those two markets stay unavailable.
+          sets.atLeastOneSet = null;
+          g.sets = sets;
+        }
+      } else {
+        setsSkippedFormat++;
+      }
+    }
+
     if (Object.keys(g.totalsByLine).length) withTot++;
     if (Object.keys(g.spreadsByLine).length) withSp++;
+    if (g.sets) withSets++;
     games.push(g);
   }
 
   log.info('PinnacleTennis', `${games.length} pre-match games (${matchups.length} matchups, `
     + `${withTot} w/totals, ${withSp} w/spreads, skipped ${skippedLive} live + ${skippedNoMl} no-ML, `
-    + `${noGamesChild} w/o games child, ${unresolved} unattributable market rows) in ${Date.now() - startedAt}ms`);
+    + `${noGamesChild} w/o games child, ${unresolved} unattributable market rows; `
+    + `sets: ${withSets} usable, ${setsRejected} failed the consistency check, `
+    + `${setsSkippedFormat} not best-of-3) in ${Date.now() - startedAt}ms`);
   return { games, fetchedAt: Date.now() };
 }
 

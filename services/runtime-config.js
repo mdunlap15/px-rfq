@@ -135,6 +135,9 @@ const REGISTRY = [
     label: 'Stale price minutes', help: 'Decline if the odds cache is older than this. Raising it quotes off staler prices.' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
 
+  { key: 'tennisSetsEnabled', path: 'tennisSetsEnabled', type: 'bool', group: 'gating', danger: true, env: 'TENNIS_SETS_ENABLED',
+    label: 'Tennis Sets markets', help: 'Register PX 1st Set ML / Total Sets / To Win At Least One Set. Best-of-3 only (source fails closed otherwise). Same-match parlays of these are hard-blocked. Ships OFF.' },
+
   // ---- quote-fisher detection (measurement only — nothing declines on it) ----
   { key: 'fisherDetectionEnabled', path: 'fisherDetectionEnabled', type: 'bool', group: 'gating', env: 'FISHER_DETECTION_ENABLED',
     label: 'Quote-fisher detection', help: 'Stamps meta.fisher on each quote so fill-rate analysis can exclude spam. Classifies from the REQUEST STREAM only, never from fills.' },

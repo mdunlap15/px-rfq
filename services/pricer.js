@@ -3791,6 +3791,41 @@ function shouldDecline(legs, parlayId) {
       }
     }
 
+    // TENNIS SETS markets may NEVER be parlayed with anything else on the same
+    // match. Like the MoV block above this is an EXPLICIT, UNCONDITIONAL
+    // pre-pass rather than a reliance on the generic SGP gate, which blocks
+    // these today only because no key in SGP_ALLOWED_COMBOS happens to match —
+    // incidental protection that evaporates the moment someone adds a key.
+    //
+    // The relationships are not merely correlated, several are deterministic
+    // (best-of-3):
+    //   - Total Sets OVER 2.5 means the match went 2-1, which means BOTH
+    //     players won at least one set. So over-2.5 IMPLIES both "at least one
+    //     set" YES legs. P(over ∧ alos) = P(over), not the product.
+    //   - Winning the MATCH requires winning 2 sets, so match-win ⊂
+    //     "wins at least one set". Nested, so the joint is the match leg alone.
+    //   - Total Sets UNDER 2.5 (a 2-0) means the LOSER won zero sets, i.e. it
+    //     is the exact complement of the loser's "at least one set" YES.
+    //   - 1st Set moneyline is strongly correlated with the match moneyline.
+    // Pricing any of these as independent multiplies a near-certain or
+    // impossible joint as if it were live.
+    const SET_MARKETS = new Set(['set_win_at_least_one', 'first_set_moneyline', 'total_sets']);
+    const setLegs = legInfos.filter(li => SET_MARKETS.has(li.marketType));
+    if (setLegs.length) {
+      for (const a of setLegs) {
+        for (const b of legInfos) {
+          if (a === b) continue;
+          if (!a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+          const bDesc = `${b.playerName || b.teamName || '?'} ${b.marketType}${b.selection ? ':' + b.selection : ''}`;
+          return {
+            declined: true,
+            reason: 'tennis_sets_sgp_blocked',
+            detail: `tennis set markets cannot be parlayed same-match: ${a.playerName || a.teamName || '?'} ${a.marketType}:${a.selection} + ${bDesc} on event ${a.pxEventId} — set outcomes are nested or deterministic within one match (over 2.5 sets IMPLIES both players won a set; winning the match implies winning a set)`,
+          };
+        }
+      }
+    }
+
     const advLegs = legInfos.filter(li => li.marketType === 'advance');
     if (advLegs.length) {
       const norm = s => String(s || '').toLowerCase().trim();

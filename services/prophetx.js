@@ -654,6 +654,61 @@ function parseMarketSelections(market) {
     return results;
   }
 
+  // TENNIS SETS MARKETS. PX posts four per match (probe 2026-08-03, ATP
+  // Montreal), and two of them are the BTTS/MoV shape trap yet again:
+  //
+  //   "1st Set Moneyline"                    type='moneyline'  id 1309
+  //   "Total Sets"            line 2.5       type='total'      id 1328
+  //   "<Player> To Win At Least One Set"     type='moneyline'  id 1329/1330
+  //
+  // The first two are the DANGEROUS ones. "1st Set Moneyline" carries PX type
+  // 'moneyline' and contains the word "Moneyline", so a substring-based name
+  // allowlist can admit it as the MATCH moneyline — pricing one set off the
+  // full-match line. "Total Sets" carries type 'total' with a 2.5 line against
+  // Total GAMES lines of 20.5-27.5; priced as a games total it is nonsense.
+  // Giving them their own marketTypes makes the handling deliberate instead of
+  // relying on a name filter to keep dropping them.
+  //
+  // The third is the MoV shape exactly: selections are literally YES/NO and the
+  // player appears ONLY in the market name.
+  //
+  // BEST-OF-3 SEMANTICS live in the pricing source, not here — see
+  // services/pinnacle-tennis.js: "+1.5 sets" is "wins at least one set" only in
+  // best-of-3, and the format is inferred rather than assumed.
+  const setsAlosMatch = /^(.+?)\s+to\s+win\s+at\s+least\s+(?:one|1)\s+set\s*$/i.exec(marketName.trim());
+  if (setsAlosMatch) {
+    const who = (setsAlosMatch[1] || '').trim();
+    const results = [];
+    for (const selGroup of (market.selections || [])) {
+      for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
+        if (!sel || !sel.line_id) continue;
+        const nameLC = (sel.name || sel.display_name || '').toLowerCase();
+        const selection = nameLC.includes('yes') ? 'yes' : nameLC.includes('no') ? 'no' : 'unknown';
+        if (selection === 'unknown') continue;
+        results.push({
+          lineId: sel.line_id,
+          marketType: 'set_win_at_least_one',
+          selection,
+          playerName: who,
+          teamName: who,
+          line: null,
+          competitorId: sel.competitor_id || null,
+          outcomeName: sel.name,
+        });
+      }
+    }
+    return results;
+  }
+  // Anchored: "1st Set Moneyline" / "Set 1 Moneyline". Deliberately does NOT
+  // match "2nd Set ..." — we have no source for later sets, so those must stay
+  // unclassified and drop rather than be priced off the first set.
+  if (/^(?:1st|first)\s+set\s+moneyline\s*$/i.test(marketName.trim())
+      || /^set\s*1\s+moneyline\s*$/i.test(marketName.trim())) {
+    marketType = 'first_set_moneyline';
+  } else if (/^total\s+sets\s*$/i.test(marketName.trim())) {
+    marketType = 'total_sets';
+  }
+
   const isBttsByName = /^both\s*teams\s*to\s*score\b/i.test(marketName.trim());
   // "Both Teams To Score in the 1st Half" is a DIFFERENT market with a
   // different fair — we have no odds for it, so leave it unclassified and
@@ -755,7 +810,12 @@ function parseMarketSelections(market) {
     return results;
   }
 
-  if ((marketType === 'moneyline' || isF5Moneyline || isH1Moneyline) && market.selections) {
+  // `first_set_moneyline` reuses the moneyline builder verbatim: PX gives it
+  // the same two-competitor shape, and line-manager's home/away matching then
+  // works unchanged. Only the marketType differs, which is what stops it being
+  // priced off the MATCH line.
+  if ((marketType === 'moneyline' || marketType === 'first_set_moneyline'
+       || isF5Moneyline || isH1Moneyline) && market.selections) {
     // Moneyline: selections is array of arrays, each inner array has one object
     for (const selGroup of market.selections) {
       for (const sel of selGroup) {
@@ -771,7 +831,9 @@ function parseMarketSelections(market) {
         });
       }
     }
-  } else if ((marketType === 'spread' || marketType === 'total' || marketType === 'team_total' || isF5Spread || isF5Total || isH1Spread || isH1Total) && market.market_lines) {
+  } else if ((marketType === 'spread' || marketType === 'total' || marketType === 'team_total'
+             || marketType === 'total_sets' || isF5Spread || isF5Total || isH1Spread || isH1Total)
+             && market.market_lines) {
     // Spread/Total: market_lines array, each with selections
     // Include ALL alternate lines so we can respond to any RFQ
     //
@@ -797,7 +859,7 @@ function parseMarketSelections(market) {
           let selection = 'unknown';
           if (marketType === 'spread' || isF5Spread || isH1Spread) {
             selection = sel.line < 0 ? 'favorite' : 'underdog';
-          } else if (marketType === 'total' || marketType === 'team_total' || isF5Total || isH1Total) {
+          } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets' || isF5Total || isH1Total) {
             const nameLC = (sel.name || sel.display_name || '').toLowerCase();
             selection = nameLC.includes('over') ? 'over' : nameLC.includes('under') ? 'under' : 'unknown';
           }
@@ -822,7 +884,8 @@ function parseMarketSelections(market) {
         }
       }
     }
-  } else if ((marketType === 'spread' || marketType === 'total' || marketType === 'team_total' || isF5Spread || isF5Total) && market.selections) {
+  } else if ((marketType === 'spread' || marketType === 'total' || marketType === 'team_total'
+             || marketType === 'total_sets' || isF5Spread || isF5Total) && market.selections) {
     // Fallback: spread/total market with selections directly (no market_lines
     // wrapper). PX sometimes returns alt lines as SEPARATE market entries,
     // each a flat spread/total market with its own selections array. Without
@@ -836,7 +899,7 @@ function parseMarketSelections(market) {
         let selection = 'unknown';
         if (marketType === 'spread' || isF5Spread) {
           selection = (legLine != null && legLine < 0) ? 'favorite' : 'underdog';
-        } else if (marketType === 'total' || marketType === 'team_total' || isF5Total) {
+        } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets' || isF5Total) {
           const nameLC = (sel.name || sel.display_name || '').toLowerCase();
           selection = nameLC.includes('over') ? 'over' : nameLC.includes('under') ? 'under' : 'unknown';
         }
