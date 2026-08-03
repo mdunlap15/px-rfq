@@ -25,6 +25,42 @@ const _tieBreakStats = {
   tiedLost: { n: 0, latencies: [] },
   won: { n: 0, latencies: [] },
 };
+// Equal-price ("tie") test for a matched parlay vs our own quote.
+//
+// SIGN CONVENTIONS — the trap this helper exists to close (fixed 2026-08-03):
+//   * `matchedOdds`, the raw param PX sends on order.matched, is SP-SIDE.
+//   * `entry.matchedAmericanOdds` = -matchedOdds is BETTOR-SIDE, and is what
+//     db.js:375 persists into the matched_odds column (db.js:422 reads it back
+//     unchanged).
+//   * `ourQuote.offeredOdds` is BETTOR-SIDE.
+// So a tie is only meaningful once BOTH sides are bettor-side.
+//
+// Before this helper the two call sites disagreed and BOTH were wrong:
+//   live path     compared the SP-side raw value with SUBTRACTION, so a true
+//                 tie computed as -2x the price (ours +285 vs raw -285 ->
+//                 delta -570) and never fell inside the tolerance. Result:
+//                 `tied_lost` was unreachable — 2 rows all-time, both
+//                 artifacts — and _recordTieBreakSample never fired, so
+//                 /market-intel tieBreakDiagnostics sat at n=0 forever.
+//   backfill path compared the BETTOR-side value with ADDITION (its comment
+//                 claimed the field was SP-side), so it had the mirror-image
+//                 bug: a true tie computed as 2x the price.
+//
+// Impact was reporting, not bidding: ~2,690 of our OWN wins per 30d were
+// mislabelled `other_sp`, understating quoteWinRate (13% shown vs ~17.4%
+// actual — 2,000 held fills of 11,489 quoted-and-matched parlays).
+const ODDS_TIE_TOL = 5; // American odds — generous, absorbs minor PX drift
+function _isOddsTie(bettorSideMatchedOdds, offeredOdds) {
+  if (bettorSideMatchedOdds == null || offeredOdds == null) return false;
+  const a = Number(bettorSideMatchedOdds), b = Number(offeredOdds);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.abs(a - b) <= ODDS_TIE_TOL;
+}
+/** Raw PX order.matched odds (SP-side) -> bettor-side, matching offeredOdds. */
+function _toBettorSideOdds(rawMatchedOdds) {
+  return rawMatchedOdds == null ? null : -Number(rawMatchedOdds);
+}
+
 function _recordTieBreakSample(bucket, ourQuote) {
   try {
     const lat = ourQuote && ourQuote.meta && ourQuote.meta.submitLatencyMs;
@@ -1670,9 +1706,10 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
   let outcome;
   if (weQuoted) {
     const offered = ourQuote.offeredOdds;
-    const ODDS_TOL = 5; // American odds — generous to absorb minor PX drift
-    const oddsTie = (matchedOdds != null && offered != null &&
-      Math.abs(matchedOdds - offered) <= ODDS_TOL);
+    // `matchedOdds` is SP-side; normalise to bettor-side before comparing with
+    // our (bettor-side) offer. See _isOddsTie for the full sign-convention note.
+    const matchedBettorSide = _toBettorSideOdds(matchedOdds);
+    const oddsTie = _isOddsTie(matchedBettorSide, offered);
     // Canonical win = we actually got the fill. PX broadcasts order.matched to
     // EVERY SP that quoted (Apr 25 audit), so a price tying our offer is NOT
     // proof we won — another SP can take the same price first. Only claim
@@ -1700,7 +1737,13 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
           observedAt: new Date().toISOString(),
           matchedOdds, matchedStake,
           ourOfferedOdds: offered,
-          oddsDelta: (matchedOdds != null && offered != null) ? (matchedOdds - offered) : null,
+          // Bettor-side, so this is directly comparable to ourOfferedOdds.
+          // (It used to record the raw SP-side delta, which read as ~-2x the
+          // price on what were actually exact ties — the tell that uncovered
+          // the sign bug.)
+          matchedOddsBettorSide: matchedBettorSide,
+          oddsDelta: (matchedBettorSide != null && offered != null)
+            ? (matchedBettorSide - offered) : null,
         };
         db.saveOrder(ourQuote).catch(err => log.error('DB', `saveOrder(matched-other-sp) failed: ${err.message}`));
       }
@@ -1972,12 +2015,14 @@ async function backfillOurOddsFromDb(entry) {
       if ((marketStats.missedNoQuote || 0) > 0) marketStats.missedNoQuote--;
     } else {
       // Distinguish a same-price loss (we tied the winning price but another
-      // SP got the fill) from being outbid — the same tie-vs-loss blind spot
-      // the live path fixes, applied to the post-restart backfill path.
-      // entry.matchedAmericanOdds is SP-side (negated PX bettor-side) and
-      // row.offeredOdds is bettor-side, so a tie is |matched + offered| <= tol.
-      const tie = (entry.matchedAmericanOdds != null && row.offeredOdds != null &&
-        Math.abs(entry.matchedAmericanOdds + row.offeredOdds) <= 5);
+      // SP got the fill) from being outbid.
+      // entry.matchedAmericanOdds is already BETTOR-side (it is -rawMatchedOdds
+      // on the live path, and db.js round-trips it unchanged through the
+      // matched_odds column), so it compares directly against row.offeredOdds.
+      // This previously ADDED the two on the belief the field was SP-side,
+      // which made a true tie compute as 2x the price — the mirror image of
+      // the live path's bug. See _isOddsTie.
+      const tie = _isOddsTie(entry.matchedAmericanOdds, row.offeredOdds);
       entry.outcome = tie ? 'tied_lost' : 'lost';
       // Decrement the 'missed' counter — the parlay was an auction we
       // competed in, not one we sat out. (No dedicated 'lost' counter
@@ -7099,6 +7144,10 @@ module.exports = {
   getConcurrentMarketExposureSnapshot,
   playerKeyForLeg,
   getRecentOrders,
+  // Sign-convention helpers — exported for test/odds-tie-sign.test.js, which
+  // pins the tie test against real production values.
+  __isOddsTie: _isOddsTie,
+  __toBettorSideOdds: _toBettorSideOdds,
   getRoiWindow,
   getStats,
   getPnLBySport,
