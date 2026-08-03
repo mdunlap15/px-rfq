@@ -824,6 +824,26 @@ async function handleRFQ(data) {
     // via scripts/_backfill_creator_ids.js.
     const creatorId = payload.creator_id || payload.creatorId || null;
 
+    // QUOTE-FISHER CLASSIFICATION. Recorded on EVERY inbound RFQ, before any
+    // decline/dedup logic, so the rate reflects what was actually asked of us
+    // rather than what we chose to quote. The verdict is stamped onto the
+    // quote (meta.fisher) so fill-rate and elasticity analysis can exclude
+    // spam WITHOUT conditioning on the outcome — an ex-post "creators with
+    // zero fills" filter is endogenous and silently invalidated a pricing
+    // study on 2026-08-03 (79.7% of the sample was four zero-fill creators,
+    // concentrated in the expensive price bands).
+    let fisherInfo = null;
+    try {
+      const legSig = Array.isArray(legs) && legs.length
+        ? legs.map(l => String(l.line_id || l.lineId || '')).sort().join('|')
+        : null;
+      // NOTE: wall-clock, NOT startTime — that is a performance.now() reading
+      // (see line ~799) and the activity window is Date.now()-based.
+      fisherInfo = require('./creator-activity').recordRfq(creatorId, legSig, Date.now());
+    } catch (err) {
+      log.debug('RFQ', `fisher classification failed (non-fatal): ${err.message}`);
+    }
+
     // Fast dedup: skip if we already saw this exact parlayId in the last 2s.
     // Pusher delivers duplicate events ~2-30ms apart; processing both doubles
     // our latency footprint and submits redundant offers to PX.
@@ -1580,6 +1600,15 @@ async function handleRFQ(data) {
     // identifier — see comment near `const creatorId` above) into the
     // meta object so it gets persisted on the parlay_orders row.
     if (creatorId) result.meta.creatorId = creatorId;
+    // Stamp the quote-time fisher verdict so downstream fill-rate / elasticity
+    // work can exclude spam without conditioning on the outcome. Recorded even
+    // when false, so "absent" is distinguishable from "not a fisher".
+    if (fisherInfo) {
+      result.meta.fisher = !!fisherInfo.fisher;
+      result.meta.fisherReason = fisherInfo.reason || null;
+      result.meta.creatorRfqPerHour = fisherInfo.rfqPerHour;
+      result.meta.creatorRefires = fisherInfo.refires;
+    }
     orderTracker.recordQuote(
       parlayId,
       result.meta.legs,

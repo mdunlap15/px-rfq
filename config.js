@@ -1029,6 +1029,16 @@ const config = {
     // just re-quoting that book's vigged line). DK+FD = 2 sharp books
     // is sufficient; default lowered from 3 to 2 (2026-06-24).
     propMinBooksWithBothSides: parseInt(process.env.PROP_MIN_BOOKS_WITH_BOTH_SIDES) || 2,
+    // ---- Quote-fisher detection (services/creator-activity.js) ----
+    // Classifies a counterparty as a quote-fisher from its REQUEST STREAM only
+    // (rate + grid re-fires), never from whether we filled — an ex-post
+    // "zero fills" filter is endogenous and invalidated a pricing study on
+    // 2026-08-03. Purely a measurement/exclusion flag: nothing declines on it.
+    // Reference point: the known fisher sustains ~2,890 RFQs/hour.
+    fisherDetectionEnabled: process.env.FISHER_DETECTION_ENABLED !== 'false',
+    fisherRfqPerHour: parseInt(process.env.FISHER_RFQ_PER_HOUR) || 400,
+    fisherRefireCount: parseInt(process.env.FISHER_REFIRE_COUNT) || 4,
+    fisherWindowMinutes: parseInt(process.env.FISHER_WINDOW_MINUTES) || 60,
     // "Book-mirror" sweetener for one-sided binary MLB hitter props
     // (hitter_hr, hitter_rbi_runs): quote the OVER at the book's RAW posted
     // price minus this fraction (sweeter for the counterparty), via

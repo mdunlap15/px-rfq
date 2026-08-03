@@ -2880,6 +2880,14 @@ function getMarketIntel(limit = 50) {
       };
     })(),
     quoteWinRate: marketStats.weQuoted > 0 ? (marketStats.weWon / marketStats.weQuoted * 100).toFixed(1) + '%' : '-',
+    // Quote-fisher activity. Surfaced next to the rate metrics because it is
+    // the denominator caveat: a 2026-08-03 audit found 79.7% of a 30-day quote
+    // sample came from four zero-fill fishers, making every naive fill-rate
+    // number ~5x too low. Classification is from the request stream only.
+    fisherActivity: (() => {
+      try { return require('./creator-activity').stats(10); }
+      catch (_) { return null; }
+    })(),
     coverageRate: marketStats.totalMatched > 0 ? (marketStats.weQuoted / marketStats.totalMatched * 100).toFixed(1) + '%' : '-',
     // Sport breakdown of matched parlays
     matchedBySport: (() => {

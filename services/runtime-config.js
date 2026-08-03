@@ -134,6 +134,15 @@ const REGISTRY = [
   { key: 'stalePriceMinutes', path: 'stalePriceMinutes', type: 'number', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES',
     label: 'Stale price minutes', help: 'Decline if the odds cache is older than this. Raising it quotes off staler prices.' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
+
+  // ---- quote-fisher detection (measurement only — nothing declines on it) ----
+  { key: 'fisherDetectionEnabled', path: 'fisherDetectionEnabled', type: 'bool', group: 'gating', env: 'FISHER_DETECTION_ENABLED',
+    label: 'Quote-fisher detection', help: 'Stamps meta.fisher on each quote so fill-rate analysis can exclude spam. Classifies from the REQUEST STREAM only, never from fills.' },
+  { key: 'fisherRfqPerHour', path: 'fisherRfqPerHour', type: 'number', min: 10, max: 100000, group: 'gating', env: 'FISHER_RFQ_PER_HOUR',
+    label: 'Fisher threshold (RFQs/hour)', help: 'The known fisher sustains ~2,890/h; genuine counterparties are far below.' },
+  { key: 'fisherRefireCount', path: 'fisherRefireCount', type: 'number', min: 2, max: 100, group: 'gating', env: 'FISHER_REFIRE_COUNT',
+    label: 'Fisher threshold (grid re-fires)', help: 'Identical leg signature re-requested this many times inside the window.' },
+  { key: 'fisherWindowMinutes', path: 'fisherWindowMinutes', type: 'number', min: 5, max: 1440, group: 'gating', env: 'FISHER_WINDOW_MINUTES', label: 'Fisher window (minutes)' },
 ];
 
 const BY_KEY = new Map(REGISTRY.map(d => [d.key, d]));
