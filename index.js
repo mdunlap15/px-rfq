@@ -1158,7 +1158,18 @@ function startStatusServer() {
           deployedParlay = orderTracker.getTotalPortfolioRisk() || 0;
         }
         const deployed = deployedSingleLeg + deployedParlay;
-        const totalEquity = (cashBalance != null) ? (cashBalance + deployed) : null;
+        // ACCOUNT EQUITY = Cash Balance + Filled. RESOLVED 2026-08-03 by an operator
+        // screenshot of the PX account, which outranks the earlier inference chain:
+        //   PX shows  Balance 63,672.28 | GEC 3,334.23 | Cash Balance 60,338.05
+        //             Filled 15,458.84  | Resting 71,143.00
+        //   -> equity 60,338.05 + 15,458.84 = 75,796.89
+        // PX's "Filled" (matched_wager_balance) ALREADY CONTAINS matched PARLAY stake —
+        // our parlay openExposure (~$8.1K) was being added on top, double-counting it and
+        // inflating equity to ~$89.7K. Adding deployedParlay here is therefore WRONG.
+        // Do NOT re-add it: ccc39e0 removed it once and was reverted as "understating",
+        // but that was validated against /viewer, which used the same inflated formula
+        // (circular). The PX account itself is the authority.
+        const totalEquity = (cashBalance != null) ? (cashBalance + deployedSingleLeg) : null;
         // Only compute account-based P&L when startingBankroll was
         // explicitly set (STARTING_BANKROLL env var present). Otherwise
         // leave null so the dashboard falls back appropriately —

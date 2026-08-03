@@ -7890,9 +7890,14 @@
     const deployedParlay = srvParlay != null ? srvParlay : (portRisk || 0);
     const deployedAmt = deployedSingle + deployedParlay;
     const deployedAmtStr = fmtDollar(deployedAmt);
+    // Account Equity = Cash Balance + FILLED only. PX's Filled (matched_wager_balance)
+    // already contains matched PARLAY stake, so adding open parlay exposure double-counts
+    // (operator PX screenshot 2026-08-03: cash 60,338.05 + filled 15,458.84 = 75,796.89,
+    // vs the old formula's 89.7K). Fallback must NOT use deployedAmt, which still carries
+    // the parlay term for the Deployed stat.
     const totalEquity = (portfolio && Number.isFinite(portfolio.totalEquity))
       ? portfolio.totalEquity
-      : ((cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null);
+      : ((cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedSingle) : null);
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
     const totalEquityCls = totalEquity == null ? ''
       : totalEquity < 500 ? 'negative'
@@ -7978,7 +7983,7 @@
 
     const html = `<div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 16px;">
       <div class="stat-bar" style="gap:6px 18px;">
-        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Total Deployed (Filled single-leg stake + open parlay exposure) — the /viewer formula, verified against the PX account. Cash Balance = PX balance − GEC − promotional (both excluded). Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
+        ${stat('Account Equity', totalEquityStr, totalEquityCls, 'Cash Balance + Filled — matches the PX app exactly. Cash Balance = PX balance − GEC − promotional (both excluded). Filled = PX matched_wager_balance, which ALREADY includes matched parlay stake, so open parlay exposure is NOT added (doing so double-counted it). Resting (unmatched) offers are notional and excluded. For parlay performance see Parlay P&L.')}
         ${stat('Total Deployed', deployedStr, portCls, `All capital locked in open positions = single-leg matched stake (PX matched_wager_balance, ${fmtDollar(filledNum)}) + open parlay stake (${fmtDollar(portRisk)}). These are two DISJOINT pools — PX's matched_wager_balance excludes parlays entirely, so it alone understates deployed. Resting offers are notional and shown separately as Open Orders. (% of account equity)`)}
         ${stat('— Straight Bets', straightStr, 'neutral', 'Deployed on SINGLE-LEG (straight) bets — PX matched_wager_balance. PX excludes parlay stake from this field entirely, which is why it must be added to the parlay figure rather than used alone.')}
         ${stat('— Parlays', parlayDepStr, 'neutral', 'Deployed on open PARLAYS — matched parlay stake from our own tracker. Parlay wagers never appear in PX matched_wager_balance, so this is the other half of Total Deployed.')}

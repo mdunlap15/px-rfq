@@ -6967,7 +6967,16 @@
     const deployedAmt = (portfolio && Number.isFinite(portfolio.deployed))
       ? portfolio.deployed : (filledNum + portRisk);
     const deployedAmtStr = fmtDollar(deployedAmt);
-    const totalEquity = (cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + deployedAmt) : null;
+    // Account Equity = Cash Balance + FILLED only — NOT cash + deployedAmt. PX's Filled
+    // (matched_wager_balance) already includes matched PARLAY stake, so deployedAmt
+    // (filled + open parlay exposure) double-counts it. Operator PX screenshot 2026-08-03:
+    // cash 60,338.05 + filled 15,458.84 = 75,796.89 (old formula read ~89.7K).
+    // Prefer the server's figure so web + mobile + server stay locked together.
+    const equityFilled = (portfolio && Number.isFinite(portfolio.deployedSingleLeg))
+      ? portfolio.deployedSingleLeg : filledNum;
+    const totalEquity = (portfolio && Number.isFinite(portfolio.totalEquity))
+      ? portfolio.totalEquity
+      : ((cashBalance != null && !isNaN(cashBalance)) ? (cashBalance + equityFilled) : null);
     const totalEquityStr = totalEquity != null ? fmtDollar(totalEquity) : '-';
     const totalEquityCls = totalEquity == null ? ''
       : totalEquity < 500 ? 'negative'
