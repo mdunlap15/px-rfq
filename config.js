@@ -1045,6 +1045,20 @@ const config = {
     // anything else, because "+1.5 sets = wins at least one set" is a Bo3
     // identity (Bo5 would need +2.5).
     tennisSetsEnabled: process.env.TENNIS_SETS_ENABLED === 'true' || process.env.TENNIS_SETS_ENABLED === '1',
+    // TOA set-market sourcing (services/toa-tennis-sets.js). These are the
+    // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
+    // which are PER-EVENT only and retail-book-only (Pinnacle is absent from
+    // TOA's list for them). Depth on alternate_set_totals is often ONE book.
+    tennisSetsMinBooks: parseInt(process.env.TENNIS_SETS_MIN_BOOKS) || 1,
+    tennisSetsTtlSeconds: parseInt(process.env.TENNIS_SETS_TTL_SECONDS) || 300,
+    // TOA rate-limits by request FREQUENCY separately from quota; an unpaced
+    // slate-wide fan-out 429s, and a 429 reads as 'no set markets' unless
+    // handled. Same guard as BTTS_FETCH_SPACING_MS.
+    // 1100ms is the operator's proven value from the standalone poster. At
+    // 400ms a 50-event slate got 10 events 429'd (20%), and a 429 reads as
+    // 'no set markets' unless handled.
+    tennisSetsFetchSpacingMs: parseInt(process.env.TENNIS_SETS_FETCH_SPACING_MS) || 1100,
+    tennisSetsConsistencyTol: parseFloat(process.env.TENNIS_SETS_CONSISTENCY_TOL) || 0.08,
     fisherDetectionEnabled: process.env.FISHER_DETECTION_ENABLED !== 'false',
     fisherRfqPerHour: parseInt(process.env.FISHER_RFQ_PER_HOUR) || 400,
     fisherRefireCount: parseInt(process.env.FISHER_REFIRE_COUNT) || 4,
