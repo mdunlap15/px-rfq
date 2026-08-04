@@ -176,12 +176,33 @@ const _normName = s => dataGolf._normalizeOutrightName(s);
 
 /** PX tournament name ("2026 The Open") -> DK slug, or null. */
 function resolveDkSlug(tournamentName) {
-  const t = _norm(tournamentName).replace(/^\d{4}\s+/, '').trim(); // drop leading year
-  if (!t) return null;
+  const t = _norm(tournamentName).replace(/^\d{4}\b\s*/, '').trim(); // drop leading year
+  // Must look like a tournament NAME: at least one letter and enough of it to
+  // identify something. Without the length floor the substring loop below is
+  // catastrophic — `k.includes(t)` means a single letter "a" matches "the
+  // masters" and resolves to a major's board. Also stops a bare "2026" (whose
+  // year-strip leaves nothing meaningful) from slugifying to "2026".
+  if (!t || t.length < 4 || !/[a-z]/.test(t)) return null;
   const map = _slugMap();
   if (map[t]) return map[t];
   for (const [k, v] of Object.entries(map)) if (t.includes(k) || k.includes(t)) return v;
-  return null;
+  // SLUGIFY FALLBACK. The map exists because slugify does NOT work for majors
+  // ("The Open" -> the-open-championship), but it is exception-only: it holds
+  // 9 majors/flagships and nothing else, so before this EVERY ordinary PGA
+  // event ("Wyndham Championship", "RBC Canadian Open") resolved to null and
+  // could never register a top-N line. That silently capped outright coverage
+  // to majors, against the operator directive to quote outrights for ALL
+  // tournaments.
+  //
+  // Safe by construction:
+  //  - PASTE path: the slug is only a cache key, and ingest + lookup both
+  //    derive it here, so they agree by definition.
+  //  - SCRAPE path: a wrong slug 404s into an empty board, which fails closed
+  //    exactly like the null it replaces. A wrong slug cannot produce a WRONG
+  //    price, only no price.
+  // Exceptions still win — the map is consulted first.
+  const slug = t.replace(/\s+/g, '-');
+  return /^[a-z0-9][a-z0-9-]{2,}$/.test(slug) ? slug : null;
 }
 
 const _aImpl = a => { if (a == null || a === '') return null; const n = Number(a); if (!isFinite(n) || n === 0) return null; return n >= 0 ? 100 / (n + 100) : (-n) / (-n + 100); };
