@@ -4960,6 +4960,113 @@ async function mergePinnacleTennisMatches(opts = {}) {
  * implementation means a fix to the sawtooth/staleness handling applies to
  * both instead of silently diverging.
  */
+/**
+ * Overlay TOA-sourced tennis SET markets onto already-cached tennis events.
+ *
+ * ENRICHMENT, NOT AN ADDITIVE MERGE. TOA's set feed carries only h2h_s1 /
+ * alternate_set_totals / alternate_set_spreads — no match moneyline, spread or
+ * total — so a TOA-sets game cannot stand alone as a cache event. It attaches to
+ * an event another source (Pinnacle/Bovada/TOA bulk) already put there, and does
+ * nothing when there is no host event.
+ *
+ * SOURCE PRIORITY, per the 2026-08-04 audit:
+ *   - TOA wins when it has >= 2 books: a real multi-book consensus beats a
+ *     single-book quote.
+ *   - Pinnacle keeps the market otherwise. Its set board is a genuine two-sided
+ *     sharp quote and it covers 83.6% of matches including ATP Challenger and
+ *     ITF events for which TOA has no sport key at all, whereas TOA's set-totals
+ *     "consensus" is frequently ONE retail book (BetRivers) and prices Over 2.5
+ *     about 1.07pp high vs Pinnacle (t=-3.50).
+ *
+ * ORIENTATION: TOA's home/away can be flipped relative to the cached event, so
+ * every market is re-oriented on the surname pair before it is written. Getting
+ * this wrong silently swaps the two players' prices.
+ */
+async function mergeToaTennisSets() {
+  const src = require('./toa-tennis-sets');
+  let data;
+  try {
+    data = src.rememberBoard(await src.fetchSlate());
+  } catch (err) {
+    log.warn('OddsFeed', `TOA tennis sets fetch failed: ${err.message}`);
+    return { attached: 0, err: err.message };
+  }
+  if (!data || !Array.isArray(data.games) || !data.games.length) return { attached: 0 };
+
+  const cache = oddsCache['tennis'];
+  if (!cache || !cache.events) return { attached: 0, reason: 'no tennis cache' };
+
+  const sn = src.__surname;
+  const byPair = new Map();
+  for (const entry of Object.values(cache.events)) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
+      const k = [sn(ev.homeTeam), sn(ev.awayTeam)].sort().join('|');
+      if (k && !byPair.has(k)) byPair.set(k, ev);
+    }
+  }
+
+  const mk = (p, line) => ({ rawOdds: null, impliedProb: p, fairProb: p, displayFairProb: p, line: line ?? null });
+  let attached = 0, noHost = 0, keptPinnacle = 0;
+
+  for (const g of data.games) {
+    const k = [sn(g.homeTeam), sn(g.awayTeam)].sort().join('|');
+    const ev = byPair.get(k);
+    if (!ev) { noHost++; continue; }
+    if (!ev.markets) ev.markets = {};
+    // TOA's "home" may be the cached event's away side.
+    const flip = sn(ev.homeTeam) !== sn(g.homeTeam);
+    const pick = (o, side) => (flip ? (side === 'home' ? o.away : o.home) : (side === 'home' ? o.home : o.away));
+    const s = g.sets;
+    let touched = false;
+
+    const better = (existing, books) => {
+      if (!existing) return true;                 // nothing there yet
+      if (existing.toaSets) return true;          // refresh our own prior overlay
+      return (books || 0) >= 2;                   // else only a real consensus wins
+    };
+
+    if (s.firstSetMl && better(ev.markets.first_set_moneyline, s.books.firstSetMl)) {
+      const h = pick(s.firstSetMl, 'home'), a = pick(s.firstSetMl, 'away');
+      if (h && a) {
+        ev.markets.first_set_moneyline = {
+          home: mk(h.fairProb), away: mk(a.fairProb),
+          books: s.books.firstSetMl || 1, pinnacle: null, fanduel: null, kalshi: null, toaSets: true,
+        };
+        touched = true;
+      }
+    }
+    if (s.totalSets && better(ev.markets.total_sets, s.books.totalSets)) {
+      ev.markets.total_sets = {
+        line: 2.5, over: mk(s.totalSets.over.fairProb, 2.5), under: mk(s.totalSets.under.fairProb, 2.5),
+        byLine: { '2.5': { line: 2.5, over: mk(s.totalSets.over.fairProb, 2.5), under: mk(s.totalSets.under.fairProb, 2.5) } },
+        books: s.books.totalSets || 1, pinnacle: null, fanduel: null, kalshi: null, toaSets: true,
+      };
+      touched = true;
+    }
+    if (s.atLeastOneSet && better(ev.markets.set_win_at_least_one, s.books.atLeastOneSet)) {
+      // Each side may be independently missing — a book posts only ONE spread
+      // direction, so one player often has no direct price. Preserve whichever
+      // side the existing (Pinnacle) market already had rather than dropping it.
+      const prev = ev.markets.set_win_at_least_one || {};
+      const h = pick(s.atLeastOneSet, 'home'), a = pick(s.atLeastOneSet, 'away');
+      const next = {
+        home: h ? mk(h.fairProb) : prev.home || null,
+        away: a ? mk(a.fairProb) : prev.away || null,
+        books: s.books.atLeastOneSet || 1, pinnacle: null, fanduel: null, kalshi: null, toaSets: true,
+      };
+      if (next.home || next.away) { ev.markets.set_win_at_least_one = next; touched = true; }
+    }
+    if (touched) { attached++; } else { keptPinnacle++; }
+  }
+
+  if (attached) cache.fetchedAt = Date.now();
+  log.info('OddsFeed', `TOA tennis sets: attached to ${attached} event(s), `
+    + `${keptPinnacle} kept existing source, ${noHost} had no cached host event `
+    + `(TOA games: ${data.games.length})`);
+  return { attached, keptPinnacle, noHost };
+}
+
 function _mergeTennisBoard(data, { sourceLabel, idPrefix, flagKey, withPinnacle }) {
   if (!data || !Array.isArray(data.games) || data.games.length === 0) return { added: 0, updated: 0 };
 
@@ -8136,7 +8243,13 @@ async function refreshAllSports() {
       .then(() => mergePinnacleTennisMatches())
       .catch(err => { log.warn('OddsFeed', `Pinnacle tennis merge failed: ${err.message}`); })
       .then(() => mergeBovadaTennisMatches())
-      .catch(err => { log.warn('OddsFeed', `Bovada tennis merge failed: ${err.message}`); });
+      .catch(err => { log.warn('OddsFeed', `Bovada tennis merge failed: ${err.message}`); })
+      // LAST, and only when the sets feature is on. This is an ENRICHMENT pass
+      // that attaches set markets to events the merges above created, so it must
+      // run after them or it finds no host events. Gated because the per-event
+      // fan-out costs one paced TOA call per match.
+      .then(() => (config.pricing.tennisSetsEnabled ? mergeToaTennisSets() : null))
+      .catch(err => { log.warn('OddsFeed', `TOA tennis sets overlay failed: ${err.message}`); });
   }
 
   return results;
@@ -10014,6 +10127,7 @@ module.exports = {
   // manually when the slate changes mid-cycle.
   mergeBovadaTennisMatches,
   mergePinnacleTennisMatches,
+  mergeToaTennisSets,
   checkLineupFreshness,
   getLineupCache,
   getPitcherSide,
