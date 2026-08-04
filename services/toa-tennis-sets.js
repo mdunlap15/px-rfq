@@ -25,15 +25,32 @@
  * `totals` is TOTAL GAMES (~22.5). Only the *_set_* keys are set markets. This
  * is the same sets/games trap documented in services/pinnacle-tennis.js.
  *
- * BEST-OF-3 ONLY. "+1.5 sets == wins at least one set" holds because the Bo3 set
- * differentials are +2/+1/-1/-2, so +1.5 covers everything except a 0-2 loss. In
- * best-of-5 the equivalent line is +2.5, so the Bo3 mapping would price a
- * DIFFERENT event. We detect the format from the posted total-sets line and fail
- * closed when it is not 2.5.
+ * BEST-OF-3 ONLY, enforced by a TWO-PART guard. "+1.5 sets == wins at least one
+ * set" holds because the Bo3 differentials are +2/+1/-1/-2, so +1.5 covers
+ * everything except a 0-2 loss. In best-of-5 the loser's differentials are
+ * -3/-2/-1, so "+1.5" means "wins at least TWO sets" — applying the Bo3 mapping
+ * there quotes PX's YES TOO CHEAP on a leg that is actually MORE likely, the
+ * dangerous direction. So:
+ *   1. the four ATP Slam sport keys are refused outright (BO5_SPORT_KEYS; the
+ *      tennis_wta_* Slam keys stay Bo3 and are fine);
+ *   2. at-least-one-set additionally REQUIRES a posted 2.5 set total as positive
+ *      proof of format. Measured 2026-08-04: the set total is absent on 11 of 60
+ *      events and ALL 11 are ATP — missing exactly in the population that turns
+ *      Bo5 at a Slam.
+ * Whether Bo5 actually posts +2.5 is UNVERIFIED — TOA's historical archive
+ * carries no set markets at all for men's Slams — so this fails closed rather
+ * than guessing. Re-check live at the US Open before quoting any Slam.
  *
- * SIDE SELECTION IS BY SIGNED POINT, never |point|. Both +1.5 and -1.5 are
- * present on the same market, and picking by absolute value would pick the wrong
- * side half the time.
+ * SIDE SELECTION IS BY SIGNED POINT, never |point|. Every row carries BOTH a
+ * +1.5 and a -1.5, so an |point|==1.5 filter returns both outcomes and then
+ * hands back, for whichever player sits on the minus side, that player's -1.5 =
+ * "wins 2-0" instead of "wins >=1 set". Measured: 115 of 115 rows have exactly
+ * one player on the minus side, so that selector misfires on 100% of rows.
+ *
+ * COVERAGE SHAPE. Each book posts only ONE spread direction, so a single book
+ * prices only ONE player's at-least-one-set. On 33 of 47 events exactly one of
+ * PX's two "To Win At Least One Set" markets has a direct price, and all four PX
+ * set markets are directly sourceable on only ~23% of matches.
  *
  * RETAIL-ONLY DEPTH. Via TOA these markets are quoted by DK/FanDuel/BetMGM/
  * ESPN BET/BetRivers/LeoVegas — Pinnacle is absent from TOA's book list for
@@ -70,10 +87,20 @@ function devig2(a, b) {
   const t = a + b;
   return t > 0 ? { a: a / t, b: b / t } : null;
 }
-/** Surname key — TOA and PX disagree on given names ("Martin Damm Jr."). */
+/**
+ * Surname key — TOA and PX disagree on given names and suffixes.
+ *
+ * GENERATIONAL SUFFIXES MUST BE STRIPPED. TOA writes "Martin Damm Jr." while PX
+ * writes "Martin Damm", and naively taking the last token yields "jr" for one
+ * and "damm" for the other, so the event silently fails to match and its set
+ * markets are dropped. Within TOA alone the bug hides, because both the
+ * home_team string and the outcome names carry the suffix and "jr" == "jr".
+ */
+const NAME_SUFFIXES = new Set(['jr', 'jnr', 'sr', 'snr', 'ii', 'iii', 'iv']);
 function surname(s) {
   const t = String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().replace(/[^a-z ]/g, ' ').split(/\s+/).filter(x => x.length > 1);
+  while (t.length > 1 && NAME_SUFFIXES.has(t[t.length - 1])) t.pop();
   return t.length ? t[t.length - 1] : '';
 }
 
@@ -108,11 +135,28 @@ async function activeTennisKeys(apiKey) {
  * Build the three set markets for one TOA event.
  * Returns null when the board cannot be trusted (wrong format, too few books).
  */
-function buildSets(odds) {
+// BEST-OF-5 KEYS. The at-least-one-set mapping is a Bo3 identity: differentials
+// are +2/+1/-1/-2, so +1.5 covers everything except 0-2. In Bo5 the loser's
+// differentials are -3/-2/-1 and "+1.5" means "wins at least TWO sets" — a
+// strictly harder event. Applying the Bo3 mapping there quotes PX's YES TOO
+// CHEAP on a leg that is actually more likely, which is the dangerous direction.
+// ATP prefix only: the four tennis_wta_* Slam keys are still best-of-3.
+const BO5_SPORT_KEYS = new Set([
+  'tennis_atp_aus_open_singles',
+  'tennis_atp_french_open',
+  'tennis_atp_us_open',
+  'tennis_atp_wimbledon',
+]);
+
+function buildSets(odds, sportKey) {
   if (!odds || !Array.isArray(odds.bookmakers)) return null;
   const home = odds.home_team, away = odds.away_team;
   const hK = surname(home), aK = surname(away);
   if (!hK || !aK || hK === aK) return null;
+  // Hard stop before anything is priced. Verified 2026-08-04: TOA's historical
+  // archive carries NO set markets for men's Slams, so whether Bo5 posts +2.5
+  // is unverified — fail closed rather than guess.
+  if (sportKey && BO5_SPORT_KEYS.has(sportKey)) return { _rejected: 'best-of-5' };
 
   const collect = (key) => {
     const out = [];
@@ -187,9 +231,16 @@ function buildSets(odds) {
       const f2 = devig2(amerToProb(aPlus && aPlus.price), amerToProb(hMinus && hMinus.price));
       if (f2) aYes.push(f2.a);
     }
+    // BO3 PROOF REQUIRED. The +1.5 identity only holds best-of-3, so a posted
+    // 2.5 SET TOTAL is demanded as positive evidence of the format before any
+    // at-least-one-set price is emitted. Verified 2026-08-04: the set total is
+    // absent on 11 of 60 events and ALL 11 are ATP — i.e. missing exactly in the
+    // population that turns Bo5 at a Slam. Combined with the BO5_SPORT_KEYS stop
+    // above, this is the two-part guard: right key AND proof of format.
+    const bo3Proven = !!sets.totalSets;
     const alos = {};
-    if (hYes.length >= MIN_BOOKS()) alos.home = { fairProb: hYes.reduce((s, x) => s + x, 0) / hYes.length };
-    if (aYes.length >= MIN_BOOKS()) alos.away = { fairProb: aYes.reduce((s, x) => s + x, 0) / aYes.length };
+    if (bo3Proven && hYes.length >= MIN_BOOKS()) alos.home = { fairProb: hYes.reduce((s, x) => s + x, 0) / hYes.length };
+    if (bo3Proven && aYes.length >= MIN_BOOKS()) alos.away = { fairProb: aYes.reduce((s, x) => s + x, 0) / aYes.length };
     if (alos.home || alos.away) {
       sets.atLeastOneSet = alos;
       sets.books.atLeastOneSet = Math.max(hYes.length, aYes.length);
@@ -248,7 +299,7 @@ async function fetchSlate() {
       const odds = await getJson(url);
       if (odds && odds._rateLimited) { rateLimited++; continue; }   // never cached as a miss
       if (odds && odds._error) { errors++; continue; }
-      const sets = buildSets(odds);
+      const sets = buildSets(odds, sportKey);
       if (!sets) { noSets++; continue; }
       if (sets._rejected) { rejected++; continue; }
       games.push({
