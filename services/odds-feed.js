@@ -173,11 +173,20 @@ const PROP_MARKET_TYPES = new Set([
 //     awayStarter: string|null,
 //     seenAt: timestamp,
 //     lastChangeAt: timestamp|null,
+//     commenceMs: timestamp,
 //     lastChangeDetail: string|null,
 //   }
-// lineupKey = `${normalizedEventKey}|${YYYY-MM-DD}` to handle doubleheaders.
+// lineupKey = `${normalizedEventKey}|${ISO commence time}` — ONE ENTRY PER GAME.
+// It used to be `|${YYYY-MM-DD}`, which collided the two games of a series
+// (an ET evening game shares a UTC date with the next afternoon's game) and
+// wedged the grace window open indefinitely. See _resolveLineupKey.
 const lineupCache = {};
 const LINEUP_GRACE_MS = 3 * 60 * 1000; // decline for 3 minutes after a change
+// Two writes land on the same game if their starts are within this window.
+// Cross-source start times differ by minutes; the tightest real gap between
+// two games of one pair (a doubleheader) is ~3h, so 2h separates them cleanly.
+const LINEUP_SAME_GAME_MS = 2 * 60 * 60 * 1000;
+const LINEUP_PRUNE_MS = 48 * 60 * 60 * 1000; // forget games that started >48h ago
 
 // Closing line snapshots. Keyed by normalized event key (home|away). Captured
 // once per event when the event's commenceTime crosses into the past. Stores
@@ -8617,13 +8626,62 @@ function extractStarter(name) {
 }
 
 /**
- * Build the lineup cache key for a sport + event.
- * Uses normalized team key + date so same-day doubleheaders stay distinct.
+ * Resolve the lineup cache entry for ONE game.
+ *
+ * The key is `${normalizedEventKey}|${ISO commence time}` — the exact start,
+ * NOT a date bucket. Keying on `${eventKey}|${YYYY-MM-DD}` (what this used to
+ * do) COLLIDES the two games of a series: an ET evening game rolls into the
+ * next UTC date and lands on the same date as the following afternoon's game.
+ * Both games then shared one entry, so every refresh overwrote game A's
+ * pitchers with game B's, `updateLineupState` scored that as a lineup change,
+ * and the 3-minute grace was re-armed forever. Measured 2026-08-04: Cubs/
+ * Dodgers 00:06Z + 18:21Z, Astros/Blue Jays 00:10Z + 18:11Z and Rockies/Rays
+ * 00:41Z + 19:11Z were each stuck in grace for 13.7 HOURS, declining every
+ * parlay touching them ($80.8K of matched volume passed on in 3 hours).
+ *
+ * Because the two writers get commence times from different sources — the odds
+ * feed's `ev.commenceTime` and the MLB StatsAPI's `g.gameDate` — an exact key
+ * match is not safe either. So resolution is NEAREST-START within
+ * LINEUP_SAME_GAME_MS, which is the same closest-commenceTime rule the odds
+ * cache already uses for same-day series. Cross-source start times agree to
+ * within minutes; the tightest real gap between two games of one pair (a
+ * doubleheader) is ~3h, so the 2h window separates games cleanly while
+ * absorbing source jitter.
+ *
+ * Returns the resolved key, or null when there is no match and create=false.
  */
-function makeLineupKey(homeTeam, awayTeam, commenceTime) {
+function _resolveLineupKey(bucket, homeTeam, awayTeam, commenceTime, create) {
   const eventKey = normalizeEventKey(homeTeam, awayTeam);
-  const date = commenceTime ? new Date(commenceTime).toISOString().substring(0, 10) : '';
-  return `${eventKey}|${date}`;
+  const prefix = `${eventKey}|`;
+  const ms = commenceTime ? new Date(commenceTime).getTime() : NaN;
+  if (!isFinite(ms)) {
+    // No usable start time: fall back to a single slot for the pair so we
+    // degrade to the old (coarse) behaviour rather than dropping the entry.
+    const k = `${prefix}unknown`;
+    return (bucket[k] || create) ? k : null;
+  }
+  let bestKey = null, bestDelta = Infinity;
+  for (const k of Object.keys(bucket)) {
+    if (!k.startsWith(prefix)) continue;
+    const e = bucket[k];
+    if (!e || !isFinite(e.commenceMs)) continue;
+    const d = Math.abs(e.commenceMs - ms);
+    if (d < bestDelta) { bestDelta = d; bestKey = k; }
+  }
+  if (bestKey && bestDelta <= LINEUP_SAME_GAME_MS) return bestKey;
+  return create ? `${prefix}${new Date(ms).toISOString()}` : null;
+}
+
+/**
+ * Drop entries for games that started well in the past. Without this the cache
+ * grows without bound — every game ever seen keeps its own key now that keys
+ * are per-game rather than per-day.
+ */
+function _pruneLineupCache(bucket, now) {
+  for (const k of Object.keys(bucket)) {
+    const e = bucket[k];
+    if (e && isFinite(e.commenceMs) && now - e.commenceMs > LINEUP_PRUNE_MS) delete bucket[k];
+  }
 }
 
 /**
@@ -8631,49 +8689,66 @@ function makeLineupKey(homeTeam, awayTeam, commenceTime) {
  * pitcher/goalie and stamps lastChangeAt when one is seen. Called during
  * the odds refresh flow for MLB and NHL only.
  *
- * homeStarter/awayStarter come from extractStarter() on the raw team names.
- * If a starter was previously known and now null (or different), it's
- * treated as a change. Null→null is a no-op.
+ * A "change" is ONLY a real name replacing a DIFFERENT real name. Two other
+ * transitions are deliberately NOT changes:
+ *   null → name  is the first time a source told us who is starting.
+ *   name → null  is a source GAP, not a scratch. This matters because the odds
+ *                feed writer still runs for MLB but `extractStarter` only ever
+ *                finds a pitcher in SharpAPI-style "Team (Pitcher)" strings;
+ *                TOA sends a bare "Chicago Cubs", so it contributes null for
+ *                every game. Treating that as a scratch let a source with no
+ *                lineup data at all repeatedly blank out the StatsAPI pitcher
+ *                and re-arm the grace window — the second half of the same
+ *                2026-08-04 outage.
  */
 function updateLineupState(sport, homeTeam, awayTeam, commenceTime, homeStarter, awayStarter) {
   if (!lineupCache[sport]) lineupCache[sport] = {};
-  const key = makeLineupKey(homeTeam, awayTeam, commenceTime);
+  const bucket = lineupCache[sport];
   const now = Date.now();
-  const prior = lineupCache[sport][key];
+  const key = _resolveLineupKey(bucket, homeTeam, awayTeam, commenceTime, true);
+  const prior = bucket[key];
+  const commenceMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
 
   if (!prior) {
-    // First time seeing this event — just stash the baseline (no change event)
-    lineupCache[sport][key] = {
+    // First time seeing this game — just stash the baseline (no change event)
+    bucket[key] = {
       homeStarter,
       awayStarter,
+      commenceMs,
       seenAt: now,
       lastChangeAt: null,
       lastChangeDetail: null,
     };
+    _pruneLineupCache(bucket, now);
     return;
   }
 
-  const homeDiff = prior.homeStarter !== homeStarter && (prior.homeStarter || homeStarter);
-  const awayDiff = prior.awayStarter !== awayStarter && (prior.awayStarter || awayStarter);
+  // Only a real→different-real swap counts. See the doc comment above.
+  const swapped = (before, after) => !!before && !!after && before !== after;
+  const homeDiff = swapped(prior.homeStarter, homeStarter);
+  const awayDiff = swapped(prior.awayStarter, awayStarter);
 
   if (homeDiff || awayDiff) {
     const parts = [];
-    if (homeDiff) parts.push(`${homeTeam}: ${prior.homeStarter || 'TBD'} → ${homeStarter || 'TBD'}`);
-    if (awayDiff) parts.push(`${awayTeam}: ${prior.awayStarter || 'TBD'} → ${awayStarter || 'TBD'}`);
+    if (homeDiff) parts.push(`${homeTeam}: ${prior.homeStarter} → ${homeStarter}`);
+    if (awayDiff) parts.push(`${awayTeam}: ${prior.awayStarter} → ${awayStarter}`);
     const detail = parts.join('; ');
     log.info('Lineup', `${sport} lineup change detected — ${detail}`);
-    lineupCache[sport][key] = {
+    bucket[key] = {
       homeStarter,
       awayStarter,
+      commenceMs: isFinite(commenceMs) ? commenceMs : prior.commenceMs,
       seenAt: now,
       lastChangeAt: now,
       lastChangeDetail: detail,
     };
   } else {
     // No change — refresh seenAt but preserve lastChangeAt so the grace
-    // window continues to count from the original change time.
-    prior.homeStarter = homeStarter;
-    prior.awayStarter = awayStarter;
+    // window continues to count from the original change time. Never let a
+    // null overwrite a known starter (that is the source-gap case).
+    if (homeStarter) prior.homeStarter = homeStarter;
+    if (awayStarter) prior.awayStarter = awayStarter;
+    if (isFinite(commenceMs)) prior.commenceMs = commenceMs;
     prior.seenAt = now;
   }
 }
@@ -8690,8 +8765,8 @@ function checkLineupFreshness(sport, homeTeam, awayTeam, commenceTime) {
   if (sport !== 'baseball_mlb' && sport !== 'icehockey_nhl') return null;
   const bucket = lineupCache[sport];
   if (!bucket) return null;
-  const key = makeLineupKey(homeTeam, awayTeam, commenceTime);
-  const entry = bucket[key];
+  const key = _resolveLineupKey(bucket, homeTeam, awayTeam, commenceTime, false);
+  const entry = key && bucket[key];
   if (!entry || !entry.lastChangeAt) return null;
   const ageMs = Date.now() - entry.lastChangeAt;
   if (ageMs >= LINEUP_GRACE_MS) return null;
@@ -8716,8 +8791,8 @@ function getPitcherSide(sport, homeTeam, awayTeam, commenceTime, playerName) {
   if (!playerName) return null;
   const bucket = lineupCache[sport];
   if (!bucket) return null;
-  const key = makeLineupKey(homeTeam, awayTeam, commenceTime);
-  const entry = bucket[key];
+  const key = _resolveLineupKey(bucket, homeTeam, awayTeam, commenceTime, false);
+  const entry = key && bucket[key];
   if (!entry) return null;
   // Diacritic-insensitive comparison (PX may send "Randy Vásquez" while
   // SharpAPI lineup has "Randy Vasquez"). Mirror the prop-matcher's
@@ -10162,6 +10237,11 @@ module.exports = {
   checkLineupFreshness,
   getLineupCache,
   getPitcherSide,
+  // Test hooks for the lineup cache. updateLineupState is driven by the odds
+  // refresh in prod; tests need to drive it directly to prove that the two
+  // games of a series no longer collide onto one key.
+  __updateLineupState: updateLineupState,
+  __resetLineupCache: (sport) => { if (sport) delete lineupCache[sport]; else for (const k of Object.keys(lineupCache)) delete lineupCache[k]; },
   __debugGetAltLinesCache: () => altLinesCache,
   normalizeEventKey,
   getAltLineCacheEntry,
