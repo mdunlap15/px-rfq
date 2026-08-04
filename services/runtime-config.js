@@ -135,6 +135,8 @@ const REGISTRY = [
     label: 'Stale price minutes', help: 'Decline if the odds cache is older than this. Raising it quotes off staler prices.' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
 
+  { key: 'golfOutrightsParlayEnabled', path: 'golfOutrightsParlayEnabled', type: 'bool', group: 'gating', danger: true, env: 'GOLF_OUTRIGHTS_PARLAY_ENABLED',
+    label: 'Golf outrights in parlays', help: 'Register golf outright (win/top 5/10/20) legs so PX can send outright RFQs. Needs a loaded DK ties-included board (POST /golf-outrights/paste) or top-N legs fail closed.' },
   { key: 'tennisSetsEnabled', path: 'tennisSetsEnabled', type: 'bool', group: 'gating', danger: true, env: 'TENNIS_SETS_ENABLED',
     label: 'Tennis Sets markets', help: 'Register PX 1st Set ML / Total Sets / To Win At Least One Set. Best-of-3 only (source fails closed otherwise). Same-match parlays of these are hard-blocked. Ships OFF.' },
 

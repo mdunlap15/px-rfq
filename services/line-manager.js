@@ -651,7 +651,11 @@ const TEAM_TOTAL_SEED_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'iceho
 // ---------------------------------------------------------------------------
 // Kill-switch: unset/false ⇒ not a single outright line registers, so PX never
 // sends us an outright RFQ and nothing about golf changes.
-const GOLF_OUTRIGHTS_PARLAY_ENABLED = String(process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED || 'true').toLowerCase() === 'true';
+// Read from config on EVERY seed rather than captured once at module load, so
+// the Runtime Tuning tab can flip it without a redeploy. config.js still
+// derives the default from GOLF_OUTRIGHTS_PARLAY_ENABLED, so env behaviour is
+// unchanged.
+const golfOutrightsEnabled = () => config.pricing.golfOutrightsParlayEnabled !== false;
 
 // Classify the market from the PX EVENT name (the event names the market; each
 // market inside it is one player). Mirrors golf-outrights.js's PX_EVENT_PATTERNS.
@@ -1033,7 +1037,7 @@ async function seedAllLines() {
   // Cold-start is BY DESIGN: the first seed registers only win/make_cut, and the
   // next seed (REFRESH_INTERVAL_MINUTES) picks up top-N once the board lands.
   // Fail-closed beats a fast wrong price.
-  if (GOLF_OUTRIGHTS_PARLAY_ENABLED) {
+  if (golfOutrightsEnabled()) {
     const golfTournaments = [...new Set(events
       .filter(e => e.sport_name === 'Golf' && e.sub_type === 'outrights')
       .map(e => String(e.name || '').split(/\s+-\s+/)[0].trim())
@@ -1117,7 +1121,7 @@ async function seedAllLines() {
     // with YES/NO selections. They therefore die on the !homeComp check below —
     // which is why no golf outright leg has ever been registered or quoted.
     // Registered YES-side only (operator directive): the counterparty takes YES.
-    if (GOLF_OUTRIGHTS_PARLAY_ENABLED && event.sport_name === 'Golf' && event.sub_type === 'outrights') {
+    if (golfOutrightsEnabled() && event.sport_name === 'Golf' && event.sub_type === 'outrights') {
       try {
         // Warm the DataGolf boards so the RFQ hot path only does a sync cache
         // read. No-ops inside its TTL, so calling per-event is cheap.

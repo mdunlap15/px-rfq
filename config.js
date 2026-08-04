@@ -1044,6 +1044,10 @@ const config = {
     // NOTE: best-of-3 ONLY — the source infers the format and fails closed on
     // anything else, because "+1.5 sets = wins at least one set" is a Bo3
     // identity (Bo5 would need +2.5).
+    // Golf outrights in PARLAYS. Was a module-load constant in line-manager,
+    // so flipping it required a redeploy; now read from config on every seed
+    // so Runtime Tuning can toggle it live. Default true (unchanged).
+    golfOutrightsParlayEnabled: String(process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED || 'true').toLowerCase() === 'true',
     tennisSetsEnabled: process.env.TENNIS_SETS_ENABLED === 'true' || process.env.TENNIS_SETS_ENABLED === '1',
     // TOA set-market sourcing (services/toa-tennis-sets.js). These are the
     // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
