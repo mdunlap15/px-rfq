@@ -6198,6 +6198,37 @@ function getFairProb(sport, homeTeam, awayTeam, marketType, selection, line, tar
     return null;
   }
 
+  // ---- TENNIS SET MARKETS -------------------------------------------------
+  // Resolved here rather than falling through the h2h/spreads/totals ladder
+  // below, which has no notion of them and would return null — i.e. every set
+  // RFQ would decline "no fair value" despite the fair sitting in the cache.
+  // The orientation flip above does not cover these keys either, so each
+  // handles it inline; getting that wrong silently swaps the two players.
+  if (marketType === 'first_set_moneyline') {
+    const side = orientationFlipped
+      ? (selection === 'home' ? 'away' : selection === 'away' ? 'home' : selection)
+      : selection;
+    const o = market[side];
+    return (o && o.fairProb > 0 && o.fairProb < 1) ? o.fairProb : null;
+  }
+  if (marketType === 'total_sets') {
+    // PX lists exactly one line (2.5). Refuse anything else rather than
+    // pricing a different total off it.
+    if (line != null && Number(line) !== 2.5) return null;
+    const o = market[selection];               // 'over' | 'under'
+    return (o && o.fairProb > 0 && o.fairProb < 1) ? o.fairProb : null;
+  }
+  if (marketType === 'set_win_at_least_one') {
+    // selection is '<side>_<yes|no>'. The stored fairProb is that player's
+    // P(wins >= 1 set); NO is its exact complement (they get swept).
+    const parts = String(selection || '').split('_');
+    let side = parts[0], yn = parts[1];
+    if (orientationFlipped) side = side === 'home' ? 'away' : side === 'away' ? 'home' : side;
+    const o = market[side];
+    if (!o || !(o.fairProb > 0 && o.fairProb < 1)) return null;
+    return yn === 'no' ? 1 - o.fairProb : o.fairProb;
+  }
+
   if (marketType === 'spreads' || marketType === 'totals' || marketType === 'spreads_f5' || marketType === 'totals_f5') {
     // CRITICAL: spreads/totals (full-game OR F5) MUST have a line value
     // to price correctly. Without a line, we can't distinguish Over 4.5

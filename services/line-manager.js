@@ -596,6 +596,14 @@ const MARKET_TYPE_MAP = {
   // Method of victory — identity-mapped: the fair comes from services/ufc-mov
   // (DK 6-way board), not from an odds-feed market key, but oddsApiMarket must
   // be set or the registration gate below drops the selection.
+  // Tennis SET markets — identity-mapped for the same reason as MoV below: the
+  // fair comes from the sets block on the cached tennis event (written by
+  // pinnacle-tennis / the TOA overlay under these exact keys), not from a
+  // generic odds-feed market, but oddsApiMarket MUST be set or the registration
+  // gate drops the selection.
+  'first_set_moneyline': 'first_set_moneyline',
+  'total_sets': 'total_sets',
+  'set_win_at_least_one': 'set_win_at_least_one',
   'mov_ko': 'mov_ko',
   'mov_sub': 'mov_sub',
   'mov_dec': 'mov_dec',
@@ -1471,7 +1479,12 @@ async function seedAllLines() {
       // "Round 1 Matchup" — none contain "Moneyline". Since the sport
       // is already gated to moneyline-only via supportedBase above,
       // no further name check is needed for golf.
-      if (!isF5 && !isH1 && !isGolfSport) {
+      if (!isF5 && !isH1 && !isGolfSport && !isTennisSetsMarket) {
+        // Set markets are exempt: "<Player> To Win At Least One Set" is PX
+        // type 'moneyline' but contains none of the canonical moneyline names,
+        // so the substring allowlist rejects it. isTennisSetsMarket is already
+        // an anchored whitelist of exactly three market names, so it is a
+        // tighter gate than this one, not a looser one.
         const allowed = fullGameNames[m.type];
         if (allowed) {
           const nameL = (m.name || '').toLowerCase();
@@ -1764,6 +1777,21 @@ async function seedAllLines() {
           // to a competitor would resolve to home/away and the pricer would
           // then read the leg as a straight moneyline.
           oddsApiSelection = (sel.selection || '').toLowerCase();
+        } else if (sel.marketType === 'first_set_moneyline') {
+          // Two-competitor market: resolve to home/away like any moneyline.
+          if (matchTeamName(sel.teamName, [matchedHome])) oddsApiSelection = 'home';
+          else if (matchTeamName(sel.teamName, [matchedAway])) oddsApiSelection = 'away';
+        } else if (sel.marketType === 'total_sets') {
+          oddsApiSelection = sel.selection;              // 'over' | 'under'
+        } else if (sel.marketType === 'set_win_at_least_one') {
+          // YES/NO on a per-PLAYER market — the player is in sel.playerName,
+          // parsed from the market NAME (selections are literally YES/NO).
+          // Resolve which SIDE of the match that player is, so the pricer can
+          // read the right half of the set_win_at_least_one market. Same trap
+          // as MoV: do NOT let the YES/NO text reach team matching.
+          const who = sel.playerName || sel.teamName;
+          if (matchTeamName(who, [matchedHome])) oddsApiSelection = 'home_' + (sel.selection || '');
+          else if (matchTeamName(who, [matchedAway])) oddsApiSelection = 'away_' + (sel.selection || '');
         } else if (sel.marketType === 'double_chance') {
           // '1X', 'X2', or '12' selection
           oddsApiSelection = sel.selection;
