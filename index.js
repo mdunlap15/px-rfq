@@ -745,22 +745,6 @@ async function startup() {
   serviceReady = true;
   log.info('Startup', `=== Service ready! Refreshing every ${config.refreshIntervalMinutes}min ===`);
 
-  // Start Golf Single-Leg lifecycle worker (second PX account). No-op when
-  // GOLF_SINGLE_LEG_ENABLED is unset/false; safe to call regardless.
-  try {
-    const gsl = require('./services/golf-single-leg');
-    gsl.startWorker();
-  } catch (e) {
-    log.warn('Startup', 'GolfSL worker did not start: ' + e.message);
-  }
-  // Start Golf Outrights lifecycle worker (second PX account). No-op when
-  // GOLF_OUTRIGHTS_ENABLED is unset/false; safe to call regardless.
-  try {
-    const go = require('./services/golf-outrights');
-    go.startWorker();
-  } catch (e) {
-    log.warn('Startup', 'GolfOut worker did not start: ' + e.message);
-  }
   console.log('');
 }
 
@@ -6163,96 +6147,6 @@ function startStatusServer() {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // Golf Single-Leg (second PX account — bulk-post offers on golf matchups).
-  // All endpoints no-op with 503 unless GOLF_SINGLE_LEG_ENABLED=true. Module
-  // is required lazily so missing env vars don't crash main app boot.
-  // -----------------------------------------------------------------------
-  let golfSingleLeg = null;
-  function _gsl() {
-    if (golfSingleLeg) return golfSingleLeg;
-    try { golfSingleLeg = require('./services/golf-single-leg'); return golfSingleLeg; }
-    catch (e) { log.error('GolfSL', 'module load failed: ' + e.message); return null; }
-  }
-  function _gslEnabledGuard(res) {
-    const m = _gsl();
-    if (!m) { res.status(500).json({ ok: false, error: 'golf-single-leg module unavailable' }); return null; }
-    if (!m.isEnabled()) { res.status(503).json({ ok: false, error: 'GOLF_SINGLE_LEG_ENABLED is not true' }); return null; }
-    return m;
-  }
-  // Module-only guard (NO isEnabled check) for read-only + safety-cancel
-  // endpoints. Critical: cancelling resting offers must work even when the bot
-  // is disabled (GOLF_SINGLE_LEG_ENABLED=false). Otherwise killing the bot via
-  // env var also locks you out of pulling offers it already posted — backwards,
-  // and exactly the trap hit during the 2026-06-03 runaway. Likewise /state is
-  // read-only, so the tab stays viewable (to see + cancel active wagers) when
-  // disabled.
-  function _gslModuleGuard(res) {
-    const m = _gsl();
-    if (!m) { res.status(500).json({ ok: false, error: 'golf-single-leg module unavailable' }); return null; }
-    return m;
-  }
-  // State: full UI dump (config rows enriched with current fair / offered /
-  // active wagers). Works even when disabled so the operator can always view
-  // and cancel resting wagers.
-  app.get('/single-leg/golf/state', async (req, res) => {
-    const m = _gslModuleGuard(res); if (!m) return;
-    try { res.json({ ok: true, enabled: m.isEnabled(), ...(await m.loadState()) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Sync: refresh PX matchups + upsert config rows for newly-seen lines
-  app.post('/single-leg/golf/sync', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
-    try {
-      const matchups = await m.discoverGolfMatchups();
-      const sync = await m.syncConfig(matchups);
-      const currentEventIds = new Set();
-      for (const mm of matchups) currentEventIds.add(mm.event_id);
-      const purge = await m.purgeStaleConfig(currentEventIds);
-      res.json({ ok: true, matchups: matchups.length, ...sync, ...purge });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Config bulk update: body { updates: [{line_id, risk_amount?, enabled?, notes?}, ...] }
-  app.post('/single-leg/golf/config', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.updateConfig((req.body && req.body.updates) || [])) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Post: place offers for every enabled+risk-set line (Post All), or just the
-  // selected lines (body.only = [line_id,...]). body.dryRun = return the plan
-  // without placing (powers the confirm-preview modal).
-  app.post('/single-leg/golf/post-all', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
-    const opts = {
-      dryRun: !!(req.body && req.body.dryRun),
-      only: (req.body && Array.isArray(req.body.only)) ? req.body.only : undefined,
-    };
-    try { res.json({ ok: true, ...(await m.postEnabled(opts)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Cancel ALL active wagers (idempotent). Uses the module-only guard so it
-  // works even when GOLF_SINGLE_LEG_ENABLED=false — pulling resting offers must
-  // never be blocked by the same flag that stops posting.
-  app.post('/single-leg/golf/cancel-all', async (req, res) => {
-    const m = _gslModuleGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.cancelAll()) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Cancel ONE resting wager (per-line Cancel button). body: { wager_id }
-  app.post('/single-leg/golf/cancel-wager', async (req, res) => {
-    const m = _gslModuleGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.cancelOne((req.body && req.body.wager_id) || null)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Repost: drift-check (cancel where stale) + post-enabled (place new offers)
-  app.post('/single-leg/golf/repost', async (req, res) => {
-    const m = _gslEnabledGuard(res); if (!m) return;
-    try {
-      const drift = await m.refreshDrift();
-      const post = await m.postEnabled();
-      res.json({ ok: true, drift, post });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
 
   // -----------------------------------------------------------------------
   // Generic manual order book — place/cancel arbitrary PRE-STAGED offers on the
@@ -6389,46 +6283,6 @@ function startStatusServer() {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // Golf Outrights (second PX account — bulk-post YES offers on Top
-  // 1/5/10/20/Make Cut markets priced from DK + sweetener). Gated on
-  // GOLF_OUTRIGHTS_ENABLED. Lazy-required so a missing dep doesn't crash boot.
-  // -----------------------------------------------------------------------
-  let golfOutrights = null;
-  function _go() {
-    if (golfOutrights) return golfOutrights;
-    try { golfOutrights = require('./services/golf-outrights'); return golfOutrights; }
-    catch (e) { log.error('GolfOut', 'module load failed: ' + e.message); return null; }
-  }
-  function _goEnabledGuard(res) {
-    const m = _go();
-    if (!m) { res.status(500).json({ ok: false, error: 'golf-outrights module unavailable' }); return null; }
-    if (!m.isEnabled()) { res.status(503).json({ ok: false, error: 'GOLF_OUTRIGHTS_ENABLED is not true' }); return null; }
-    return m;
-  }
-  app.get('/single-leg/golf-outrights/state', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.loadState()) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/tournaments', async (req, res) => {
-    // body: { dk_slug?, dk_url, tournament_name?, enabled?, notes? }
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.upsertTournament(req.body || {})) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.delete('/single-leg/golf-outrights/tournaments/:slug', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.deleteTournament(req.params.slug)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/sync/:slug', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    // Manual Sync forces a fresh DK scrape (bypass the 15-min cache) so the
-    // operator sees current market availability.
-    try { res.json({ ok: true, ...(await m.syncTournament(req.params.slug, { force: true })) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
   // Golf top-N (Top 5/10/20 INCLUDING TIES) board state. Read-only.
   // Answers "why isn't top-N quoting?": no `bySlug` entry = no DK slug for that
   // tournament (add GOLF_DK_SLUG_MAP) or the scrape hasn't landed yet (~142s,
@@ -6492,72 +6346,6 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // Make-the-cut dry-run: price PX's cut board off DataGolf and return exactly
-  // what a sync WOULD write, WITHOUT touching Supabase or PX order entry.
-  // Read-only review step — make_cut is DataGolf-priced (DK serves no cut
-  // market) and its offered price moves the OPPOSITE way from the DK path
-  // (fair × (1 + GOLF_MAKE_CUT_VIG), because DataGolf gives a de-vigged fair
-  // while dk_implied is raw). Check `lay_ev_ok` before enabling anything.
-  //   GET /single-leg/golf-outrights/make-cut-dryrun/the-open?name=The%20Open%20Championship
-  app.get('/single-leg/golf-outrights/make-cut-dryrun/:slug', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try {
-      const r = await m.dryRunMakeCut({ dk_slug: req.params.slug, tournament_name: req.query.name || null });
-      if (!r.ok) return res.status(404).json(r);
-      // Invariant surfaced per-row: we lay the player (post NO at 1-offered),
-      // which is only +EV while offered_implied > fair.
-      const rows = r.rows.map(x => ({
-        player: x.player_name,
-        fair: x.dk_implied,
-        offered_implied: x.offered_implied,
-        offered_american: x.offered_american,
-        source_books: x.source_books,
-        lay_ev_ok: x.offered_implied > x.dk_implied,
-      })).sort((a, b) => b.fair - a.fair);
-      res.json({ ...r, rows, lay_ev_violations: rows.filter(x => !x.lay_ev_ok).length });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/config', async (req, res) => {
-    // body: { updates: [{ id, risk_amount?, enabled?, notes? }, ...] }
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.updateConfig((req.body && req.body.updates) || [])) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/post-all', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    const opts = {
-      dryRun: !!(req.body && req.body.dryRun),
-      only: (req.body && Array.isArray(req.body.only)) ? req.body.only : undefined,
-    };
-    try { res.json({ ok: true, ...(await m.postEnabled(opts)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/cancel-all', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.cancelAll()) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Cancel ONE resting wager (per-line Cancel button). body: { wager_id }
-  app.post('/single-leg/golf-outrights/cancel-wager', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.cancelOne((req.body && req.body.wager_id) || null)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  // Edit-risk on a live offer: cancel this row's wager(s) + repost at current
-  // config (new stake/side). body: { config_id }
-  app.post('/single-leg/golf-outrights/repost-one', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try { res.json({ ok: true, ...(await m.repostOne((req.body && req.body.config_id) != null ? req.body.config_id : null)) }); }
-    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
-  app.post('/single-leg/golf-outrights/repost', async (req, res) => {
-    const m = _goEnabledGuard(res); if (!m) return;
-    try {
-      const drift = await m.refreshDrift();
-      const post = await m.postEnabled();
-      res.json({ ok: true, drift, post });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-  });
 
   // Coverage audit: for each PX event in the next N hours, compare PX-published
   // markets against what we've registered + what's in our odds cache. Surfaces

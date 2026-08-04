@@ -295,43 +295,6 @@ const config = {
       const v = parseFloat(raw);
       return Number.isFinite(v) && v >= 0 ? v : 10;
     })(),
-    // Minimum PAIR overround for SINGLE-LEG golf-matchup offers (operator
-    // 2026-06-04: "18 ticks minimum", e.g. -109 vs -109 on a coinflip). The
-    // raw-book quote path (BetOnline/Bovada round matchups) can run near-pickem,
-    // well under our per-leg floor, and the 1-tick sweetener narrows it further.
-    // This guarantees a minimum total margin: golf-single-leg.js floors each
-    // side at fair + (this / 2), so the offered pair sums to >= 1 + this. Only
-    // widens — book lines already wider than the floor keep their price. 0.043 =>
-    // -109/-109 on a 50/50. 0 disables. Single-leg book only (not RFQ pricing).
-    golfMatchupMinPairVig: parseFloat(process.env.VIG_GOLF_MATCHUP_MIN_PAIR) || 0.043,
-    // Single-leg-account matchup sweetener — applied ONLY to the second
-    // (single-leg) PX account when posting golf matchup wagers via
-    // services/golf-single-leg.js. Independent of the parlay SP vig stack
-    // above so Mike can quote matchups WIDE on the single-leg book without
-    // disturbing parlay-SP pricing.
-    //
-    // Formula: offered_implied = fair_implied × (1 + GOLF_SL_MATCHUP_SWEETENER_PCT)
-    // applied symmetrically per side. Reference: Caesars typically posts
-    // matchups around -125 / -105 on a 50/50 fair, which is ~7% markup
-    // per side / ~6.8% pair vig. Default 0.07 produces that shape.
-    //
-    // Bypasses pricer.computeSingleLegQuote entirely when this is > 0 AND
-    // the line is sport=golf_matchups. When set to 0, falls back to the
-    // shared computeSingleLegQuote path (useful if Mike wants to disable
-    // the override and let the parlay-SP vig stack apply).
-    golfSlMatchupSweetenerPct: parseFloat(process.env.GOLF_SL_MATCHUP_SWEETENER_PCT) || 0.07,
-    // Single-leg "1-tick sweetener" (operator request 2026-06-03). On the
-    // single-leg book ONLY, post N PX odds-ladder rungs BETTER than the
-    // auto/book price on each side to attract action — we hold the complement.
-    // 1 → a -110/-110 book becomes -109/-109 offered (we hold +109 on both
-    // sides). 0 disables. RFQ parlay-SP pricing is unaffected. Manual per-line
-    // overrides are NOT sweetened (the operator typed the exact price they want).
-    // Applied in services/golf-single-leg.js:_computeOffered, the single source
-    // of both the displayed "Our Offered" and the posted complement.
-    golfSlSweetenTicks: (() => {
-      const n = parseInt(process.env.GOLF_SL_SWEETEN_TICKS, 10);
-      return Number.isInteger(n) && n >= 0 ? n : 1;
-    })(),
     // Longshot vig widening: add extra vig on low-PARLAY-fair-prob quotes
     // (long odds). Per-leg favorite ramp only fires above fairProb 0.5 —
     // it doesn't help multi-leg parlays made of dog legs, which hit a low

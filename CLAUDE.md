@@ -53,7 +53,7 @@ client/
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
 | `REFRESH_INTERVAL_MINUTES` | No | Default: 10 (code default — production Railway sets 2) |
 | `SUPPORTED_SPORTS` | No | Default: `basketball_nba,basketball_ncaab,baseball_mlb,icehockey_nhl,tennis,soccer` |
-| `GOLF_OUTRIGHTS_PARLAY_ENABLED` | No | Default: `true`. Kill-switch for quoting golf outright legs (win/top 5/10/20/make cut) in **parlays**. When false, zero outright lines register → PX never sends an outright RFQ. Independent of the single-leg poster (still hard-disabled). |
+| `GOLF_OUTRIGHTS_PARLAY_ENABLED` | No | Default: `true`. Kill-switch for quoting golf outright legs (win/top 5/10/20/make cut) in **parlays**. When false, zero outright lines register → PX never sends an outright RFQ. |
 | `GOLF_OUTRIGHT_MAX_AGE_MIN` | No | Default: 360. Refuse a DataGolf outright board older than this. DataGolf serves the LAST tournament's board when a tour is idle (euro returned a 9-day-stale "BMW International Open" on 2026-07-14) — without this we'd quote a finished event. |
 | `GOLF_TOPN_TTL_MIN` | No | Default: 30. TTL of the DK ties-included top-N board cache (`services/golf-topn.js`). The DK scrape is Puppeteer (~142s/tournament) so it is warmed in the background and only ever read synchronously on the RFQ path. |
 | `GOLF_DK_SLUG_MAP` | No | JSON PX-tournament → DK-league-slug overrides, e.g. `{"the open":"the-open-championship"}`. PX says "2026 The Open" but DK's slug is `the-open-championship`, so slugify does NOT work. A tournament with no slug simply never registers top-N (logged). |
@@ -200,7 +200,7 @@ is why no golf outright leg had ever been registered or quoted. Registered via
   - `market=make_cut` = MAKE (YES); **`market=mc` = MISS (NO)** — they are the two sides of
     one 2-way market, NOT aliases. Verified: both sides sum to 105-109% per player. Treating
     `mc` as the make side inverts every price.
-  - **Dead-heat objection does not apply.** golf-outrights.js prices Top 1/5/10/20 off DK
+  - **Dead-heat objection does not apply.** Top 1/5/10/20 are priced off DK
     because DataGolf settles dead-heat while PX settles ties-included (PX names those events
     "Top 5 Finish (Ties Included)"). Make-the-cut is **binary** — no dead heat — and PX's
     event carries no ties qualifier ("2026 The Open - To Make The Cut"). DataGolf is valid here.
@@ -249,7 +249,6 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
 | `/ufc-mov` | GET | UFC method-of-victory board: per-fight de-vigged KO/SUB/DEC/ITD fairs, age, `priceable`. **First stop when a MoV leg won't quote.** `?force=1` kicks a fresh scrape. |
 | `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. **First stop when top-N isn't quoting**: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. |
-| `/single-leg/golf-outrights/make-cut-dryrun/:slug` | GET | Dry-run the DataGolf-priced make_cut board (no DB/PX writes). `?name=<tournament>` helps match DataGolf's event. Check `lay_ev_violations` = 0 before enabling. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
 | `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |
 
