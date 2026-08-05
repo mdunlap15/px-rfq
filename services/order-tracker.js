@@ -3287,6 +3287,102 @@ function getRoiWindow(days = 15) {
   return { days, roi, pnl: Math.round(pnl * 100) / 100, stake: Math.round(stake * 100) / 100, n };
 }
 
+/**
+ * Cumulative realized P&L vs cumulative EV over a trailing window, one point
+ * per settled parlay ordered by settlement time. Powers the Analytics
+ * "Rolling P&L vs EV Banked" chart.
+ *
+ * WHY THIS MATTERS: EV is `order.expectedValue`, frozen at confirm time from
+ * the fair prob and stake that were live then (see confirmOrder). Summing it
+ * gives "EV banked" — what the model expected to earn on the tickets we
+ * actually wrote. The GAP between the realized line and the EV line is LUCK;
+ * the SLOPE of the EV line is the edge we are actually booking. That split is
+ * the point: a realized line below EV is variance, an EV line that flattens
+ * is a pricing problem. They call for opposite responses.
+ *
+ * MUST be server-side: GET /orders ships ~100 rows, which at current volume is
+ * under two days, so the client cannot build a 30-day curve. Same reason
+ * getRoiWindow exists.
+ *
+ * Only parlays carrying a finite expectedValue contribute to EITHER series, so
+ * the two lines always cover the same ticket set and the gap stays meaningful.
+ * `skipped` reports how many settled parlays were left out for lacking one.
+ */
+function getEvCurve(days = 30, maxPoints = 1200) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rows = [];
+  let skipped = 0;
+  let varSum = 0;
+  for (const o of Object.values(orders)) {
+    if (!o.status || !String(o.status).startsWith('settled_')) continue;
+    const t = o.settledAt ? new Date(o.settledAt).getTime() : NaN;
+    if (Number.isNaN(t) || t < cutoff) continue;
+    const ev = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
+    if (!Number.isFinite(ev)) { skipped++; continue; }
+    const risk = Number(o.confirmedStake) || 0;
+    rows.push({ t, pnl: Number(o.pnl) || 0, ev, stake: risk });
+
+    // Variance of THIS ticket's outcome: we win +W with prob (1-fp) and lose
+    // -R with prob fp, so Var = fp(1-fp)(W+R)^2. Summing gives the SD of the
+    // window's total P&L, which is what turns the realized-vs-EV gap from a
+    // suggestive picture into a testable number (z below).
+    const fp = Number(o.fairParlayProb);
+    const odds = Number(o.confirmedOdds || o.offeredOdds);
+    if (fp > 0 && fp < 1 && risk > 0 && Number.isFinite(odds) && odds !== 0) {
+      const win = risk * 100 / Math.abs(odds);
+      varSum += fp * (1 - fp) * Math.pow(win + risk, 2);
+    }
+  }
+  rows.sort((a, b) => a.t - b.t);
+
+  let cumPnl = 0, cumEv = 0, cumStake = 0;
+  const all = rows.map(r => {
+    cumPnl += r.pnl; cumEv += r.ev; cumStake += r.stake;
+    return { t: r.t, pnl: cumPnl, ev: cumEv };
+  });
+
+  // Downsample for transport only. The series is cumulative, so dropping
+  // intermediate points never distorts the ones we keep — and the last point
+  // is always retained so the endpoint totals match the curve's right edge.
+  let points = all;
+  if (all.length > maxPoints) {
+    const step = Math.ceil(all.length / maxPoints);
+    points = all.filter((_, i) => i % step === 0);
+    if (points[points.length - 1] !== all[all.length - 1]) points.push(all[all.length - 1]);
+  }
+
+  const r2 = v => Math.round(v * 100) / 100;
+  const sd = Math.sqrt(varSum);
+  // How many SDs the realized total sits from what the model expected.
+  // |z| < 2  => the gap is ordinary variance; do NOT re-tune pricing off it.
+  // z < -2   => the model is over-stating its own edge, i.e. real miscalibration.
+  //
+  // TWO LIMITS, both of which push toward UNDER-detecting a problem, so a
+  // quiet z is weaker evidence than a loud one:
+  //  1. EV and this variance both come from OUR fairParlayProb. A miscalibrated
+  //     model is graded against its own wrong distribution, so this test has
+  //     little power to catch modest calibration error — it answers "is this
+  //     surprising GIVEN the model", not "is the model right". Per-sport
+  //     calibration is what answers the latter.
+  //  2. It assumes tickets are independent. Ours are not (shared games, shared
+  //     slates, same-tournament golf), so the true SD is wider than this.
+  const z = sd > 0 ? r2((cumPnl - cumEv) / sd) : null;
+  return {
+    days,
+    n: rows.length,
+    skipped,
+    realized: r2(cumPnl),
+    evBanked: r2(cumEv),
+    luck: r2(cumPnl - cumEv),          // >0 = ran hot vs the model, <0 = ran cold
+    sd: r2(sd),
+    z,
+    stake: r2(cumStake),
+    realizedRoi: cumStake > 0 ? r2((cumPnl / cumStake) * 100) : null,
+    evRoi: cumStake > 0 ? r2((cumEv / cumStake) * 100) : null,
+    points: points.map(p => ({ t: p.t, pnl: r2(p.pnl), ev: r2(p.ev) })),
+  };
+}
+
 function getStats() {
   return {
     ...stats,
@@ -7157,6 +7253,7 @@ module.exports = {
   __isOddsTie: _isOddsTie,
   __toBettorSideOdds: _toBettorSideOdds,
   getRoiWindow,
+  getEvCurve,
   getStats,
   getPnLBySport,
   getExposureForTeam,

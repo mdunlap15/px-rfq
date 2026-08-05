@@ -1025,18 +1025,27 @@
           </div>
         </div>
 
-        <!-- Rolling 500-SETTLED-parlay window: total realized P&L,
-             stake-weighted edge, cumulative stake. Settled-only so the
-             rolling pnl sum is over a constant 500 finished outcomes —
-             not a partially-settled subset that drifts upward as backlog
-             clears. (EV was split into its own chart below 2026-05-21.) -->
+        <!-- Rolling realized P&L vs EV banked. Replaced "Rolling 500 Settled:
+             P&L vs Avg Edge" 2026-08-04. The two lines separate the only two
+             explanations for a P&L swing: the ORANGE line's slope is the edge
+             we are actually booking (a pricing question), the GAP between the
+             lines is luck (a variance question). They call for opposite
+             responses, so reading them apart matters more than either alone.
+             Expanded by default — this is the headline diagnostic. -->
         <div class="card">
-          <div class="card-header" onclick="const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');">
-            <span><span class="toggle-icon collapsed">&#9660;</span>Rolling 500 Settled: P&L vs Avg Edge</span>
-            <span id="rolling500-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
+          <div class="card-header" onclick="if(event.target.tagName!=='BUTTON'){const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');}">
+            <span><span class="toggle-icon">&#9660;</span>Rolling P&L vs EV Banked</span>
+            <span style="display:flex; align-items:center; gap:10px;">
+              <span id="ev-banked-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
+              <span style="display:flex; gap:3px;">
+                <button class="btn" data-evdays="7" onclick="setEvCurveDays(7)" style="padding:1px 6px; font-size:10px;">7d</button>
+                <button class="btn primary" data-evdays="30" onclick="setEvCurveDays(30)" style="padding:1px 6px; font-size:10px;">30d</button>
+                <button class="btn" data-evdays="90" onclick="setEvCurveDays(90)" style="padding:1px 6px; font-size:10px;">90d</button>
+              </span>
+            </span>
           </div>
-          <div class="card-body collapsed" id="chart-rolling500">
-            <div class="empty-state"><div class="icon">-</div><div>Need 500+ settled parlays to chart rolling window</div></div>
+          <div class="card-body" id="chart-ev-banked">
+            <div class="empty-state"><div class="icon">-</div><div>Loading…</div></div>
           </div>
         </div>
 
@@ -9161,7 +9170,7 @@
     renderChartLegVsBooks(allQuoted);
     renderChartCumulPnlRoi(settled);
     renderChartCumulPnlByType(settled);
-    renderChartRolling500(ownOrders);
+    renderChartEvBanked(false);
     renderChartEvDaily(settled);
     renderChartPnlSport(settled);
     renderChartPnlLegs(settled);
@@ -13584,275 +13593,204 @@
     el.innerHTML = svg;
   }
 
-  // True rolling-500 chart. At each plotted parlay N, the y-values
-  // represent the sum/avg over the trailing 500 parlays ending AT N
-  // (i.e. parlays [N-499 .. N]). The plotted X range is the most
-  // recent 500 such N's, so the leftmost point already reflects 500
-  // parlays of history — it does NOT start at 0.
+  // Rolling P&L vs EV banked. Replaced the "Rolling 500 Settled: P&L vs Avg
+  // Edge" chart 2026-08-04 (operator: the old one wasn't clear or useful).
   //
-  // Earlier versions either (a) walked every parlay in history with a
-  // 500-window stat, producing ~2000 points, or (b) summed cumulatively
-  // from the oldest parlay in the trailing window forward, which made
-  // the leftmost point start at 0 and falsely implied the window only
-  // saw the visible parlays.
-  function renderChartRolling500(ownOrders) {
-    const el = document.getElementById('chart-rolling500');
-    const sumEl = document.getElementById('rolling500-summary');
-    if (!el) return;
+  // WHAT IT SHOWS, and why it is the most useful chart on this tab:
+  //   green  = cumulative REALIZED P&L over the window
+  //   orange = cumulative EV BANKED — the sum of each ticket's expectedValue,
+  //            frozen at confirm time from the fair prob and stake live then
+  //   the shaded band between them = LUCK
+  // The two lines answer different questions and demand opposite responses:
+  //   * EV line's SLOPE is the edge we are actually booking. If it flattens,
+  //     that is a PRICING problem — the model stopped finding value.
+  //   * The GAP is variance. Realized far below a healthy EV line means we
+  //     priced fine and ran cold; do NOT re-tune pricing off that.
+  // Conflating the two is how a market maker over-corrects into a real leak.
+  //
+  // Data comes from GET /ev-curve because /orders only ships ~100 rows —
+  // under two days at current volume — so a 30-day curve cannot be built
+  // client-side. Same constraint that put the 15-day ROI stat on the server.
+  let _evCurveCache = { at: 0, data: null, days: 30, inflight: false };
+  const EV_CURVE_TTL_MS = 60 * 1000;
 
-    // Use SETTLED parlays only so the rolling window holds 500 finished
-    // outcomes — not 500 accepted-but-mostly-unsettled tickets.
-    //
-    // Prior behaviour ("trailing 500 accepted") quietly summed pnl over
-    // whatever subset of the window had settled; the rightmost positions
-    // were ~60% unsettled, so as backlog settlements landed the P&L line
-    // appeared to climb by thousands of dollars without any actual new
-    // wins. Filtering to settled-only makes the denominator constant at
-    // 500 and the line interpretable: realized P&L over the last 500
-    // finished parlays. EV / edge / stake are computed at quote time so
-    // they're still available on settled rows.
-    const settled = (ownOrders || []).filter(o =>
-      o && typeof o.status === 'string' && o.status.startsWith('settled_')
-    );
-    const sorted = [...settled].sort((a, b) =>
-      (a.settledAt || a.confirmedAt || a.quotedAt || '').localeCompare(b.settledAt || b.confirmedAt || b.quotedAt || '')
-    );
-    const WINDOW = 500;
-    const totalAccepted = sorted.length;
-    if (totalAccepted < WINDOW) {
-      el.innerHTML = '<div class="empty-state" style="padding:24px 12px;"><div class="icon">-</div><div>Need ' + WINDOW + '+ settled parlays to chart rolling window (have ' + totalAccepted + ')</div></div>';
+  function renderChartEvBanked(force) {
+    const el = document.getElementById('chart-ev-banked');
+    if (!el) return;
+    const now = Date.now();
+    const fresh = _evCurveCache.data && (now - _evCurveCache.at) < EV_CURVE_TTL_MS;
+    if (fresh && !force) { _paintEvBanked(_evCurveCache.data); return; }
+    if (_evCurveCache.inflight) return;
+    _evCurveCache.inflight = true;
+    fetch(BASE + '/ev-curve?days=' + _evCurveCache.days, { credentials: 'include' })
+      .then(r => r.json())
+      .then(j => {
+        _evCurveCache.inflight = false;
+        if (!j || !j.ok) return;
+        _evCurveCache.at = Date.now();
+        _evCurveCache.data = j;
+        _paintEvBanked(j);
+      })
+      .catch(() => {
+        _evCurveCache.inflight = false;
+        if (!_evCurveCache.data) {
+          el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Could not load /ev-curve</div></div>';
+        }
+      });
+  }
+
+  function setEvCurveDays(days) {
+    _evCurveCache.days = days;
+    _evCurveCache.data = null;
+    _evCurveCache.at = 0;
+    document.querySelectorAll('[data-evdays]').forEach(b => {
+      b.classList.toggle('primary', Number(b.getAttribute('data-evdays')) === days);
+    });
+    renderChartEvBanked(true);
+  }
+
+  function _paintEvBanked(j) {
+    const el = document.getElementById('chart-ev-banked');
+    const sumEl = document.getElementById('ev-banked-summary');
+    if (!el) return;
+    const pts = (j.points || []).filter(p => p && Number.isFinite(p.t));
+    if (pts.length < 2) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Need 2+ settled parlays in the last ' + j.days + ' days (have ' + (j.n || 0) + ')</div></div>';
       if (sumEl) sumEl.textContent = '';
       return;
     }
 
-    // Pre-compute per-parlay derived numbers across ALL accepted parlays
-    // (not just the visible window) — we need the prior 499 to seed each
-    // rolling-500 point. computeParlayEdge is the same helper that powers
-    // the table columns and WoW report, so values can't drift.
-    const perParlay = sorted.map(o => {
-      const { edge, evDollar } = computeParlayEdge(o);
-      const stake = (o.confirmedStake && o.offeredOdds)
-        ? calcSpProfit(o.confirmedStake, o.offeredOdds)
-        : 0;  // bettor wager
-      const pnl = Number.isFinite(o.pnl) ? Number(o.pnl) : null;
-      return {
-        ev: Number.isFinite(evDollar) ? evDollar : 0,
-        pnl,
-        edge: Number.isFinite(edge) ? edge : null,
-        stake: stake > 0 ? stake : 0,
-        edgeStake: (Number.isFinite(edge) && stake > 0) ? edge * stake : 0,
-      };
-    });
-
-    // Plot the LAST WINDOW positions (or fewer if 500 ≤ total < 1000).
-    // Each point at global position N (0-based) shows the trailing-WINDOW
-    // stat over [N-WINDOW+1 .. N].
-    const firstPlotN = Math.max(WINDOW - 1, totalAccepted - WINDOW);
-
-    // Initialize the window for the first plotted point.
-    let sumEv = 0, sumPnl = 0, sumStake = 0, sumEdgeStake = 0, settledCount = 0;
-    for (let i = firstPlotN - WINDOW + 1; i <= firstPlotN; i++) {
-      const p = perParlay[i];
-      sumEv += p.ev;
-      if (p.pnl != null) { sumPnl += p.pnl; settledCount++; }
-      sumStake += p.stake;
-      sumEdgeStake += p.edgeStake;
-    }
-    const points = [{
-      idx: firstPlotN + 1,                              // global 1-based parlay #
-      ev: sumEv,
-      pnl: settledCount > 0 ? sumPnl : null,
-      edgePct: sumStake > 0 ? (sumEdgeStake / sumStake) * 100 : null,
-      stake: sumStake,
-      settledCount,
-    }];
-
-    // Slide the window forward one parlay at a time: add the new entry
-    // entering on the right, drop the one that just fell off the left.
-    for (let N = firstPlotN + 1; N < totalAccepted; N++) {
-      const incoming = perParlay[N];
-      const outgoing = perParlay[N - WINDOW];
-      sumEv += incoming.ev - outgoing.ev;
-      if (incoming.pnl != null) { sumPnl += incoming.pnl; settledCount++; }
-      if (outgoing.pnl != null) { sumPnl -= outgoing.pnl; settledCount--; }
-      sumStake += incoming.stake - outgoing.stake;
-      sumEdgeStake += incoming.edgeStake - outgoing.edgeStake;
-      points.push({
-        idx: N + 1,
-        ev: sumEv,
-        pnl: settledCount > 0 ? sumPnl : null,
-        edgePct: sumStake > 0 ? (sumEdgeStake / sumStake) * 100 : null,
-        stake: sumStake,
-        settledCount,
-      });
-    }
-
-    // Trailing-window totals in the header.
-    const last = points[points.length - 1];
-    function fmtKShort(n) {
-      // Compact $ display for the header — e.g. $312.4k, $1.05M.
-      if (!Number.isFinite(n)) return '—';
-      const abs = Math.abs(n);
-      if (abs >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-      if (abs >= 1e4) return '$' + (n / 1e3).toFixed(1) + 'k';
-      return '$' + n.toFixed(0);
-    }
+    const money = v => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
     if (sumEl) {
-      const pnlCls = (last.pnl ?? 0) >= 0 ? 'positive' : 'negative';
-      const edgeCls = (last.edgePct ?? 0) >= 0 ? 'positive' : 'negative';
-      sumEl.innerHTML = ' &middot; last ' + WINDOW + ': '
-        + 'P&amp;L <span class="' + pnlCls + '">' + ((last.pnl == null) ? '—' : ((last.pnl >= 0 ? '+$' : '-$') + Math.abs(last.pnl).toFixed(0))) + '</span> · '
-        + 'Edge <span class="' + edgeCls + '">' + ((last.edgePct == null) ? '—' : ((last.edgePct >= 0 ? '+' : '') + last.edgePct.toFixed(2) + '%')) + '</span> · '
-        + 'Stake <span style="color:var(--text2);">' + fmtKShort(last.stake) + '</span>';
+      const rCls = j.realized >= 0 ? 'positive' : 'negative';
+      const lCls = j.luck >= 0 ? 'positive' : 'negative';
+      sumEl.innerHTML =
+        j.days + 'd realized <span class="' + rCls + '">' + money(j.realized) + '</span>'
+        + ' &middot; EV banked <span style="color:var(--orange,#d29922);">' + money(j.evBanked) + '</span>'
+        // money() already carries the sign; do NOT strip it — a negative luck
+        // figure rendered as a bare "$14,282" reads as running HOT when we ran cold.
+        + ' &middot; luck <span class="' + lCls + '">' + (j.luck >= 0 ? '+' : '') + money(j.luck) + '</span>';
     }
 
-    // Layout — match renderChartCumulPnlRoi's hand-rolled SVG style so
-    // the look feels consistent across charts. Right padding bumped to
-    // accommodate a second right-side axis (stake $) outside the inner
-    // edge-% axis.
-    const W = 760, H = 320, pad = { l: 70, r: 110, t: 28, b: 44 };
+    const W = 720, H = 300, pad = { l: 68, r: 70, t: 24, b: 42 };
     const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
 
-    // Left axis: $ amounts (P&L only — EV moved to its own chart 2026-05-21).
-    // Snap lo/hi to dStep boundaries so the topmost/bottommost gridline always
-    // brackets the data — otherwise a +$7k P&L peak with $5k-step gridlines
-    // shows the line shooting past the "+$5000" label with nothing labeled
-    // above it, looking like the chart is clipping.
-    const dollarVals = points.map(p => p.pnl).filter(v => v != null);
-    const rawMin$ = Math.min(0, ...dollarVals);
-    const rawMax$ = Math.max(0, ...dollarVals);
-    const dRange = Math.max(rawMax$ - rawMin$, 1);
-    const dStep = niceStep(dRange / 5);
-    const dLo = Math.floor((rawMin$ - dStep * 0.1) / dStep) * dStep;
-    const dHi = Math.ceil((rawMax$ + dStep * 0.1) / dStep) * dStep;
+    // ONE shared $ axis — the whole point is reading the two series against
+    // each other, so a dual axis (what the old chart did) would destroy the
+    // comparison.
+    const vals = pts.flatMap(p => [p.pnl, p.ev]).filter(Number.isFinite);
+    const rawLo = Math.min(0, ...vals), rawHi = Math.max(0, ...vals);
+    const vPad = (rawHi - rawLo) * 0.1 || 1;
+    const lo = rawLo - vPad, hi = rawHi + vPad;
 
-    // Right axis (inner): edge %. Same snap so the topmost edge% gridline
-    // always sits above the peak edge value.
-    const edgeVals = points.map(p => p.edgePct).filter(v => v != null);
-    const rawMinE = edgeVals.length ? Math.min(0, ...edgeVals) : 0;
-    const rawMaxE = edgeVals.length ? Math.max(0, ...edgeVals) : 1;
-    const eRange = Math.max(rawMaxE - rawMinE, 0.5);
-    const eStep = niceStep(eRange / 5);
-    const eLo = Math.floor((rawMinE - eStep * 0.1) / eStep) * eStep;
-    const eHi = Math.ceil((rawMaxE + eStep * 0.1) / eStep) * eStep;
+    const tMin = pts[0].t, tMax = pts[pts.length - 1].t;
+    const tRange = Math.max(1, tMax - tMin);
+    const scaleX = t => pad.l + ((t - tMin) / tRange) * chartW;
+    const scaleY = v => pad.t + chartH - ((v - lo) / (hi - lo)) * chartH;
 
-    // Right axis (outer): stake $. Zero-anchored since cumulative stake is
-    // always non-negative; snap hi up to a step boundary.
-    const stakeVals = points.map(p => p.stake).filter(v => Number.isFinite(v));
-    const rawMaxS = stakeVals.length ? Math.max(...stakeVals) : 1;
-    const sStep = niceStep(Math.max(rawMaxS, 1) / 5);
-    const sLo = 0;
-    const sHi = Math.max(Math.ceil((rawMaxS + sStep * 0.1) / sStep) * sStep, sStep);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; max-height:360px;">`;
 
-    const xMin = points[0].idx;
-    const xMax = points[points.length - 1].idx;
-    const xRange = Math.max(1, xMax - xMin);
-
-    const scaleX = (idx) => pad.l + ((idx - xMin) / xRange) * chartW;
-    const scaleYd = (v) => pad.t + chartH - ((v - dLo) / (dHi - dLo)) * chartH;
-    const scaleYe = (v) => pad.t + chartH - ((v - eLo) / (eHi - eLo)) * chartH;
-    const scaleYs = (v) => pad.t + chartH - ((v - sLo) / (sHi - sLo)) * chartH;
-
-    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; max-height:380px;">';
-
-    // Left-axis $ gridlines + ticks (dStep already computed above for snap)
-    for (let v = dLo; v <= dHi + 1e-6; v += dStep) {
-      const y = scaleYd(v);
+    // $ gridlines
+    const step = niceStep((hi - lo) / 5);
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      const y = scaleY(v);
       svg += svgLine(pad.l, y, W - pad.r, y, 'var(--border)', 0.3);
-      const label = v >= 0 ? '+$' + v.toFixed(0) : '-$' + Math.abs(v).toFixed(0);
-      svg += svgText(pad.l - 8, y + 3, label, { anchor: 'end', size: 9, fill: 'var(--text3)' });
+      const label = (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(0);
+      svg += svgText(pad.l - 8, y + 3, label, { anchor: 'end', size: 9, fill: v >= 0 ? 'var(--green)' : 'var(--red)' });
     }
-    // $ zero line
-    svg += svgLine(pad.l, scaleYd(0), W - pad.r, scaleYd(0), 'var(--text3)', 0.8);
+    const zeroY = scaleY(0);
+    svg += svgLine(pad.l, zeroY, W - pad.r, zeroY, 'var(--text3)', 0.8);
 
-    // Right-axis edge % ticks (inner) — eStep already computed above
-    for (let v = eLo; v <= eHi + 1e-6; v += eStep) {
-      const y = scaleYe(v);
-      const label = (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
-      svg += svgText(W - pad.r + 8, y + 3, label, { anchor: 'start', size: 9, fill: 'var(--blue)' });
-    }
-
-    // Right-axis stake $ ticks (outer)
-    function fmtKaxis(n) {
-      if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-      if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'k';
-      return '$' + Math.round(n);
-    }
-    // sStep already computed above for snap
-    for (let v = 0; v <= sHi + 1e-6; v += sStep) {
-      const y = scaleYs(v);
-      svg += svgText(W - pad.r + 50, y + 3, fmtKaxis(v), { anchor: 'start', size: 9, fill: 'var(--purple)' });
+    // X ticks
+    const spanDays = tRange / 86400000;
+    const tickMs = spanDays <= 3 ? 12 * 3600000 : spanDays <= 14 ? 86400000 : spanDays <= 45 ? 7 * 86400000 : 14 * 86400000;
+    const fmt = d => d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
+    for (let t = Math.ceil(tMin / tickMs) * tickMs; t <= tMax; t += tickMs) {
+      const x = scaleX(t);
+      svg += svgLine(x, pad.t, x, pad.t + chartH, 'var(--border)', 0.25);
+      svg += svgText(x, pad.t + chartH + 14, fmt(new Date(t)), { size: 9, fill: 'var(--text3)' });
     }
 
-    // X-axis ticks (5 evenly spaced parlay-index ticks)
-    const xTicks = 5;
-    for (let i = 0; i <= xTicks; i++) {
-      const idx = Math.round(xMin + (xMax - xMin) * (i / xTicks));
-      const x = scaleX(idx);
-      svg += svgLine(x, pad.t + chartH, x, pad.t + chartH + 4, 'var(--text3)', 0.8);
-      svg += svgText(x, pad.t + chartH + 16, '#' + idx, { anchor: 'middle', size: 9, fill: 'var(--text3)' });
-    }
-    svg += svgText(pad.l + chartW / 2, H - 4, 'settled parlay # (chronological)', { anchor: 'middle', size: 10, fill: 'var(--text3)' });
-
-    // Polyline helper
-    const buildPath = (vals, scaleY) => {
-      const pts = [];
-      for (let i = 0; i < points.length; i++) {
-        const v = vals[i];
-        if (v == null) { pts.push(null); continue; }
-        pts.push(scaleX(points[i].idx).toFixed(1) + ',' + scaleY(v).toFixed(1));
+    // LUCK BAND — the area between the two lines, green where realized is
+    // running above EV and red where it is running below. Emitted as one
+    // polygon per same-sign RUN so the fill colour actually tracks the sign
+    // instead of being decided by whatever the last point happened to be.
+    let runStart = 0;
+    const signAt = i => (pts[i].pnl - pts[i].ev) >= 0 ? 1 : -1;
+    for (let i = 1; i <= pts.length; i++) {
+      const atEnd = i === pts.length;
+      if (!atEnd && signAt(i) === signAt(runStart)) continue;
+      const seg = pts.slice(runStart, Math.min(i + 1, pts.length));
+      if (seg.length >= 2) {
+        let d = 'M' + scaleX(seg[0].t) + ',' + scaleY(seg[0].pnl);
+        for (const p of seg) d += ' L' + scaleX(p.t) + ',' + scaleY(p.pnl);
+        for (let k = seg.length - 1; k >= 0; k--) d += ' L' + scaleX(seg[k].t) + ',' + scaleY(seg[k].ev);
+        d += ' Z';
+        const fill = signAt(runStart) > 0 ? 'rgba(63,185,80,0.16)' : 'rgba(248,81,73,0.16)';
+        svg += `<path d="${d}" fill="${fill}" stroke="none" />`;
       }
-      // Break on null gaps so the line doesn't span them.
-      let d = '';
-      let inSegment = false;
-      for (const p of pts) {
-        if (p == null) { inSegment = false; continue; }
-        d += (inSegment ? ' L' : ' M') + p;
-        inSegment = true;
-      }
-      return d.trim();
-    };
+      runStart = i;
+    }
 
-    const pnlColor = 'var(--amber)';
-    const edgeColor = 'var(--blue)';
-    const stakeColor = 'var(--purple)';
+    // EV banked line (orange, smooth and near-monotonic by construction)
+    let evPath = '';
+    pts.forEach((p, i) => { evPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.ev); });
+    svg += `<path d="${evPath}" fill="none" stroke="#d29922" stroke-width="2.2" />`;
 
-    // P&L line (solid, left axis)
-    const pnlPath = buildPath(points.map(p => p.pnl), scaleYd);
-    if (pnlPath) svg += '<path d="' + pnlPath + '" fill="none" stroke="' + pnlColor + '" stroke-width="2"/>';
+    // Realized line (green/red by where it ended)
+    let pnlPath = '';
+    pts.forEach((p, i) => { pnlPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.pnl); });
+    const pnlColor = j.realized >= 0 ? 'var(--green)' : 'var(--red)';
+    svg += `<path d="${pnlPath}" fill="none" stroke="${pnlColor}" stroke-width="2.2" />`;
 
-    // Edge % line (dashed, right axis inner)
-    const edgePath = buildPath(points.map(p => p.edgePct), scaleYe);
-    if (edgePath) svg += '<path d="' + edgePath + '" fill="none" stroke="' + edgeColor + '" stroke-width="2" stroke-dasharray="5,3"/>';
-
-    // Stake $ line (dotted, right axis outer)
-    const stakePath = buildPath(points.map(p => p.stake), scaleYs);
-    if (stakePath) svg += '<path d="' + stakePath + '" fill="none" stroke="' + stakeColor + '" stroke-width="2" stroke-dasharray="2,3"/>';
-
-    // Endpoint labels
-    if (last.pnl != null) svg += svgText(scaleX(last.idx) - 4, scaleYd(last.pnl) + 12,
-      (last.pnl >= 0 ? '+$' : '-$') + Math.abs(last.pnl).toFixed(0) + ' P&L',
-      { anchor: 'end', size: 10, fill: pnlColor });
-    if (last.edgePct != null) svg += svgText(scaleX(last.idx) - 4, scaleYe(last.edgePct) - 4,
-      ((last.edgePct >= 0 ? '+' : '') + last.edgePct.toFixed(2) + '% edge'),
-      { anchor: 'end', size: 10, fill: edgeColor });
-    if (Number.isFinite(last.stake)) svg += svgText(scaleX(last.idx) - 4, scaleYs(last.stake) - 4,
-      fmtKShort(last.stake) + ' stake',
-      { anchor: 'end', size: 10, fill: stakeColor });
+    // End markers + labels
+    const last = pts[pts.length - 1];
+    svg += svgCircle(scaleX(last.t), scaleY(last.pnl), 3.2, pnlColor);
+    svg += svgCircle(scaleX(last.t), scaleY(last.ev), 3.2, '#d29922');
+    svg += svgText(W - pad.r + 6, scaleY(last.pnl) + 3, money(last.pnl), { anchor: 'start', size: 10, fill: pnlColor });
+    svg += svgText(W - pad.r + 6, scaleY(last.ev) + 3, money(last.ev), { anchor: 'start', size: 10, fill: '#d29922' });
 
     // Legend
     svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
     svg += '<line x1="0" y1="0" x2="18" y2="0" stroke="' + pnlColor + '" stroke-width="2.2"/>';
-    svg += svgText(24, 4, 'Realized P&L ($, left)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    svg += '<line x1="140" y1="0" x2="158" y2="0" stroke="' + edgeColor + '" stroke-width="2" stroke-dasharray="5,3"/>';
-    svg += svgText(164, 4, 'Avg Edge (%, R inner)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    svg += '<line x1="295" y1="0" x2="313" y2="0" stroke="' + stakeColor + '" stroke-width="2" stroke-dasharray="2,3"/>';
-    svg += svgText(319, 4, 'Total Stake ($, R outer)', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += svgText(24, 4, 'Realized P&L', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="112" y1="0" x2="130" y2="0" stroke="#d29922" stroke-width="2.2"/>';
+    svg += svgText(136, 4, 'EV banked', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<rect x="218" y="-4" width="14" height="8" fill="rgba(63,185,80,0.16)"/>';
+    svg += svgText(238, 4, 'running hot', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<rect x="312" y="-4" width="14" height="8" fill="rgba(248,81,73,0.16)"/>';
+    svg += svgText(332, 4, 'running cold', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '</g>';
 
     svg += '</svg>';
-    svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:4px;">'
-      + 'showing last ' + points.length + ' of ' + totalAccepted + ' total settled parlays &middot; each point = trailing-' + WINDOW + ' stat ending at that parlay # (leftmost point includes the prior ' + (WINDOW - 1) + ' parlays)</div>';
+
+    // Plain-language read-out. The gap is only interpretable relative to the
+    // EV line, so spell out which of the two stories the current shape is.
+    const luck = j.luck, ev = j.evBanked, z = j.z;
+    const zTxt = z == null ? '' : ' (z=' + z.toFixed(2) + (j.sd ? ', 1SD=' + money(j.sd) : '') + ')';
+    let verdict;
+    if (ev <= 0) {
+      verdict = 'EV banked is <b>' + money(ev) + '</b> — the model is not booking a positive edge on these tickets at all. That is a PRICING problem, not luck.';
+    } else if (z != null && z <= -2) {
+      verdict = 'Priced for <b>' + money(ev) + '</b>, realized <b>' + money(j.realized) + '</b>' + zTxt
+        + ' — that shortfall is <b>too large to be variance</b>. The model is over-stating its own edge somewhere; check per-sport calibration.';
+    } else if (z != null && z >= 2) {
+      verdict = 'Realized <b>' + money(j.realized) + '</b> vs <b>' + money(ev) + '</b> priced' + zTxt
+        + ' — running hot beyond normal variance. Do not read the green line as edge, and do not size up on it.';
+    } else if (luck < 0) {
+      verdict = 'Priced for <b>' + money(ev) + '</b>, realized <b>' + money(j.realized) + '</b> — running <b>' + money(Math.abs(luck)) + ' cold</b>' + zTxt + '. '
+        + 'That is inside the normal noise band, so it is <b>not by itself</b> evidence of mispricing. '
+        + 'But this test grades the model against its OWN probabilities, so it is weak at catching calibration error — a quiet z does not clear the model. Use the calibration chart for that.';
+    } else {
+      verdict = 'Priced for <b>' + money(ev) + '</b>, realized <b>' + money(j.realized) + '</b> — running <b>' + money(luck) + ' hot</b>' + zTxt + '. '
+        + 'Do not read the green line as edge; the orange line is the edge.';
+    }
+    svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:6px; line-height:1.5;">'
+      + j.n + ' settled parlays &middot; $' + (j.stake || 0).toFixed(0) + ' risked &middot; realized ROI '
+      + (j.realizedRoi == null ? '-' : (j.realizedRoi >= 0 ? '+' : '') + j.realizedRoi.toFixed(2) + '%')
+      + ' vs EV ROI ' + (j.evRoi == null ? '-' : (j.evRoi >= 0 ? '+' : '') + j.evRoi.toFixed(2) + '%')
+      + (j.skipped ? ' &middot; ' + j.skipped + ' skipped (no stored EV)' : '')
+      + '<br>' + verdict + '</div>';
     el.innerHTML = svg;
   }
 

@@ -4196,6 +4196,18 @@ function startStatusServer() {
     }
   });
 
+  // Rolling realized P&L vs EV banked, for the Analytics chart of the same
+  // name. Server-side because /orders ships ~100 rows (under two days at
+  // current volume) so the client cannot build a 30-day curve itself — the
+  // same constraint that put the 15-day ROI stat on the server.
+  //   ?days=30 (1-365)
+  app.get('/ev-curve', (req, res) => {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+      res.json({ ok: true, ...orderTracker.getEvCurve(days) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.get('/orders', (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     // Stamp each order with isStalePhantom computed server-side so the
