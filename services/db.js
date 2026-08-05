@@ -3,7 +3,37 @@ const log = require('./logger');
 
 let supabase = null;
 
+// TEST-RUNNER KILL SWITCH.
+//
+// Several tests (fill-count-race, creator-blocklist, odds-tie-sign) exercise the
+// REAL order-tracker rather than a stub, and order-tracker persists through
+// db.saveOrder. With a populated .env that wrote straight into PRODUCTION
+// Supabase: `npm test` created parlays race-1..race-4 as live 'confirmed' rows,
+// which then hydrated at every boot and showed up on the dashboard as four
+// $100 open positions worth $400 of phantom deployed risk. Found 2026-08-05
+// after the operator asked what they were; they had been re-appearing on every
+// restart because saveOrder upserts on parlay_id.
+//
+// Node's test runner exports NODE_TEST_CONTEXT, which catches `node --test`
+// directly as well as `npm test` — the direct invocation is how these rows were
+// actually created, so keying only on an npm script would not have caught it.
+// NODE_ENV=test is honoured as a second signal for other runners.
+//
+// Returning null here routes every call down the already-supported
+// "no credentials configured" path (`const db = getClient(); if (!db) return;`),
+// which every function in this file already handles. Tests get a hermetic
+// no-op DB instead of the production one.
+const IS_TEST_RUN = !!process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test';
+let _warnedTestRun = false;
+
 function getClient() {
+  if (IS_TEST_RUN) {
+    if (!_warnedTestRun) {
+      _warnedTestRun = true;
+      log.warn('DB', 'Test run detected — Supabase disabled. No reads or writes will touch the real database.');
+    }
+    return null;
+  }
   if (!supabase) {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_KEY;
@@ -16,6 +46,7 @@ function getClient() {
 }
 
 function isEnabled() {
+  if (IS_TEST_RUN) return false;
   return !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 }
 
