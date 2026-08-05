@@ -202,6 +202,20 @@ async function startup() {
   try { require('./services/roster').startPolling(); } catch (err) {
     log.warn('Startup', `    roster service init failed (xteam pairs stay declined): ${err.message}`);
   }
+  // Restore the operator's pasted golf outright board BEFORE seeding. The paste
+  // lived only in memory, so every deploy wiped it while ~430 outright lines
+  // stayed registered with PX — we kept advertising markets we could not price.
+  // Must run before seedAllLines so outright lines register against a live
+  // board rather than a cold one. Awaited (it is a single small KV read) so the
+  // ordering is real; a stale board is refused inside restorePasteBoard.
+  try {
+    const restored = await require('./services/golf-topn').restorePasteBoard();
+    log.info('Startup', restored
+      ? '    ✓ Golf outright paste board restored from DB'
+      : '    · No golf paste board restored (none stored, too old, or already loaded)');
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Golf paste board restore failed: ${err.message}`);
+  }
   try {
     const seedStats = await lineManager.seedAllLines();
     log.info('Startup', `    ✓ ${seedStats.registeredLines} lines registered (${seedStats.matchedLines} matched of ${seedStats.totalLines} parsed)`);
@@ -6318,14 +6332,19 @@ function startStatusServer() {
   // flaky prod scrape). Body: { text: "<pasted DK board>", tournament: "2026 The Open" }.
   // Prices winner + top 5/10/20 off the raw DK implied with only the mirror
   // cushion (option B). Marks the board manual so the scrape won't clobber it.
-  app.post('/golf-outrights/paste', express.json({ limit: '512kb' }), (req, res) => {
+  app.post('/golf-outrights/paste', express.json({ limit: '512kb' }), async (req, res) => {
     try {
       const topN = require('./services/golf-topn');
       const text = (req.body && req.body.text) || '';
       const tournament = (req.body && req.body.tournament) || '2026 The Open';
       if (!text || text.length < 20) return res.status(400).json({ ok: false, error: 'missing/short text' });
       const r = topN.ingestPaste(text, tournament);
-      res.json({ ok: true, ...r });
+      // Write through to kv_store so the board survives the next Railway deploy.
+      // Awaited (not fire-and-forget) so `persisted` is the truth: persisted:false
+      // means the board is live NOW but will be gone after the next restart and
+      // needs re-pasting. The paste itself already succeeded either way.
+      const persisted = await topN.persistPasteBoard();
+      res.json({ ok: true, ...r, persisted });
     } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
   });
 

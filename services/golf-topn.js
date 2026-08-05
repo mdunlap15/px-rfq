@@ -144,6 +144,104 @@ const UPLIFT_MIN = 1.0, UPLIFT_MAX = 1.6;
 const MANUAL_MAX_AGE_MS = (Number(process.env.GOLF_OUTRIGHT_PASTE_MAX_AGE_MIN) || 720) * 60 * 1000;
 
 let _cache = { at: 0, bySlug: {} };  // slug -> { tournament, eventName, markets: { outright_top_5: {T, uplift, k, players: Map} }, manual? }
+
+// ---------------------------------------------------------------------------
+// PASTE-BOARD PERSISTENCE
+//
+// The operator's DK "(Including Ties)" paste is the AUTHORITATIVE outright
+// board and it lived only in memory, so every Railway deploy silently wiped it
+// while ~430 outright lines stayed registered with PX. That leaves us
+// advertising markets we cannot price: getTopNFairProbSync returns null and
+// every outright leg declines. On 2026-08-05 it had to be hand-re-pasted three
+// times in one day.
+//
+// Only MANUAL (pasted) boards are persisted. Scraped boards rebuild themselves
+// on the warm cycle; the paste cannot, which is the whole problem.
+//
+// `players` is a Map, so it is serialized to a plain object and rebuilt on load.
+//
+// CRITICAL: the restored board keeps its ORIGINAL `at` timestamp. Restoring it
+// as "now" would let a deploy silently rejuvenate a stale board and quote a
+// finished tournament — the exact failure GOLF_OUTRIGHT_MAX_AGE_MIN exists to
+// prevent. A board that was already too old stays too old and fails closed.
+const _KV_KEY = 'golf_topn_paste_board';
+
+function _serializeCache() {
+  const bySlug = {};
+  for (const [slug, b] of Object.entries(_cache.bySlug || {})) {
+    if (!b || !b.manual) continue;              // scraped boards re-warm on their own
+    const markets = {};
+    for (const [mt, m] of Object.entries(b.markets || {})) {
+      if (!m || !m.players) continue;
+      markets[mt] = {
+        T: m.T, uplift: m.uplift, k: m.k, overround: m.overround, source: m.source,
+        players: Object.fromEntries(m.players),
+      };
+    }
+    if (Object.keys(markets).length) {
+      bySlug[slug] = { tournament: b.tournament, eventName: b.eventName, manual: true, markets };
+    }
+  }
+  return Object.keys(bySlug).length ? { at: _cache.at, bySlug } : null;
+}
+
+async function persistPasteBoard() {
+  try {
+    const payload = _serializeCache();
+    if (!payload) return false;
+    const db = require('./db');
+    await db.saveKV(_KV_KEY, payload);
+    log.info('GolfTopN', `Persisted paste board (${Object.keys(payload.bySlug).join(', ')}) — survives redeploys`);
+    return true;
+  } catch (e) {
+    log.warn('GolfTopN', `persistPasteBoard failed: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Rehydrate the operator's pasted board at boot. Never clobbers a board that is
+ * already loaded (a scrape or a fresh paste that landed first wins), and never
+ * resurrects one that is already past MANUAL_MAX_AGE_MS.
+ */
+async function restorePasteBoard() {
+  try {
+    const db = require('./db');
+    const saved = await db.loadKV(_KV_KEY);
+    if (!saved || !saved.bySlug || !Object.keys(saved.bySlug).length) return false;
+    const ageMs = Date.now() - Number(saved.at || 0);
+    if (!(Number(saved.at) > 0) || ageMs > MANUAL_MAX_AGE_MS) {
+      log.info('GolfTopN', `Stored paste board is ${(ageMs / 3600000).toFixed(1)}h old (limit ${(MANUAL_MAX_AGE_MS / 3600000).toFixed(0)}h) — NOT restoring; re-paste to quote outrights`);
+      return false;
+    }
+    if (Object.keys(_cache.bySlug || {}).length) {
+      log.info('GolfTopN', 'A board is already loaded — skipping restore');
+      return false;
+    }
+    const bySlug = {};
+    for (const [slug, b] of Object.entries(saved.bySlug)) {
+      const markets = {};
+      for (const [mt, m] of Object.entries(b.markets || {})) {
+        const players = new Map();
+        for (const [name, p] of Object.entries(m.players || {})) {
+          const v = Number(p);
+          if (v > 0 && v < 1) players.set(name, v);   // re-validate; never trust stored junk
+        }
+        if (players.size) markets[mt] = { T: m.T, uplift: m.uplift, k: m.k, overround: m.overround, source: m.source || 'paste', players };
+      }
+      if (Object.keys(markets).length) bySlug[slug] = { tournament: b.tournament, eventName: b.eventName, manual: true, markets };
+    }
+    if (!Object.keys(bySlug).length) return false;
+    _cache = { at: Number(saved.at), bySlug };       // ORIGINAL timestamp, not now
+    const counts = Object.entries(bySlug).map(([s, b]) =>
+      s + ':' + Object.entries(b.markets).map(([m, x]) => m + '=' + x.players.size).join(',')).join(' | ');
+    log.info('GolfTopN', `Restored pasted outright board from DB (${(ageMs / 60000).toFixed(0)}min old): ${counts}`);
+    return true;
+  } catch (e) {
+    log.warn('GolfTopN', `restorePasteBoard failed: ${e.message}`);
+    return false;
+  }
+}
 let _inflight = null;
 // Last-attempt telemetry, exposed via /golf-topn. The warm is fire-and-forget
 // from the seed, so when it dies on prod the ONLY trace is a log line inside
@@ -595,6 +693,10 @@ function ingestPaste(text, tournamentName) {
     bySlug: { [slug]: { tournament: tournamentName, eventName: tournamentName, markets, manual: true } },
   };
   log.info('GolfTopN', `Ingested operator paste for ${slug}: ${Object.entries(counts).map(([k, v]) => k + '=' + v).join(' ')}`);
+  // NOTE: persistence is the CALLER's job (POST /golf-outrights/paste awaits
+  // persistPasteBoard so it can report `persisted` honestly). Kept out of here
+  // so this stays synchronous and a DB hiccup can never fail a paste that is
+  // already in memory and pricing. Any new caller must persist explicitly.
   return { slug, counts };
 }
 
@@ -616,4 +718,4 @@ function __debugCache() {
     }])) };
 }
 
-module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, ingestPaste, parseDkOutrightPaste, resolveDkSlug, __debugCache, _buildTopNMarket, __anchorProb: _anchorProb };
+module.exports = { warmTopN, warmTopNForSlug, getTopNFairProbSync, ingestPaste, parseDkOutrightPaste, resolveDkSlug, __debugCache, _buildTopNMarket, __anchorProb: _anchorProb, persistPasteBoard, restorePasteBoard, __setCacheForTest: (c) => { _cache = c; }, __getCacheForTest: () => _cache };
