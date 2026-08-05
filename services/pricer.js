@@ -2343,6 +2343,11 @@ function priceParlay(legs, opts = {}) {
   let offeredImpliedProb;
   let vigMode;
   let vigRateUsed; // informational — the rate applied (for debugging/analytics)
+  // Implied-prob added by the near-lock concentration surcharge (0 when the
+  // ticket isn't the lock+coinflip shape). Surfaced on meta so we can tell
+  // whether the guard ever fires — the flow it targets went dormant 2026-07-30,
+  // so "it earned nothing" and "it never fired" must be distinguishable.
+  let lockConcentrationAdd = 0;
   // Legs flagged with bookPriceOverride (e.g. NBA series heavy favorites
   // past -500 FV) bypass vig entirely — we quote DK's offered number for
   // those legs. Vig logic below applies only to the remaining legs.
@@ -2641,6 +2646,62 @@ function priceParlay(legs, opts = {}) {
     const scaledOffered = vigFair * (1 + currentVigFraction * legCountMult);
     if (scaledOffered > offeredImpliedProb) {
       offeredImpliedProb = Math.min(0.99, scaledOffered);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // NEAR-LOCK CONCENTRATION SURCHARGE
+  //
+  // A leg priced >= 0.90 contributes almost no uncertainty. Bolt one onto a
+  // single genuine coinflip and the ticket is economically a SINGLE BET wearing
+  // a parlay's clothing: the real leg's model error passes through undiluted,
+  // but the ladder above prices it as a 2-leg (x1.0, since vigByLegCount starts
+  // at 3) and our normal ~6% markup is all that stands behind it.
+  //
+  // MEASURED over the full book 2026-04-02..08-05, tickets with a leg at
+  // -1000 or longer (fair >= 90.91%):
+  //   ALL leg counts   n=65   -$3,690   ROI -36.9%   realised 49.2% vs model
+  //                                                  37.1% void-adjusted, z=2.03
+  //   >>> exactly 1 non-lock leg: n=17  -$4,225  ROI -99.5%  bettor won 17/17, z=4.62
+  //       3 legs n=9  +$94 | 4 legs n=18 +$502 | 5+ legs n=21 -$61
+  // So the damage is ENTIRELY the concentrated shape. Genuine multi-leg parlays
+  // that merely contain a lock are fine-to-profitable and are deliberately left
+  // alone — this fires only when <= 1 leg carries real uncertainty.
+  //
+  // Threshold is 0.90, NOT 0.80: the 0.80-0.90 band is +$2,204 over the same
+  // window and widening into it would tax a profitable segment.
+  //
+  // The lock legs themselves are not the problem — they went 66-1-11(void). We
+  // are not repricing them; we are refusing to give single-bet risk a parlay's
+  // vig treatment.
+  //
+  // HONEST LIMIT: a surcharge cannot rescue a segment that lost 100% of 17
+  // tickets — that run implies the counterparty was reading the coinflip leg
+  // better than we were, not that our margin was 15% too thin. This makes the
+  // shape unattractive and observable; VIG_LOCK_DECLINE=true refuses it
+  // outright, which the data says is also +EV. Default is to price, not refuse.
+  // -------------------------------------------------------------------
+  const lockThresh = config.pricing.vigLockLegThreshold;
+  const lockLegs = vigLegs.filter(l => Number(l.fairProb) >= lockThresh);
+  const realLegs = vigLegs.length - lockLegs.length;
+  const lockConcentrated = lockLegs.length > 0 && realLegs <= 1 && vigLegs.length >= 2;
+  if (lockConcentrated) {
+    if (config.pricing.declineNearLockSingleBet) {
+      log.info('Pricing', `Declined: near-lock single-bet shape — ${lockLegs.length} leg(s) >= ${lockThresh} with only ${realLegs} uncertain leg`);
+      priceParlay._lastFailure = {
+        reason: 'near_lock_single_bet',
+        detail: `${lockLegs.length} leg(s) at fair >= ${lockThresh} with only ${realLegs} uncertain leg — economically a single bet`,
+      };
+      return null;
+    }
+    const surcharge = config.pricing.vigLockConcentrationSurcharge || 0;
+    if (surcharge > 0 && offeredImpliedProb > vigFair && vigFair > 0) {
+      const currentVigFraction = offeredImpliedProb / vigFair - 1;
+      const scaled = vigFair * (1 + currentVigFraction * (1 + surcharge));
+      if (scaled > offeredImpliedProb) {
+        lockConcentrationAdd = Math.min(0.99, scaled) - offeredImpliedProb;
+        offeredImpliedProb = Math.min(0.99, scaled);
+      }
     }
   }
 
@@ -3407,6 +3468,11 @@ function priceParlay(legs, opts = {}) {
       // template stacking and retroactively measure whether we actually
       // lost volume on the 2nd/3rd/4th-of-identical bets.
       templateRampAdd: Math.round((templateRampAdd || 0) * 10000) / 10000,
+      // Implied-prob added by the near-lock concentration surcharge. 0 means
+      // the ticket was not the lock+coinflip shape (or the surcharge is off).
+      // Non-zero is the only way to confirm the guard is live, since the flow
+      // it targets has been dormant since 2026-07-30.
+      lockConcentrationAdd: Math.round((lockConcentrationAdd || 0) * 10000) / 10000,
       templatePriorCount: templatePriorCount || 0,
       fairParlayProb: Math.round(fairParlayProb * 100000) / 100000,
       pricingMethod,

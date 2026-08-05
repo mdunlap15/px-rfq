@@ -449,6 +449,24 @@ const config = {
     // pricing produces +120). This knob lets us approach DK-style
     // pricing on chalk stacks without touching single-leg quotes or
     // mixed parlays. Default 0 = disabled.
+    // NEAR-LOCK CONCENTRATION. A leg at/above this fair prob adds essentially no
+    // uncertainty, so a parlay of one lock + one coinflip is a SINGLE BET priced
+    // with parlay vig. Measured full-book 2026-04-02..08-05 on tickets with a leg
+    // at -1000 or longer: exactly-one-uncertain-leg went n=17, -$4,225, ROI
+    // -99.5%, bettor won 17/17 (z=4.62), while 3/4/5+ leg tickets containing a
+    // lock were fine-to-profitable. The surcharge therefore fires ONLY when <= 1
+    // leg carries real uncertainty; genuine multi-leg parlays are untouched.
+    // 0.90 not 0.80 — the 0.80-0.90 band is +$2,204 over the same window.
+    // Distinct from vigChalkStack* below, which requires EVERY leg to be a
+    // favourite and so can never fire on this shape.
+    vigLockLegThreshold: parseFloat(process.env.VIG_LOCK_LEG_THRESHOLD) || 0.90,
+    // Multiplier on the ALREADY-ACCUMULATED vig fraction (same mechanism as
+    // vigByLegCount), not a flat pp add. 0 disables.
+    vigLockConcentrationSurcharge: parseFloat(process.env.VIG_LOCK_CONCENTRATION_SURCHARGE) || 0.15,
+    // Refuse the shape outright instead of pricing it. The data says declining
+    // is also +EV (the segment is 0.5% of book risk at -37% ROI), but a
+    // surcharge keeps the volume and stays measurable, so default is false.
+    declineNearLockSingleBet: process.env.VIG_LOCK_DECLINE === 'true',
     vigChalkStackSurcharge: parseFloat(process.env.VIG_CHALK_STACK_SURCHARGE) || 0,
     vigChalkStackLegThreshold: parseFloat(process.env.VIG_CHALK_STACK_LEG_THRESHOLD) || 0.60,
     vigChalkStackParlayThreshold: parseFloat(process.env.VIG_CHALK_STACK_PARLAY_THRESHOLD) || 0.25,
