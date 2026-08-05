@@ -5220,6 +5220,22 @@
         hitProb *= ls.wantsRef ? m.refProb : (1 - m.refProb);
       }
       const evLive = (1 - hitProb) * spProfit - hitProb * spRisk;
+      // Per-parlay contribution record, carried onto every row this position
+      // touches so the Events / Outcomes tables can expand to show exactly which
+      // tickets make up a row's EV impact. `ev` here is the SAME evLive that is
+      // summed into the row total, so the children always reconcile to the
+      // parent — that is the whole point of the drill-down.
+      const contrib = {
+        id: o.parlayId || o.parlay_id || o.id || '',
+        ev: evLive,
+        risk: spRisk,
+        profit: spProfit,
+        hit: hitProb,               // BETTOR's win prob — we lose spRisk if it hits
+        nLegs: legs.length,
+        nPending: pendingLegs.length,
+        odds: o.offeredOdds,
+        legs: pendingLegs.map(l => _ocLabel(l)).slice(0, 8),
+      };
       const evSeen = new Set();
       for (const l of pendingLegs) {
         const gKey = l.pxEventId ? String(l.pxEventId)
@@ -5232,10 +5248,11 @@
           const name = (l.homeTeam && l.awayTeam)
             ? (l.awayTeam + ' @ ' + l.homeTeam)
             : (l.pxEventName || l.team || l.teamName || l.selection || 'Unknown');
-          evByEvent[gKey] = { ev: 0, n: 0, name, sport: l.sport || '' };
+          evByEvent[gKey] = { ev: 0, n: 0, name, sport: l.sport || '', parlays: [] };
         }
         evByEvent[gKey].ev += evLive;
         evByEvent[gKey].n++;
+        evByEvent[gKey].parlays.push(contrib);
       }
 
       // EV-by-outcome attribution: attribute evLive to each distinct (event, outcome)
@@ -5245,9 +5262,10 @@
         const oc = _ocLabel(l), ev = _evLabel(l), key = ev + ' ||| ' + oc;
         if (ocSeen[key]) continue;
         ocSeen[key] = 1;
-        if (!evByOutcome[key]) evByOutcome[key] = { outcome: oc, event: ev, ev: 0, n: 0, sport: l.sport || '' };
+        if (!evByOutcome[key]) evByOutcome[key] = { outcome: oc, event: ev, ev: 0, n: 0, sport: l.sport || '', parlays: [] };
         evByOutcome[key].ev += evLive;
         evByOutcome[key].n++;
+        evByOutcome[key].parlays.push(contrib);
       }
     }
 
@@ -5335,13 +5353,20 @@
       .filter(([, e]) => Math.abs(e.ev) >= 0.5)
       .sort((a, b) => Math.abs(b[1].ev) - Math.abs(a[1].ev))
       .slice(0, 10)
-      .map(([key, e]) => ({ key, name: e.name, sport: e.sport, n: e.n, ev: e.ev }));
+      .map(([key, e]) => ({
+        key, name: e.name, sport: e.sport, n: e.n, ev: e.ev,
+        // biggest contributors first — that is what the operator opens the row to find
+        parlays: (e.parlays || []).slice().sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev)),
+      }));
 
     // All outcomes with a non-negligible |EV impact| — individual sides/
     // selections. No longer capped at 10: the table paginates client-side.
     const topOutcomes = Object.values(evByOutcome)
       .filter(e => Math.abs(e.ev) >= 0.5)
-      .sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev));
+      .sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev))
+      .map(e => Object.assign({}, e, {
+        parlays: (e.parlays || []).slice().sort((a, b) => Math.abs(b.ev) - Math.abs(a.ev)),
+      }));
 
     return {
       nSims,
@@ -5548,19 +5573,24 @@
       html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:8px;">Top 10 Events by Expected-Value Impact</div>';
       html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
       html += '<tr style="color:var(--text3); text-align:left;">'
+        + '<th style="padding:5px 10px;"></th>'
         + '<th style="padding:5px 10px;">Event</th>'
         + '<th style="padding:5px 10px;">Sport</th>'
         + '<th style="padding:5px 10px; text-align:right;">Positions</th>'
         + '<th style="padding:5px 10px; text-align:right;">EV impact</th></tr>';
       for (const e of r.topEvents) {
-        html += '<tr style="border-top:1px solid var(--border);">'
+        const rid = _rsKeyId('ev|' + e.key);
+        const isOpen = window._rsExpanded.has(rid);
+        html += '<tr style="border-top:1px solid var(--border); cursor:pointer;" onclick="_rsToggleRow(\'' + rid + '\')" title="Click to see the parlays behind this row">'
+          + '<td style="padding:5px 10px; color:var(--text3); width:1%;"><span id="' + rid + '-car">' + (isOpen ? '▾' : '▸') + '</span></td>'
           + '<td style="padding:5px 10px;">' + escapeHtml(e.name) + '</td>'
           + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
           + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
           + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + formatCls(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+        html += _rsDetailRow('ev|' + e.key, e.parlays, e.ev, 5);
       }
       html += '</table>';
-      html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s expected value, summed by event; a multi-game parlay counts under each game it touches.</div>';
+      html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s expected value, summed by event; a multi-game parlay counts under each game it touches. Click a row to see the individual parlays behind it.</div>';
       html += '</div>';
     }
 
@@ -5618,6 +5648,90 @@
   // Operates on window._rsOutcomes (full list, set in renderRiskSim). Only the
   // #rs-outcomes-container (table + pager) re-renders on interaction, so the
   // filter <input> above it keeps focus/caret while typing.
+  // ---------------------------------------------------------------------
+  // EV-IMPACT ROW DRILL-DOWN (Events + Outcomes tables)
+  //
+  // Each row expands to the individual open parlays behind it, so a large EV
+  // impact can be read as "one whale" vs "thirty small tickets" — which is the
+  // difference between a concentration problem and a pricing one.
+  //
+  // The children ALWAYS reconcile to the parent: a child's `ev` is the very
+  // same per-position evLive that was summed into the row total.
+  //
+  // A parlay touching several games/outcomes appears under EACH of them at its
+  // FULL EV (matching how the row totals are built), so child EV summed across
+  // DIFFERENT rows will exceed the headline Expected. Within one row it ties out.
+  // ---------------------------------------------------------------------
+  window._rsExpanded = window._rsExpanded || new Set();
+  // Stable short id from a row key so expanded state survives sort/filter/paging.
+  function _rsKeyId(key) {
+    let h = 5381;
+    const s = String(key);
+    for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+    return 'rsx' + h.toString(36);
+  }
+  window._rsToggleRow = function (id) {
+    const tr = document.getElementById(id);
+    if (!tr) return;
+    const open = tr.style.display !== 'none';
+    tr.style.display = open ? 'none' : '';
+    if (open) window._rsExpanded.delete(id); else window._rsExpanded.add(id);
+    const car = document.getElementById(id + '-car');
+    if (car) car.textContent = open ? '▸' : '▾';
+  };
+  // Detail <tr>. Rendered collapsed unless the key is in _rsExpanded.
+  function _rsDetailRow(key, parlays, totalEv, colspan) {
+    const id = _rsKeyId(key);
+    const list = parlays || [];
+    const open = window._rsExpanded.has(id);
+    const cls = (v) => v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
+    const money = (v) => (v < 0 ? '-$' : '$') + Math.abs(Number(v) || 0).toFixed(2);
+    let h = '<tr id="' + id + '" style="display:' + (open ? '' : 'none') + ';">'
+      + '<td colspan="' + colspan + '" style="padding:0 10px 10px 10px; background:var(--surface2);">';
+    if (!list.length) {
+      h += '<div style="padding:10px; color:var(--text3); font-size:12px;">No open parlays behind this row.</div></td></tr>';
+      return h;
+    }
+    h += '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
+    h += '<tr style="color:var(--text3); text-align:left;">'
+      + '<th style="padding:4px 8px;">Parlay</th>'
+      + '<th style="padding:4px 8px;">Legs (pending)</th>'
+      + '<th style="padding:4px 8px; text-align:right;">Odds</th>'
+      + '<th style="padding:4px 8px; text-align:right;">Our risk</th>'
+      + '<th style="padding:4px 8px; text-align:right;">Bettor win</th>'
+      + '<th style="padding:4px 8px; text-align:right;">EV contribution</th>'
+      + '<th style="padding:4px 8px; text-align:right;">Share</th></tr>';
+    let sum = 0;
+    for (const p of list) {
+      sum += Number(p.ev) || 0;
+      // Share is signed and can exceed 100% when a row mixes +EV and -EV
+      // tickets. That is arithmetically right, not a bug — footnoted below.
+      const share = Math.abs(totalEv) > 1e-9 ? (p.ev / totalEv) * 100 : null;
+      const legTxt = (p.legs || []).join('  +  ') + (p.nPending > (p.legs || []).length ? '  +' + (p.nPending - (p.legs || []).length) + ' more' : '');
+      h += '<tr style="border-top:1px solid var(--border);">'
+        + '<td style="padding:4px 8px; font-family:monospace; color:var(--text3);">' + escapeHtml(String(p.id || '').slice(0, 8)) + '</td>'
+        + '<td style="padding:4px 8px;">' + escapeHtml(legTxt || '-')
+        + (p.nLegs !== p.nPending ? ' <span style="color:var(--text3);">(' + p.nPending + ' of ' + p.nLegs + ' still live)</span>' : '') + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-family:monospace;">' + (p.odds > 0 ? '+' : '') + (p.odds != null ? p.odds : '-') + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-family:monospace;">' + money(p.risk) + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums;">' + (p.hit != null ? (p.hit * 100).toFixed(1) + '%' : '-') + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-family:monospace;" class="' + cls(p.ev) + '">' + money(p.ev) + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums; color:var(--text2);">' + (share == null ? '-' : share.toFixed(1) + '%') + '</td></tr>';
+    }
+    h += '<tr style="border-top:2px solid var(--border); font-weight:600;">'
+      + '<td style="padding:4px 8px;" colspan="5">' + list.length + ' parlay' + (list.length === 1 ? '' : 's') + ' — row total</td>'
+      + '<td style="padding:4px 8px; text-align:right; font-family:monospace;" class="' + cls(sum) + '">' + money(sum) + '</td>'
+      + '<td style="padding:4px 8px; text-align:right; color:var(--text2);">100%</td></tr>';
+    h += '</table>';
+    h += '<div style="padding:6px 8px 0 8px; font-size:11px; color:var(--text3); line-height:1.5;">'
+      + 'Each parlay\'s EV contribution is the same per-position value summed into the row total, so these tie out exactly. '
+      + 'Bettor win = probability the whole parlay hits (we lose our risk if it does). '
+      + 'Shares can exceed 100% or read negative when a row mixes +EV and −EV tickets.'
+      + '</div>';
+    h += '</td></tr>';
+    return h;
+  }
+
   const RS_OUTCOMES_PER_PAGE = 10;
   function _rsOutcomesStateSafe() {
     return window._rsOutcomesState || (window._rsOutcomesState = { page: 0, sortCol: 'ev', sortDir: -1, filter: '' });
@@ -5674,6 +5788,7 @@
     const th = (col, label, align) => '<th style="padding:5px 10px; cursor:pointer; user-select:none; white-space:nowrap; text-align:' + (align || 'left') + ';" onclick="_rsOutcomesSort(\'' + col + '\')">' + label + arrow(col) + '</th>';
     let h = '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
     h += '<tr style="color:var(--text3); text-align:left;">'
+      + '<th style="padding:5px 10px;"></th>'
       + th('outcome', 'Team / Outcome')
       + th('event', 'Event')
       + th('sport', 'Sport')
@@ -5681,15 +5796,20 @@
       + th('ev', 'EV impact', 'right')
       + '</tr>';
     if (!pageRows.length) {
-      h += '<tr><td colspan="5" style="padding:12px 10px; color:var(--text3); text-align:center;">No outcomes match the filter.</td></tr>';
+      h += '<tr><td colspan="6" style="padding:12px 10px; color:var(--text3); text-align:center;">No outcomes match the filter.</td></tr>';
     }
     for (const e of pageRows) {
-      h += '<tr style="border-top:1px solid var(--border);">'
+      const rkey = 'oc|' + e.event + ' ||| ' + e.outcome;
+      const rid = _rsKeyId(rkey);
+      const isOpen = window._rsExpanded.has(rid);
+      h += '<tr style="border-top:1px solid var(--border); cursor:pointer;" onclick="_rsToggleRow(\'' + rid + '\')" title="Click to see the parlays behind this row">'
+        + '<td style="padding:5px 10px; color:var(--text3); width:1%;"><span id="' + rid + '-car">' + (isOpen ? '▾' : '▸') + '</span></td>'
         + '<td style="padding:5px 10px; font-weight:600;">' + escapeHtml(e.outcome) + '</td>'
         + '<td style="padding:5px 10px; color:var(--text2);">' + escapeHtml(e.event) + '</td>'
         + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
         + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
         + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + clsOf(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+      h += _rsDetailRow(rkey, e.parlays, e.ev, 6);
     }
     h += '</table>';
     h += '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:8px; font-size:12px; color:var(--text3);">';
