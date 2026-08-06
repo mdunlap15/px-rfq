@@ -850,6 +850,8 @@ function priceParlay(legs, opts = {}) {
   // All original validation, decline reasons, and blocker-leg reporting are
   // preserved — just the two network calls are now parallel instead of serial.
   const pricedLegs = [];
+  // Per-leg prop-fair calibration adjustments applied this parlay (telemetry).
+  const propFairCalibs = [];
   let fairParlayProb = 1.0;
 
   // Phase-timing markers. We emit these on the happy path via the
@@ -1598,6 +1600,27 @@ function priceParlay(legs, opts = {}) {
         effectiveBookPriceOverride = implied;
         manualOddsApplied = manualAm;
         log.info('Pricing', `Manual override applied to line ${lineId}: offered ${manualAm} (implied ${implied.toFixed(4)})`);
+      }
+    }
+
+    // Per-prop-type-per-side fair CALIBRATION. De-vig inherits the books'
+    // favourite-longshot shading, so some prop legs are systematically
+    // mispriced (HR-over: our fair 21.2% vs realised 16.3%, z=-3.62 on 930
+    // unique legs). A measured multiplier corrects the leg's fairProb before it
+    // compounds. Off unless config.pricing.propFairCalibration has the key.
+    // Skipped for bookPriceOverride legs (we quote the book number directly
+    // there) and only touches genuine prob fairs.
+    const calibMap = config.pricing.propFairCalibration;
+    if (calibMap && effectiveBookPriceOverride == null
+        && fairProb != null && fairProb > 0 && fairProb < 1
+        && lineInfo.marketType && lineInfo.oddsApiSelection) {
+      const mult = calibMap[`${lineInfo.marketType}.${String(lineInfo.oddsApiSelection).toLowerCase()}`];
+      if (mult != null && mult !== 1) {
+        const adj = Math.min(0.999, Math.max(0.0001, fairProb * mult));
+        if (adj !== fairProb) {
+          propFairCalibs.push({ leg: legLabel, from: Math.round(fairProb * 10000) / 10000, to: Math.round(adj * 10000) / 10000, mult });
+          fairProb = adj;
+        }
       }
     }
 
@@ -3498,6 +3521,8 @@ function priceParlay(legs, opts = {}) {
       // VIG_MIN_PP / VIG_MIN_ROI experiment against retention directly.
       vigFloorAdd: Math.round((vigFloorAdd || 0) * 10000) / 10000,
       vigFloorWhich,
+      // Per-prop-type leg-fair calibration adjustments applied (empty when off).
+      propFairCalibs: propFairCalibs.length ? propFairCalibs : undefined,
       templatePriorCount: templatePriorCount || 0,
       fairParlayProb: Math.round(fairParlayProb * 100000) / 100000,
       pricingMethod,

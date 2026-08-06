@@ -1024,6 +1024,33 @@ const config = {
     // just re-quoting that book's vigged line). DK+FD = 2 sharp books
     // is sufficient; default lowered from 3 to 2 (2026-06-24).
     propMinBooksWithBothSides: parseInt(process.env.PROP_MIN_BOOKS_WITH_BOTH_SIDES) || 2,
+    // Per-prop-type-per-side leg-fair CALIBRATION multipliers. Some prop legs
+    // are systematically miscalibrated because our de-vig inherits the books'
+    // favourite-longshot shading: an HR-over is a ~20% longshot and books price
+    // it high, so our "fair" carries that inflation. MEASURED on 930 unique
+    // HR-over legs (box-score ground truth): our fair 21.2% vs realised 16.3%,
+    // ratio 1.30, z=-3.62 — we overprice the over and lose on it.
+    //
+    // Map key = "<propType>.<side>" (e.g. "hitter_hr.over"), value = a
+    // multiplier on the leg's fairProb BEFORE it enters the parlay product.
+    // 0.80 shades HR-over fair down ~20%, a partial (not full) correction of
+    // the measured 1.30 to avoid over-fitting in-sample. Applies to that side
+    // only; the thin under book is left alone.
+    //
+    // DEFAULT EMPTY = OFF. This ships the mechanism, not a price change — enable
+    // deliberately after reviewing /calibration. Recommended first value:
+    // {"hitter_hr.over":0.82}. Bounds each multiplier to [0.5, 1.5].
+    propFairCalibration: (() => {
+      const out = {};
+      try {
+        const raw = JSON.parse(process.env.PROP_FAIR_CALIBRATION || '{}');
+        for (const [k, v] of Object.entries(raw)) {
+          const m = parseFloat(v);
+          if (/^[a-z0-9_]+\.(over|under|yes|no|home|away)$/i.test(k) && Number.isFinite(m) && m >= 0.5 && m <= 1.5) out[k] = m;
+        }
+      } catch { /* bad JSON -> empty (off) */ }
+      return out;
+    })(),
     // ---- Quote-fisher detection (services/creator-activity.js) ----
     // Classifies a counterparty as a quote-fisher from its REQUEST STREAM only
     // (rate + grid re-fires), never from whether we filled — an ex-post
