@@ -2198,7 +2198,7 @@
       html += `
         <tr>
           <td>${sportPill(sport)}</td>
-          <td><span class="market-pill">${market}</span></td>
+          <td><span class="market-pill" title="${escapeHtml(market || '')}">${escapeHtml(marketLabel(market))}</span></td>
           <td style="text-align:right; font-variant-numeric: tabular-nums;">${count}</td>
         </tr>
       `;
@@ -11271,7 +11271,7 @@
           const enrichedLegLabel = formatParlaySelections([l])
             || ((l.teamName || l.team || l.selection || '?')
                 + (l.line != null ? ' ' + l.line : '')
-                + (l.market ? ' (' + l.market + ')' : ''));
+                + (l.market ? ' (' + marketLabel(l.market) + ')' : ''));
           data.push({
             parlayId: o.parlayId,
             legLabel: enrichedLegLabel,
@@ -12883,7 +12883,7 @@
     const legLine = (l) => {
       const sport = l.sport ? ' [' + escapeHtml(sportLabel(l.sport)) + ']' : '';
       const who = escapeHtml(l.team || l.selection || '?');
-      const mkt = l.market ? ' ' + escapeHtml(l.market) : '';
+      const mkt = l.market ? ' ' + escapeHtml(marketLabel(l.market)) : '';
       const line = (l.line != null && l.line !== '') ? ' ' + escapeHtml(String(l.line)) : '';
       return who + mkt + line + sport;
     };
@@ -13373,7 +13373,7 @@
     for (const r of marketRows) {
       const gColor = Math.abs(r.medianGap) < 0.5 ? 'var(--text2)' : (r.medianGap > 0 ? 'var(--amber)' : 'var(--text3)');
       html += '<tr style="border-bottom:1px solid var(--surface2);">'
-        + '<td style="padding:4px 8px;">' + r.market + '</td>'
+        + '<td style="padding:4px 8px;" title="' + escapeHtml(r.market || '') + '">' + escapeHtml(marketLabel(r.market)) + '</td>'
         + '<td style="text-align:right; padding:4px 8px;">' + r.count + '</td>'
         + '<td style="text-align:right; padding:4px 8px; font-family:monospace;">$' + Math.round(r.stake).toLocaleString() + '</td>'
         + '<td style="text-align:right; padding:4px 8px; font-family:monospace; color:' + gColor + ';">' + (r.medianGap >= 0 ? '+' : '') + r.medianGap.toFixed(2) + 'pp</td>'
@@ -15338,7 +15338,7 @@
       const unregMktSuffix = (l.wasUnregistered && l.propType)
         ? ' <span style="color:var(--amber); font-size:9px;">(unregistered)</span>'
         : '';
-      h += '<td style="padding:' + pad + ';"><span class="market-pill">' + (mkt || '-') + '</span>' + unregMktSuffix + '</td>';
+      h += '<td style="padding:' + pad + ';"><span class="market-pill" title="' + escapeHtml(mkt || '') + '">' + escapeHtml(marketLabel(mkt)) + '</span>' + unregMktSuffix + '</td>';
       h += '<td style="padding:' + pad + '; color:var(--text2);">' + lineDisplay + '</td>';
       h += '<td style="padding:' + pad + '; white-space:nowrap; font-size:11px; color:var(--text3);">' + eventTime + '</td>';
       // Live state cell. Shows live score + period/clock when ESPN has
@@ -16951,12 +16951,29 @@
     series_winner: 'Series Winner',
     series_spread: 'Series Spread',
     series_total: 'Series Total',
-    first_5_innings_moneyline: 'F5 Moneyline',
-    first_5_innings_run_line: 'F5 Run Line',
-    first_5_innings_total: 'F5 Total',
-    first_half_moneyline: '1st Half Moneyline',
-    first_half_spread: '1st Half Spread',
-    first_half_total: '1st Half Total',
+    first_5_innings_moneyline: 'First 5 Innings Moneyline',
+    first_5_innings_run_line: 'First 5 Innings Run Line',
+    first_5_innings_total: 'First 5 Innings Total',
+    first_half_moneyline: 'First Half Moneyline',
+    first_half_spread: 'First Half Spread',
+    first_half_total: 'First Half Total',
+    first_set_moneyline: 'First Set Moneyline',
+    total_sets: 'Total Sets',
+    set_win_at_least_one: 'To Win a Set',
+    // Player props — the generic fallback ("player_" stripped, title-cased)
+    // handles player_points -> "Points" fine, but leaves compound MLB/soccer
+    // types awkward ("Hitter Hr", "Sot 1"). Cover both the marketType
+    // (player_*) and bare propType forms since either can reach marketLabel.
+    player_hitter_hr: 'Home Runs', hitter_hr: 'Home Runs',
+    player_hitter_hits: 'Hits', hitter_hits: 'Hits',
+    player_hitter_total_bases: 'Total Bases', hitter_total_bases: 'Total Bases',
+    player_hitter_rbi_runs: 'RBIs + Runs', hitter_rbi_runs: 'RBIs + Runs',
+    player_hitter_stolen_bases: 'Stolen Bases', hitter_stolen_bases: 'Stolen Bases',
+    player_hitter_singles: 'Singles', player_hitter_doubles: 'Doubles',
+    player_strikeouts: 'Strikeouts', player_pitcher_strikeouts: 'Strikeouts',
+    player_threes_made: 'Threes Made', pra_combo: 'Pts + Reb + Ast',
+    player_shots_on_target: 'Shots on Target', sot_1: 'Shots on Target 1+', sot_2: 'Shots on Target 2+',
+    goalscorer: 'Anytime Goalscorer',
   };
   function marketLabel(mt) {
     if (!mt) return '-';

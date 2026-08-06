@@ -1749,7 +1749,7 @@
       html += `
         <tr>
           <td>${sportPill(sport)}</td>
-          <td><span class="market-pill">${market}</span></td>
+          <td><span class="market-pill" title="${escapeHtml(market || '')}">${escapeHtml(marketLabel(market))}</span></td>
           <td style="text-align:right; font-variant-numeric: tabular-nums;">${count}</td>
         </tr>
       `;
@@ -11578,7 +11578,7 @@
       const gameLabel = l.matchup ? l.matchup + (l.gameDate ? ' · ' + l.gameDate : '') : l.gameDate || '-';
       html += '<tr><td>' + l.team + '</td>';
       html += '<td style="font-size:11px; color:var(--text3); white-space:nowrap;">' + escapeHtml(gameLabel) + '</td>';
-      html += '<td><span class="market-pill">' + l.market + '</span></td>';
+      html += '<td><span class="market-pill" title="' + escapeHtml(l.market || '') + '">' + escapeHtml(marketLabel(l.market)) + '</span></td>';
       html += '<td style="text-align:right; font-family:monospace;">' + myFmt + '</td>';
       html += '<td style="text-align:right; font-family:monospace; color:var(--purple);">' + pinFmt + '</td>';
       html += '<td style="text-align:right; font-family:monospace; color:var(--blue);">' + fdFmt + '</td>';
@@ -12054,7 +12054,7 @@
       const unregMktSuffix = (l.wasUnregistered && l.propType)
         ? ' <span style="color:var(--amber); font-size:9px;">(unregistered)</span>'
         : '';
-      h += '<td style="padding:' + pad + ';"><span class="market-pill">' + (mkt || '-') + '</span>' + unregMktSuffix + '</td>';
+      h += '<td style="padding:' + pad + ';"><span class="market-pill" title="' + escapeHtml(mkt || '') + '">' + escapeHtml(marketLabel(mkt)) + '</span>' + unregMktSuffix + '</td>';
       h += '<td style="padding:' + pad + '; color:var(--text2);">' + lineDisplay + '</td>';
       h += '<td style="padding:' + pad + '; white-space:nowrap; font-size:11px; color:var(--text3);">' + eventTime + '</td>';
       if (showOdds) {
@@ -13107,6 +13107,39 @@
     const d = document.createElement('div');
     d.textContent = text;
     return d.innerHTML;
+  }
+
+  // Human-readable market labels. Kept in sync with client/index.html's
+  // marketLabel — the viewer renders the same leg tables and must not show
+  // code-style strings like "first_5_innings_run_line". Generic fallback:
+  // strip a leading "player_", underscores -> spaces, Title Case.
+  const MARKET_LABELS = {
+    outright_win: 'Tournament Winner', outright_top_5: 'Top 5 Finish (Ties Incl.)',
+    outright_top_10: 'Top 10 Finish (Ties Incl.)', outright_top_20: 'Top 20 Finish (Ties Incl.)',
+    outright_make_cut: 'To Make the Cut', advance: 'To Advance',
+    moneyline: 'Moneyline', spread: 'Spread', total: 'Total', team_total: 'Team Total',
+    btts: 'Both Teams to Score', double_chance: 'Double Chance',
+    mov_ko: 'Win by KO/TKO/DQ', mov_sub: 'Win by Submission', mov_dec: 'Win by Decision',
+    mov_itd: 'Win Inside the Distance', run_first_inning: 'Run First Inning',
+    series_winner: 'Series Winner', series_spread: 'Series Spread', series_total: 'Series Total',
+    first_5_innings_moneyline: 'First 5 Innings Moneyline', first_5_innings_run_line: 'First 5 Innings Run Line',
+    first_5_innings_total: 'First 5 Innings Total', first_half_moneyline: 'First Half Moneyline',
+    first_half_spread: 'First Half Spread', first_half_total: 'First Half Total',
+    first_set_moneyline: 'First Set Moneyline', total_sets: 'Total Sets', set_win_at_least_one: 'To Win a Set',
+    player_hitter_hr: 'Home Runs', hitter_hr: 'Home Runs', player_hitter_hits: 'Hits', hitter_hits: 'Hits',
+    player_hitter_total_bases: 'Total Bases', hitter_total_bases: 'Total Bases',
+    player_hitter_rbi_runs: 'RBIs + Runs', hitter_rbi_runs: 'RBIs + Runs',
+    player_hitter_stolen_bases: 'Stolen Bases', hitter_stolen_bases: 'Stolen Bases',
+    player_hitter_singles: 'Singles', player_hitter_doubles: 'Doubles',
+    player_strikeouts: 'Strikeouts', player_pitcher_strikeouts: 'Strikeouts',
+    player_threes_made: 'Threes Made', pra_combo: 'Pts + Reb + Ast',
+    player_shots_on_target: 'Shots on Target', sot_1: 'Shots on Target 1+', sot_2: 'Shots on Target 2+',
+    goalscorer: 'Anytime Goalscorer',
+  };
+  function marketLabel(mt) {
+    if (!mt) return '-';
+    if (MARKET_LABELS[mt]) return MARKET_LABELS[mt];
+    return String(mt).replace(/^player_/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
   /** Debounce helper — delays fn execution until input stops for ms */
