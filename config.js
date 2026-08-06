@@ -1579,6 +1579,15 @@ const config = {
   },
   logLevel: process.env.LOG_LEVEL || 'info',
   refreshIntervalMinutes: parseInt(process.env.REFRESH_INTERVAL_MINUTES) || 10,
+  // Max hours between a PX line's start time and the odds event it matches to.
+  // getEventMarkets picks the closest candidate by time but had NO ceiling, so a
+  // leg could bind to a fixture days/weeks away (NFL preseason binding to the
+  // same teams' September game; the 2026-07-23 mid-series MLB dark incident).
+  // Legit matches are within a few hours; a doubleheader ~3h, a back-to-back
+  // ~24h; the preseason collision is ~5 weeks. 36h separates them cleanly.
+  // Beyond this the leg declines rather than pricing off the wrong game.
+  oddsMatchMaxDeltaHours: Number(process.env.ODDS_MATCH_MAX_DELTA_HOURS) > 0
+    ? Number(process.env.ODDS_MATCH_MAX_DELTA_HOURS) : 36,
 };
 
 /**

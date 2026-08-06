@@ -7589,6 +7589,21 @@ const _MERGEABLE_SUPP_MARKETS = [
   'team_totals',                                 // NBA / MLB / NHL
 ];
 
+/**
+ * True when a candidate odds event is close enough in time to the PX line it
+ * would price, i.e. plausibly the SAME fixture. Fails OPEN (true) when either
+ * time is missing or unparseable — we never reject a match on absent data, only
+ * on a confirmed large gap. maxHours defaults to 36 (see config comment).
+ */
+function _withinMatchWindow(targetTime, eventTime, maxHours) {
+  if (targetTime == null || targetTime === '' || eventTime == null || eventTime === '') return true;
+  const t = new Date(targetTime).getTime();
+  const e = new Date(eventTime).getTime();
+  if (isNaN(t) || isNaN(e)) return true;
+  const cap = (Number(maxHours) > 0 ? Number(maxHours) : 36) * 3600 * 1000;
+  return Math.abs(e - t) <= cap;
+}
+
 function getEventMarkets(sport, homeTeam, awayTeam, targetTime) {
   const sportCache = oddsCache[sport];
   if (!sportCache) return null;
@@ -7633,6 +7648,31 @@ function getEventMarkets(sport, homeTeam, awayTeam, targetTime) {
   }
 
   const closest = closestC.ev;
+
+  // COMMENCE-TIME PROXIMITY GUARD. The selection above picks the closest
+  // candidate by time, but with NO ceiling — and a SINGLE candidate never
+  // consults time at all. So a leg can bind to an event days or weeks away and
+  // price off it silently, fresh cache, no stale flag:
+  //   - NFL preseason (Aug) shares a team pair with the SAME teams' regular-
+  //     season fixture (Sep). 4 of the Aug 13-17 preseason games do; each would
+  //     bind to the September event and quote off regular-season odds.
+  //   - The 2026-07-23 incident (5 mid-series MLB games dark) is the same code
+  //     path — a mid-series game matching the wrong day's event.
+  // Legitimate matches sit within a few hours of the PX start (timezone,
+  // posted-vs-actual jitter); a doubleheader is ~3h, a back-to-back ~24h; the
+  // preseason collision is ~5 WEEKS. So a generous ceiling separates them
+  // cleanly. When the only candidate is too far off, return null (leg declines)
+  // rather than price off the wrong game. Skipped when targetTime is absent.
+  // Golf is exempt: a tournament "event" legitimately spans ~4 days, so a
+  // round-4 matchup's PX start can sit 3+ days from the tournament-start odds
+  // event. Golf also has no weekly same-pair collision to guard against.
+  const timeGuarded = typeof sport === 'string' && !sport.startsWith('golf');
+  if (timeGuarded && targetTime && !_withinMatchWindow(targetTime, closest.commenceTime, config.oddsMatchMaxDeltaHours)) {
+    const dh = Math.round(Math.abs(new Date(closest.commenceTime).getTime() - new Date(targetTime).getTime()) / 3600000);
+    log.debug('OddsFeed', `Event match rejected for ${homeTeam} v ${awayTeam} (${sport}): nearest odds event ${dh}h from PX start — wrong fixture`);
+    return null;
+  }
+
   const flippedBucket = closestC.flipped;
   const sameBucket = flippedBucket ? revEvents : fwdEvents;
   const oppositeBucket = flippedBucket ? fwdEvents : revEvents;
@@ -10197,6 +10237,7 @@ module.exports = {
   getPinVerifyWarmStats,
   getPinVerifyFastFailStats,
   getEventMarkets,
+  _withinMatchWindow,
   getGolfMatchupEvent,
   getLiveEventMarkets,
   getLiveFairProb,
