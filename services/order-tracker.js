@@ -1696,6 +1696,14 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
       market: displayMarket,
       line: displayLine,
       sport: displaySport,
+      // Which SIDE of the market this line is. Registered lines carry it
+      // (over/under, home/away, yes/no); without it prop-settlement graded
+      // EVERY hitter-prop leg as an OVER, silently inverting parlay_won for
+      // the ~6.5% that are unders and feeding /prop-correlation the opposite
+      // of truth. Carried here so matched_parlays rows written from now on can
+      // be settled on the correct side. Absent on unregistered legs (they
+      // aren't box-score-settleable anyway).
+      selection: info?.oddsApiSelection || info?.selection || null,
       // Surface the full PX market name as a tooltip for unregistered
       // legs so the operator can hover-read the literal book wording
       // without losing the cleaner playerName-first display.

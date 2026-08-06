@@ -82,14 +82,31 @@ function _settleLeg(leg, indexes) {
       if (cand.length === 1) st = idx[cand[0]];
     }
     if (st) {
-      const need = Math.ceil(Number(leg.line)); // over L -> stat >= ceil(L)
+      const lineNum = Number(leg.line);
+      const need = Math.ceil(lineNum); // over L -> stat >= ceil(L)
       let val;
       if (pt === 'hitter_hr') val = st.HR;
       else if (pt === 'hitter_hits') val = st.H;
       else if (pt === 'hitter_total_bases') val = st.TB;
       else if (pt === 'hitter_rbi_runs') val = st.RBI;
       else return null;
-      return { win: val >= need, gamePk: st.gamePk, team: st.team, val, need };
+
+      // SIDE-AWARE grading. This used to hardcode `val >= need`, i.e. it graded
+      // every leg as an OVER — which inverted parlay_won for every UNDER leg
+      // (~6.5% of hitter props) and fed /prop-correlation the opposite of truth.
+      // On the half-point lines props almost always carry, over and under are
+      // exact complements (no push), so under-win is simply !over-win.
+      const sideRaw = String(leg.selection || '').toLowerCase();
+      // Absent selection (legacy matched_parlays rows written before the
+      // recordMatchedParlay fix) => assume OVER, the dominant side, and flag it
+      // so calibration can exclude guessed rows. `no` is the anytime-prop under.
+      const isUnder = sideRaw === 'under' || sideRaw === 'no';
+      const sideKnown = sideRaw === 'over' || sideRaw === 'under' || sideRaw === 'yes' || sideRaw === 'no';
+      const overWin = val >= need;
+      // Integer lines CAN push (val === line). Half-point lines never do.
+      const isPush = Number.isInteger(lineNum) && val === lineNum;
+      const win = isPush ? false : (isUnder ? !overWin : overWin);
+      return { win, push: isPush, gamePk: st.gamePk, team: st.team, val, need, side: isUnder ? 'under' : 'over', sideKnown };
     }
   }
   return null;
@@ -169,7 +186,7 @@ async function settleRecent(opts = {}) {
       matched_odds: r.matched_odds,
       matched_stake: r.matched_stake,
       we_quoted: !!r.we_quoted,
-      leg_results: legs.map((l, i) => ({ player: l.team, propType: _propType(l), line: l.line, stat: results[i].val, won: results[i].win })),
+      leg_results: legs.map((l, i) => ({ player: l.team, propType: _propType(l), line: l.line, side: results[i].side, sideKnown: results[i].sideKnown, stat: results[i].val, won: results[i].win })),
       parlay_won: results.every((x) => x.win),
       source: 'mlb-statsapi',
     });
@@ -264,4 +281,4 @@ async function getCalibration(opts = {}) {
   return { ok: true, windowDays: days, marginalRates: Object.fromEntries(Object.entries(margRate).map(([k, v]) => [k, +(v * 100).toFixed(1)])), combos: out };
 }
 
-module.exports = { settleRecent, getCalibration };
+module.exports = { settleRecent, getCalibration, __settleLeg: _settleLeg };
