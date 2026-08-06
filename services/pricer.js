@@ -2348,6 +2348,11 @@ function priceParlay(legs, opts = {}) {
   // whether the guard ever fires — the flow it targets went dormant 2026-07-30,
   // so "it earned nothing" and "it never fired" must be distinguishable.
   let lockConcentrationAdd = 0;
+  // Implied-prob added by the longshot vig floor (0 when neither floor bound).
+  // Surfaced so the VIG_MIN_PP / VIG_MIN_ROI experiment is measurable — we can
+  // split retention on floored vs un-floored quotes rather than guessing.
+  let vigFloorAdd = 0;
+  let vigFloorWhich = null;   // 'pp' | 'roi' | null
   // Legs flagged with bookPriceOverride (e.g. NBA series heavy favorites
   // past -500 FV) bypass vig entirely — we quote DK's offered number for
   // those legs. Vig logic below applies only to the remaining legs.
@@ -2830,11 +2835,26 @@ function priceParlay(legs, opts = {}) {
   // push. Start small (0.3-0.5pp) and watch the longshot band on the
   // chart lift while monitoring fill rate.
   // -------------------------------------------------------------------
+  // Two floors, applied as a UNION (whichever binds harder wins):
+  //   pp floor : never offer closer than VIG_MIN_PP points above fair.
+  //   ROI floor: never accept less than VIG_MIN_ROI return on our risk, i.e.
+  //              op >= (fp + R)/(1 - ... ) — since ROI = (op-fp)/(1-op) = R
+  //              solves to op = (fp + R)/(1 + R). For op < ~0.10 the two agree;
+  //              the ROI floor keeps biting as parlays shorten.
+  // Both default 0 (disabled). Telemetry: lockConcentrationAdd-style, so the
+  // experiment is measurable — meta.vigFloorAdd records the implied-prob the
+  // floor added, and which floor bound. START SMALL (see config).
   const minVigPp = config.pricing.vigMinPp || 0;
-  if (minVigPp > 0 && fairParlayProb > 0) {
-    const ppFloor = fairParlayProb + minVigPp / 100;
-    if (ppFloor > offeredImpliedProb) {
-      offeredImpliedProb = Math.min(0.99, ppFloor);
+  const minVigRoi = config.pricing.vigMinRoi || 0;
+  if ((minVigPp > 0 || minVigRoi > 0) && fairParlayProb > 0 && fairParlayProb < 1) {
+    const ppFloor = minVigPp > 0 ? fairParlayProb + minVigPp / 100 : 0;
+    const roiFloor = minVigRoi > 0 ? (fairParlayProb + minVigRoi) / (1 + minVigRoi) : 0;
+    const floor = Math.max(ppFloor, roiFloor);
+    if (floor > offeredImpliedProb) {
+      const before = offeredImpliedProb;
+      offeredImpliedProb = Math.min(0.99, floor);
+      vigFloorAdd = offeredImpliedProb - before;
+      vigFloorWhich = roiFloor >= ppFloor ? 'roi' : 'pp';
     }
   }
 
@@ -3473,6 +3493,11 @@ function priceParlay(legs, opts = {}) {
       // Non-zero is the only way to confirm the guard is live, since the flow
       // it targets has been dormant since 2026-07-30.
       lockConcentrationAdd: Math.round((lockConcentrationAdd || 0) * 10000) / 10000,
+      // Implied-prob added by the longshot vig floor, and which floor bound.
+      // 0 / null when the floor is off or didn't bind. Lets us measure the
+      // VIG_MIN_PP / VIG_MIN_ROI experiment against retention directly.
+      vigFloorAdd: Math.round((vigFloorAdd || 0) * 10000) / 10000,
+      vigFloorWhich,
       templatePriorCount: templatePriorCount || 0,
       fairParlayProb: Math.round(fairParlayProb * 100000) / 100000,
       pricingMethod,

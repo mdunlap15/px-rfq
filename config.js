@@ -330,6 +330,20 @@ const config = {
       if (!Number.isFinite(v) || v < 0) return 0;
       return v;
     })(),
+    // Minimum ROI-on-risk floor, the companion to VIG_MIN_PP. ROI on our risk is
+    // (op - fp)/(1 - op), so flooring it at R means op >= (fp + R)/(1 + R). The
+    // 2026-08-05 pricing deep-dive proposed the two as a UNION — for op < ~0.10
+    // they are the same lever, but the ROI floor keeps biting as parlays
+    // shorten, guaranteeing a minimum return per dollar of risk rather than a
+    // fixed pp distance. Sharpe-accretive in every measured branch; +$974/30d at
+    // the modest 0.4pp/0.75% setting at the measured 0.72 retention.
+    // VALUE IN pp IS TINY BUT ON A LONGSHOT IT IS NOT — at 1.5% a median MLB HR
+    // ticket's payout roughly halves. START SMALL. 0 disables (default).
+    vigMinRoi: (() => {
+      const v = parseFloat(process.env.VIG_MIN_ROI);       // as a fraction, e.g. 0.0075
+      if (!Number.isFinite(v) || v < 0 || v >= 1) return 0;
+      return v;
+    })(),
     // Minimum theoretical edge gate. After all pricing adjustments, if our
     // final edge (offeredImplied − fairParlayProb) / fairParlayProb × 100 is
     // below this floor, decline rather than quote. Calibration data shows that
