@@ -4663,6 +4663,29 @@ function shouldDecline(legs, parlayId) {
   // pxEventId bucket. Without this, repeated parlays touching opposite
   // sides of the same game can build event-level concentration that
   // no team-level cap sees.
+  // Per-LINE cap. Sits alongside the team/game caps because those key on an
+  // ENTITY: a counterparty pairing ONE repeated line with many different
+  // partners spreads across a fresh team bucket and a fresh game bucket on
+  // every ticket, so neither ever binds while the repeated line concentrates.
+  // See checkLegExposure for the measured case that motivated it.
+  const legCheck = orderTracker.checkLegExposure(
+    legsWithProb, estPayout, config.pricing.maxExposurePerLeg
+  );
+  if (!legCheck.allowed) {
+    log.info('Pricing', `Leg exposure limit: ${legCheck.reason}`);
+    try {
+      const push = require('./push');
+      push.notifyCapHit('leg', { subject: legCheck.legLabel || 'line', limit: legCheck.limit, current: legCheck.wouldBe });
+    } catch (_) { /* fire-and-forget */ }
+    return {
+      declined: true,
+      reason: 'leg exposure limit',
+      detail: legCheck.reason,
+      violations: [{ team: legCheck.legLabel || 'line', wouldBe: legCheck.wouldBe || 0, limit: legCheck.limit || 0 }],
+      estPayout,
+    };
+  }
+
   const gameCheck = orderTracker.checkGameExposure(
     legsWithProb, estPayout, config.pricing.maxExposurePerGame
   );

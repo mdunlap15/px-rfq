@@ -1150,6 +1150,17 @@ const config = {
     // more ways to load up on one event.
     // Tunable via MAX_EXPOSURE_PER_GAME env var. Set 0 to disable.
     maxExposurePerGame: _capNum(process.env.MAX_EXPOSURE_PER_GAME, 5000),
+    // Per-LINE cap. The team/game/player caps all key on an ENTITY, so a
+    // counterparty pairing one repeated line with many different partners lands
+    // in a different team and game bucket every ticket while the repeated line
+    // accumulates unchecked. Measured 2026-08-05 (creator f88b95dc): 998 quotes
+    // over 573 distinct leg-sets, ONE line in 357 of them, $3,654 raw on a
+    // single strikeout line across 8 tickets — no existing cap came close.
+    // WEIGHTED risk (payout × P(other legs)), same basis as the game cap.
+    // Book-wide per-line-per-day weighted exposure: p50 $30 / p90 $276 /
+    // p95 $534 / p99 $1,527. $1,500 binds on ~1% of line-days — the
+    // concentrated tail only. 0 disables.
+    maxExposurePerLeg: _capNum(process.env.MAX_EXPOSURE_PER_LEG, 1500),
     // Tighter risk caps for parlays containing series_* markets. Series
     // bets tie up bankroll for weeks until the series settles, so we
     // limit both per-parlay SP risk and aggregate per-series-event

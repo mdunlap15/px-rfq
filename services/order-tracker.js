@@ -240,6 +240,7 @@ function recordUnsupportedMarket(info) {
 const LIMIT_REASONS = new Set([
   'team exposure limit',
   'game exposure limit',
+  'leg exposure limit',
   'player exposure limit',
   'series exposure limit',
   'per-parlay risk limit',
@@ -409,6 +410,7 @@ function buildPendingReservation(legs, worstCaseRisk, offerValidSeconds) {
   const teamKeys = [];
   const gameKeys = [];
   const pitcherKeys = [];
+  const legKeys = [];
   for (let i = 0; i < legs.length; i++) {
     const leg = legs[i];
     const li = leg.lineInfo || leg;
@@ -455,12 +457,18 @@ function buildPendingReservation(legs, worstCaseRisk, offerValidSeconds) {
         pitcherKeys.push({ key: pkey, risk: worstCaseRisk });
       }
     }
+    // Per-LINE key. WEIGHTED, matching gameKeys: we only lose this ticket if
+    // the other legs also land, so the risk attributable to this one line is
+    // payout × P(other legs). The check side must use the same basis.
+    const lkey = legExposureKey(li);
+    if (lkey) legKeys.push({ key: lkey, risk: weightedRisk });
   }
   return {
     expiresAt: Date.now() + (offerValidSeconds || 120) * 1000,
     teamKeys,
     gameKeys,
     pitcherKeys,
+    legKeys,
   };
 }
 
@@ -492,6 +500,14 @@ const pendingPitcherRiskByKey = new Map(); // key → running risk total
 // prop launch types). Mirrors pitcher pending logic exactly — see
 // reservePending / checkPlayerExposure for the read side.
 const pendingPlayerRiskByKey = new Map(); // key → running risk total
+// Per-LINE pending index. The team/game/player caps all key on an entity, so a
+// counterparty that pairs ONE repeated line with many DIFFERENT partners never
+// concentrates in any of them — each ticket lands in a different team bucket and
+// a different game bucket while the repeated line accumulates unchecked.
+// Observed 2026-08-05: creator f88b95dc sent 998 quotes covering 573 distinct
+// leg-sets, with a single line (Kamilla Cardoso rebounds 7.5) in 357 of them,
+// and built $3,654 of raw risk on one pitcher's strikeout line across 8 tickets.
+const pendingLegRiskByKey = new Map(); // key → running WEIGHTED risk total
 
 function _addToIndex(idx, key, risk) {
   idx.set(key, (idx.get(key) || 0) + risk);
@@ -523,6 +539,10 @@ function _applyReservationToIndices(reservation, sign) {
   for (const pk of reservation.playerKeys || []) {
     if (sign > 0) _addToIndex(pendingPlayerRiskByKey, pk.key, pk.risk);
     else _subFromIndex(pendingPlayerRiskByKey, pk.key, pk.risk);
+  }
+  for (const lk of reservation.legKeys || []) {
+    if (sign > 0) _addToIndex(pendingLegRiskByKey, lk.key, lk.risk);
+    else _subFromIndex(pendingLegRiskByKey, lk.key, lk.risk);
   }
 }
 
@@ -573,6 +593,28 @@ function getPendingTeamRawRisk(teamEventKey) {
 
 function getPendingGameRisk(gameKey) {
   return pendingGameRiskByKey.get(gameKey) || 0;
+}
+
+function getPendingLegRisk(legKey) {
+  return pendingLegRiskByKey.get(legKey) || 0;
+}
+
+/**
+ * Stable identity for ONE tradeable line. Prefers PX's lineId, which is exactly
+ * the market+selection+line we are repeatedly laying. Falls back to
+ * team|market|line so legs that arrive without a lineId (reconstructed rows)
+ * still concentrate into a bucket rather than silently escaping the cap.
+ * Date-suffixed so the same line on a later day is a fresh bucket.
+ */
+function legExposureKey(li) {
+  if (!li) return null;
+  const day = li.startTime ? new Date(li.startTime).toISOString().substring(0, 10) : '';
+  const id = li.lineId || li.line_id;
+  if (id) return 'L:' + id + '|' + day;
+  const team = normalizeExposureKey(li.teamName || li.team || '');
+  const mkt = String(li.marketType || li.market || '').toLowerCase();
+  if (!team && !mkt) return null;
+  return 'S:' + team + '|' + mkt + '|' + (li.line != null ? li.line : '') + '|' + (day || 'noevent');
 }
 
 // Game-exposure-decline snapshot buffer. When checkGameExposure declines
@@ -1239,6 +1281,7 @@ function classifyRejectionReason(reason) {
   // Local exposure / risk limits
   if (/team exposure/i.test(r)) return 'team exposure limit';
   if (/game exposure/i.test(r)) return 'game exposure limit';
+  if (/leg exposure|^Line \"/i.test(r)) return 'leg exposure limit';
   if (/portfolio (risk|drawdown)/i.test(r)) return 'portfolio drawdown limit';
   if (/per-parlay risk|risk \$[\d,.]+ > max/i.test(r)) return 'per-parlay risk limit';
   // Generic: take the clause before the first colon (dropping any
@@ -2405,6 +2448,7 @@ function buildNotSeenBreakdown(missed) {
 const RISK_LIMIT_REASONS = new Set([
   'team exposure limit',
   'game exposure limit',
+  'leg exposure limit',
   'portfolio drawdown limit',
   'odds too high',
 ]);
@@ -4368,6 +4412,113 @@ function checkGameExposure(legs, estPayout, maxPerGame) {
         pendingEffective: Math.round(pendingNetEff * 100) / 100,
         newRiskRaw: Math.round(newWeightedRiskRaw * 100) / 100,
         newRiskEffective: Math.round(newWeightedRiskEff * 100) / 100,
+        reservationDiscount: discount,
+      };
+    }
+  }
+  return { allowed: true };
+}
+
+/**
+ * Confirmed (already-filled) weighted risk per LINE, built on demand from the
+ * live order book rather than a maintained accumulator.
+ *
+ * Deriving it instead of incrementing it means it cannot drift out of sync with
+ * settlement, and it inherits isParlayAlreadyDead for free — a parlay with a
+ * dead leg carries no remaining risk and must not consume line capacity. Cost
+ * is one pass over open confirmed orders (tens to low hundreds), which is
+ * nothing next to the RFQ path's ~14ms median.
+ */
+function buildOpenLegRiskMap() {
+  const map = new Map();
+  for (const o of Object.values(orders)) {
+    if (o.status !== 'confirmed') continue;
+    if (isOrderStalePhantom(o)) continue;
+    const legs = getLegsForExposure(o);
+    if (!legs.length) continue;
+    if (isParlayAlreadyDead(legs)) continue;
+    const payout = getOrderPayout(o);
+    if (!payout) continue;
+    const probs = legs.map(legEffectiveProb);
+    for (let i = 0; i < legs.length; i++) {
+      const key = legExposureKey(legs[i]);
+      if (!key) continue;
+      let other = 1;
+      for (let j = 0; j < legs.length; j++) if (j !== i) other *= probs[j];
+      map.set(key, (map.get(key) || 0) + payout * other);
+    }
+  }
+  return map;
+}
+
+/**
+ * Per-LINE exposure cap.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE TEAM / GAME / PLAYER CAPS. Every one of
+ * those keys on an entity, so a counterparty that pairs ONE repeated line with
+ * many DIFFERENT partners spreads across a different team bucket and a different
+ * game bucket on every ticket while the repeated line itself accumulates
+ * unchecked. Measured 2026-08-05 on creator f88b95dc: 998 quotes covering 573
+ * distinct leg-sets, one line (Kamilla Cardoso rebounds 7.5) present in 357 of
+ * them, $3,654 of raw risk on a single pitcher's strikeout line across 8
+ * tickets, and $3,744 of open risk resting on ~3 prop outcomes. Team and game
+ * caps never came close to binding because each ticket's partner leg differed.
+ *
+ * WEIGHTED, not raw, matching checkGameExposure: we only lose a ticket if the
+ * OTHER legs also land, so risk attributable to one line is payout × P(others).
+ * Using raw would double-count every multi-leg parlay against every line it
+ * touches. The raw figure is still reported in the decline detail.
+ *
+ * Default cap $1,500. Book-wide, per-line-per-day weighted exposure runs
+ * p50 $30 / p90 $276 / p95 $534 / p99 $1,527, so this binds on ~1% of
+ * line-days — the concentrated tail — while leaving ordinary flow untouched.
+ * It would have bound on the two worst lines of the case that motivated it
+ * (peak $1,821 weighted). 0 disables.
+ */
+function checkLegExposure(legs, estPayout, maxPerLeg) {
+  if (!maxPerLeg || maxPerLeg <= 0) return { allowed: true };
+  let discount = 1.0;
+  try {
+    const { config } = require('../config');
+    const d = config?.pricing?.pendingReservationDiscount;
+    if (Number.isFinite(d) && d > 0 && d <= 1) discount = d;
+  } catch { /* ignore */ }
+
+  let openMap = null; // built lazily — most RFQs never reach the cap
+  for (let i = 0; i < legs.length; i++) {
+    const li = legs[i].lineInfo || legs[i];
+    const key = legExposureKey(li);
+    if (!key) continue;
+
+    let otherProb = 1;
+    for (let j = 0; j < legs.length; j++) {
+      if (j === i) continue;
+      otherProb *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
+    }
+    const newRiskRaw = estPayout * otherProb;
+    const newRiskEff = newRiskRaw * discount;
+
+    if (!openMap) openMap = buildOpenLegRiskMap();
+    const current = openMap.get(key) || 0;
+    const pendingRaw = getPendingLegRisk(key);
+    const pendingEff = pendingRaw * discount;
+    const wouldBe = current + pendingEff + newRiskEff;
+
+    if (wouldBe > maxPerLeg) {
+      const label = (li.teamName || li.team || 'line') +
+        (li.marketType || li.market ? ' ' + (li.marketType || li.market) : '') +
+        (li.line != null ? ' ' + li.line : '');
+      const discTag = discount < 1 ? ` (discount ${Math.round(discount * 100)}%)` : '';
+      return {
+        allowed: false,
+        reason: `Line "${label}" open $${Math.round(current)} + pending $${Math.round(pendingEff)} + new $${Math.round(newRiskEff)} > max $${Math.round(maxPerLeg)}${discTag}`,
+        legLabel: label,
+        legKey: key,
+        wouldBe,
+        limit: maxPerLeg,
+        currentOpen: Math.round(current * 100) / 100,
+        pendingRaw: Math.round(pendingRaw * 100) / 100,
+        newRiskRaw: Math.round(newRiskRaw * 100) / 100,
         reservationDiscount: discount,
       };
     }
@@ -7238,6 +7389,10 @@ module.exports = {
   isOrderStalePhantom,
   getGameExposureSnapshot,
   checkGameExposure,
+  checkLegExposure,
+  legExposureKey,
+  buildOpenLegRiskMap,
+  getPendingLegRisk,
   getSeriesEventRisk,
   checkSeriesExposure,
   checkPitcherExposure,
