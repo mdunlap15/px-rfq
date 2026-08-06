@@ -4222,6 +4222,19 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // Void-adjusted rolling calibration — the standing health metric that P&L
+  // cannot be at 0.56 sigma/30d. `adjusted` grades against the fair of the
+  // parlay that ACTUALLY settled (void legs removed); `raw` is the biased
+  // figure, returned so the void gap that fooled earlier analyses is visible.
+  // Alarm when adjusted.z stays above ~2 across consecutive windows.
+  //   ?days=30 (1-365)
+  app.get('/calibration', (req, res) => {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+      res.json({ ok: true, ...orderTracker.getVoidAdjustedCalibration(days) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.get('/orders', (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     // Stamp each order with isStalePhantom computed server-side so the

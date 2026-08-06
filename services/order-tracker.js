@@ -1462,6 +1462,34 @@ function americanOddsToProfit(americanOdds, stake) {
   return 0;
 }
 
+/**
+ * The fair prob of the parlay THAT ACTUALLY SETTLED, i.e. with void/push legs
+ * removed. Raw fair is the product of all priced legs; dividing out each void
+ * leg's own fair recovers the product of the surviving legs — which is what the
+ * realised win/loss should be graded against.
+ *
+ * Returns { prob, voidLegs } or null when there is nothing to correct or the
+ * inputs are unusable. A leg counts as void on settlementStatus void/push/
+ * cancel/refund. Legs with no usable fairProb are left in (we can't divide them
+ * out safely); the result is clamped to (0,1).
+ */
+function computeVoidAdjustedFairProb(rawFair, legs) {
+  if (!Number.isFinite(rawFair) || rawFair <= 0 || rawFair >= 1) return null;
+  if (!Array.isArray(legs) || !legs.length) return null;
+  let prob = rawFair;
+  let voidLegs = 0;
+  for (const l of legs) {
+    const st = String((l && (l.settlementStatus || l.settlement_status)) || '').toLowerCase();
+    if (!/void|push|cancel|refund/.test(st)) continue;
+    voidLegs++;
+    const p = Number(l.fairProb);
+    if (p > 0.0001 && p < 1) prob = prob / p;
+  }
+  if (voidLegs === 0) return { prob: rawFair, voidLegs: 0 };
+  if (!Number.isFinite(prob) || prob <= 0) return null;
+  return { prob: Math.min(0.999999, prob), voidLegs };
+}
+
 function recordSettlement(orderUuid, result, payout, opts = {}) {
   const parlayId = ordersByUuid[orderUuid];
   const order = parlayId ? orders[parlayId] : null;
@@ -1601,6 +1629,32 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
       }
     } catch (err) {
       log.debug('CLV', `CLV capture failed for ${order.parlayId}: ${err.message}`);
+    }
+
+    // VOID-ADJUSTED FAIR PROB — the honest denominator for any calibration.
+    //
+    // meta.fairParlayProb is the product of ALL legs as priced, including ones
+    // that later VOIDED. But PX grades the parlay after DROPPING void legs, so
+    // comparing the realised outcome against the raw product is biased toward
+    // the bettor: the parlay that actually settled is easier than the one we
+    // priced. That artifact manufactured the golf and soccer "correlation"
+    // scares (2026-08-05) that both evaporated once adjusted — 9.1% of tickets
+    // book-wide carry a void leg, 22.6% in golf, 27.1% in soccer. Persist the
+    // corrected figure at settlement so every downstream calibration reads it
+    // instead of re-deriving (and re-inheriting) the bias.
+    try {
+      const legs = order.legs || order.meta?.legs || [];
+      const raw = Number(order.fairParlayProb ?? order.meta?.fairParlayProb);
+      const adj = computeVoidAdjustedFairProb(raw, legs);
+      if (adj != null) {
+        order.voidAdjustedFairProb = adj.prob;
+        if (order.meta) {
+          order.meta.voidAdjustedFairProb = adj.prob;
+          order.meta.voidLegCount = adj.voidLegs;
+        }
+      }
+    } catch (err) {
+      log.debug('Settle', `void-adjust failed for ${order.parlayId}: ${err.message}`);
     }
 
     // Release exposure for settled parlay
@@ -3360,6 +3414,59 @@ function getRoiWindow(days = 15) {
  * the two lines always cover the same ticket set and the gap stays meaningful.
  * `skipped` reports how many settled parlays were left out for lacking one.
  */
+/**
+ * Rolling VOID-ADJUSTED calibration over settled parlays — the standing health
+ * metric that P&L cannot be (0.56 sigma/30d). Compares each ticket's realised
+ * outcome against the fair of the parlay THAT ACTUALLY SETTLED (void legs
+ * removed), never the raw priced fair. See computeVoidAdjustedFairProb.
+ *
+ * Bettor win = status settled_lost. Model = mean void-adjusted fair. A positive
+ * diff (realised > model) means bettors are beating our prices; z > ~2 sustained
+ * is the alarm the golf/soccer scares were mistaken for before adjustment.
+ *
+ * Also returns the RAW (unadjusted) model so the size of the void bias is
+ * visible — that gap is exactly what fooled earlier analyses. Optional `band`
+ * splits by model-prob bucket. Push-settled parlays are excluded (no win/loss).
+ */
+function getVoidAdjustedCalibration(days = 30) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rows = [];
+  for (const o of Object.values(orders)) {
+    if (o.status !== 'settled_won' && o.status !== 'settled_lost') continue;
+    const t = o.settledAt ? new Date(o.settledAt).getTime() : NaN;
+    if (Number.isNaN(t) || t < cutoff) continue;
+    const raw = Number(o.fairParlayProb ?? o.meta?.fairParlayProb);
+    if (!(raw > 0 && raw < 1)) continue;
+    // prefer the persisted adjusted value; fall back to computing it live so
+    // rows settled before this shipped still count.
+    let adj = Number(o.voidAdjustedFairProb ?? o.meta?.voidAdjustedFairProb);
+    if (!(adj > 0 && adj < 1)) {
+      const c = computeVoidAdjustedFairProb(raw, o.legs || o.meta?.legs || []);
+      adj = c ? c.prob : raw;
+    }
+    rows.push({ raw, adj, bettorWon: o.status === 'settled_lost' });
+  }
+  const n = rows.length;
+  const stat = (arr, key) => {
+    if (!arr.length) return null;
+    const model = arr.reduce((a, r) => a + r[key], 0) / arr.length;
+    const real = arr.filter(r => r.bettorWon).length / arr.length;
+    const se = Math.sqrt(model * (1 - model) / arr.length) || 1e-9;
+    const r2 = v => Math.round(v * 10000) / 10000;
+    return { n: arr.length, model: r2(model), realised: r2(real), diffPp: r2((real - model) * 100), z: r2((real - model) / se) };
+  };
+  const bands = [[0, 0.05], [0.05, 0.1], [0.1, 0.2], [0.2, 0.35], [0.35, 0.6], [0.6, 1]]
+    .map(([lo, hi]) => ({ band: `${lo}-${hi}`, ...(stat(rows.filter(r => r.adj >= lo && r.adj < hi), 'adj') || { n: 0 }) }))
+    .filter(b => b.n > 0);
+  return {
+    days,
+    n,
+    adjusted: stat(rows, 'adj'),      // the honest calibration
+    raw: stat(rows, 'raw'),           // biased; shown so the void gap is visible
+    byBand: bands,
+  };
+}
+
 function getEvCurve(days = 30, maxPoints = 1200) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const rows = [];
@@ -7325,6 +7432,7 @@ module.exports = {
   sweepOpenOrdersByCreator,
   recordFinalized,
   recordSettlement,
+  computeVoidAdjustedFairProb,
   recordLegSettlement,
   pollOrderSettlements,
   checkSettlementDrift,
@@ -7417,6 +7525,7 @@ module.exports = {
   __toBettorSideOdds: _toBettorSideOdds,
   getRoiWindow,
   getEvCurve,
+  getVoidAdjustedCalibration,
   getStats,
   getPnLBySport,
   getExposureForTeam,
