@@ -131,6 +131,8 @@ const REGISTRY = [
   { key: 'propLaunchAllowlist', path: 'propLaunchAllowlist', type: 'strList', group: 'gating', danger: true, env: 'PROP_LAUNCH_ALLOWLIST',
     label: 'Prop launch allowlist', help: '<sport>.<propType> keys allowed to quote. Not listed = never registers.' },
   { key: 'propMinBooksWithBothSides', path: 'propMinBooksWithBothSides', type: 'number', min: 1, max: 10, group: 'gating', env: 'PROP_MIN_BOOKS_WITH_BOTH_SIDES', label: 'Prop min books (both sides)' },
+  { key: 'tennisSetsMinBooks', path: 'tennisSetsMinBooks', type: 'number', min: 1, max: 6, group: 'gating', env: 'TENNIS_SETS_MIN_BOOKS',
+    label: 'Tennis sets min books', help: 'Minimum books quoting a tennis SET market (1st-set ML / total sets / win-a-set) before it prices. Set boards are the thinnest we quote — alternate_set_totals is often a single book.' },
   { key: 'stalePriceMinutes', path: 'stalePriceMinutes', type: 'number', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES',
     label: 'Stale price minutes', help: 'Decline if the odds cache is older than this. Raising it quotes off staler prices.' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },

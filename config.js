@@ -1075,7 +1075,12 @@ const config = {
     // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
     // which are PER-EVENT only and retail-book-only (Pinnacle is absent from
     // TOA's list for them). Depth on alternate_set_totals is often ONE book.
-    tennisSetsMinBooks: parseInt(process.env.TENNIS_SETS_MIN_BOOKS) || 1,
+    // Raised 1 -> 2 (2026-08-06 source-breadth audit): set markets are the
+    // thinnest boards we quote (alternate_set_totals is often a single book),
+    // and a 1-book fair carries that book's full noise against a ~6% markup.
+    // Same rule as every other two-sided gate (BTTS, make_cut, props). The
+    // trade is volume: thin matches go dark instead of quoting off one book.
+    tennisSetsMinBooks: parseInt(process.env.TENNIS_SETS_MIN_BOOKS) || 2,
     tennisSetsTtlSeconds: parseInt(process.env.TENNIS_SETS_TTL_SECONDS) || 300,
     // TOA rate-limits by request FREQUENCY separately from quota; an unpaced
     // slate-wide fan-out 429s, and a 429 reads as 'no set markets' unless
@@ -1355,6 +1360,31 @@ const config = {
     sgpPropSameGamePhiFloor: Number.isFinite(parseFloat(process.env.SGP_PROP_SAMEGAME_PHI_FLOOR))
       ? parseFloat(process.env.SGP_PROP_SAMEGAME_PHI_FLOOR)
       : 0.10,
+    // PER-FAMILY phi overrides for the same-game prop-pair floor above.
+    // The pooled floor treats every prop pair identically, but correlation is
+    // prop-family-specific: run-producing batter composites correlate with the
+    // game script far more than strikeouts do. DK's own SGP prices imply (phi):
+    // batter-scoring composites × own ML ~0.32, pitcher outs ~0.30, pitcher Ks
+    // ~0.17, basketball points ~0.20 (Kalshi-maker calibration 2026-08; back
+    // out our own with scripts/dk-sgp-phi.js before trusting these here).
+    // Keys are a sorted pair of family buckets joined by '_':
+    //   kprop (player_strikeouts), batter (player_hitter_*),
+    //   bball (points/rebounds/assists/threes/pra), total (game total),
+    //   prop (any other player_*)
+    // e.g. {"batter_batter":0.2,"batter_total":0.25,"kprop_kprop":0.08}.
+    // Missing key -> the pooled sgpPropSameGamePhiFloor applies, so an EMPTY
+    // map (default) changes nothing. Values bounded [0, 0.6].
+    sgpPhiByFamily: (() => {
+      const out = {};
+      try {
+        const raw = JSON.parse(process.env.SGP_PHI_BY_FAMILY || '{}');
+        for (const [k, v] of Object.entries(raw)) {
+          const f = parseFloat(v);
+          if (/^[a-z]+_[a-z]+$/.test(k) && Number.isFinite(f) && f >= 0 && f <= 0.6) out[k] = f;
+        }
+      } catch { /* bad JSON -> empty (pooled floor applies) */ }
+      return out;
+    })(),
     // SGP correlation adjustment factors. The naive product of leg fair
     // probs understates the true joint probability for positively-
     // correlated combos (spread-fav + over, or spread-dog + under) and

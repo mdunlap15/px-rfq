@@ -18,10 +18,16 @@ const upd = (...a) => of.__updateLineupState(MLB, ...a);
 const fresh = (h, a, t) => of.checkLineupFreshness(MLB, h, a, t);
 const reset = () => of.__resetLineupCache();
 
-// The exact pair that wedged production.
+// The exact pair that wedged production. Times are RELATIVE to now (a prior
+// version hardcoded 2026-08-05 and started failing two days later when the
+// 48h prune correctly deleted the "older game" — the prune was right, the
+// fixtures were stale). Shape preserved: an ET-evening game that rolls into
+// the SAME UTC date as the next afternoon's game.
 const HOME = 'Chicago Cubs', AWAY = 'Los Angeles Dodgers';
-const GAME1 = '2026-08-05T00:06:00Z';   // tonight, ET evening -> next UTC date
-const GAME2 = '2026-08-05T18:21:00Z';   // tomorrow afternoon, SAME UTC date
+const _base = new Date(Date.now() + 2 * 86400e3);   // two days out — never prunable
+const _day = _base.toISOString().slice(0, 10);
+const GAME1 = _day + 'T00:06:00Z';   // "tonight" ET evening -> this UTC date
+const GAME2 = _day + 'T18:21:00Z';   // "tomorrow afternoon", SAME UTC date
 
 test('the two games of a series do NOT share a cache entry', () => {
   reset();
@@ -95,19 +101,19 @@ test('a first-time starter fill is not treated as a swap', () => {
 test('two writers whose start times differ by minutes hit the SAME game', () => {
   reset();
   // odds feed says 00:06Z, MLB StatsAPI says 00:10Z for the same game.
-  upd(HOME, AWAY, '2026-08-05T00:06:00Z', 'Shota Imanaga', 'Eric Lauer');
-  upd(HOME, AWAY, '2026-08-05T00:10:00Z', 'Shota Imanaga', 'Eric Lauer');
+  upd(HOME, AWAY, _day + 'T00:06:00Z', 'Shota Imanaga', 'Eric Lauer');
+  upd(HOME, AWAY, _day + 'T00:10:00Z', 'Shota Imanaga', 'Eric Lauer');
   assert.equal(Object.keys(of.getLineupCache()[MLB]).length, 1, 'minor jitter must not split a game');
-  assert.equal(fresh(HOME, AWAY, '2026-08-05T00:06:00Z'), null);
+  assert.equal(fresh(HOME, AWAY, _day + 'T00:06:00Z'), null);
 });
 
 test('a doubleheader (~3h apart) still gets two entries', () => {
   reset();
-  upd(HOME, AWAY, '2026-08-05T17:05:00Z', 'Pitcher One', 'Pitcher Two');
-  upd(HOME, AWAY, '2026-08-05T20:40:00Z', 'Pitcher Three', 'Pitcher Four');
+  upd(HOME, AWAY, _day + 'T17:05:00Z', 'Pitcher One', 'Pitcher Two');
+  upd(HOME, AWAY, _day + 'T20:40:00Z', 'Pitcher Three', 'Pitcher Four');
   assert.equal(Object.keys(of.getLineupCache()[MLB]).length, 2);
-  assert.equal(fresh(HOME, AWAY, '2026-08-05T17:05:00Z'), null);
-  assert.equal(fresh(HOME, AWAY, '2026-08-05T20:40:00Z'), null);
+  assert.equal(fresh(HOME, AWAY, _day + 'T17:05:00Z'), null);
+  assert.equal(fresh(HOME, AWAY, _day + 'T20:40:00Z'), null);
 });
 
 test('different team pairs never collide', () => {

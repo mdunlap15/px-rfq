@@ -43,9 +43,23 @@ function odds(over = {}) {
   return {
     home_team: 'Stefanos Tsitsipas',
     away_team: 'Martin Damm Jr.',
-    bookmakers: [{ key: 'betmgm', markets }],
+    // TWO books quoting identical prices: tennisSetsMinBooks default rose to 2
+    // (2026-08-06 source-breadth audit), and identical duplicates keep every
+    // exact de-vig assertion below unchanged (mean of two equal fairs).
+    bookmakers: [
+      { key: 'betmgm', markets },
+      { key: 'betrivers', markets: JSON.parse(JSON.stringify(markets)) },
+    ],
   };
 }
+
+test('a SINGLE-book board fails closed at the 2-book default gate', () => {
+  const single = odds();
+  single.bookmakers = single.bookmakers.slice(0, 1);
+  const s = toa.buildSets(single, BO3);
+  const priced = s && (s.firstSetMl || s.totalSets || (s.atLeastOneSet && (s.atLeastOneSet.home || s.atLeastOneSet.away)));
+  assert.ok(!priced, 'one book must not price any set market (was the pre-audit behavior)');
+});
 
 test('1st set moneyline maps from PLAYER-NAME outcomes', () => {
   const s = toa.buildSets(odds(), BO3);
