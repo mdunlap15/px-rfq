@@ -716,28 +716,61 @@ async function startup() {
     // (see the "MUST run before websocket.connect" block above) so the RFQ-time
     // gate is armed from the first RFQ rather than after this slow pre-warm IIFE.
   })();
+  // RAILWAY COST NOTE (2026-08-07): this loop was launching FIVE forced
+  // Chromium sessions every 10 minutes (~720/day) — NBA and NHL series
+  // winners with ZERO events cached all offseason, a BetOnline scrape for a
+  // tournament that ended in April, and force:true on MMA/golf which
+  // bypassed their own 15-min cache. Each launch is 30-90s of near-full-CPU
+  // plus 300-600MB for the Akamai challenge; this loop alone was the largest
+  // single contributor to a $300+/mo bill. Now:
+  //   - series scrape runs ONLY when that sport has events in the odds cache
+  //     (season-aware for free; NBA/NHL come back in October without a deploy)
+  //   - MMA/golf honor their internal TTL (force dropped) — the interval is
+  //     the *ceiling*, the TTL is the cadence
+  //   - the Zurich scrape is env-gated OFF (BETONLINE_ZURICH_ENABLED=true to
+  //     revive for a future event that needs BetOnline coverage)
+  //   - overnight (02:00-08:59 ET) the whole loop runs at 1/3 cadence; the
+  //     market does ~3% of peak volume in that window
+  let _scrapeCycleN = 0;
   setInterval(async () => {
-    await Promise.all(['nba', 'nhl'].map(sport =>
+    _scrapeCycleN++;
+    const etHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(new Date()));
+    const overnight = etHour >= 2 && etHour < 9;
+    if (overnight && _scrapeCycleN % 3 !== 0) return;
+
+    let cacheStatus = {};
+    try { cacheStatus = oddsFeed.getCacheStatus(); } catch (_) { /* fail open — scrape */ }
+    const activeSeries = ['nba', 'nhl'].filter(sport => {
+      const key = sport === 'nba' ? 'basketball_nba' : 'icehockey_nhl';
+      const st = cacheStatus[key];
+      // Fail OPEN (scrape) when the status is unreadable; skip only on a
+      // confirmed zero — the same only-reject-on-evidence rule as the
+      // commence-time match guard.
+      return !st || st.eventCount > 0;
+    });
+    await Promise.all(activeSeries.map(sport =>
       dkScraper.fetchSeriesWinners(sport, { force: true }).catch(err => {
         log.warn('DkScraper', `Periodic ${sport.toUpperCase()} refresh failed: ${err.message}`);
       })
     ));
     try {
-      await dkScraper.fetchMmaFightOdds({ force: true });
+      await dkScraper.fetchMmaFightOdds({});
       await oddsFeed.mergeDkMmaFights();
     } catch (err) {
       log.warn('DkScraper', `Periodic MMA refresh failed: ${err.message}`);
     }
     try {
-      await dkScraper.fetchGolfMatchups({ force: true });
+      await dkScraper.fetchGolfMatchups({});
     } catch (err) {
       log.warn('DkScraper', `Periodic golf matchups refresh failed: ${err.message}`);
     }
-    try {
-      const betonlineScraper = require('./services/betonline-scraper');
-      await betonlineScraper.fetchZurichMatchups({ force: true });
-    } catch (err) {
-      log.warn('BetOnlineScraper', `Periodic Zurich refresh failed: ${err.message}`);
+    if (process.env.BETONLINE_ZURICH_ENABLED === 'true') {
+      try {
+        const betonlineScraper = require('./services/betonline-scraper');
+        await betonlineScraper.fetchZurichMatchups({ force: true });
+      } catch (err) {
+        log.warn('BetOnlineScraper', `Periodic Zurich refresh failed: ${err.message}`);
+      }
     }
   }, 10 * 60 * 1000);
 
@@ -4278,7 +4311,13 @@ function startStatusServer() {
     res.json({
       stats: orderTracker.getStats(),
       pnlBySport: orderTracker.getPnLBySport(),
-      recentOrders: orderTracker.getRecentOrders(limit).map(stamp),
+      // ?settled=N caps settled rows on the wire (open orders never capped).
+      // No param = full history (back-compat for viewer.html, scripts, and
+      // chart tabs that need it). The main dashboard passes settled=400 on
+      // its fast poll and drops the cap only while a chart tab is active.
+      recentOrders: orderTracker.getRecentOrders(limit, {
+        settledLimit: req.query.settled != null ? parseInt(req.query.settled, 10) : null,
+      }).map(stamp),
     });
   });
 

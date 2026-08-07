@@ -3355,10 +3355,24 @@ function findByOrderUuid(uuid) {
   return parlayId ? orders[parlayId] : null;
 }
 
-function getRecentOrders(limit = 200) {
+function getRecentOrders(limit = 200, opts = {}) {
   const all = Object.values(orders);
   // Always include settled and confirmed orders regardless of limit
-  const important = all.filter(o => o.status === 'confirmed' || (o.status && o.status.startsWith('settled_')));
+  let important = all.filter(o => o.status === 'confirmed' || (o.status && o.status.startsWith('settled_')));
+  // opts.settledLimit caps SETTLED rows (most recent first). The unbounded
+  // default made /orders ship every settled order ever loaded — 10,474 rows /
+  // 60MB (5MB gzipped) PER POLL, serialized + gzipped every ~10s per open
+  // dashboard. That serialization alone was a measurable slice of the Railway
+  // bill. Open (confirmed) orders are never capped — they are the live book
+  // and small. Charts that genuinely need full history pass no cap.
+  const sl = Number(opts.settledLimit);
+  if (Number.isFinite(sl) && sl > 0) {
+    const open = important.filter(o => o.status === 'confirmed');
+    const settled = important.filter(o => o.status !== 'confirmed')
+      .sort((a, b) => (b.settledAt || b.confirmedAt || '').localeCompare(a.settledAt || a.confirmedAt || ''))
+      .slice(0, sl);
+    important = [...open, ...settled];
+  }
   const rest = all.filter(o => o.status !== 'confirmed' && !(o.status && o.status.startsWith('settled_')))
     .sort((a, b) => (b.quotedAt || '').localeCompare(a.quotedAt || ''))
     .slice(0, limit);

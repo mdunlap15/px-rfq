@@ -1466,11 +1466,24 @@
     indicator.style.display = 'flex';
 
     try {
+      // Settled-history depth follows the active tab. Chart tabs (analytics,
+      // lost) genuinely aggregate full history; every other tab renders at
+      // most a few hundred recent rows, and rendering is active-tab-only
+      // (_renderSectionPanels). Uncapped, this poll shipped EVERY settled
+      // order — 60MB serialized / 5MB on the wire, every ~10s, per open
+      // dashboard — a measurable slice of the Railway bill. 400 covers the
+      // Open/Settled tables' visible depth with headroom.
+      const needFullHistory = (typeof activeSection !== 'undefined')
+        && (activeSection === 'analytics' || activeSection === 'lost');
       const [status, orders, intel] = await Promise.all([
         fetchJSON('/status'),
-        fetchJSON('/orders'),
+        fetchJSON(needFullHistory ? '/orders' : '/orders?settled=400'),
         fetchJSON('/market-intel'),
       ]);
+      // Flag capped payloads so switchSection can force a full re-fetch when a
+      // chart tab opens — otherwise Analytics would silently chart 400 rows of
+      // "history" for up to one poll cycle.
+      window._lastOrdersCapped = !needFullHistory;
 
       // Fetch balance separately (don't block main refresh)
       fetchJSON('/balance').then(b => {
@@ -15627,6 +15640,13 @@
 
   function switchSection(section, navEl) {
     activeSection = section;
+    // Chart tabs aggregate FULL settled history, but the fast poll ships a
+    // capped payload (?settled=400) on every other tab. Entering a chart tab
+    // with only capped data in hand would silently chart 400 rows as if they
+    // were all of history — force an immediate full re-fetch instead.
+    if ((section === 'analytics' || section === 'lost') && window._lastOrdersCapped) {
+      try { refreshDashboard(); } catch (_) { /* next poll covers it */ }
+    }
     document.querySelectorAll('.section').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const sectionEl = document.getElementById('section-' + section);
