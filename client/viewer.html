@@ -1087,11 +1087,13 @@
     indicator.style.display = 'flex';
 
     try {
+      const _needFull = window._positionsActiveTab === 'settled';
       const [status, orders, intel] = await Promise.all([
         fetchJSON('/status'),
-        fetchJSON('/orders'),
+        fetchJSON(_needFull ? '/orders' : '/orders?settled=800'),
         fetchJSON('/market-intel'),
       ]);
+      window._viewerOrdersCapped = !_needFull;
 
       // Fetch balance separately (don't block main refresh)
       fetchJSON('/balance').then(b => {
@@ -12109,6 +12111,13 @@
       if (settledEl) settledEl.style.display = 'block';
       if (openBtn) { openBtn.style.borderBottomColor = 'transparent'; openBtn.style.color = 'var(--text3)'; }
       if (settledBtn) { settledBtn.style.borderBottomColor = 'var(--accent)'; settledBtn.style.color = 'var(--text)'; }
+      // The fast poll ships a capped payload (?settled=800). The Settled tab's
+      // Cumul column aggregates FULL history, so entering it with capped data
+      // would show a running total over 800 rows as if it were all-time —
+      // force an immediate full re-fetch instead.
+      if (window._viewerOrdersCapped && typeof viewerRefresh === 'function') {
+        try { viewerRefresh(); } catch (_) { /* next poll covers it */ }
+      }
     }
     updatePositionsCountBadge();
   }
@@ -13798,7 +13807,12 @@
     // strip with dual-cohort numbers. The cached-status render path above
     // gives us a fast first paint even before /bankroll resolves.
     const statusP   = fetchJSON('/status').catch(err => ({ _err: err }));
-    const ordersP   = fetchJSON('/orders').catch(err => ({ _err: err }));
+    // Settled tab aggregates FULL history (the Cumul column); every other view
+    // needs only recent rows. Uncapped, this poll shipped ~10k rows / 5MB
+    // gzipped per cycle — the dominant egress line of the Railway bill.
+    const _viewerNeedFull = window._positionsActiveTab === 'settled';
+    const ordersP   = fetchJSON(_viewerNeedFull ? '/orders' : '/orders?settled=800').catch(err => ({ _err: err }));
+    window._viewerOrdersCapped = !_viewerNeedFull;
     const bankrollP = fetchBankroll().catch(() => null);
 
     let statusOk = false, ordersOk = false;

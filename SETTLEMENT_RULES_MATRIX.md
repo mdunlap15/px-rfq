@@ -20,17 +20,23 @@ belongs in the question list at the bottom.
 | UFC method-of-victory (mov_*) | DK 6-way, power de-vig to 1−draw | Draw = the unpriced 7th outcome (MOV_DRAW_PROB) | Fight cancelled → PX void; we fail closed on missing outcomes | **VERIFIED** | ITD = KO+SUB exact identity |
 | Golf outright top-N | DK **"(Including Ties)"** board only | Ties-included matches PX's "(Ties Included)" naming | Tournament abandoned: both follow official result | **VERIFIED** (deeply — DataGolf rejected precisely because it settles dead-heat) | The strongest precedent of this discipline in the codebase |
 | Golf make_cut | DataGolf make/mc 2-way power de-vig | n/a (binary, no dead heat) | | **VERIFIED** | |
-| MLB F5 moneyline / run line / total | Books' `1st_5_innings_*` | **Push-on-tie assumed BOTH sides** | Rain shortening <5 innings: assumed void both sides | **UNVERIFIED** ← ask PX | F5 legs calibrate fine (+0.80pp), which *suggests* no mismatch, but PX's rule text has never been read. Kalshi's F5 was three-way (tie=loss) — the exact trap |
+| MLB F5 moneyline / run line / total | Books' `1st_5_innings_*` | Tie after 5 ⇒ no winner ⇒ void/push (Moneyline contract definition; Rules I/J void-on-exact pattern) — matches book convention | Rain <5 innings: Postponed (Rule C, same-calendar-day) / Suspended (Rule D, 36h) ⇒ void unless unequivocally determined — matches book void | **VERIFIED** (PX Baseball Rules, 2026-08-07; F5 has no explicit spec section — settled by the general contract definitions) | https://prophethelp.zendesk.com/hc/en-us/articles/45512047671697 |
 | Run first inning (YRFI/NRFI) | TOA `totals_1st_1_innings` | n/a (0.5 line) | | **KNOWN-OPEN, correctly gated OFF** | `config.rfi.enabled` off pending PX side-convention confirmation — do not enable before resolving |
-| MLB hitter/K props | TOA + distribution fair | Integer lines push (side-aware since 02c241a) | Player doesn't start: PX voids, books vary (DNP rules) | **PARTIAL** | Box-score grading verified; the source's DNP convention vs PX's unexamined |
+| MLB hitter/K props | TOA + distribution fair | Integer lines push (side-aware since 02c241a) | **PX Rule L (VERIFIED): batter must be in STARTING LINEUP + record ≥1 PA or the leg VOIDS; pitcher must start + throw ≥1 pitch. Parlay legs void individually.** Stricter than some books (bench/pinch-hit settles at DK-style books, voids on PX). Direction: PX voids MORE ⇒ more void-refunds ⇒ neutral-to-slightly-favorable for us as layer; void-adjusted calibration (e21976a) grades it correctly | **VERIFIED** | Extra innings count in all totals (Rule G) |
 | Tennis moneyline | Books' h2h | n/a | **Retirement: PX pushed** (Musetti ret → 'push', observed once). Books VARY: Pinnacle voids unless match complete; DK settles after 1 set played | **PARTIAL** | One observation. If PX pushes retirements while a source book settles-after-1-set, the source price embeds win-by-retirement value we refund — small but real |
 | Tennis totals / spread (games) | TOA + Pinnacle merge, exact line | Push on exact games line | Retirement mid-match: PX push (same observation); Pinnacle voids incomplete | **PARTIAL** | Directionally aligned (both void/push-ish); the *threshold* (any retirement vs completed-set-1) unverified |
 | Tennis 1st-set ML / total sets | TOA `h2h_s1` / `alternate_set_totals` | Exact-line push n/a (2.5) | Set 1 completed → most books settle s1 markets even on later retirement | **PARTIAL** | Lower risk: set-1 markets usually resolve before retirements |
-| **Tennis "to win a set" (set_win_at_least_one)** | TOA `alternate_set_spreads` (+1.5 identity) | n/a | **THE LIVE RISK.** Player retires in set 2 having WON set 1: PX plausibly settles YES as already-achieved; the +1.5-sets source at many books is **VOID** on an incomplete match. If so, every consumed price embeds different retirement treatment than what we owe | **UNVERIFIED ← ask PX (top priority)** | Quoting now (~64 lines). Bo3-only identity is guarded; retirement is not |
-| Team totals (MLB) | TOA per-event `team_totals` | Push on exact | Extra innings count (standard both sides) | **UNVERIFIED** (low volume) | |
+| **Tennis "to win a set" (set_win_at_least_one)** | TOA `alternate_set_spreads` (+1.5 identity) | n/a | **RESOLVED (PX/Anthony 2026-08-07): PX settles YES as already-achieved on retirement after a won set.** Void-on-incomplete source books refund those scenarios, so their +1.5 price slightly UNDERSTATES P(PX YES) — our YES fair is ~1-2% relative cheap (bettor-favorable, bounded by the ~2-4% tour retirement rate). Documented bias; optional retirement premium if it ever matters. Retirement BEFORE any set concludes: still unanswered | **VERIFIED (PX side)** | Mismatch confirmed but small + direction known |
+| Team totals (MLB) | TOA per-event `team_totals` | Push on exact (Rule J void-on-exact) | Extra innings count (Rule G, VERIFIED) | **VERIFIED** | |
 | NBA/NHL series markets | DK series winners scrape | n/a | Series cancelled: both follow league | **VERIFIED-ish**, out of season | |
 
-## The question for PX (Anthony) — draft, for Mike to send
+## The question for PX (Anthony) — ANSWERED 2026-08-07
+
+Answers folded into the rows above. (1) Tennis to-win-a-set: **settles YES** as
+already-achieved on retirement after a won set (retirement before any set
+concludes remains open — low priority, tiny probability mass). (2) F5: resolved
+by PX's published Baseball Rules (link in the F5 row). Original draft kept for
+the record:
 
 > Two settlement-rule questions on markets we're quoting:
 >
