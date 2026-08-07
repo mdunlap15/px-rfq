@@ -1817,7 +1817,9 @@ function priceParlay(legs, opts = {}) {
   if (isSGPParlay) {
     const phiRaw = config.pricing.sgpPropSameGamePhiFloor;
     const phiFloor = Math.max(0, Number.isFinite(phiRaw) ? phiRaw : 0.10);
-    if (phiFloor > 0) {
+    // Run when the pooled floor is on OR any per-family key is set — a family
+    // key must still bind when the operator zeroes the pooled floor.
+    if (phiFloor > 0 || Object.keys(config.pricing.sgpPhiByFamily || {}).length > 0) {
       const isProp = li => /^player_/.test(li.marketType || '');
       const sideOf = li => String(li.oddsApiSelection || li.selection || '').toLowerCase();
       const consumed = new Set([..._sgpNestedUsed, ..._sgpXteamUsed]);
@@ -1854,17 +1856,27 @@ function priceParlay(legs, opts = {}) {
         if (!(p > 0 && p < 1)) continue;
         if (li.pxEventId == null) continue;
         const key = li.pxEventId + '|' + side;
-        const c = clusters[key] || (clusters[key] = { ps: [], hasProp: false });
+        const c = clusters[key] || (clusters[key] = { ps: [], fams: [], hasProp: false });
         c.ps.push(p);
+        c.fams.push(sgpPropFamily(li));
         if (isProp(li)) c.hasProp = true;
       }
+      // Per-family phi: correlation is prop-family-specific (batter composites
+      // ride the game script far harder than strikeouts), so each consecutive
+      // pair looks up its sorted family-pair key in sgpPhiByFamily and falls
+      // back to the pooled floor when unkeyed. Empty map = pooled behavior,
+      // byte-identical to before. Calibrate keys with scripts/dk-sgp-phi.js.
+      const phiByFamily = config.pricing.sgpPhiByFamily || {};
       for (const key of Object.keys(clusters)) {
         const c = clusters[key];
         if (c.ps.length < 2 || !c.hasProp) continue; // same-game same-side pair, prop-anchored
         for (let k = 1; k < c.ps.length; k++) {
           const p1 = c.ps[k - 1], p2 = c.ps[k];
+          const famKey = [c.fams[k - 1], c.fams[k]].sort().join('_');
+          const pairPhi = Number.isFinite(phiByFamily[famKey]) ? phiByFamily[famKey] : phiFloor;
+          if (pairPhi <= 0) continue;
           const naive = p1 * p2;
-          const jointFair = Math.min(naive + phiFloor * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
+          const jointFair = Math.min(naive + pairPhi * Math.sqrt(p1 * (1 - p1) * p2 * (1 - p2)), Math.min(p1, p2));
           if (jointFair > naive) propSameGameFallbackMultiplier *= jointFair / naive;
         }
         propSameGameFallbackPairs += c.ps.length - 1;
@@ -3674,6 +3686,22 @@ const _NESTED_CROSS_RULES = [
   { sport: (s) => s === 'basketball_nba' || s === 'basketball_wnba', strong: 'threes_made', weak: 'points', cond: (ls, lw) => lw <= 3 * Math.ceil(ls) - 0.5 },
 ];
 
+/**
+ * Prop-family bucket for the per-family same-game phi map (sgpPhiByFamily).
+ * Correlation with the game script is family-specific — batter run-producing
+ * composites ride it far harder than strikeouts — so pairs are keyed by the
+ * sorted pair of these buckets (e.g. 'batter_batter', 'kprop_total').
+ */
+function sgpPropFamily(li) {
+  const mt = String((li && li.marketType) || '');
+  if (mt === 'player_strikeouts') return 'kprop';
+  if (/^player_hitter_/.test(mt)) return 'batter';
+  if (/^player_(points|rebounds|assists|threes_made|pra)/.test(mt)) return 'bball';
+  if (mt === 'total') return 'total';
+  if (/^player_/.test(mt)) return 'prop';
+  return 'other';
+}
+
 function _nestedNormPlayer(s) {
   return (s || '')
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -4986,6 +5014,9 @@ function getLastPriceFailure() {
 module.exports = {
   setGolfOutrightsPaused,
   isGolfOutrightsPaused,
+  // Exported for test/sgp-phi-family.test.js — pins the family buckets the
+  // per-family phi map keys on.
+  sgpPropFamily,
   // Exported for test/dnb-book-comparator.test.js — pins the draw-no-bet
   // product-matching rule that book comparisons depend on.
   __bookImpliedForLeg: bookImpliedForLeg,
