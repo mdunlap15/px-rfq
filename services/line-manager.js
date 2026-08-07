@@ -904,6 +904,21 @@ function extractPitcherNameFromKMarket(name) {
  * 5. Match each line to Odds API event/market
  * 6. Register matched lines with PX
  */
+/**
+ * Mass-removal circuit breaker decision. Fires when one reconcile pass would
+ * remove more than `pct`% of a non-trivial tracked set — the signature of a
+ * transient upstream outage (odds gap, empty PX fetch), not a schedule change.
+ * Small sets (<200) are exempt: early-boot and off-season churn is legitimately
+ * lumpy and wiping 50 lines is recoverable in one cycle anyway.
+ */
+function _removalBreakerFires(trackedSize, removeCount, pct) {
+  if (!(trackedSize >= 200)) return false;
+  if (!(removeCount > 0)) return false;
+  const p = Number(pct) > 0 ? Number(pct) : 60;
+  if (p >= 100) return false;                 // 100 = breaker disabled
+  return removeCount / trackedSize > p / 100;
+}
+
 async function seedAllLines() {
   log.info('Lines', '=== Starting line seed ===');
   log.info('Lines', '[golf-debug] seedAllLines starting — golf bypass code v2 is live');
@@ -2453,7 +2468,26 @@ async function seedAllLines() {
   }
   const _newSet = new Set(lineIds);
   const _toAdd = lineIds.filter(id => !_lastRegisteredLineIds.has(id));
-  const _toRemove = [..._lastRegisteredLineIds].filter(id => !_newSet.has(id));
+  let _toRemove = [..._lastRegisteredLineIds].filter(id => !_newSet.has(id));
+  // MASS-REMOVAL CIRCUIT BREAKER. A transient upstream failure (odds outage,
+  // empty PX event fetch, one bad seed) makes every line "stale" for one
+  // cycle; without a breaker this pass would REMOVE the whole supported set
+  // and re-register it next cycle — a burst-shaped write storm against PX and
+  // a window where every RFQ declines as unknown. Legitimate churn is
+  // incremental (a slate rolling over removes a fraction); wiping >60% of a
+  // non-trivial set in ONE pass is an outage signature, not a schedule.
+  // Skipping keeps quoting on the old set for a cycle (stale-price gates
+  // still protect pricing) and retries next reconcile. Genuine mass turnover
+  // (e.g. sport season flips) clears in a few cycles as the fraction drops,
+  // or set LINE_REMOVE_BREAKER_PCT=100 to disable.
+  const _breakerPct = Number(process.env.LINE_REMOVE_BREAKER_PCT) > 0
+    ? Number(process.env.LINE_REMOVE_BREAKER_PCT) : 60;
+  let _breakerFired = false;
+  if (_removalBreakerFires(_lastRegisteredLineIds.size, _toRemove.length, _breakerPct)) {
+    log.error('Lines', `BREAKER: reconcile wants to remove ${_toRemove.length}/${_lastRegisteredLineIds.size} supported lines (>${_breakerPct}%) in one pass — looks like a transient outage, not a schedule change. Skipping removals this cycle (additions still apply).`);
+    _breakerFired = true;
+    _toRemove = [];
+  }
   try {
     if (_toAdd.length > 0) {
       await px.registerSupportedLines(_toAdd);
@@ -2463,7 +2497,13 @@ async function seedAllLines() {
       await px.removeSupportedLines(_toRemove);
       log.info('Lines', `Removed ${_toRemove.length} stale supported lines from ProphetX`);
     }
-    _lastRegisteredLineIds = _newSet; // advance only on success
+    // Advance only on success. When the breaker skipped removals, keep the
+    // skipped ids IN the tracked set — advancing to _newSet alone would
+    // forget lines still registered at PX (permanent drift the boot-time
+    // reconcile only heals on restart) and next cycle would never retry.
+    _lastRegisteredLineIds = _breakerFired
+      ? new Set([..._newSet, ..._lastRegisteredLineIds])
+      : _newSet;
     if (_toAdd.length === 0 && _toRemove.length === 0) {
       log.debug('Lines', `Supported-lines set unchanged (${_newSet.size} lines)`);
     }
@@ -3650,9 +3690,23 @@ async function resolveUnknownLine(rfqLeg) {
             // ±3 from the primary run/puck line.
             // Only basketball and football get virtual alt spread registration
             // by *distance*. MLB uses a discrete allowlist instead.
+            // FOOTBALL IS DELIBERATELY ABSENT (removed 2026-08-07, NFL
+            // readiness audit). The rfq leg carries NO name here — only
+            // lineId + line — so this inference cannot tell an alt spread
+            // from a player prop. With NFL primary spreads at ~3-7, a
+            // receptions 4.5 or pass-TDs 1.5 prop lands inside any usable
+            // deviation window and would register as an "alt spread" priced
+            // off the SPREAD LADDER — the same 2x-mispricing class as the
+            // second-half trap. Football alt spreads therefore stay dark
+            // until a name-carrying path exists; the entries that used to be
+            // here (nfl/ncaaf: 15) were speculative, written before any
+            // football quoting existed.
+            // WATCH (October): basketball has the same shape — an NBA
+            // rebounds 8.5 prop sits within ±20 of a typical spread. It was
+            // built for NBA and has run there, but re-verify prop leakage
+            // when the season opens.
             const MAX_ALT_DEVIATION = {
               'basketball_nba': 20, 'basketball_ncaab': 20, 'basketball_wnba': 20,
-              'americanfootball_nfl': 15, 'americanfootball_ncaaf': 15,
             };
             const maxDeviation = MAX_ALT_DEVIATION[sportKey] ?? 0;
             const deviation = Math.abs(absLine - primaryAbsSpread);
@@ -4112,6 +4166,8 @@ module.exports = {
   seedAllLines,
   refreshLines,
   lookupLine,
+  // Exported for test/line-removal-breaker.test.js
+  _removalBreakerFires,
   lookupLineAsync,
   __debugGetLineIndex,
   resolveUnknownLine,
