@@ -955,9 +955,12 @@ function priceParlay(legs, opts = {}) {
     // Golf matchups exempt (no commenceTime from DataGolf; isStale check covers).
     // Uses pre-computed lineInfo.startTimeMs (cached by lookupLine).
     const isGolfMatchup = lineInfo.sport === 'golf_matchups' || lineInfo.oddsApiSport === 'golf_matchups';
-    // Golf outrights quote LIVE — same exemption + rationale as shouldDecline's
-    // started check (freshness is the DK board age, not the tournament start).
-    const isGolfOutright = lineInfo.sport === 'golf_outrights';
+    // Golf OUTRIGHTS are PRE-TOURNAMENT ONLY (operator directive 2026-07-30)
+    // — this MUST mirror shouldDecline's gate. This copy previously kept the
+    // superseded 2026-07-16 live exemption, and because the confirm path runs
+    // ONLY priceParlay, that stale exemption let a pre-start outright quote be
+    // honored at confirm after play began.
+    const isGolfOutright = false;
     const startMs = lineInfo.startTimeMs;
     if (startMs != null) {
       if (isNaN(startMs)) {
@@ -969,6 +972,18 @@ function priceParlay(legs, opts = {}) {
         log.debug('Pricing', `Declined: event already started (${lineInfo.teamName}, started ${lineInfo.startTime})`);
         priceParlay._lastFailure = { reason: 'event started', detail: `${legLabel} already in progress`, blockerLeg: legDescriptor };
         return null;
+      }
+      // Early-actual-start veto (config.pricing.liveStartVetoSports, default
+      // tennis): the scheduled gate above passed, but the match may already be
+      // LIVE — tennis courts run queues and matches start early when the prior
+      // match ends fast. Sync ESPN cache read only; no match fails OPEN.
+      if (nowMs <= startMs && config.pricing.liveStartVetoSports.includes(lineInfo.sport)) {
+        const espnScores = require('./espn-scores');
+        if (espnScores.isMatchLive(lineInfo.sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime)) {
+          log.debug('Pricing', `Declined: live per ESPN before scheduled start (${lineInfo.teamName}, scheduled ${lineInfo.startTime})`);
+          priceParlay._lastFailure = { reason: 'event started', detail: `${legLabel} in progress per ESPN (started before scheduled ${lineInfo.startTime})`, blockerLeg: legDescriptor };
+          return null;
+        }
       }
     } else if (!isGolfMatchup) {
       log.debug('Pricing', `Declined: null startTime for ${lineInfo.teamName} (${lineInfo.sport})`);
@@ -4371,6 +4386,17 @@ function shouldDecline(legs, parlayId) {
       if (nowMs > startMs && !isGolfOutright) {
         return { declined: true, reason: 'event started', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) already in progress` };
       }
+      // Early-actual-start veto (config.pricing.liveStartVetoSports, default
+      // tennis): scheduled gate passed but the match may already be LIVE —
+      // tennis matches start early when the prior match on the court ends
+      // fast or retires. Sync ESPN cache read only; no match fails OPEN
+      // (the scheduled gate still governs).
+      if (nowMs <= startMs && config.pricing.liveStartVetoSports.includes(lineInfo.sport)) {
+        const espnScores = require('./espn-scores');
+        if (espnScores.isMatchLive(lineInfo.sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime)) {
+          return { declined: true, reason: 'event started', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) in progress per ESPN before scheduled start ${lineInfo.startTime}` };
+        }
+      }
     } else if (!isGolfMatchup) {
       // Null startTime is a risk — game could already be live. Decline rather than
       // silently skip the check. Golf matchups exempt (see comment above).
@@ -4976,6 +5002,28 @@ async function validateForConfirmation(parlayId, originalMeta) {
     // budget (offer validity already bounds their age to ≤60s).
     const quoteAgeMs = originalMeta.quotedAtMs ? (Date.now() - originalMeta.quotedAtMs) : null;
     const withinBudget = quoteAgeMs == null || quoteAgeMs <= budgetMs;
+    // Started re-check on the ORIGINAL quote's legs (2026-08-10): index churn
+    // and event start CORRELATE — started lines are exactly what the refresh
+    // prunes from the index — so without this a quote placed seconds pre-start
+    // could be honored seconds post-start through the churn accept. Meta legs
+    // carry the quote-time startTime; any leg now past it (or missing /
+    // unparseable — can't verify) vetoes the accept and falls through to the
+    // fail-closed reject. Golf matchups exempt (null startTime by design,
+    // mirroring the quote-time gates).
+    const startedLeg = (originalMeta.legs || []).find(l => {
+      if (l.sport === 'golf_matchups') return false;
+      if (!l.startTime) return true;
+      const t = new Date(l.startTime).getTime();
+      return !Number.isFinite(t) || Date.now() > t;
+    });
+    if (isIndexChurn && withinBudget && startedLeg) {
+      log.warn('Pricing', `Could not reprice at confirm — REJECTING despite index churn: leg started or unverifiable (${startedLeg.team || '?'} ${startedLeg.market || '?'}, startTime ${startedLeg.startTime || 'missing'})`);
+      return {
+        valid: false,
+        reason: 'reprice failed (event started) — fail closed',
+        currentPricing: null,
+      };
+    }
     if (isIndexChurn && withinBudget) {
       log.warn('Pricing', `Could not reprice at confirm (index churn) — accepting on original quote (age ${quoteAgeMs == null ? 'unknown' : Math.round(quoteAgeMs / 1000) + 's'})`);
       return {

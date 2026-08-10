@@ -877,6 +877,16 @@ const config = {
     //   TOA_PROP_REFRESH_AHEAD_SECONDS=90 + REFRESH_INTERVAL_MINUTES=2
     // (gate must exceed TTL + refresh interval + ~90s seed, with headroom).
     stalePropSeconds: parseInt(process.env.STALE_PROP_SECONDS) || 900,
+    // Sports whose legs get an ESPN live-state veto at quote/confirm time in
+    // ADDITION to the scheduled-start gate. Tennis matches routinely start
+    // EARLY (court frees up when the prior match ends fast or retires), so the
+    // scheduled-time gate alone can quote a match already in play. Checked
+    // against the sync ESPN cache only (never a network call on the RFQ path);
+    // no ESPN match / cold cache fails OPEN — the scheduled gate still governs.
+    // Env LIVE_START_VETO_SPORTS, comma-separated; empty string disables.
+    liveStartVetoSports: (process.env.LIVE_START_VETO_SPORTS != null
+      ? process.env.LIVE_START_VETO_SPORTS
+      : 'tennis').split(',').map(s => s.trim()).filter(Boolean),
     maxExposurePerTeam: _capNum(process.env.MAX_EXPOSURE_PER_TEAM, 5000),
     // Raw vs probability-weighted per-team exposure measurement (PRIMARY cap).
     //

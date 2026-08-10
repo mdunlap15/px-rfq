@@ -627,11 +627,28 @@ function __debugDump() {
   return out;
 }
 
+// Sync live-state check for the QUOTE/CONFIRM path: is this matchup currently
+// in progress per ESPN, regardless of its scheduled start time? Tennis matches
+// routinely begin EARLY (a court frees up when the prior match finishes fast
+// or retires), so the scheduled-time started gate alone can quote a live
+// match. Returns true ONLY on a confident in-progress match; cold cache, no
+// match, pre-game, and final all return false (fail-open — the scheduled gate
+// still governs those). Never makes a network call.
+function isMatchLive(sportKey, homeTeam, awayTeam, startTime) {
+  try {
+    const r = getEspnGameResult(sportKey, homeTeam, awayTeam, startTime);
+    return !!(r && r.state === 'in' && !r.completed);
+  } catch (_) {
+    return false;
+  }
+}
+
 module.exports = {
   refreshSport,
   refreshAll,
   getEspnGameResult,
   getEspnF5Result,
+  isMatchLive,
   startPoller,
   __debugDump,
 };
