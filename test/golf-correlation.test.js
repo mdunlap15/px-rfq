@@ -21,11 +21,15 @@ const assert = require('node:assert');
 const { config } = require('../config');
 
 // Mirrors the grouping + compounding in priceParlay.
+// MATCHUPS ONLY since 2026-08-11: outright parlays are operator-directed
+// pure DK-mirror pricing ("no changes"), and different players' outrights
+// are NEGATIVELY correlated (finite winner/top-N slots) — independent
+// multiplication already overstates the bettor's joint there.
 function golfFactor(legs, perLeg, cap) {
   const byTournament = {};
   for (const l of legs) {
     const sport = String(l.sport || '');
-    if (!sport.startsWith('golf')) continue;
+    if (sport !== 'golf_matchups') continue;
     const key = String(l.tournamentName || l.pxEventName || sport).toLowerCase().trim();
     byTournament[key] = (byTournament[key] || 0) + 1;
   }
@@ -65,11 +69,13 @@ test('legs in DIFFERENT tournaments are not cross-correlated', () => {
   assert.equal(golfFactor([g('Rocket Classic'), g('Utah Championship')], P(), C()), 1);
 });
 
-test('OUTRIGHTS are correlated too — same course, same conditions', () => {
+test('OUTRIGHTS are EXCLUDED from the factor (2026-08-11: mirror pricing + negative cross-player correlation)', () => {
   const f = golfFactor([o('Rocket Classic'), o('Rocket Classic')], P(), C());
-  assert.ok(f > 1, 'outright legs share the tournament structure that caused the loss');
-  // Matchup + outright in the same tournament is still one correlated group.
-  assert.ok(golfFactor([g('RC'), o('RC')], P(), C()) > 1);
+  assert.equal(f, 1, 'outright parlays keep pure DK-mirror pricing — no correlation boost');
+  // Matchup + outright: only the matchup leg counts, one leg = no factor.
+  assert.equal(golfFactor([g('RC'), o('RC')], P(), C()), 1);
+  // Two matchups + one outright: the matchup PAIR still fires.
+  assert.ok(golfFactor([g('RC'), g('RC'), o('RC')], P(), C()) > 1);
 });
 
 test('non-golf legs never trigger it', () => {

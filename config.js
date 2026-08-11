@@ -183,6 +183,21 @@ const config = {
     // top of the normal baseVig + favorite ramp. Tunable via
     // VIG_MMA_MIN env var.
     vigMmaMin: parseFloat(process.env.VIG_MMA_MIN) || 0.03,
+    // Additive favorite markup for MMA MONEYLINE legs (2026-08-11 audit):
+    // MMA ML favorites in the 0.65-0.85 fair band realize ~8-14pp above our
+    // proportional-de-vig fair (dedup z≈2.2-2.5; the same favorite-underrating
+    // signature measured on the golf make-cut board). The generic
+    // VIG_HEAVY_FAV_FAIR_MARKUP (multiplicative ~2.3%) is an order of
+    // magnitude too small for the gap, so this adds a flat +pp to the leg's
+    // offered implied: offered >= fair + add. MAX-gated like every other
+    // markup — never tightens. Moneyline only (MoV fairs come from the 6-way
+    // POWER de-vig, which doesn't underrate favorites). 0 disables.
+    // Guarded parse (not `|| default`): env=0 must actually DISABLE — the
+    // `parseFloat(x) || d` pattern silently re-enables the default on 0,
+    // the exact footgun class VIG_MMA_MIN=0.015 already demonstrated.
+    vigMmaFavAddPp: (() => { const v = parseFloat(process.env.VIG_MMA_FAV_ADD_PP); return Number.isFinite(v) ? v : 0.03; })(),
+    vigMmaFavAddMin: (() => { const v = parseFloat(process.env.VIG_MMA_FAV_ADD_MIN); return Number.isFinite(v) && v > 0 ? v : 0.65; })(),
+    vigMmaFavAddMax: (() => { const v = parseFloat(process.env.VIG_MMA_FAV_ADD_MAX); return Number.isFinite(v) && v > 0 ? v : 0.85; })(),
     // Minimum per-leg vig for golf_matchups when sourcing fair from
     // DataGolf (i.e., when no operator manual upload exists for the
     // specific player+round). DataGolf publishes near-fair de-vigged

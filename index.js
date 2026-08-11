@@ -1097,6 +1097,27 @@ function startStatusServer() {
         sgpCorrelationByCombo: config.pricing.sgpCorrelationByCombo,
         sgpCorrelation3PlusByCombo: config.pricing.sgpCorrelation3PlusByCombo,
         resolveInlineOnRfq: config.pricing.resolveInlineOnRfq,
+        // Previously-invisible knobs (2026-08-11 audit: three deploy-state
+        // findings were unverifiable because these never appeared here —
+        // "absence from /status" had to be caveated as "not evidence it's
+        // off" every time. Every armed-but-unsurfaced control goes here.)
+        vigMinPp: config.pricing.vigMinPp,
+        vigMinRoi: config.pricing.vigMinRoi,
+        vigDnbFavMarkup: config.pricing.vigDnbFavMarkup,
+        vigDnbFavThreshold: config.pricing.vigDnbFavThreshold,
+        vigDnbFavCap: config.pricing.vigDnbFavCap,
+        vigHeavyFavFairCap: config.pricing.vigHeavyFavFairCap,
+        vigMmaFavAddPp: config.pricing.vigMmaFavAddPp,
+        vigMmaFavAddMin: config.pricing.vigMmaFavAddMin,
+        vigMmaFavAddMax: config.pricing.vigMmaFavAddMax,
+        priceFloorVsConsensusParlayPp: config.pricing.priceFloorVsConsensusParlayPp,
+        priceFloorVsConsensusParlayChalkPp: config.pricing.priceFloorVsConsensusParlayChalkPp,
+        maxExposurePerLeg: config.pricing.maxExposurePerLeg,
+        sgpPropSameGamePhiFloor: config.pricing.sgpPropSameGamePhiFloor,
+        sgpPhiByFamily: config.pricing.sgpPhiByFamily,
+        golfSameTournamentCorrelation: config.pricing.golfSameTournamentCorrelation,
+        golfSameTournamentCorrelationCap: config.pricing.golfSameTournamentCorrelationCap,
+        propFairCalibration: config.pricing.propFairCalibration,
       },
       websocket: websocket.getState(),
       lines: {

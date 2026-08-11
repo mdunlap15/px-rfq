@@ -398,6 +398,19 @@ const stats = {
  * Uses the SAME key construction as addExposure (team+event+date) so that
  * checkExposureLimits sees consistent totals across real + pending.
  */
+// A PROP-containing parlay's true worst case is bounded by the prop parlay
+// cap — use it (when set) instead of the generic worst-case estimate for
+// prop LINE-key accounting. Lazy config require matches the module's other
+// config reads (circular-import safety during bootstrap).
+function _propRawRisk(worstCaseRisk) {
+  try {
+    const { config } = require('../config');
+    const cap = config?.pricing?.maxRiskPerParlayWithProp;
+    if (Number.isFinite(cap) && cap > 0) return Math.min(worstCaseRisk, cap);
+  } catch { /* config unavailable — fall through to the generic estimate */ }
+  return worstCaseRisk;
+}
+
 function buildPendingReservation(legs, worstCaseRisk, offerValidSeconds) {
   if (!legs || legs.length === 0) return null;
   // 2026-05-14: Always track BOTH weighted (`risk`) AND raw (`rawRisk`)
@@ -451,17 +464,35 @@ function buildPendingReservation(legs, worstCaseRisk, offerValidSeconds) {
     // pitcher-tracking semantics (which uses raw payout, not weighted).
     // checkPitcherExposure compares wouldBe against maxPerPitcher with
     // unweighted risk, so the pending side must match.
-    if (li.marketType === 'player_strikeouts') {
+    // Dual-field read (2026-08-11 review): the live RFQ call site passes
+    // meta-shaped legs whose field is `market`, not `marketType` — the
+    // single-field read left pitcherKeys empty from the RFQ path, so
+    // pitcher pending exposure always read $0 during the offer window.
+    if ((li.marketType || li.market) === 'player_strikeouts') {
       const pkey = pitcherKeyForLeg(li);
       if (pkey) {
         pitcherKeys.push({ key: pkey, risk: worstCaseRisk });
       }
     }
-    // Per-LINE key. WEIGHTED, matching gameKeys: we only lose this ticket if
-    // the other legs also land, so the risk attributable to this one line is
-    // payout × P(other legs). The check side must use the same basis.
+    // Per-LINE key. Team lines stay WEIGHTED, matching gameKeys: we only lose
+    // this ticket if the other legs also land, so the risk attributable to
+    // this one line is payout × P(other legs). PROP legs use RAW payout
+    // (2026-08-11 audit): the duplicate-stacking pattern pairs one prop
+    // opinion with near-coinflip ML carriers, so otherProb≈0.5 weighting let
+    // ~2x the intended cap through — post-8/6-cap clusters (Dobbins ×3
+    // $4.3K, Burns ×6 $5.2K) proved the weighted basis leaks. The check +
+    // open-map sides use the same per-leg basis (checkLegExposure /
+    // buildOpenLegRiskMap) — all three must match or pending is understated.
     const lkey = legExposureKey(li);
-    if (lkey) legKeys.push({ key: lkey, risk: weightedRisk });
+    if (lkey) {
+      const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(li.marketType || li.market || ''));
+      // Prop RAW risk is bounded by the PROP parlay cap, not the generic
+      // worst-case estimate: a prop-containing parlay can never risk more
+      // than maxRiskPerParlayWithProp, and charging the generic estimate
+      // ($4-5K) raw against a $1,500 line cap would decline every
+      // prop-containing RFQ outright (adversarial-review blocker, 8/11).
+      legKeys.push({ key: lkey, risk: isPropLine ? _propRawRisk(worstCaseRisk) : weightedRisk });
+    }
   }
   return {
     expiresAt: Date.now() + (offerValidSeconds || 120) * 1000,
@@ -3886,8 +3917,11 @@ function addExposure(order) {
  * isn't a player_strikeouts leg or is missing required fields.
  */
 function pitcherKeyForLeg(leg) {
-  if (!leg || leg.marketType !== 'player_strikeouts') return null;
-  const player = leg.playerName || leg.teamName;
+  // Dual-field read (2026-08-11): meta-shaped legs carry `market`/`team`,
+  // lineInfo-shaped legs carry `marketType`/`teamName`. The single-field
+  // read left pitcherKeys empty from the RFQ path (pending pitcher risk $0).
+  if (!leg || (leg.marketType || leg.market) !== 'player_strikeouts') return null;
+  const player = leg.playerName || leg.teamName || leg.team;
   if (!player) return null;
   const eid = leg.pxEventId || 'unknown';
   return `${eid}|${normalizeExposureKey(player)}`;
@@ -4572,8 +4606,13 @@ function buildOpenLegRiskMap() {
     for (let i = 0; i < legs.length; i++) {
       const key = legExposureKey(legs[i]);
       if (!key) continue;
+      // PROP legs accumulate RAW payout (2026-08-11) — must match the basis
+      // used by buildPendingReservation's legKeys and checkLegExposure.
+      const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(legs[i].marketType || legs[i].market || ''));
       let other = 1;
-      for (let j = 0; j < legs.length; j++) if (j !== i) other *= probs[j];
+      if (!isPropLine) {
+        for (let j = 0; j < legs.length; j++) if (j !== i) other *= probs[j];
+      }
       map.set(key, (map.get(key) || 0) + payout * other);
     }
   }
@@ -4619,25 +4658,40 @@ function checkLegExposure(legs, estPayout, maxPerLeg) {
     const key = legExposureKey(li);
     if (!key) continue;
 
+    // PROP legs (2026-08-11 audit): RAW payout, NO pending discount. The
+    // duplicate-stacking pattern this cap exists for (one prop opinion ×
+    // many ML carriers, fired in same-minute bursts) was slipping through
+    // both softeners: otherProb≈0.5 halved each ticket's contribution and
+    // pendingReservationDiscount (prod 0.1) let ~10 duplicates pass before
+    // pending risk registered. Team lines keep the weighted/discounted
+    // basis — their duplication profile is broad flow, not burst-stacking.
+    const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(li.marketType || li.market || ''));
+    const legDiscount = isPropLine ? 1.0 : discount;
     let otherProb = 1;
-    for (let j = 0; j < legs.length; j++) {
-      if (j === i) continue;
-      otherProb *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
+    if (!isPropLine) {
+      for (let j = 0; j < legs.length; j++) {
+        if (j === i) continue;
+        otherProb *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
+      }
     }
-    const newRiskRaw = estPayout * otherProb;
-    const newRiskEff = newRiskRaw * discount;
+    // Prop legs: RAW but bounded by the prop parlay cap — estPayout here is
+    // the GENERIC worst-case estimate (maxRiskPerParlay, $4-5K in prod);
+    // charging it raw against the $1,500 line cap would decline every
+    // prop-containing RFQ before any duplication exists (review blocker).
+    const newRiskRaw = (isPropLine ? _propRawRisk(estPayout) : estPayout) * otherProb;
+    const newRiskEff = newRiskRaw * legDiscount;
 
     if (!openMap) openMap = buildOpenLegRiskMap();
     const current = openMap.get(key) || 0;
     const pendingRaw = getPendingLegRisk(key);
-    const pendingEff = pendingRaw * discount;
+    const pendingEff = pendingRaw * legDiscount;
     const wouldBe = current + pendingEff + newRiskEff;
 
     if (wouldBe > maxPerLeg) {
       const label = (li.teamName || li.team || 'line') +
         (li.marketType || li.market ? ' ' + (li.marketType || li.market) : '') +
         (li.line != null ? ' ' + li.line : '');
-      const discTag = discount < 1 ? ` (discount ${Math.round(discount * 100)}%)` : '';
+      const discTag = legDiscount < 1 ? ` (discount ${Math.round(legDiscount * 100)}%)` : '';
       return {
         allowed: false,
         reason: `Line "${label}" open $${Math.round(current)} + pending $${Math.round(pendingEff)} + new $${Math.round(newRiskEff)} > max $${Math.round(maxPerLeg)}${discTag}`,
@@ -4648,7 +4702,7 @@ function checkLegExposure(legs, estPayout, maxPerLeg) {
         currentOpen: Math.round(current * 100) / 100,
         pendingRaw: Math.round(pendingRaw * 100) / 100,
         newRiskRaw: Math.round(newRiskRaw * 100) / 100,
-        reservationDiscount: discount,
+        reservationDiscount: legDiscount,
       };
     }
   }

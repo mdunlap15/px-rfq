@@ -2132,16 +2132,33 @@ function priceParlay(legs, opts = {}) {
   // magnitude is not; we apply a deliberately conservative compounding factor
   // rather than the raw implied one.
   //
-  // Applies to matchups AND outrights — outrights share the same structure
-  // (one tournament, one course) and, being YES-side legs we lay, carry the
-  // same exposure. Legs across DIFFERENT tournaments stay independent.
+  // MATCHUP legs only (narrowed 2026-08-11, was matchups+outrights):
+  //  - The July loss this factor answers was measured on MATCHUP tickets,
+  //    and matchup pairs share course/weather/wave symmetrically.
+  //  - OUTRIGHT parlays are operator-directed pure DK-mirror pricing
+  //    (9f681b3, "just use the lines DK uses with no changes") — boosting
+  //    their offered price 1.22x/leg breaks the mirror. And per the
+  //    correlation rules doc, different players' outrights are NEGATIVELY
+  //    correlated (finite winner/top-N slots), so independent
+  //    multiplication already overstates the bettor's joint there.
+  // Legs across DIFFERENT tournaments stay independent.
   const golfCorrPerLeg = config.pricing.golfSameTournamentCorrelation;
+  // Hoisted (2026-08-11): the applied factor must ALSO feed sgpFairMultiplier
+  // below (offered side) — mirroring crossGameCorrFactor. Before this, the
+  // boost multiplied only fairParlayProb, so it reached the OFFERED price
+  // only when a fair-referencing floor (VIG_MIN_PP/VIG_MIN_ROI, consensus
+  // clamps) happened to bind — rolling those floors back would have silently
+  // disconnected the golf correction from prices. Also recorded in meta
+  // (golfCorrFactor) because meta.sgpCorrelationFactor is structurally blind
+  // to golf: it only tracks same-pxEventId SGP combos, and every golf market
+  // sits on its own pxEventId.
+  let golfCorrFactor = 1;
   if (golfCorrPerLeg > 1) {
     const byTournament = {};
     for (const l of pricedLegs) {
       const li = l.lineInfo || {};
       const sport = String(li.sport || li.oddsApiSport || '');
-      if (!sport.startsWith('golf')) continue;
+      if (sport !== 'golf_matchups') continue;
       // Group by tournament. Fall back to the sport key so legs with no
       // tournament metadata still group (conservative: assumes same event).
       const key = String(li.tournamentName || li.pxEventName || sport).toLowerCase().trim();
@@ -2155,6 +2172,7 @@ function priceParlay(legs, opts = {}) {
       const before = fairParlayProb;
       const cap = config.pricing.golfSameTournamentCorrelationCap || 3;
       const applied = Math.min(golfFactor, cap);
+      golfCorrFactor = applied;
       fairParlayProb = Math.max(0.001, Math.min(0.99, fairParlayProb * applied));
       log.info('Pricing', `Golf same-tournament correlation ×${applied.toFixed(3)} `
         + `(groups ${JSON.stringify(byTournament)}) — fair ${(before * 100).toFixed(2)}% → ${(fairParlayProb * 100).toFixed(2)}%`);
@@ -2432,6 +2450,7 @@ function priceParlay(legs, opts = {}) {
     (isKpropMlSameTeamSGP ? (1 + (config.pricing.sgpPropMlCorrBoost || 0)) : 1) *
     sgpCorrelationFactor *
     crossGameCorrFactor *
+    golfCorrFactor *
     nestedOfferedMultiplier *
     xteamFairMultiplier *
     propSameGameFallbackMultiplier;
@@ -2609,7 +2628,16 @@ function priceParlay(legs, opts = {}) {
   const dnbFavThreshold = config.pricing.vigDnbFavThreshold || 0.55;
   const heavyFavCap = config.pricing.vigHeavyFavFairCap || 0.85;
   const dnbFavCap = config.pricing.vigDnbFavCap || 0.92;
-  if ((heavyFavMarkup > 0 || dnbFavMarkup > 0) && vigLegs.length > 0) {
+  // MMA moneyline favorite ADDITIVE markup (2026-08-11 audit): MMA ML
+  // favorites in [vigMmaFavAddMin, vigMmaFavAddMax] realize ~8-14pp above
+  // the proportional-de-vig fair; the generic multiplicative markup is far
+  // too small for the gap. offered >= fair + addPp, folded into the same
+  // MAX-gated compound. Moneyline only — MoV legs price off the 6-way
+  // POWER de-vig which doesn't underrate favorites.
+  const mmaFavAdd = config.pricing.vigMmaFavAddPp || 0;
+  const mmaFavAddMin = config.pricing.vigMmaFavAddMin || 0.65;
+  const mmaFavAddMax = config.pricing.vigMmaFavAddMax || 0.85;
+  if ((heavyFavMarkup > 0 || dnbFavMarkup > 0 || mmaFavAdd > 0) && vigLegs.length > 0) {
     let heavyCompound = overrideProduct;
     for (const leg of vigLegs) {
       const fp = leg.fairProb;
@@ -2627,12 +2655,22 @@ function priceParlay(legs, opts = {}) {
         && fp > dnbFavThreshold && fp < dnbFavCap;
       const heavyApplies = heavyFavMarkup > 0 && !isProp
         && fp > heavyFavThreshold && fp < heavyFavCap;
-      if (dnbApplies || heavyApplies) {
-        const markup = Math.max(
-          dnbApplies ? dnbFavMarkup : 0,
-          heavyApplies ? heavyFavMarkup : 0,
+      const mmaApplies = mmaFavAdd > 0 && mt === 'moneyline'
+        && leg.lineInfo.sport === 'mma_mixed_martial_arts'
+        && fp >= mmaFavAddMin && fp <= mmaFavAddMax;
+      if (dnbApplies || heavyApplies || mmaApplies) {
+        // Compare the CANDIDATE implieds (multiplicative vs additive differ
+        // in shape) and take the widest — FLOORED at the leg's normal
+        // payout-vig contribution so a small tuned markup can never come
+        // out TIGHTER than no markup at all (review finding: the candidate
+        // used to REPLACE the payout-vig term).
+        const candidate = Math.max(
+          dnbApplies ? fp * (1 + dnbFavMarkup) : 0,
+          heavyApplies ? fp * (1 + heavyFavMarkup) : 0,
+          mmaApplies ? fp + mmaFavAdd : 0,
+          applyOddsVig(fp, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0),
         );
-        heavyCompound *= Math.min(0.99, fp * (1 + markup));
+        heavyCompound *= Math.min(0.99, candidate);
       } else {
         heavyCompound *= applyOddsVig(fp, leg.lineInfo.sport, leg.lineInfo.marketType, leg.vigBump || 0);
       }
@@ -3478,6 +3516,12 @@ function priceParlay(legs, opts = {}) {
           let _off = 1 / (1 + (1 / _fp - 1) * (1 - _v)); // payout-vig
           if (fairMult > 0) { const m = _fp * (1 + fairMult); if (m > _off && m < 0.99) _off = m; }
           if (heavyFavMarkup > 0 && _fp > heavyFavThreshold) { const m = _fp * (1 + heavyFavMarkup); if (m > _off && m < 0.99) _off = m; }
+          // Mirror the MMA additive favorite markup (same gate as the pricing side).
+          if (mmaFavAdd > 0 && l.lineInfo.sport === 'mma_mixed_martial_arts'
+              && (l.lineInfo.marketType || '') === 'moneyline'
+              && _fp >= mmaFavAddMin && _fp <= mmaFavAddMax) {
+            const m = _fp + mmaFavAdd; if (m > _off && m < 0.99) _off = m;
+          }
           legOfferedProb = Math.min(0.99, _off);
         }
         return {
@@ -3574,6 +3618,11 @@ function priceParlay(legs, opts = {}) {
       // correlation sign as we tune the factors.
       sgpCorrelationSign: sgpCorrelationSign,
       sgpCorrelationFactor: sgpCorrelationFactor,
+      // Golf same-tournament factor telemetry (2026-08-11). Separate field
+      // because sgpCorrelationFactor only tracks same-pxEventId combos and
+      // every golf market sits on its own pxEventId — the 2-month audit
+      // burned a full investigation lane on that blindness.
+      golfCorrFactor: golfCorrFactor !== 1 ? Math.round(golfCorrFactor * 10000) / 10000 : 1,
       pinRawCompound: pinRawCompound != null ? Math.round(pinRawCompound * 100000) / 100000 : null,
       pinMatchTarget: pinMatchTarget != null ? Math.round(pinMatchTarget * 100000) / 100000 : null,
       offeredImpliedProb: Math.round(cappedProb * 100000) / 100000,
