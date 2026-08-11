@@ -330,6 +330,16 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
   fairs, `priceable`). `?force=1` kicks a fresh scrape.
 - Prelims often carry NO method markets — 0 prices on an undercard fight is normal,
   not a scrape failure. A fight missing any of its 6 outcomes fails closed.
+- **DK segregates MMA by league page** (found 2026-08-11): `/leagues/mma/ufc`
+  carries numbered cards ONLY — Tuesday **Dana White's Contender Series** lives at
+  `/leagues/mma/dana-white's-contender-series`, and the UFC page silently returns
+  zero of its fighters. Our MoV scrape hits the UFC page, so Contender Series MoV
+  legs have an empty board and fail closed (safe decline, known coverage gap).
+- **A standalone operator routine posts single-market MoV NO lines** on PX
+  (DK raw mirror, offers tagged `claude_mov_`, $500-$2,000 tiers). Those positions
+  are INVISIBLE to this trader's exposure tracker — a parlay MoV quote on the same
+  fight outcome stacks risk across the two books with no shared cap. PX also
+  frequently lacks DEC markets that DK prices (10/10 skipped 2026-08-11).
 
 ## Key Gotchas
 
