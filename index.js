@@ -6450,6 +6450,20 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // Manual MoV board upload — the DK-blocks-Railway fallback (2026-08-11:
+  // every DK scrape returned 0 events from the box while local scrapes
+  // worked). Body = the dk-scraper fetchUfcMethodOfVictory payload
+  // ({ fights: [{ slug, fighters: [{ name, KO, SUB, DEC }] }] }). Runs the
+  // same _buildFight validation/de-vig as the live scrape; admin-only
+  // (viewers' mutations 403 via the standard auth gate).
+  app.post('/ufc-mov/paste', (req, res) => {
+    try {
+      const mov = require('./services/ufc-mov');
+      const result = mov.ingestBoard(req.body || {});
+      res.status(result.ok ? 200 : 400).json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
 
   // Coverage audit: for each PX event in the next N hours, compare PX-published
   // markets against what we've registered + what's in our odds cache. Surfaces

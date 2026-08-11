@@ -198,6 +198,38 @@ async function warmMovBoards({ force = false } = {}) {
 }
 
 /**
+ * Manual board ingest (2026-08-11). DK intermittently serves EMPTY pages to
+ * the Railway box (every DK scrape — MoV, golf top-N, MLB props, series —
+ * returned 0 events on 2026-08-11) while a LOCAL scrape of the same league
+ * pages works fine. POST /ufc-mov/paste feeds a locally-scraped dk-scraper
+ * payload ({ fights: [{ slug, fighters: [{ name, KO, SUB, DEC }] }] },
+ * American ints) through the SAME _buildFight validation + 6-way power
+ * de-vig as the live scrape — a manual board is never trusted raw, and the
+ * overround window / full-6-outcome / 2-fighter gates all still apply.
+ * Freshness stamps at ingest; MAX_AGE ages it out exactly like a scrape.
+ * MERGES into a still-fresh existing board (so pasting tonight's card
+ * doesn't drop Saturday's); replaces an expired one.
+ */
+function ingestBoard(payload) {
+  const fights = payload && Array.isArray(payload.fights) ? payload.fights : null;
+  if (!fights || !fights.length) return { ok: false, error: 'payload.fights[] required' };
+  const built = {};
+  const skipped = [];
+  for (const f of fights) {
+    if (!f || !f.slug || !Array.isArray(f.fighters)) { skipped.push((f && f.slug) || '?'); continue; }
+    const b = _buildFight(f.slug, f.fighters);
+    if (b) built[f.slug] = b;
+    else skipped.push(f.slug);
+  }
+  const builtCount = Object.keys(built).length;
+  if (!builtCount) return { ok: false, error: 'no priceable fights in payload (need 2 fighters x KO/SUB/DEC each, sane overround)', skipped };
+  const keepExisting = _cache.at && (Date.now() - _cache.at) <= MAX_AGE_MS;
+  _cache = { at: Date.now(), byFight: { ...(keepExisting ? _cache.byFight : {}), ...built } };
+  log.info('UfcMov', `Manual board ingest: ${builtCount} fight(s) priceable, board now ${Object.keys(_cache.byFight).length} fight(s)${skipped.length ? ' (skipped: ' + skipped.join(', ') + ')' : ''}`);
+  return { ok: true, built: builtCount, boardFights: Object.keys(_cache.byFight).length, skipped };
+}
+
+/**
  * Sync fair for one fighter+method. Hot-path safe. Fails CLOSED.
  *
  * `opponentName` is REQUIRED: it scopes the lookup to the one fight, which is
@@ -306,4 +338,4 @@ function __debugCache() {
   };
 }
 
-module.exports = { warmMovBoards, getMovFairSync, getMovFairForLine, __debugCache, _sig, _tokens, _buildFight };
+module.exports = { warmMovBoards, ingestBoard, getMovFairSync, getMovFairForLine, __debugCache, _sig, _tokens, _buildFight };
