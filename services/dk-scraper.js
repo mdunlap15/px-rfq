@@ -360,6 +360,23 @@ function fetchNhlSeriesTotals(opts) { return fetchSeriesMarkets('nhl', opts); }
  */
 const _MOV_METHODS = [[/^ko\/tko(\/dq)?$/i, 'KO'], [/^submission$/i, 'SUB'], [/^(decision|points)$/i, 'DEC']];
 
+// DK segregates MMA by LEAGUE page (found 2026-08-11): /leagues/mma/ufc
+// carries numbered cards ONLY — Tuesday Dana White's Contender Series lives
+// on its own league slug, and the UFC page silently returns zero of its
+// fighters. Scrape every listed page and merge (a page with no current card
+// just contributes no links; per-page failures are isolated). Env
+// DK_MMA_URLS (comma-separated) overrides the whole list.
+function _movLeagueUrls() {
+  const env = process.env.DK_MMA_URLS;
+  if (env != null && env.trim() !== '') {
+    return env.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [
+    'https://sportsbook.draftkings.com/leagues/mma/ufc',
+    "https://sportsbook.draftkings.com/leagues/mma/dana-white's-contender-series",
+  ];
+}
+
 async function fetchUfcMethodOfVictory({ force = false } = {}) {
   const cacheKey = 'ufc_mov';
   if (!force && cacheBySport[cacheKey] && Date.now() - cacheBySport[cacheKey].at < CACHE_TTL_MS) {
@@ -388,11 +405,22 @@ async function fetchUfcMethodOfVictory({ force = false } = {}) {
         } catch (_) { /* body already consumed / non-text */ }
       });
 
-      await page.goto('https://sportsbook.draftkings.com/leagues/mma/ufc', { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
-      await new Promise(r => setTimeout(r, 4000));
-      for (let i = 0; i < 5; i++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 800)); }
-      const links = await page.evaluate(() =>
-        [...new Set(Array.from(document.querySelectorAll('a[href*="/event/"]')).map(a => a.href.split('?')[0]))]);
+      const links = [];
+      const seenLinks = new Set();
+      for (const leagueUrl of _movLeagueUrls()) {
+        try {
+          await page.goto(leagueUrl, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
+          await new Promise(r => setTimeout(r, 4000));
+          for (let i = 0; i < 5; i++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 800)); }
+          const pageLinks = await page.evaluate(() =>
+            [...new Set(Array.from(document.querySelectorAll('a[href*="/event/"]')).map(a => a.href.split('?')[0]))]);
+          let added = 0;
+          for (const l of pageLinks) { if (!seenLinks.has(l)) { seenLinks.add(l); links.push(l); added++; } }
+          log.info('DkScraper', `UFC MoV: ${leagueUrl.split('/').pop()}: ${pageLinks.length} event link(s), ${added} new`);
+        } catch (err) {
+          log.warn('DkScraper', `UFC MoV league page failed (${leagueUrl}): ${err.message} — continuing with remaining pages`);
+        }
+      }
       log.info('DkScraper', `UFC MoV: ${links.length} fight page(s) to walk`);
 
       const byFight = new Map(); // slug -> Map(fighterName -> {name, KO, SUB, DEC})
@@ -3650,6 +3678,7 @@ module.exports = {
   fetchNhlSeriesTotals,
   fetchMmaFightOdds,
   fetchUfcMethodOfVictory,
+  _movLeagueUrls,
   fetchMlbF5Odds,
   fetchDkPlayerProps,
   lookupDkPlayerPropFairProb,
