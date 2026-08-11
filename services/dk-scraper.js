@@ -373,7 +373,11 @@ function _movLeagueUrls() {
   }
   return [
     'https://sportsbook.draftkings.com/leagues/mma/ufc',
-    "https://sportsbook.draftkings.com/leagues/mma/dana-white's-contender-series",
+    // DK's slug uses the TYPOGRAPHIC apostrophe U+2019 (%E2%80%99), not the
+    // ASCII one — the ASCII-apostrophe URL silently redirects to /sports/mma
+    // with zero event links (verified 2026-08-11 via DK's own nav hrefs).
+    // Same character-class trap as DK serving U+2212 minus signs.
+    'https://sportsbook.draftkings.com/leagues/mma/dana-white%E2%80%99s-contender-series',
   ];
 }
 
