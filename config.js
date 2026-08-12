@@ -1096,6 +1096,12 @@ const config = {
     // so Runtime Tuning can toggle it live. Default true (unchanged).
     golfOutrightsParlayEnabled: String(process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED || 'true').toLowerCase() === 'true',
     tennisSetsEnabled: process.env.TENNIS_SETS_ENABLED === 'true' || process.env.TENNIS_SETS_ENABLED === '1',
+    // Football same-game parlays. OFF by default — the prod SGP combo factors
+    // (spread_total/ml_total 1.15) are back-calculated from 4 FanDuel MLB/NHL
+    // samples with no football key, and football has the strongest game-script
+    // coupling of anything quoted. Consumers must treat undefined as false
+    // (absence-safe): only the literal env string 'true' releases the block.
+    footballSgpEnabled: process.env.FOOTBALL_SGP_ENABLED === 'true',
     // TOA set-market sourcing (services/toa-tennis-sets.js). These are the
     // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
     // which are PER-EVENT only and retail-book-only (Pinnacle is absent from
@@ -1574,7 +1580,12 @@ const config = {
   // (typed 'American Football', tournament 'CFL') and TOA's key is active.
   // ⚠ If SUPPORTED_SPORTS is set in Railway it OVERRIDES this default entirely
   // — the env value must also include americanfootball_cfl.
-  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,soccer_argentina_primera_division,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl')
+  // americanfootball_nfl_preseason added 2026-08-12 — TOA serves preseason
+  // under a SEPARATE key from americanfootball_nfl (whose events are the
+  // September regular season). Without it, fetchOddsForSport emits no HTTP
+  // request for preseason and every Aug game fails team-matching.
+  // ⚠ Same env-override warning: Railway SUPPORTED_SPORTS must also add it.
+  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,soccer_argentina_primera_division,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl,americanfootball_nfl_preseason')
     .split(',').map(s => s.trim()),
   // Maps our sport keys to ProphetX sport_name values
   // Note: NBA and NCAAB both map to 'Basketball' — line manager handles both
@@ -1598,6 +1609,13 @@ const config = {
     'baseball_mlb': 'Baseball',
     'icehockey_nhl': 'Ice Hockey',
     'tennis': 'Tennis',
+    // NFL preseason MUST come BEFORE americanfootball_nfl: possibleSportKeys
+    // (line-manager) derives from this map and its stable sort preserves
+    // config order, so the preseason key gets first crack at an August game
+    // before the regular-season key (whose cache holds the same team pairs
+    // for September fixtures) can bind it. The 36h commence-time window is
+    // the hard guard; this ordering keeps the first candidate the right one.
+    'americanfootball_nfl_preseason': 'American Football',
     'americanfootball_nfl': 'American Football',
     // CFL shares PX sport_name 'American Football' with NFL/NCAAF. The seed's
     // possibleSportKeys tries all three; the team-match loop picks whichever

@@ -582,6 +582,36 @@ function parseMarketSelections(market) {
     else if (marketType === 'spread') marketType = 'first_half_spread';
     else if (marketType === 'total') marketType = 'first_half_total';
   }
+  // Second Half (football/basketball) — same mechanism as H1 above, run after
+  // it so the patterns can't overlap. Belt-and-braces for the seed-time name
+  // exclusion in line-manager: even if that filter is ever relaxed, the
+  // marketType can never collide with a full-game type. The measured failure
+  // without this: PX's 2H total market carries line 35.5 and so does the
+  // full-game ladder, so "Second Half Under 35.5" priced BYTE-IDENTICAL to the
+  // full-game Under 35.5 — true P(2H under 35.5) is ~98-99%, a ~2x mispricing
+  // (NFL_CFB_READINESS_2026-08-05.md). Registered lines never re-enter
+  // resolveUnknownLine where the sub-game name pattern lives, so the retag
+  // here is the only type-level defence.
+  const isH2ByName = !isF5ByName && !isH1ByName && /second\s*half|2nd\s*half/i.test(marketName);
+  if (isH2ByName) {
+    if (marketType === 'moneyline') marketType = 'second_half_moneyline';
+    else if (marketType === 'spread') marketType = 'second_half_spread';
+    else if (marketType === 'total') marketType = 'second_half_total';
+  }
+  // Quarters (1st-4th, football/basketball) — same collision trap as 2H. The
+  // quarter number is preserved in the type (quarter_1_total etc.) so two
+  // different quarters can never alias each other either.
+  const quarterMatch = (!isF5ByName && !isH1ByName && !isH2ByName)
+    ? /\b(1st|2nd|3rd|4th|first|second|third|fourth)\s+quarter\b/i.exec(marketName)
+    : null;
+  const quarterNum = quarterMatch
+    ? { '1st': 1, first: 1, '2nd': 2, second: 2, '3rd': 3, third: 3, '4th': 4, fourth: 4 }[quarterMatch[1].toLowerCase()]
+    : null;
+  if (quarterNum) {
+    if (marketType === 'moneyline') marketType = `quarter_${quarterNum}_moneyline`;
+    else if (marketType === 'spread') marketType = `quarter_${quarterNum}_spread`;
+    else if (marketType === 'total') marketType = `quarter_${quarterNum}_total`;
+  }
 
   // Team totals are also typed as 'total' by PX. The only way to distinguish
   // from full-game totals is the market NAME (e.g. "SJ: Team Total Goals",
@@ -642,6 +672,49 @@ function parseMarketSelections(market) {
         results.push({
           lineId: sel.line_id,
           marketType,
+          selection,
+          playerName: who,
+          teamName: who,
+          line: null,
+          competitorId: sel.competitor_id || null,
+          outcomeName: sel.name,
+        });
+      }
+    }
+    return results;
+  }
+
+  // FOOTBALL PLAYER PROPS. PX types these 'sup_moneyline' with YES/NO
+  // selections and the player ONLY in the market name — the BTTS/MoV/
+  // tennis-sets shape trap for the fourth time (probe 2026-08-05, preseason
+  // event 19453: "Jeremiah Love To Score a Touchdown", market 1500029692).
+  // Keyed on the NAME pattern, never on type='sup_moneyline': that type is
+  // shared with series spreads/totals and soccer asian handicaps below, and
+  // the failure mode of a loose match is a prop registering as marketType
+  // 'moneyline' — which turns prop+total into an ALLOWED ml_total priced off
+  // the team line. Anchored regex ONLY.
+  //
+  // Multi-player composites ("Kenny Pickett or Carson Beck To Throw An
+  // Interception?") are DELIBERATELY left unmatched — no book posts a price
+  // for an OR-of-two-players market, so they must stay unparsed and decline.
+  // The or/and/&/slash guard below catches a conjunction that satisfies the
+  // anchor ("A or B To Score a Touchdown") and fails it CLOSED (zero
+  // selections, before any branch that could read YES/NO as team names).
+  const tdMatch = /^(.+?)\s+to\s+score\s+a\s+touchdown\s*\??$/i.exec(marketName.trim());
+  if (tdMatch) {
+    const who = (tdMatch[1] || '').trim();
+    // Multi-player / team-unit composites (incl. "D/ST") fail closed.
+    if (!who || /\b(?:or|and)\b|[&/+,]/i.test(who)) return [];
+    const results = [];
+    for (const selGroup of (market.selections || [])) {
+      for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
+        if (!sel || !sel.line_id) continue;
+        const nameLC = (sel.name || sel.display_name || '').toLowerCase();
+        const selection = nameLC.includes('yes') ? 'yes' : nameLC.includes('no') ? 'no' : 'unknown';
+        if (selection === 'unknown') continue;
+        results.push({
+          lineId: sel.line_id,
+          marketType: 'player_anytime_td',
           selection,
           playerName: who,
           teamName: who,
@@ -731,6 +804,17 @@ function parseMarketSelections(market) {
   const isH1Moneyline = /first_half_moneyline|1st_half_moneyline/.test(marketType);
   const isH1Spread = /first_half_spread|1st_half_spread/.test(marketType);
   const isH1Total = /first_half_total|1st_half_total/.test(marketType);
+  // H2 + quarter types (retagged above) reuse the same structures. Building
+  // their selections keeps the retagged marketType attached to every leg;
+  // downstream registration drops the unknown types (no odds source exists),
+  // which is the fail-closed path — what must NEVER happen is these legs
+  // carrying a full-game marketType.
+  const isH2Moneyline = /second_half_moneyline|2nd_half_moneyline/.test(marketType);
+  const isH2Spread = /second_half_spread|2nd_half_spread/.test(marketType);
+  const isH2Total = /second_half_total|2nd_half_total/.test(marketType);
+  const isQuarterMoneyline = /^quarter_[1-4]_moneyline$/.test(marketType);
+  const isQuarterSpread = /^quarter_[1-4]_spread$/.test(marketType);
+  const isQuarterTotal = /^quarter_[1-4]_total$/.test(marketType);
 
   // PX uses `type: 'sup_moneyline'` for Series Game Spread + Series Total
   // Games (live probe 2026-04-18). Selections are structured like moneyline
@@ -815,7 +899,7 @@ function parseMarketSelections(market) {
   // works unchanged. Only the marketType differs, which is what stops it being
   // priced off the MATCH line.
   if ((marketType === 'moneyline' || marketType === 'first_set_moneyline'
-       || isF5Moneyline || isH1Moneyline) && market.selections) {
+       || isF5Moneyline || isH1Moneyline || isH2Moneyline || isQuarterMoneyline) && market.selections) {
     // Moneyline: selections is array of arrays, each inner array has one object
     for (const selGroup of market.selections) {
       for (const sel of selGroup) {
@@ -832,7 +916,8 @@ function parseMarketSelections(market) {
       }
     }
   } else if ((marketType === 'spread' || marketType === 'total' || marketType === 'team_total'
-             || marketType === 'total_sets' || isF5Spread || isF5Total || isH1Spread || isH1Total)
+             || marketType === 'total_sets' || isF5Spread || isF5Total || isH1Spread || isH1Total
+             || isH2Spread || isH2Total || isQuarterSpread || isQuarterTotal)
              && market.market_lines) {
     // Spread/Total: market_lines array, each with selections
     // Include ALL alternate lines so we can respond to any RFQ
@@ -857,9 +942,10 @@ function parseMarketSelections(market) {
           if (!sel.line_id) continue;
 
           let selection = 'unknown';
-          if (marketType === 'spread' || isF5Spread || isH1Spread) {
+          if (marketType === 'spread' || isF5Spread || isH1Spread || isH2Spread || isQuarterSpread) {
             selection = sel.line < 0 ? 'favorite' : 'underdog';
-          } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets' || isF5Total || isH1Total) {
+          } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets'
+                     || isF5Total || isH1Total || isH2Total || isQuarterTotal) {
             const nameLC = (sel.name || sel.display_name || '').toLowerCase();
             selection = nameLC.includes('over') ? 'over' : nameLC.includes('under') ? 'under' : 'unknown';
           }
@@ -958,6 +1044,29 @@ function parseMarketSelections(market) {
   return results;
 }
 
+// Registration-safety assertion for football player props — the BTTS/MoV/
+// tennis-sets marketType trap, fourth occurrence. Everything protecting
+// same-game prop stacks in the pricer (prop_correlation_same_game) keys on
+// the /^player_/ marketType prefix, and PX types football props
+// 'sup_moneyline': a football prop that slips through registration carrying a
+// full-game marketType turns prop+total into an ALLOWED ml_total priced off
+// the team moneyline. The registration path must call this for every football
+// prop line and REFUSE (fail closed) any line for which it returns false.
+//
+// Absence-safe by design: null/undefined/'' are NOT safe, and only /^player_/
+// types pass — so the forbidden full-game set {moneyline, spread, total,
+// team_total} can never sneak through, nor can a period retag
+// (first_half_* / second_half_* / quarter_N_*), 'sup_moneyline' itself, or a
+// typo'd/unknown type.
+const FOOTBALL_PROP_FORBIDDEN_MARKET_TYPES = new Set(['moneyline', 'spread', 'total', 'team_total']);
+function isFootballPropMarketTypeSafe(marketType) {
+  if (typeof marketType !== 'string') return false;
+  const mt = marketType.trim().toLowerCase();
+  if (!mt) return false;
+  if (FOOTBALL_PROP_FORBIDDEN_MARKET_TYPES.has(mt)) return false;
+  return /^player_[a-z0-9_]+$/.test(mt);
+}
+
 function clearCooldown() {
   loginCooldownUntil = 0;
 }
@@ -984,4 +1093,5 @@ module.exports = {
   fetchOrders,
   fetchOrderByUuid,
   parseMarketSelections,
+  isFootballPropMarketTypeSafe,
 };

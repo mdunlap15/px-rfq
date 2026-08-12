@@ -91,6 +91,40 @@ const _SOCCER_PROP_TO_TOA_MARKET = {
   sot_2: 'player_shots_on_target',
   assists: 'player_assists',
 };
+// Football (NFL/preseason/NCAAF) player props. PX posts anytime-TD as a
+// lineless YES/NO market ("<Player> To Score a Touchdown", type
+// 'sup_moneyline') — same shape as the soccer goalscorer/assists props.
+// TOA's player_anytime_td outcomes carry NO point and use side name "Yes",
+// so registration is line 0.5 (anytime semantics) with a NULL TOA query
+// line, mirroring _classifySoccerProp's anytime handling. anytime_td is the
+// ONLY mapped market: TOA's measured football prop coverage is
+// player_anytime_td on 2 books for regular-season NFL and ZERO player_*
+// keys for preseason/NCAAF, so everything else classifies for decline
+// visibility but never maps → never registers. Launch remains fully gated
+// by PROP_LAUNCH_ALLOWLIST (no americanfootball entries yet = dark).
+const _FOOTBALL_PROP_TO_TOA_MARKET = {
+  anytime_td: 'player_anytime_td',
+};
+// Line semantics for lineless football YES/NO props (parallel to the
+// {line, toaLine} object _classifySoccerProp returns). Null for any
+// propType we don't price — callers must fail closed on null.
+function _footballPropCtx(propType) {
+  if (propType === 'anytime_td') return { propType, line: 0.5, toaLine: null };
+  return null;
+}
+// Registration-safety assertion for football player props (the BTTS/MoV/
+// tennis-sets marketType trap, fourth occurrence — see prophetx.js
+// isFootballPropMarketTypeSafe). PX types football props 'sup_moneyline';
+// a football prop that registered carrying a full-game marketType
+// {moneyline, spread, total, team_total} would turn prop+total into an
+// ALLOWED ml_total priced off the team line. Every football prop
+// registration path must pass this and REFUSE the line when false.
+// Absence-safe: if the prophetx helper hasn't landed (parallel
+// integration), football props fail CLOSED — nothing registers unvalidated.
+function _footballPropRegistrationSafe(marketType) {
+  if (typeof px.isFootballPropMarketTypeSafe !== 'function') return false;
+  return px.isFootballPropMarketTypeSafe(marketType);
+}
 const _SOCCER_PROP_TOA_SPORT = 'soccer_fifa_world_cup';
 // Map a PX soccer sport key to the source sport key for player-prop lookups.
 // The generic 'soccer' key (SharpAPI-era events; today = World Cup) resolves to
@@ -301,6 +335,15 @@ const TOTAL_BOUNDS_BY_SPORT = {
   'soccer_brazil_campeonato': [0.5, 7],
   'soccer_conmebol_libertadores': [0.5, 7],
   'tennis': [15, 40],
+  // Football (NFL_CFB_READINESS T1.4). NOTE: bounds are NOT a substitute for
+  // the second-half seed exclusion — [30, 65] rejects the harmless 2H 16.5/
+  // 17.5 lines and ACCEPTS the dangerous 2H 35.5 (which collides with the
+  // full-game ladder). The name filter + parser retag are the real defence;
+  // this is the sanity net for prop/period totals that slip type detection.
+  'americanfootball_nfl': [30, 65],
+  'americanfootball_nfl_preseason': [30, 65],
+  'americanfootball_ncaaf': [30, 90],
+  'americanfootball_cfl': [35, 70],
 };
 // Max plausible alt-spread line per sport. PX bettors commonly play alt
 // lines out to ±4 or ±5 for hockey/baseball (e.g. Rangers -3.5 puck line,
@@ -328,6 +371,15 @@ const MAX_SPREAD_BY_SPORT = {
   'soccer_brazil_campeonato': 5,
   'soccer_conmebol_libertadores': 5,
   'tennis': 10,
+  // Football (NFL_CFB_READINESS T1.4). NFL spreads top out ~17-20 (widest
+  // posted alt ladders included); NCAAF mismatches genuinely reach the 40s.
+  // These also feed the virtual-registration maxSpread gate — the DISTANCE
+  // gate there (MAX_ALT_DEVIATION) deliberately has no football entries, so
+  // props cannot ride these wider bounds into an alt-spread registration.
+  'americanfootball_nfl': 21,
+  'americanfootball_nfl_preseason': 21,
+  'americanfootball_ncaaf': 45,
+  'americanfootball_cfl': 30,
 };
 
 /**
@@ -456,9 +508,22 @@ function resolveTeamTotalSide(hint, homeTeam, awayTeam) {
     }
   }
 
-  // Substring: full team name contains the hint (or vice versa)
-  if (normHome.includes(normHint) || normHint.includes(normHome)) return 'home';
-  if (normAway.includes(normHint) || normHint.includes(normAway)) return 'away';
+  // Substring: full team name contains the hint (or vice versa).
+  // BOTH-SIDES AMBIGUITY CHECK (NFL_CFB_READINESS): home was checked first
+  // and returned immediately, so a hint contained in BOTH competitors always
+  // resolved to home. Measured collision on the 2026-08-06 preseason probe:
+  // PX abbreviates team totals ("ARI: Team Total Points" / "CAR: Team Total
+  // Points"), and "CAR" is a substring of both "CARolina" and "CARdinals" —
+  // both team totals registered as Arizona. When both sides substring-hit,
+  // fall through to the abbreviation strategies below (more specific — they
+  // resolve CAR→Carolina via first-word prefix); if nothing disambiguates,
+  // the final return null fails the line closed instead of guessing.
+  {
+    const homeSub = normHome.includes(normHint) || normHint.includes(normHome);
+    const awaySub = normAway.includes(normHint) || normHint.includes(normAway);
+    if (homeSub && !awaySub) return 'home';
+    if (awaySub && !homeSub) return 'away';
+  }
 
   // Abbreviation / initials matching. Sports use three different
   // abbreviation conventions and we need to handle all of them:
@@ -481,28 +546,45 @@ function resolveTeamTotalSide(hint, homeTeam, awayTeam) {
   }
   const hintCompact = normHint.replace(/\s/g, '');
 
+  // Every abbreviation strategy below resolves ONLY when exactly one side
+  // matches. A double-hit (e.g. "NEW" against New York + New England via
+  // first-word chunk) falls through to the next strategy rather than
+  // returning the home side by check order; a hint no strategy uniquely
+  // resolves returns null and the line fails closed.
+  const _uniqueSide = (homeHit, awayHit) => (homeHit && !awayHit) ? 'home' : (awayHit && !homeHit) ? 'away' : null;
+
   // Strategy 1: all-word initials
-  if (hintCompact === allWordInitials(homeTeam)) return 'home';
-  if (hintCompact === allWordInitials(awayTeam)) return 'away';
+  {
+    const side = _uniqueSide(
+      hintCompact === allWordInitials(homeTeam),
+      hintCompact === allWordInitials(awayTeam));
+    if (side) return side;
+  }
 
   // Strategy 2: first-N-word prefix initials where N = hint length
   if (hintCompact.length >= 2 && hintCompact.length <= 4) {
-    if (firstNWordInitials(homeTeam, hintCompact.length) === hintCompact) return 'home';
-    if (firstNWordInitials(awayTeam, hintCompact.length) === hintCompact) return 'away';
+    const side = _uniqueSide(
+      firstNWordInitials(homeTeam, hintCompact.length) === hintCompact,
+      firstNWordInitials(awayTeam, hintCompact.length) === hintCompact);
+    if (side) return side;
   }
 
   // Strategy 3: first-N-chars of first word
   for (const n of [5, 4, 3]) {
     if (hintCompact.length !== n) continue;
-    if (firstWordChunk(homeTeam, n) === hintCompact) return 'home';
-    if (firstWordChunk(awayTeam, n) === hintCompact) return 'away';
+    const side = _uniqueSide(
+      firstWordChunk(homeTeam, n) === hintCompact,
+      firstWordChunk(awayTeam, n) === hintCompact);
+    if (side) return side;
   }
 
   // Last-word match (e.g., "Phillies" vs "Philadelphia Phillies")
   const homeLast = normHome.split(/\s+/).pop();
   const awayLast = normAway.split(/\s+/).pop();
-  if (normHint === homeLast) return 'home';
-  if (normHint === awayLast) return 'away';
+  {
+    const side = _uniqueSide(normHint === homeLast, normHint === awayLast);
+    if (side) return side;
+  }
 
   return null;
 }
@@ -553,11 +635,24 @@ function matchTeamName(pxName, oddsApiNames) {
   const exact = oddsApiNames.find(n => normalizeTeamName(n) === norm);
   if (exact) return exact;
 
-  // Substring: PX name contains Odds API name or vice versa
+  // Substring: PX name contains Odds API name or vice versa.
+  // AMBIGUITY-GUARDED: this branch used to return the FIRST hit, which is
+  // candidate-array-order-dependent and measurably wrong — "CAR" matched
+  // "Arizona Cardinals" (substring of "Cardinals") before "Carolina
+  // Panthers" ever got looked at, and bare CFB school names ("Michigan",
+  // "Texas") resolved to whichever directional variant the odds cache
+  // happened to list first. Mirror the last-N-words discipline below:
+  // exactly one distinct match or fall through (last-N-words may still
+  // resolve it; otherwise null = fail closed, leg goes dark instead of
+  // pricing the wrong team).
+  const subMatches = [];
   for (const oaName of oddsApiNames) {
     const oaNorm = normalizeTeamName(oaName);
-    if (norm.includes(oaNorm) || oaNorm.includes(norm)) return oaName;
+    if (norm.includes(oaNorm) || oaNorm.includes(norm)) {
+      if (!subMatches.some(n => normalizeTeamName(n) === oaNorm)) subMatches.push(oaName);
+    }
   }
+  if (subMatches.length === 1) return subMatches[0];
 
   // Last N words match (e.g., "Red Sox" matches "Boston Red Sox")
   const pxWords = norm.split(/\s+/);
@@ -1893,6 +1988,23 @@ async function seedAllLines() {
           continue;
         }
 
+        // Football (NFL/preseason/NCAAF/CFL) — T1.8, same PX Rule 2 posture
+        // as the tennis guard above but for EVERY market key: PX posts 14+
+        // markets per football event (1Q/1H/2H, both team totals, ...) while
+        // our consensus sources cover full-game h2h/spreads/totals only —
+        // the measured priceable slice is ~10 of ~50 line_ids. Registering
+        // the rest advertises lines we then decline 100% of the time. Fail
+        // closed at registration: a football line registers ONLY when the
+        // matched odds event carries the exact odds-feed market key it
+        // would price against. Team totals / H1 self-heal the moment their
+        // supplement lands in the cache (markets.team_totals / markets.
+        // h2h_h1 appear → next seed registers them); full-game ml/spread/
+        // total with odds coverage register exactly as before.
+        if (sportKey.startsWith('americanfootball')
+            && !(oddsEvt && oddsEvt.markets && oddsEvt.markets[oddsApiMarket])) {
+          continue;
+        }
+
         if (isGolfSport) golfTrace.linesRegistered++;
         const info = _setSeedLine(sel.lineId, {
           sport: sportKey,
@@ -1953,6 +2065,11 @@ async function seedAllLines() {
           // classifier-derived TOA line (PX posts them lineless as YES/NO)
           // and the dedicated TOA sport key for lookups.
           let soccerProp = null;
+          // Football anytime-TD props share the soccer lineless YES/NO shape
+          // but keep their own ctx variable: they source under their OWN
+          // sport key (no _soccerPropToaSport remap) and must never take the
+          // DK soccer/MLB scraper fallbacks.
+          let footballProp = null;
           if (ws) {
             if (sportKey.includes('basketball')) {
               propType = ws._classifyNbaProp(market.name);
@@ -1969,9 +2086,25 @@ async function seedAllLines() {
                 propType = soccerProp.propType;
                 toaMarketKey = _SOCCER_PROP_TO_TOA_MARKET[propType];
               }
+            } else if (sportKey.startsWith('americanfootball')) {
+              // Keep in lockstep with the on-demand router branch in
+              // resolveUnknownLine. typeof-guarded: fail closed (no football
+              // props) if the websocket classifier hasn't landed.
+              propType = (typeof ws._classifyFootballProp === 'function')
+                ? ws._classifyFootballProp(market.name) : null;
+              footballProp = _footballPropCtx(propType);
+              toaMarketKey = footballProp ? _FOOTBALL_PROP_TO_TOA_MARKET[propType] : null;
             }
           }
           if (!propType || !toaMarketKey) continue;
+          // Registration-safety assertion: a football prop line may never
+          // carry a full-game marketType (fails closed, logged — see
+          // _footballPropRegistrationSafe).
+          if (sportKey.startsWith('americanfootball')
+              && !_footballPropRegistrationSafe(_propMarketType(propType))) {
+            log.error('Lines', `Football prop assertion: refusing to register "${market.name}" — marketType '${_propMarketType(propType)}' is not a safe player_* type`);
+            continue;
+          }
           if (!propAllowlist.has(sportKey + '.' + propType)) continue;
           const playerName = ws ? ws._extractPlayerNameFromPropMarket(market.name) : null;
           if (!playerName) continue;
@@ -1981,15 +2114,18 @@ async function seedAllLines() {
           try { parsedProp = px.parseMarketSelections(market) || []; } catch { continue; }
           if (parsedProp.length === 0) continue;
 
-          // Soccer props post as YES/NO with no line on PX. Register the
-          // YES side only, mapped to over at the classifier-derived TOA
-          // line (anytime = 0.5, "At Least 2 SoT" = 1.5). The NO side of a
-          // one-sided vigged market is +EV for the bettor by construction —
-          // leave those line_ids unknown so they decline.
-          if (soccerProp) {
+          // Soccer + football props post as YES/NO with no line on PX.
+          // Register the YES side only, mapped to over at the classifier-
+          // derived line (anytime = 0.5, "At Least 2 SoT" = 1.5). The NO
+          // side of a one-sided vigged market is +EV for the bettor by
+          // construction — leave those line_ids unknown so they decline.
+          // Null-safe on the ctx line: a lineless anytime market defaults
+          // to 0.5 so the byLine grouping below can never silently drop it.
+          const linelessProp = soccerProp || footballProp;
+          if (linelessProp) {
             parsedProp = parsedProp
               .filter(s => String(s.outcomeName || s.teamName || '').toUpperCase() === 'YES')
-              .map(s => Object.assign({}, s, { selection: 'over', line: soccerProp.line }));
+              .map(s => Object.assign({}, s, { selection: 'over', line: (linelessProp.line != null ? linelessProp.line : 0.5) }));
             if (parsedProp.length === 0) continue;
           }
 
@@ -2021,9 +2157,9 @@ async function seedAllLines() {
           }
 
           for (const [thisLine, sels] of byLine) {
-            // Soccer anytime markets must query TOA with line=null (their
-            // outcomes carry no point); SoT queries its real point.
-            const toaQueryLine = soccerProp ? soccerProp.toaLine : thisLine;
+            // Soccer/football anytime markets must query TOA with line=null
+            // (their outcomes carry no point); SoT queries its real point.
+            const toaQueryLine = linelessProp ? linelessProp.toaLine : thisLine;
             let lookup = null;
             try {
               lookup = await oddsFeed.lookupTheOddsApiPlayerProp(
@@ -2051,10 +2187,12 @@ async function seedAllLines() {
               || lookup.fairProbUnder == null
               || ((lookup.booksWithBothSides || 0) < minBooks
                   && !((lookup.books || []).some(b => trustedSet.includes(String(b).toLowerCase()))));
-            // Soccer skips the DK pair-scraper fallback — there's no DK soccer
-            // prop scrape config, and these markets are one-sided anyway
-            // (handled by the TOA one-sided path below).
-            if (toaInsufficient && !soccerProp) {
+            // Soccer + football skip the DK pair-scraper fallback — there's
+            // no DK soccer/football prop scrape config, and these markets
+            // are one-sided anyway (handled by the TOA one-sided path
+            // below). For football this also keeps a Puppeteer scrape off
+            // the seed path.
+            if (toaInsufficient && !soccerProp && !footballProp) {
               try {
                 const dk = require('./dk-scraper');
                 if (typeof dk.fetchDkPlayerProps === 'function') {
@@ -2101,7 +2239,11 @@ async function seedAllLines() {
               && ['hitter_hits', 'hitter_hr', 'hitter_total_bases', 'hitter_rbi_runs'].includes(propType))
               // Soccer goalscorer/SoT/assists are one-sided by construction
               // (books post only the YES/over side).
-              || !!soccerProp;
+              || !!soccerProp
+              // Football anytime-TD is Yes-only at every book (measured:
+              // player_anytime_td, 2 books, no under anywhere) — the
+              // two-sided path can never satisfy booksWithBothSides.
+              || (!!footballProp && propType === 'anytime_td');
             let oneSidedHit = null;       // { source, impliedOver, books[], fetchedAt }
             if (oneSidedEligible) {
               const lookupHasDk = lookup && Array.isArray(lookup.books)
@@ -2128,8 +2270,8 @@ async function seedAllLines() {
                   log.debug('Lines', `TOA one-sided lookup error for ${playerName} ${propType} ${thisLine}: ${err.message}`);
                 }
                 // Fall back to DK scraper if TOA one-sided didn't return.
-                // (MLB only — there's no DK soccer prop scrape.)
-                if (!oneSidedHit && !soccerProp) {
+                // (MLB only — there's no DK soccer/football prop scrape.)
+                if (!oneSidedHit && !soccerProp && !footballProp) {
                   try {
                     const dk = require('./dk-scraper');
                     if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
@@ -2164,16 +2306,17 @@ async function seedAllLines() {
               // real DK number (scraper) as the basis; fall back to the raw
               // posted consensus the one-sided source already returned. HR only.
               let overBookPriceOverride = null;
-              // Soccer one-sided props use the same operator-approved
-              // book-mirror as MLB hitter binaries: quote the books' RAW
-              // posted consensus minus the sweetener, inheriting their
-              // (large) goalscorer margin instead of guessing a one-sided
-              // de-vig. Multi-book TOA raw average is the basis — no DK
-              // preference step (no DK soccer scrape exists).
-              if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs' || soccerProp) {
+              // Soccer + football-anytime-TD one-sided props use the same
+              // operator-approved book-mirror as MLB hitter binaries: quote
+              // the books' RAW posted consensus minus the sweetener,
+              // inheriting their (large) anytime-market margin instead of
+              // guessing a one-sided de-vig. Multi-book TOA raw average is
+              // the basis — no DK preference step (no DK soccer/football
+              // scrape exists).
+              if (propType === 'hitter_hr' || propType === 'hitter_rbi_runs' || soccerProp || footballProp) {
                 let mirrorRawOver = oneSidedHit.rawImpliedOver;
                 let mirrorSource = oneSidedHit.source;
-                if (!soccerProp && oneSidedHit.source !== 'dk-scraper-one-sided') {
+                if (!soccerProp && !footballProp && oneSidedHit.source !== 'dk-scraper-one-sided') {
                   try {
                     const dk = require('./dk-scraper');
                     if (typeof dk.lookupDkPlayerPropOneSidedFairProb === 'function') {
@@ -3252,7 +3395,27 @@ async function resolveUnknownLine(rfqLeg) {
                 // Phase-2 bridge using TOA's batter_* market keys.
                 propType = ws._classifyMlbProp(market.name);
                 toaMarketKey = _MLB_PROP_TO_TOA_MARKET[propType];
+              } else if (sportKey.startsWith('americanfootball')) {
+                // Lockstep with the pre-seed router branch. Football
+                // anytime-TD is lineless + Yes-only, so this on-demand
+                // two-sided lookup fails closed (booksWithBothSides=0 →
+                // decline) — one-sided registration happens at seed time,
+                // exactly like the golf/MoV cold-start posture. The branch
+                // exists so seed and on-demand can never classify the same
+                // market differently, and declines get propType visibility.
+                propType = (typeof ws._classifyFootballProp === 'function')
+                  ? ws._classifyFootballProp(market.name) : null;
+                toaMarketKey = propType ? _FOOTBALL_PROP_TO_TOA_MARKET[propType] : undefined;
               }
+            }
+            // Registration-safety assertion (football only): a football prop
+            // may never proceed carrying a full-game marketType. Fails
+            // closed → falls through to the standard prop decline below.
+            if (sportKey.startsWith('americanfootball') && propType && toaMarketKey
+                && !_footballPropRegistrationSafe(_propMarketType(propType))) {
+              log.error('Lines', `Football prop assertion (on-demand): refusing "${market.name}" — marketType '${_propMarketType(propType)}' is not a safe player_* type`);
+              propType = null;
+              toaMarketKey = null;
             }
             const allowlist = (config.pricing && config.pricing.propLaunchAllowlist) || new Set();
             const allowKey = sportKey + '.' + propType;
@@ -4185,6 +4348,13 @@ module.exports = {
   getPrimarySpreadHomePoint,
   getPrimaryTotalLine,
   debugGolfMatching,
+  // Exported for test/football-lines.test.js
+  _isValidFullGameLine: isValidFullGameLine,
+  _resolveTeamTotalSide: resolveTeamTotalSide,
+  _FOOTBALL_PROP_TO_TOA_MARKET,
+  _footballPropCtx,
+  _footballPropRegistrationSafe,
+  _propMarketType,
   // Manual disable controls
   isLineDisabled,
   isPxEventDisabled,

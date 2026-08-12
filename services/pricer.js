@@ -3722,7 +3722,13 @@ function priceParlay(legs, opts = {}) {
 // RBI Over 1.5 with Runs Over 0.5, which is NOT an implication (review
 // finding). The HR⇒hitter_rbi_runs cross rule at 0.5/0.5 stays valid: a HR
 // credits the batter ≥1 RBI AND ≥1 run, so it implies either reading.
-const _NESTED_LADDER_EXCLUDED_PROPTYPES = new Set(['pitcher_strikeouts', 'hitter_rbi_runs']);
+// touchdowns: pre-emptive football entry (no football propTypes exist yet —
+// Tier 3 unbuilt). If a future _classifyFootballProp names a propType
+// 'touchdowns' it would conflate a QB's PASSING TDs ("...To Throw...") with
+// SCORED rush/rec TDs ("...To Score a Touchdown") — different stats, so a
+// same-player "ladder" is NOT an implication (the hitter_rbi_runs mistake).
+// Single-stat football types (anytime_td, pass_yds, ...) need no entry.
+const _NESTED_LADDER_EXCLUDED_PROPTYPES = new Set(['pitcher_strikeouts', 'hitter_rbi_runs', 'touchdowns']);
 // Cross-stat implication rules: strong propType ⇒ weak propType, with a
 // line condition (ls = strong leg line, lw = weak leg line; anytime YES
 // markets register at 0.5).
@@ -3856,6 +3862,113 @@ function matchXTeamPair(a, b) {
 
 function _xteamCombosAllowed() {
   return (config.pricing.sgpAllowedCombos || []).includes('prop_prop_xteam');
+}
+
+// ---------------------------------------------------------------------------
+// FOOTBALL structural guards (NFL_CFB_READINESS_2026-08-05.md, "Correlation
+// rules that MUST land before football SGPs"). Three explicit pre-passes in
+// shouldDecline, deliberately independent of the generic SGP gate — that gate
+// blocks most of these today only because no key in SGP_ALLOWED_COMBOS happens
+// to match, incidental protection that evaporates the moment someone adds a
+// combo key (the MoV/tennis lesson, verbatim):
+//   football_period_sgp_blocked — UNCONDITIONAL. Period leg + anything else on
+//     the same pxEventId. 1Q ⊂ 1H ⊂ game, 2H ⊂ game: independent
+//     multiplication of nested legs is the golf/UFC failure again.
+//   football_futures_nested — UNCONDITIONAL. Keyed on TEAM/PLAYER, not
+//     pxEventId (golf_same_player_nested's model): SB/AFC/NFC/MVP/win-total
+//     futures live in DISTINCT competitor-less events, so the pxEventId-keyed
+//     machinery is structurally blind to "KC win Super Bowl + KC win AFC"
+//     (perfectly nested — P(joint) = P(SB), not the product).
+//   football_sgp_blocked — every other same-pxEventId football pair. Released
+//     ONLY by config.pricing.footballSgpEnabled === true (env
+//     FOOTBALL_SGP_ENABLED, entry owned by config.js). ABSENCE-SAFE: the knob
+//     missing, false, or any non-boolean (incl. the string 'true') = blocked.
+// ---------------------------------------------------------------------------
+
+function _isFootballLine(li) {
+  return String((li && (li.sport || li.oddsApiSport)) || '').startsWith('americanfootball');
+}
+
+// "(Incl. OT)" / "(Including Overtime)" is the FULL-GAME settlement qualifier,
+// not a period market — strip it before the period test so an
+// overtime-inclusive full-game total isn't flagged. A bare "(OT)" or
+// standalone "overtime"/"ot" still matches (over-declining is the safe
+// direction; missing a period market is the measured 2x mispricing).
+const _FB_INCL_OT_RE = /\(?\b(?:incl(?:uding)?|inc)\.?\s*(?:overtime|ot)\b\)?/gi;
+// Detection reads marketName AND pxEventName AND marketType because the
+// marketType string CANNOT be trusted: measured on PX event 19453, "Second
+// Half Moneyline/Spread/Total Points" register with plain marketType
+// 'moneyline'/'spread'/'total' — byte-indistinguishable from full-game legs.
+const _FB_PERIOD_RE = new RegExp([
+  '\\b(?:1st|2nd|first|second)[\\s-]*half\\b',
+  '\\bhalf[\\s-]*time\\b',
+  '\\b[12]h\\b',
+  '\\b(?:1st|2nd|3rd|4th|first|second|third|fourth)[\\s-]*quarter\\b',
+  '\\bquarter\\b',        // any other quarter-scoped market ("Highest Scoring Quarter") — over-decline is safe; \b keeps "quarterback" clear
+  '\\b[1-4][\\s-]?q\\b',
+  '\\bq[1-4]\\b',
+  '\\bovertime\\b',
+  '\\bot\\b',
+].join('|'), 'i');
+
+function _isFootballPeriodLeg(li) {
+  if (!_isFootballLine(li)) return false;
+  for (const f of [li.marketName, li.pxEventName, li.marketType]) {
+    if (!f) continue;
+    // Underscores→spaces so marketType tokens ('first_half_spread') hit the
+    // same word-boundary patterns the display names do.
+    const t = String(f).replace(/_/g, ' ').replace(_FB_INCL_OT_RE, ' ');
+    if (_FB_PERIOD_RE.test(t)) return true;
+  }
+  return false;
+}
+
+const _FB_FUTURES_NAME_RE = /\bsuper[\s-]*bowl\b|\bafc\b|\bnfc\b|\bmvp\b|\bwin[\s-]*totals?\b|\bto\s+win\s+the\b|\bconference\b|\bdivision\b|\bheisman\b/i;
+
+// Futures-shaped = outright-marked, fully competitor-less, or half
+// competitor-less with a futures-sounding name. The name test deliberately
+// does NOT apply when BOTH competitors are set: real GAMES carry these tokens
+// in their event names ("AFC Divisional Round", the Super Bowl itself) and
+// must not be swept into the futures guard — same-game combos on those are
+// football_sgp_blocked's territory.
+function _isFootballFuturesLeg(li) {
+  if (!_isFootballLine(li)) return false;
+  if (li.subType === 'outrights' || li.isOutright === true) return true;
+  if (/^outright/i.test(String(li.marketType || ''))) return true;
+  const hasBothComps = !!(li.homeTeam && li.awayTeam);
+  if (!li.homeTeam && !li.awayTeam) return true; // competitor-less — the measured PX futures shape
+  if (hasBothComps) return false;
+  return _FB_FUTURES_NAME_RE.test(String(li.marketName || ''))
+    || _FB_FUTURES_NAME_RE.test(String(li.pxEventName || ''));
+}
+
+// Market-noise words stripped from a futures leg's identity BEFORE token
+// comparison, so "Chiefs Regular Season Wins Over 10.5" and "AFC Conference
+// Winner" don't hand every leg a shared 'winner'/'total' token. Purely
+// numeric tokens are dropped for the same reason (a shared "10" is not a
+// shared team).
+const _FB_FUTURES_NOISE_RE = /\b(?:super\s*bowl|win\s*totals?|winner|to\s+win(?:\s+the)?|mvp|afc|nfc|conference|division(?:al)?|championship|regular\s*season|nfl|ncaaf?|football|yes|no|over|under|wins?)\b/gi;
+
+// Identity keys for one futures leg: the normalized full team/player string
+// plus its last alphabetic token (nickname/surname), from BOTH playerName and
+// teamName. Last-token matching is what lets PX's abbreviated futures naming
+// ("KC Chiefs") collide with the full form ("Kansas City Chiefs") while
+// keeping shared-city DIFFERENT teams apart (giants vs jets, not "new york").
+function _footballFuturesIdentityKeys(li) {
+  const keys = new Set();
+  for (const raw of [li.playerName, li.teamName]) {
+    if (!raw) continue;
+    const norm = String(raw)
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .toLowerCase().replace(/[^a-z0-9 ]/g, ' ')
+      .replace(_FB_FUTURES_NOISE_RE, ' ')
+      .replace(/\s+/g, ' ').trim();
+    const toks = norm.split(' ').filter(t => /[a-z]/.test(t) && t !== 'the');
+    if (!toks.length) continue;
+    keys.add(toks.join(' '));
+    keys.add(toks[toks.length - 1]);
+  }
+  return keys;
 }
 
 function shouldDecline(legs, parlayId) {
@@ -4031,6 +4144,96 @@ function shouldDecline(legs, parlayId) {
             detail: `tennis set markets cannot be parlayed same-match: ${a.playerName || a.teamName || '?'} ${a.marketType}:${a.selection} + ${bDesc} on event ${a.pxEventId} — set outcomes are nested or deterministic within one match (over 2.5 sets IMPLIES both players won a set; winning the match implies winning a set)`,
           };
         }
+      }
+    }
+
+    // ---- FOOTBALL: three structural pre-passes ---------------------------
+    // See the helper block above shouldDecline for the full rationale.
+    // Order matters for reason determinism: the UNCONDITIONAL guards (period,
+    // futures) run before the env-releasable blanket block, so releasing
+    // football SGPs via FOOTBALL_SGP_ENABLED can NEVER re-open period-vs-game
+    // or same-team futures combos.
+
+    // (1) PERIOD PRE-PASS — unconditional, in the MoV/tennis mold. Detection
+    // reads name fields, not just marketType, because the measured trap is a
+    // "Second Half Moneyline" leg whose marketType is silently the full-game
+    // string 'moneyline' (NFL_CFB_READINESS: the 2x mispricing landmine).
+    const fbPeriodLegs = legInfos.filter(_isFootballPeriodLeg);
+    if (fbPeriodLegs.length) {
+      for (const a of fbPeriodLegs) {
+        for (const b of legInfos) {
+          if (a === b) continue;
+          if (!a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+          const bDesc = `${b.teamName || b.playerName || '?'} ${b.marketType}${b.selection ? ':' + b.selection : ''}`;
+          return {
+            declined: true,
+            reason: 'football_period_sgp_blocked',
+            detail: `football period market cannot be parlayed same-game: "${a.marketName || a.marketType}" + ${bDesc} on event ${a.pxEventId} — 1Q ⊂ 1H ⊂ game and 2H ⊂ game, so independent multiplication misprices the nested joint (and the period leg's marketType cannot be trusted to be retagged)`,
+          };
+        }
+      }
+    }
+
+    // (2) FUTURES NESTING — unconditional, keyed on TEAM/PLAYER identity like
+    // golf_same_player_nested. Two futures-shaped football legs sharing an
+    // identity key decline; a futures-shaped leg whose identity cannot be
+    // resolved at all ALSO declines (fail closed — we cannot prove the pair
+    // is on different teams). Different teams/players are deliberately
+    // allowed: they are mutually exclusive or compete for finite slots, so
+    // independent multiplication OVERSTATES those parlays (conservative).
+    const fbFuturesLegs = legInfos.filter(_isFootballFuturesLeg);
+    if (fbFuturesLegs.length >= 2) {
+      const keyed = fbFuturesLegs.map(li => ({ li, keys: _footballFuturesIdentityKeys(li) }));
+      const noId = keyed.find(e => e.keys.size === 0);
+      if (noId) {
+        return {
+          declined: true,
+          reason: 'football_futures_nested',
+          detail: `football futures leg with unresolvable team/player identity ("${noId.li.marketName || noId.li.pxEventName || '?'}") in a multi-futures parlay — cannot prove the futures legs are on different teams; failing closed`,
+        };
+      }
+      for (let i = 0; i < keyed.length; i++) {
+        for (let j = i + 1; j < keyed.length; j++) {
+          const shared = [...keyed[i].keys].find(k => keyed[j].keys.has(k));
+          if (shared) {
+            const dA = `${keyed[i].li.teamName || keyed[i].li.playerName || '?'} ${keyed[i].li.marketName || keyed[i].li.marketType || '?'}`;
+            const dB = `${keyed[j].li.teamName || keyed[j].li.playerName || '?'} ${keyed[j].li.marketName || keyed[j].li.marketType || '?'}`;
+            return {
+              declined: true,
+              reason: 'football_futures_nested',
+              detail: `${dA} + ${dB} share futures identity "${shared}" — football futures on one team/player are nested (Super Bowl ⊂ conference ⊂ playoff berth; MVP rides team success), so independent pricing badly underprices the joint`,
+            };
+          }
+        }
+      }
+    }
+
+    // (3) SAME-GAME HARD BLOCK — every remaining same-pxEventId football
+    // combination. Released ONLY by config.pricing.footballSgpEnabled === true
+    // (env FOOTBALL_SGP_ENABLED; the config.js entry is owned elsewhere, so
+    // this read must be ABSENCE-SAFE: undefined = blocked, and a non-boolean
+    // truthy like the string 'true' = still blocked). Rationale: prod's
+    // sgpCorrelationByCombo factors are flat, sport-agnostic numbers
+    // back-calculated from 4 FanDuel MLB/NHL samples — football has the
+    // strongest game-script coupling we quote and the biggest book SGP
+    // discounts, so a guessed factor is worse than a block (the tennis
+    // precedent). Do NOT bypass by adding football keys to the combo grid.
+    if (((config.pricing || {}).footballSgpEnabled) !== true) {
+      const fbByEvent = new Map();
+      for (const li of legInfos) {
+        if (!_isFootballLine(li) || !li.pxEventId) continue;
+        const k = String(li.pxEventId);
+        if (!fbByEvent.has(k)) fbByEvent.set(k, []);
+        fbByEvent.get(k).push(li);
+      }
+      for (const [eid, ls] of fbByEvent) {
+        if (ls.length < 2) continue;
+        const desc = ls.map(li => `${li.teamName || li.playerName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}`).join(' + ');
+        return {
+          declined: true,
+          reason: 'football_sgp_blocked',
+          detail: `${ls.length} football legs on event ${eid} (${desc}) — football same-game parlays are blocked until FOOTBALL_SGP_ENABLED=true (no calibrated football correlation factors exist)`,
+        };
       }
     }
 

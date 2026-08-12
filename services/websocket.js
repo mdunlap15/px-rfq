@@ -67,6 +67,10 @@ function extractPlayerNameFromPropMarket(marketName) {
     /\s+to\s+give\s+(an?\s+)?assists?$/i,
     /\s+to\s+have\s+at\s+least\s+\d+\s+shots?(\s+on\s+target)?$/i,
     /\s+(total\s+)?shots?\s+on\s+target$/i,
+    // ---- Football (NFL/NCAAF; PX phrasing, probe 2026-08-05) ----
+    // Full phrase, optionally with PX's trailing "?" — must run before any
+    // bare single-stat pattern so only the player name survives.
+    /\s+to\s+score\s+a\s+touchdown\s*\??$/i,
     // Single stats
     /\s+(total\s+)?points?$/i,
     /\s+(total\s+)?rebounds?$/i,
@@ -115,6 +119,63 @@ function extractPlayerNameFromPropMarket(marketName) {
   return null;
 }
 
+// Football-shaped prop names that MUST NOT be classified by another sport's
+// classifier. Measured misroutes (NFL_CFB_READINESS_2026-08-05.md):
+//   classifyNbaProp("Bijan Robinson To Score a Touchdown")  → 'turnovers'
+//     (the /\btos?\b/ turnover alternation matched the word "To")
+//   classifyNhlProp("Justin Tucker Field Goals Made")        → 'goals'
+//   classifyMlbProp("Jeremiah Love To Score a Touchdown")    → 'hitter_other'
+//     (via the /to\s+score/ hitter pattern)
+// A misclassified football prop doesn't just pollute Phase-0 stats: the prop
+// routers key TOA market lookups on the classifier output, so a football name
+// classified as an NBA/NHL/MLB propType would look up a completely wrong
+// book market. Every marker here is football-unambiguous ACROSS the sports
+// that consult it — "field goal" is deliberately NOT here because it is a
+// real NBA stat (classifyNhlProp adds it separately; hockey has no field
+// goals).
+const FOOTBALL_PROP_NAME_RE = /touch\s*down|\btds?\b|to\s+throw\s+an?\s+interception|interceptions?\s+thrown|(?:passing|rushing|receiving)\s+yards?|pass\s+(?:completions?|attempts?)|\breceptions?\b|\bsacks?\b|kicking\s+points?|extra\s+points?\s+made/i;
+
+// Football player-prop sub-classifier. Mirrors the MLB/NBA/NHL/soccer
+// classifiers. Only 'anytime_td' maps to a TOA market
+// (line-manager _FOOTBALL_PROP_TO_TOA_MARKET) — every other bucket exists
+// for decline-rollup visibility and never registers. Quoting additionally
+// requires a PROP_LAUNCH_ALLOWLIST entry (none shipped = fully dark).
+//
+// Returns one of:
+//   'anytime_td'          — "<Player> To Score a Touchdown" (PX sup_moneyline YES/NO)
+//   'first_td'            — first-TD variants (novelty; no source wired)
+//   'passing_yards' / 'rushing_yards' / 'receiving_yards' / 'receptions'
+//                         — volume stats (not posted 5 weeks out; re-measure in game week)
+//   'interception_thrown' — single-player INT market
+//   'field_goals_made' / 'kicking_points' — kicker props
+//   'other_football_prop' — football-shaped but unbucketed
+//   null                  — not a recognizable football prop (game markets like
+//                           "Moneyline"/"Total Points" return null so the prop
+//                           routers skip them), OR a multi-player composite
+//                           ("Kenny Pickett or Carson Beck To Throw An
+//                           Interception?") which is unpriceable by
+//                           construction — no book posts an OR-of-two-players
+//                           market — and must stay unclassified so it declines.
+function classifyFootballProp(marketName) {
+  if (!marketName) return null;
+  const n = String(marketName).toLowerCase().trim();
+  // Multi-player / unit composites fail closed (mirrors the parser's
+  // or/and/&/slash guard in prophetx.js parseMarketSelections).
+  if (/\b(?:or|and)\b|[&/+,]/.test(n)) return null;
+  if (/\bto\s+score\s+a\s+touchdown\s*\??$/.test(n)) return 'anytime_td';
+  if (/\b(?:first|1st)\s+touchdown\b|to\s+score\s+the\s+first\s+touchdown/.test(n)) return 'first_td';
+  if (/passing\s+yards?/.test(n)) return 'passing_yards';
+  if (/rushing\s+yards?/.test(n)) return 'rushing_yards';
+  if (/receiving\s+yards?/.test(n)) return 'receiving_yards';
+  if (/\breceptions?\b/.test(n)) return 'receptions';
+  if (/to\s+throw\s+an?\s+interception|interceptions?\s+thrown/.test(n)) return 'interception_thrown';
+  if (/field\s+goals?\s+made/.test(n)) return 'field_goals_made';
+  if (/kicking\s+points?|extra\s+points?\s+made/.test(n)) return 'kicking_points';
+  if (FOOTBALL_PROP_NAME_RE.test(n)) return 'other_football_prop';
+  return null;
+}
+// (exported via module.exports block at end of file as _classifyFootballProp)
+
 // MLB player-prop sub-classifier (Phase 0 of pitcher-strikeouts experiment).
 // We currently bucket all MLB props as `category='player_prop'`. To decide
 // whether to subscribe to a paid prop feed, we need to know what % of that
@@ -144,6 +205,10 @@ function extractPlayerNameFromPropMarket(marketName) {
 function classifyMlbProp(marketName) {
   if (!marketName) return null;
   const n = String(marketName).toLowerCase();
+  // Football names belong to classifyFootballProp — measured misroute:
+  // "Jeremiah Love To Score a Touchdown" hit the /to\s+score/ hitter
+  // pattern below and returned 'hitter_other'.
+  if (FOOTBALL_PROP_NAME_RE.test(n)) return null;
   // Pitcher strikeouts — PX's "Pitching Strikeouts" + variants where
   // 'thrown'/'recorded' makes pitcher-side unambiguous on its own.
   // Allow optional 's / s suffix on K to catch "K's Thrown".
@@ -233,6 +298,11 @@ function classifyNbaProp(marketName) {
   if (!marketName) return null;
   const n = String(marketName).toLowerCase();
 
+  // Football names belong to classifyFootballProp — measured misroute:
+  // "Bijan Robinson To Score a Touchdown" matched the /\btos?\b/ turnover
+  // alternation (the word "To") and returned 'turnovers'.
+  if (FOOTBALL_PROP_NAME_RE.test(n)) return null;
+
   // Triple/double double — check before single-stat patterns
   if (/triple\s*[-]?\s*double/.test(n)) return 'triple_double';
   if (/double\s*[-]?\s*double/.test(n)) return 'double_double';
@@ -276,7 +346,10 @@ function classifyNbaProp(marketName) {
   if (hasSteals) return 'steals';
   if (hasRebounds) return 'rebounds';
   if (hasAssists) return 'assists';
-  if (/\bturnovers?\b|\btos?\b/.test(n)) return 'turnovers';
+  // \btos\b (plural only) — the old \btos?\b also matched the bare English
+  // word "to", so ANY market name containing "To ..." that reached this
+  // line classified as turnovers. Real turnover props say "Turnovers".
+  if (/\bturnovers?\b|\btos\b/.test(n)) return 'turnovers';
   if (hasPoints) return 'points';
 
   // Other recognized NBA prop families we don't yet bucket
@@ -312,6 +385,12 @@ function classifyNbaProp(marketName) {
 function classifyNhlProp(marketName) {
   if (!marketName) return null;
   const n = String(marketName).toLowerCase();
+
+  // Football names belong to classifyFootballProp — measured misroute:
+  // "Justin Tucker Field Goals Made" matched the goals pattern and
+  // returned 'goals'. "Field goal" is checked here (not in the shared
+  // football RE) because it IS a real NBA stat but is NOT a hockey one.
+  if (FOOTBALL_PROP_NAME_RE.test(n) || /field\s+goals?/.test(n)) return null;
 
   // Goalie-specific markets first — these are unambiguous and should
   // not be conflated with skater stats.
@@ -1221,6 +1300,8 @@ async function handleRFQ(data) {
               propType = classifyNhlProp(propMarketName);
             } else if (eventSport.includes('soccer')) {
               propType = classifySoccerProp(propMarketName);
+            } else if (eventSport.includes('americanfootball')) {
+              propType = classifyFootballProp(propMarketName);
             }
           }
           const propTag = propType ? ` [propType:${propType}]` : '';
@@ -3054,5 +3135,6 @@ module.exports = {
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing
   _classifySoccerProp: classifySoccerProp, // exposed for /prop-opportunity sanity testing
+  _classifyFootballProp: classifyFootballProp, // exposed for line-manager football prop routers
   _extractPlayerNameFromPropMarket: extractPlayerNameFromPropMarket, // exposed for line-manager Phase-2 prop bridge
 };

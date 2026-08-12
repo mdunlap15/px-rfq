@@ -276,6 +276,21 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // NFL preseason (added 2026-08-12). TOA serves preseason under a SEPARATE
+  // active key — americanfootball_nfl's ~272 cached events are the September
+  // regular season, so August preseason games had no odds and every one
+  // failed team-matching (prod unmatchedEventDetails named the 8/6 game).
+  // Kept as its own key deliberately: merging preseason events into the
+  // americanfootball_nfl cache would arm the virtual-registration alt-spread
+  // trap (MAX_ALT_DEVIATION=15 under the nfl key registers any prop leg with
+  // a line ≤15 as an alt spread); under a distinct key that lookup misses and
+  // fails closed. Team names match PX byte-identically ("Carolina Panthers").
+  // Not flipGated: SharpAPI is retired and never carried preseason.
+  'americanfootball_nfl_preseason': {
+    oddsApiSport: 'americanfootball_nfl_preseason',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
   'americanfootball_nfl': {
     oddsApiSport: 'americanfootball_nfl',
     markets: 'h2h,spreads,totals',
@@ -1149,6 +1164,22 @@ const DK_GAME_LINE_SPORTS = new Set([
   'soccer_brazil_campeonato', 'soccer_mexico_ligamx', 'soccer_usa_nwsl',
 ]);
 
+// Sports whose refresh cycle warms 1st-Half markets (h2h_h1/spreads_h1/
+// totals_h1). These keys are PER-EVENT-endpoint only — the bulk /odds
+// endpoint 422s on them (same trap as F5/team_totals/BTTS) — so they ride
+// supplementH1Markets. TOA serves the *_h1 keys for football too (measured
+// on the 2026-08-06 preseason event), not just NBA; the supplement was
+// previously hardcoded basketball_nba in both its gate and its URL.
+// H1_SUPPLEMENT_SPORTS env overrides the whole set.
+const H1_SUPPLEMENT_SPORTS = new Set(
+  (process.env.H1_SUPPLEMENT_SPORTS
+    || 'basketball_nba,americanfootball_nfl,americanfootball_nfl_preseason,americanfootball_ncaaf')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+// Log/retry label: keeps the NBA strings byte-identical to the pre-
+// generalization implementation (dashboards and log greps key on them).
+const _h1Label = (sport) => sport === 'basketball_nba' ? 'NBA H1' : `${sport} H1`;
+
 // MLB probable pitchers via the official MLB Stats API (free, keyless).
 // SharpAPI-removal audit: pitcher identity used to arrive embedded in
 // SharpAPI's team strings; the TOA path carries NO starter info, which
@@ -1212,14 +1243,14 @@ async function _runPostParseSupplements(sport, parsed) {
     }
   }
 
-  // 1st-Half markets for NBA (separate from full-game)
-  if (sport === 'basketball_nba') {
+  // 1st-Half markets (separate from full-game) — NBA + football.
+  if (H1_SUPPLEMENT_SPORTS.has(sport)) {
     try {
-      await supplementNbaH1Markets(parsed);
+      await supplementH1Markets(parsed, sport);
     } catch (err) {
-      log.warn('OddsFeed', `NBA H1 supplement failed: ${err.message}`);
+      log.warn('OddsFeed', `${_h1Label(sport)} supplement failed: ${err.message}`);
     }
-    _scheduleSupplementRetry(sport, 'NBA H1', supplementNbaH1Markets, parsed);
+    _scheduleSupplementRetry(sport, _h1Label(sport), supplementH1Markets, parsed, sport);
   }
 
   // Team totals for NBA/MLB/NHL (gap-fill from TOA on the refresh cycle).
@@ -2161,8 +2192,10 @@ async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
 }
 
 /**
- * Fetch 1st-Half markets for NBA from The Odds API and attach them
- * to the existing event cache as: h2h_h1, spreads_h1, totals_h1.
+ * Fetch 1st-Half markets from The Odds API and attach them to the
+ * existing event cache as: h2h_h1, spreads_h1, totals_h1. Sports gated
+ * by H1_SUPPLEMENT_SPORTS (NBA + football); `sport` defaults to
+ * basketball_nba so any stale caller keeps the original behavior.
  *
  * IMPORTANT: Same endpoint gotcha as F5 and team_totals — the bulk
  * /odds endpoint returns 422 INVALID_MARKET for h2h_h1/spreads_h1/
@@ -2171,9 +2204,10 @@ async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
  * This is why the previous bulk-endpoint implementation produced zero
  * 1H data for months. H1 markets live on the per-event endpoint.
  */
-async function supplementNbaH1Markets(parsedEvents) {
+async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey) return;
+  const label = _h1Label(sport);
 
   // Collect candidates — skip events already populated with H1 data.
   const candidates = [];
@@ -2186,7 +2220,7 @@ async function supplementNbaH1Markets(parsedEvents) {
     }
   }
   if (candidates.length === 0) {
-    log.info('OddsFeed', 'NBA H1 supplement: no candidates');
+    log.info('OddsFeed', `${label} supplement: no candidates`);
     return;
   }
 
@@ -2197,10 +2231,10 @@ async function supplementNbaH1Markets(parsedEvents) {
   async function worker() {
     while (idx < candidates.length) {
       const ev = candidates[idx++];
-      const resolved = await resolveOddsApiEventId('basketball_nba', ev.homeTeam, ev.awayTeam, ev.commenceTime);
+      const resolved = await resolveOddsApiEventId(sport, ev.homeTeam, ev.awayTeam, ev.commenceTime);
       if (!resolved) { matchFails++; continue; }
 
-      const url = `https://api.the-odds-api.com/v4/sports/basketball_nba/events/${resolved.eventId}/odds`
+      const url = `https://api.the-odds-api.com/v4/sports/${resolved.oddsApiSport || sport}/events/${resolved.eventId}/odds`
         + `?apiKey=${theOddsApiKey}`
         + `&regions=us,eu`
         + `&markets=h2h_h1,spreads_h1,totals_h1`
@@ -2270,7 +2304,7 @@ async function supplementNbaH1Markets(parsedEvents) {
   const workers = [];
   for (let i = 0; i < Math.min(CONCURRENCY, candidates.length); i++) workers.push(worker());
   await Promise.all(workers);
-  log.info('OddsFeed', `NBA H1 supplement (per-event): ${calls}/${candidates.length} calls, h2h+${h2hCount} spread+${spreadCount} total+${totalCount}, matchFails=${matchFails} apiFails=${apiFails}`);
+  log.info('OddsFeed', `${label} supplement (per-event): ${calls}/${candidates.length} calls, h2h+${h2hCount} spread+${spreadCount} total+${totalCount}, matchFails=${matchFails} apiFails=${apiFails}`);
 }
 
 /**
@@ -3707,6 +3741,14 @@ async function resolveOddsApiEventId(sport, homeTeam, awayTeam, targetTime) {
     // totals from TOA's mma_mixed_martial_arts feed (Pinnacle+DK+FD)
     // so getFairProbAsync can backstop Total Rounds quotes.
     'mma_mixed_martial_arts': 'mma_mixed_martial_arts',
+    // Football (added 2026-08-12): required for the H1 per-event supplement
+    // (supplementH1Markets) to resolve TOA event ids — absent keys made it
+    // count every football event as a matchFail and attach nothing. Also
+    // enables on-demand TOA alt-line fetches for football (PX posts alt
+    // spreads/totals the primary book allowlist doesn't carry).
+    'americanfootball_nfl_preseason': 'americanfootball_nfl_preseason',
+    'americanfootball_nfl': 'americanfootball_nfl',
+    'americanfootball_ncaaf': 'americanfootball_ncaaf',
   };
   // Dynamic sports (e.g. tennis) use tournament-specific Odds API keys that
   // rotate over time. For these, we discover active tournaments and fetch
@@ -7572,7 +7614,7 @@ function getGolfMatchupEvent(homeTeam, awayTeam, roundNum) {
 }
 
 // Markets attached by per-event TOA supplements (supplementMlbF5Markets,
-// supplementNbaH1Markets, supplementTeamTotals). These don't conflict
+// supplementH1Markets, supplementTeamTotals). These don't conflict
 // across sibling cache entries because they're MARKET TYPES not present
 // on the primary feed. When a sport's cache holds multiple entries for
 // the same matchup — either same-key siblings (back-to-backs, generic-
@@ -9647,6 +9689,50 @@ async function _getTheOddsApiPropOdds(sport, eventId, marketKey) {
   return null;
 }
 
+// ── Player-name normalization + matching (TOA description vs PX name) ──
+// Rules (measured against live TOA boards, NFL readiness doc 2026-08-05):
+// - Hyphens normalize to SPACES, never to nothing: PX "Jaxon Smith Njigba"
+//   must equal TOA "Jaxon Smith-Njigba" ('smithnjigba' would match neither).
+// - Jr/Sr are decorative — books disagree on them for the SAME player, so
+//   they are dropped: 'Travis Etienne' == 'Travis Etienne Jr.'.
+// - Roman-numeral suffixes (II/III/IV/V) are DISTINGUISHING — the NFL has
+//   both a Michael Carter and a Michael Carter II. Kept in a separate field
+//   compared strictly, so present-vs-absent fails closed to no-match (the
+//   base-name substring fallback could never see the difference).
+// - D/ST rows ("49ers D/ST") are team units, not players — they match
+//   nothing (parts = null).
+function _normPlayerNameParts(s) {
+  const raw = String(s || '');
+  if (/d\s*\/\s*st/i.test(raw)) return null;
+  const base = raw.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[.'`]/g, '')
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!base) return null;
+  const words = base.split(' ');
+  let gen = '';
+  // Peel suffixes from the end; "John Smith Jr II" sheds both. Never consume
+  // the whole name — a lone "V" stays a name, not a suffix.
+  while (words.length > 1) {
+    const last = words[words.length - 1];
+    if (last === 'jr' || last === 'sr') { words.pop(); continue; }
+    if (/^(ii|iii|iv|v)$/.test(last)) { gen = last; words.pop(); continue; }
+    break;
+  }
+  return { base: words.join(' '), gen };
+}
+// Accepts raw strings or pre-computed parts (pass parts for the hot side of
+// a loop so the PX name is normalized once).
+function _playerNamesMatch(a, b) {
+  const pa = (a && typeof a === 'object') ? a : _normPlayerNameParts(a);
+  const pb = (b && typeof b === 'object') ? b : _normPlayerNameParts(b);
+  if (!pa || !pb) return false;
+  if (pa.gen !== pb.gen) return false;
+  return pa.base === pb.base || pa.base.includes(pb.base) || pb.base.includes(pa.base);
+}
+
 // Generic TOA player-prop lookup. Works for any TOA market key with
 // player Over/Under outcomes shaped as {description: playerName, name:
 // 'Over'|'Under', point: line, price: american}. Used by the wrappers
@@ -9704,25 +9790,25 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   const bookmakers = odds.bookmakers || [];
   stages.push(`books_in_resp:${bookmakers.length}`);
 
-  const stripDiacritics = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
-  // Normalize player names: strip diacritics, periods, apostrophes,
-  // collapse whitespace. Books vary on "C.J." vs "CJ", "D'Angelo" vs
-  // "DAngelo", etc.
-  const normPlayerName = (s) => stripDiacritics(s || '').toLowerCase()
-    .replace(/[.'`]/g, '').replace(/\s+/g, ' ').trim();
-  const normPlayer = normPlayerName(playerName);
+  // Player matching via the module-level _normPlayerNameParts/_playerNamesMatch
+  // (hyphen⇒space, Jr/Sr dropped, II/III/IV/V compared strictly, D/ST dropped).
+  const normParts = _normPlayerNameParts(playerName);
   const matched = []; // {book, side, point, price}  (exact requested line)
   const allRows = []; // {book, side, point, price}  (ALL of the player's lines — distribution fit)
   for (const bk of bookmakers) {
     const market = (bk.markets || []).find(m => m.key === marketKey);
     if (!market) continue;
     for (const o of (market.outcomes || [])) {
-      const outcomePlayer = normPlayerName(o.description);
-      const playerOk = outcomePlayer === normPlayer ||
-                       outcomePlayer.includes(normPlayer) ||
-                       normPlayer.includes(outcomePlayer);
-      if (!playerOk) continue;
-      if (o.point != null && Number.isFinite(o.price)) allRows.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
+      if (!_playerNamesMatch(normParts, o.description)) continue;
+      // Lineless (anytime) markets carry NO point on any outcome. Accepting
+      // only pointful rows here made the allRows-empty early-return below fire
+      // for every anytime lookup (Yes rows sat in `matched` but never reached
+      // allRows) — the 3d45fca regression that silently killed the live
+      // soccer.goalscorer/soccer.assists allowlist entries for ~4 weeks.
+      // Pointful requests (line != null) keep the strict o.point gate.
+      if ((o.point != null || line == null) && Number.isFinite(o.price)) {
+        allRows.push({ book: bk.key, side: o.name, point: o.point != null ? o.point : null, price: o.price });
+      }
       const lineOk = line == null || Math.abs((o.point || 0) - line) < 0.01;
       if (lineOk) matched.push({ book: bk.key, side: o.name, point: o.point, price: o.price });
     }
@@ -9746,11 +9832,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
         const market = (bk.markets || []).find(m => m.key === marketKey);
         if (!market) continue;
         for (const o of (market.outcomes || [])) {
-          const outcomePlayer = normPlayerName(o.description);
-          const playerOk = outcomePlayer === normPlayer ||
-                           outcomePlayer.includes(normPlayer) ||
-                           normPlayer.includes(outcomePlayer);
-          if (!playerOk || o.point == null) continue;
+          if (!_playerNamesMatch(normParts, o.description) || o.point == null) continue;
           const k = String(o.point);
           lineCounts[k] = (lineCounts[k] || 0) + 1;
         }
@@ -9780,8 +9862,13 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   // No rows at ALL for this player → genuinely unmatched. (Exact-line-empty is
   // still OK for count props: the distribution fit below prices the requested
   // line from the player's other lines, within the alt-line-distance guard.)
+  // matchedRows rides along even on error: for a lineless request the one-
+  // sided wrapper can recover from matched Yes rows (see the wrapper's guard)
+  // instead of turning a priceable board into a decline.
   if (allRows.length === 0) {
     return { error: 'no_player_or_line_match', stages, resolvedEventId: event.id,
+             matchedRows: matched,
+             fetchedAt: odds.fetchedAt || null,
              samplePlayers: [...new Set(
                bookmakers.flatMap(bk =>
                  (bk.markets || []).flatMap(m =>
@@ -9896,8 +9983,16 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   }
   // If the standard lookup hard-errored (no event match, alt line too
   // far, etc.) propagate the error — one-sided can't recover those.
+  // ONE exception, deliberately narrow (fail-closed everywhere else): a
+  // lineless (anytime) request that matched player rows but produced no
+  // pointful allRows is NOT a hard failure — those Yes rows are exactly
+  // what this wrapper prices. Belt-and-braces with the allRows fix in the
+  // standard lookup so a revert of either alone can't resurrect 3d45fca.
   if (std && std.error) {
-    return std;
+    const recoverable = line == null
+      && std.error === 'no_player_or_line_match'
+      && Array.isArray(std.matchedRows) && std.matchedRows.length > 0;
+    if (!recoverable) return std;
   }
   if (!std || !Array.isArray(std.matchedRows) || std.matchedRows.length === 0) {
     return { error: 'no_one_sided_data', stages: (std && std.stages) || [] };
@@ -10294,5 +10389,13 @@ module.exports = {
   lookupTheOddsApiPlayerPropOneSided,
   lookupPlayerPointsProp,
   getPropRowsCacheStatus,
+  // Football build test seams (test/football-odds-feed.test.js): fixture
+  // tests drive the REAL functions; these expose the config surfaces they
+  // assert against. Not for production callers.
+  supplementH1Markets,
+  _normPlayerNameParts,
+  _playerNamesMatch,
+  __H1_SUPPLEMENT_SPORTS: H1_SUPPLEMENT_SPORTS,
+  __ODDS_API_FALLBACK: ODDS_API_FALLBACK,
 };
 
