@@ -226,6 +226,15 @@ let _seedPrimaryTarget = null;
 // otherwise. Returns the stored info so callers can chain
 // _trackPrimaryForIndex without re-reading.
 function _setSeedLine(lineId, info) {
+  // Stamp the id ON the object (2026-08-13). legExposureKey(lineInfo) reads
+  // li.lineId to build its 'L:<id>|<day>' key; registered infos never carried
+  // the field, so every QUOTE-TIME per-line exposure check fell to the
+  // 'S:team|market|line' fallback while the OPEN-risk map (built from meta
+  // legs, which DO carry lineId) used 'L:' keys. The keys never matched →
+  // open risk was invisible at quote time → the per-line cap fired ZERO
+  // times in production and an $8.7K same-line stack (Shelton/Swiatek
+  // doubles, 2026-08-12) sailed through a $1,500 cap.
+  info.lineId = lineId;
   (_seedIndexTarget || lineIndex)[lineId] = info;
   return info;
 }
@@ -2917,6 +2926,7 @@ async function lookupLineAsync(lineId) {
   const cached = await db.loadLineCacheEntry(lineId);
   if (cached) {
     // Populate in-memory index so subsequent sync lookups hit
+    cached.lineId = lineId; // legExposureKey needs it — see _setSeedLine
     lineIndex[lineId] = cached;
     _trackPrimaryForIndex(cached);
     log.debug('Lines', `lookupLineAsync: resolved ${lineId} from Supabase cache → ${cached.teamName}`);
@@ -4039,6 +4049,7 @@ async function resolveUnknownLine(rfqLeg) {
       }
 
       // Add to index locally
+      foundInfo.lineId = lineId; // legExposureKey needs it — see _setSeedLine
       lineIndex[lineId] = foundInfo;
       _trackPrimaryForIndex(foundInfo);
       log.info('Lines', `On-demand registered ${sportKey}/${foundInfo.marketType} line for ${foundInfo.teamName} ${foundInfo.line != null ? foundInfo.line : ''} (${event.name})`);

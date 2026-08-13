@@ -145,10 +145,15 @@ test('MoV leg is NOT bumped by the MMA favorite markup', async () => {
 const PROP_LEG = { lineInfo: { lineId: 'p1', sport: 'basketball_wnba', marketType: 'player_rebounds', teamName: 'Kamilla Cardoso', line: 7.5, startTime: FUTURE, fairProb: 0.55 }, fairProb: 0.55 };
 const ML_LEG = { lineInfo: { lineId: 'm1', sport: 'baseball_mlb', marketType: 'moneyline', teamName: 'Home Team', startTime: FUTURE, fairProb: 0.50 }, fairProb: 0.50 };
 
-test('prop legs reserve RAW risk BOUNDED by the prop parlay cap; team legs stay weighted', () => {
+test('prop legs reserve RAW risk BOUNDED by the prop parlay cap; team legs emit NO pending leg entry', () => {
   // estPayout here is the GENERIC worst-case estimate ($4-5K in prod).
   // Charging it raw would black out all prop quoting (review blocker), so
   // the prop line-key risk is min(estimate, maxRiskPerParlayWithProp).
+  // Team lines emit NO pending leg entry since the 2026-08-13 $6K-ceiling
+  // rework: their reservations would carry the generic estimate (~100x a
+  // retail fill), and any future reader summing them against the line cap
+  // would quote-dark popular lines. Team screening = open + in-flight
+  // confirm reservations; exact enforcement at confirm time.
   const propCap = config.pricing.maxRiskPerParlayWithProp; // code default 50
   const res = orderTracker.buildPendingReservation([PROP_LEG, ML_LEG], 1000, 120);
   const propKey = orderTracker.legExposureKey(PROP_LEG.lineInfo);
@@ -157,29 +162,28 @@ test('prop legs reserve RAW risk BOUNDED by the prop parlay cap; team legs stay 
   const mlEntry = res.legKeys.find(k => k.key === mlKey);
   assert.ok(Math.abs(propEntry.risk - Math.min(1000, propCap)) < 1e-9,
     `prop line must reserve RAW min(1000, ${propCap}), got ${propEntry.risk}`);
-  assert.ok(Math.abs(mlEntry.risk - 1000 * 0.55) < 1e-9, `team line stays weighted (payout x other fair), got ${mlEntry.risk}`);
+  assert.equal(mlEntry, undefined, 'team lines must not emit a pending leg entry');
 });
 
 test('prop leg check is raw + undiscounted (but prop-cap-bounded)', () => {
   const propCap = config.pricing.maxRiskPerParlayWithProp; // 50 default
   // Cap below the prop-bounded raw risk -> declines.
-  // Pre-fix basis: min-cap didn't exist but weighting x discount made the
-  // charge ~propCap x 0.5 x 0.2 = 5, which would PASS this cap.
   const r = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 1000, propCap - 10);
   assert.equal(r.allowed, false, 'raw prop basis must trip a cap below the prop-bounded risk');
   assert.match(r.reason, /Cardoso/);
-  assert.equal(r.reservationDiscount, 1.0, 'prop legs must not get the pending discount');
   // A prop-containing RFQ with ZERO existing exposure must still QUOTE at
   // the default cap (the review blocker: generic $4-5K estimate raw vs
-  // $1,500 cap = unconditional decline).
+  // the line cap = unconditional decline).
   const ok = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 5000, config.pricing.maxExposurePerLeg);
   assert.equal(ok.allowed, true, 'first prop RFQ must not be blacked out by the generic estimate: ' + (ok.reason || ''));
 });
 
-test('team-line check keeps the weighted/discounted basis', () => {
-  // Same shape, no prop: weighted 1000 x 0.55 x discount << 800 -> allowed.
+test('team-line QUOTE check screens on open risk only (2026-08-13 semantics)', () => {
+  // No open risk on these lines -> quote passes regardless of the generic
+  // estimate; exact dollars are enforced at CONFIRM time with actual stake
+  // (see test/leg-exposure-cap.test.js Shelton regression).
   const r = orderTracker.checkLegExposure([ML_LEG, { lineInfo: { lineId: 'm2', sport: 'baseball_mlb', marketType: 'total', teamName: 'over', line: 8.5, startTime: FUTURE, fairProb: 0.55 }, fairProb: 0.55 }], 1000, 800);
-  assert.equal(r.allowed, true, 'team lines keep the weighted basis: ' + (r.reason || ''));
+  assert.equal(r.allowed, true, 'fresh team lines must quote: ' + (r.reason || ''));
 });
 
 test('same-minute duplicate prop burst is caught: pending counts raw + undiscounted', () => {

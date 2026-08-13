@@ -1233,11 +1233,18 @@ const config = {
     // accumulates unchecked. Measured 2026-08-05 (creator f88b95dc): 998 quotes
     // over 573 distinct leg-sets, ONE line in 357 of them, $3,654 raw on a
     // single strikeout line across 8 tickets — no existing cap came close.
-    // WEIGHTED risk (payout × P(other legs)), same basis as the game cap.
-    // Book-wide per-line-per-day weighted exposure: p50 $30 / p90 $276 /
-    // p95 $534 / p99 $1,527. $1,500 binds on ~1% of line-days — the
-    // concentrated tail only. 0 disables.
-    maxExposurePerLeg: _capNum(process.env.MAX_EXPOSURE_PER_LEG, 1500),
+    // RAW dollars since 2026-08-13 (operator directive after the $8.7K
+    // Shelton/Swiatek same-line stack: "up to $6K exposure, not the $8.5K
+    // they got to"). The original weighted-with-discount basis plus a
+    // lineId key mismatch meant the cap fired ZERO times in production.
+    // Enforcement is exact at CONFIRM time (actual stake); quote time only
+    // screens lines whose OPEN risk already exceeds the cap. 0 disables.
+    maxExposurePerLeg: _capNum(process.env.MAX_EXPOSURE_PER_LEG, 6000),
+    // PROP lines keep the tighter original calibration (measured prop-pattern
+    // p99 $1,527) — the $6K directive was about team-line whale doubles, and
+    // a shared knob would quietly loosen the prop guard 4x (2026-08-13
+    // review). Effective prop ceiling is min(this, maxExposurePerLeg).
+    maxExposurePerLegProp: _capNum(process.env.MAX_EXPOSURE_PER_LEG_PROP, 1500),
     // Tighter risk caps for parlays containing series_* markets. Series
     // bets tie up bankroll for weeks until the series settles, so we
     // limit both per-parlay SP risk and aggregate per-series-event

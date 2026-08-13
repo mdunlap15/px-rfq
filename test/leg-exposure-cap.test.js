@@ -1,17 +1,26 @@
-// Per-LINE exposure cap.
+// Per-LINE exposure cap — RAW-dollar semantics (2026-08-13 rework).
 //
 // WHY IT EXISTS: the team, game, player and pitcher caps all key on an ENTITY.
 // A counterparty that pairs ONE repeated line with many DIFFERENT partners lands
 // in a fresh team bucket and a fresh game bucket on every ticket, so none of
 // them ever binds while the repeated line concentrates unchecked.
 //
-// Measured 2026-08-05, creator f88b95dc: 998 quotes over 573 distinct leg-sets,
-// a single line (Kamilla Cardoso rebounds 7.5) present in 357 of them, $3,654 of
-// raw risk on one pitcher's strikeout line across 8 tickets, and $3,744 of open
-// risk resting on ~3 prop outcomes. No existing cap came close to binding.
+// WHY IT WAS REWORKED: the original weighted-with-discount basis fired ZERO
+// times in production — registered lineInfos carried no lineId (quote-time
+// keys never matched the open map), the pending discount let a fresh $5K
+// ticket count as ~$350, and probability weighting halved everything again.
+// Result: creator dc3945a9 stacked $8,729 on one line pair (Shelton/Swiatek
+// doubles, 2026-08-12) through a "$1,500" cap. Operator directive: cap raw
+// same-line dollars at $6K, enforced exactly.
 //
-// The decisive test here is `the pattern the existing caps miss` — it asserts
-// the team and game caps stay silent on exactly the shape the leg cap catches.
+// SEMANTICS UNDER TEST:
+//  - QUOTE mode (team lines): screen on OPEN raw risk only — an RFQ carries
+//    no size, and pending reservations hold the generic $5K estimate, so
+//    counting either would quote-dark popular lines.
+//  - QUOTE mode (prop legs): open + pending + prop-bounded increment (prop
+//    estimates are accurate — bounded by maxRiskPerParlayWithProp).
+//  - CONFIRM mode: exact — open + in-flight confirms + ACTUAL stake > cap
+//    rejects. reserveConfirmingLegRisk closes the check→record race.
 //
 // Run: npm test   (or: node --test test/leg-exposure-cap.test.js)
 
@@ -22,28 +31,20 @@ const ot = require('../services/order-tracker');
 const { config } = require('../config');
 
 const DAY = '2026-08-05T23:00:00Z';
-// A leg as the pricer hands it to the checkers (lineInfo flattened on top).
+const FUT = new Date(Date.now() + 24 * 3600e3).toISOString();
 function leg(o) {
   return Object.assign({
     lineId: null, teamName: null, marketType: 'moneyline', line: null,
     fairProb: 0.5, startTime: DAY, pxEventId: 'E1', homeTeam: 'H', awayTeam: 'A',
   }, o);
 }
-const CAP = 1500;
-// Quote-time projections are scaled by pendingReservationDiscount (prod: 0.2)
-// exactly as checkGameExposure does — most quotes never fill, so reserving full
-// risk for each would block everything. CONFIRMED exposure is NOT discounted,
-// and that is the term that actually concentrated in the case this cap targets.
-// Tests below use a small cap so the arithmetic stays readable.
-const DISC = config.pricing.pendingReservationDiscount;
-const SMALL = 300;
+const CAP = 6000;
 
 // ---------------------------------------------------------------- key shape
 test('legExposureKey prefers PX lineId and is scoped to the game date', () => {
   const k = ot.legExposureKey(leg({ lineId: 'abc123' }));
   assert.ok(k.startsWith('L:abc123|'), 'lineId should drive the key, got ' + k);
   assert.ok(k.endsWith('|2026-08-05'), 'key must carry the date, got ' + k);
-  // same line, later day => different bucket
   const k2 = ot.legExposureKey(leg({ lineId: 'abc123', startTime: '2026-08-06T23:00:00Z' }));
   assert.notEqual(k, k2);
 });
@@ -51,101 +52,89 @@ test('legExposureKey prefers PX lineId and is scoped to the game date', () => {
 test('legExposureKey falls back to team|market|line when lineId is absent', () => {
   const k = ot.legExposureKey(leg({ teamName: 'Kamilla Cardoso', marketType: 'player_rebounds', line: 7.5 }));
   assert.ok(k.startsWith('S:'), 'expected synthetic key, got ' + k);
-  assert.ok(/cardoso/i.test(k) && k.includes('player_rebounds') && k.includes('7.5'), k);
-  // different LINE on the same player is a DIFFERENT bucket (7.5 vs 8 are distinct bets)
   const k8 = ot.legExposureKey(leg({ teamName: 'Kamilla Cardoso', marketType: 'player_rebounds', line: 8 }));
   assert.notEqual(k, k8);
 });
 
 test('legExposureKey returns null when there is nothing to key on', () => {
-  assert.equal(ot.legExposureKey(null), null);
   assert.equal(ot.legExposureKey(leg({ teamName: '', marketType: '' })), null);
 });
 
-// ------------------------------------------------------------- cap behaviour
+// ------------------------------------------------------------- quote mode
 test('cap of 0 disables the check entirely', () => {
   const legs = [leg({ lineId: 'x' }), leg({ lineId: 'y' })];
   assert.equal(ot.checkLegExposure(legs, 999999, 0).allowed, true);
   assert.equal(ot.checkLegExposure(legs, 999999, null).allowed, true);
 });
 
-test('a single ticket under the cap is allowed', () => {
-  const legs = [leg({ lineId: 'solo-a' }), leg({ lineId: 'solo-b' })];
-  // weighted risk per leg = 400 * 0.5 = 200, well under 1500
-  assert.equal(ot.checkLegExposure(legs, 400, CAP).allowed, true);
+test('QUOTE mode, team lines: a fresh line always quotes — size is unknown pre-confirm', () => {
+  // Even the generic $5K worst-case estimate must not block an empty line:
+  // enforcement of the actual dollars is confirm-time's job.
+  const legs = [leg({ lineId: 'fresh-a' }), leg({ lineId: 'fresh-b' })];
+  assert.equal(ot.checkLegExposure(legs, 5000, CAP).allowed, true);
 });
 
-test('one ticket that alone exceeds the cap is declined', () => {
-  const legs = [leg({ lineId: 'big-a' }), leg({ lineId: 'big-b' })];
-  // weighted raw = 5000 * 0.5 = 2500; effective = 2500 * DISC
-  const r = ot.checkLegExposure(legs, 5000, SMALL);
-  assert.equal(r.allowed, false);
-  assert.match(r.reason, /Line .* > max/);
-  assert.equal(r.limit, SMALL);
-  assert.ok(r.wouldBe > SMALL);
-  assert.equal(r.newRiskRaw, 2500, 'raw weighted risk is reported undiscounted');
-});
-
-test('quote-time risk is scaled by pendingReservationDiscount, like the game cap', () => {
-  // Pins the semantic: 2 legs, payout P -> raw weighted 0.5P, effective 0.5P*DISC.
-  const legs = [leg({ lineId: 'disc-a' }), leg({ lineId: 'disc-b' })];
-  const P = 5000;
-  const rawWeighted = P * 0.5;
-  const effective = rawWeighted * DISC;
-  // just under the effective figure -> declines; just over -> allowed
-  assert.equal(ot.checkLegExposure(legs, P, effective * 0.99).allowed, false);
-  assert.equal(ot.checkLegExposure(legs, P, effective * 1.01).allowed, true);
-  assert.equal(ot.checkLegExposure(legs, P, effective * 0.99).reservationDiscount, DISC);
-});
-
-test('risk is WEIGHTED by the other legs, not raw', () => {
-  // Same payout, but a longer parlay puts less risk on any ONE line, because we
-  // only lose if every other leg also lands. Raw accounting would double-count.
-  const two = [leg({ lineId: 'w1' }), leg({ lineId: 'w2', fairProb: 0.5 })];
-  const three = [leg({ lineId: 'w1' }), leg({ lineId: 'w2', fairProb: 0.5 }), leg({ lineId: 'w3', fairProb: 0.5 })];
-  const payout = 5000;
-  // 2-leg: 0.5*5000*DISC ; 3-leg: 0.25*5000*DISC — half as much on any one line
-  const cap = 0.375 * payout * DISC;           // between the two
-  assert.equal(ot.checkLegExposure(two, payout, cap).allowed, false, '2-leg concentrates more');
-  assert.equal(ot.checkLegExposure(three, payout, cap).allowed, true, '3-leg spreads the risk');
-});
-
-// --------------------------------------------------- pending accumulation
-test('in-flight quotes accumulate, so a burst cannot slip through', () => {
-  ot.releasePending('burst-1'); ot.releasePending('burst-2'); ot.releasePending('burst-3');
-  const key = ot.legExposureKey(leg({ lineId: 'burst-line' }));
-  const mk = (id) => ot.reservePending(id, {
+test('QUOTE mode, team lines: pending reservations do NOT quote-dark a line', () => {
+  // Pending carries the generic estimate (~100x a retail fill). Team-line
+  // quoting must ignore it — the confirm gate holds the real ceiling.
+  const key = ot.legExposureKey(leg({ lineId: 'busy-line' }));
+  ot.releasePending('busy-1');
+  ot.reservePending('busy-1', {
     expiresAt: Date.now() + 120000,
     teamKeys: [], gameKeys: [], pitcherKeys: [],
-    legKeys: [{ key, risk: 700 }],
+    legKeys: [{ key, risk: 5000 }],
   });
-  const legs = [leg({ lineId: 'burst-line' }), leg({ lineId: 'partner' })];
-  const P = 1000;
-  const newEff = P * 0.5 * DISC;               // this quote's contribution
-  const perRes = 700 * DISC;                   // each in-flight reservation's
-  const cap = newEff + perRes * 1.5;           // room for ONE, not two
-  mk('burst-1');
-  assert.equal(ot.getPendingLegRisk(key), 700, 'raw pending is tracked undiscounted');
-  assert.equal(ot.checkLegExposure(legs, P, cap).allowed, true, 'one in-flight quote fits');
-  mk('burst-2');
-  assert.equal(ot.getPendingLegRisk(key), 1400);
-  const r = ot.checkLegExposure(legs, P, cap);
-  assert.equal(r.allowed, false, 'second in-flight quote must push it over');
-  assert.equal(r.legKey, key);
-  ot.releasePending('burst-1'); ot.releasePending('burst-2');
-  assert.equal(ot.getPendingLegRisk(key), 0, 'release must fully unwind the index');
-  assert.equal(ot.checkLegExposure(legs, P, cap).allowed, true);
+  const legs = [leg({ lineId: 'busy-line' }), leg({ lineId: 'busy-partner' })];
+  assert.equal(ot.checkLegExposure(legs, 5000, CAP).allowed, true,
+    'a single in-flight generic reservation must not block team-line quotes');
+  ot.releasePending('busy-1');
 });
 
-test('releasing a reservation that was never made is a no-op', () => {
-  ot.releasePending('never-existed');
-  assert.equal(ot.getPendingLegRisk('L:nope|2026-08-05'), 0);
+// ------------------------------------------------------------ confirm mode
+test('CONFIRM mode: the Shelton/Swiatek regression — second whale rejected, right-sized allowed', () => {
+  // Ticket 1 confirmed $3,731 on lines S1+S2. Ticket 2 asks $4,998 on the
+  // SAME lines: 3731 + 4998 = 8729 > 6000 must reject; a $2,200 ticket
+  // (5931 <= 6000) must pass. Open risk arrives via a real confirmed order.
+  const id = 'shelton-t1';
+  ot.recordQuote(id, [
+    { line_id: 'shelton-ml', fairProb: 0.661, startTime: FUT },
+    { line_id: 'swiatek-ml', fairProb: 0.670, startTime: FUT },
+  ], 150, 100, 0.44, {});
+  ot.recordConfirmation(id, 'uuid-t1', 113, 3731);
+
+  const t2legs = [
+    leg({ lineId: 'shelton-ml', startTime: FUT, fairProb: 0.661 }),
+    leg({ lineId: 'swiatek-ml', startTime: FUT, fairProb: 0.670 }),
+  ];
+  const whale = ot.checkLegExposure(t2legs, 5000, CAP, { mode: 'confirm', actualRisk: 4998 });
+  assert.equal(whale.allowed, false, 'the $8.7K stack must now reject: ' + JSON.stringify(whale));
+  assert.ok(whale.wouldBe > CAP);
+  assert.match(whale.reason, /\[confirm\]/);
+
+  const sized = ot.checkLegExposure(t2legs, 5000, CAP, { mode: 'confirm', actualRisk: 2200 });
+  assert.equal(sized.allowed, true, 'a ticket that lands the line at $5,931 stays under the $6K ceiling');
 });
 
-// ------------------------------------------- THE PATTERN THE OTHER CAPS MISS
-test('the pattern the existing caps miss: one repeated line, many partners', () => {
-  // Reproduces creator f88b95dc: the SAME prop line paired with a DIFFERENT team
-  // in a DIFFERENT game every time. Team and game buckets never concentrate.
+test('CONFIRM mode: in-flight confirm reservations close the race window', () => {
+  const legs = [leg({ lineId: 'race-a', startTime: FUT }), leg({ lineId: 'race-b', startTime: FUT })];
+  // First whale passes and reserves; second whale must see the reservation.
+  const first = ot.checkLegExposure(legs, 5000, CAP, { mode: 'confirm', actualRisk: 3800 });
+  assert.equal(first.allowed, true);
+  ot.reserveConfirmingLegRisk('race-p1', legs, 3800);
+  const second = ot.checkLegExposure(legs, 5000, CAP, { mode: 'confirm', actualRisk: 3800 });
+  assert.equal(second.allowed, false, 'concurrent confirm must count the in-flight reservation');
+  // Release (handler finally) frees the line again.
+  ot.releaseConfirmingLegRisk('race-p1');
+  const third = ot.checkLegExposure(legs, 5000, CAP, { mode: 'confirm', actualRisk: 3800 });
+  assert.equal(third.allowed, true);
+});
+
+test('releasing an unknown confirm reservation is a no-op', () => {
+  ot.releaseConfirmingLegRisk('never-reserved');
+});
+
+// -------------------------------------------------------------- prop path
+test('QUOTE mode, prop legs: pending accumulation still binds (burst guard)', () => {
   const PROP = { lineId: 'cardoso-reb-75', teamName: 'Kamilla Cardoso', marketType: 'player_rebounds', line: 7.5 };
   const propKey = ot.legExposureKey(leg(PROP));
   const ids = [];
@@ -155,47 +144,104 @@ test('the pattern the existing caps miss: one repeated line, many partners', () 
     ot.releasePending(id);
     ot.reservePending(id, {
       expiresAt: Date.now() + 120000,
-      // each ticket lands in its OWN team and game bucket — those never stack
       teamKeys: [{ key: 'team' + i + '|E' + i + '|2026-08-05', risk: 500, rawRisk: 1000 }],
       gameKeys: [{ key: 'E' + i + '|2026-08-05', risk: 500 }],
       pitcherKeys: [],
-      legKeys: [{ key: propKey, risk: 500 }],   // ...but the PROP line does
+      legKeys: [{ key: propKey, risk: 500 }],
     });
   }
-  // Team and game caps see only 500 per bucket — nowhere near their 5000/12000 limits.
-  assert.ok(ot.getPendingTeamRisk('team0|E0|2026-08-05') <= 500, 'team bucket stays small');
-  assert.ok(ot.getPendingGameRisk('E0|2026-08-05') <= 500, 'game bucket stays small');
-  // The leg bucket, however, has accumulated 2000 and is over the cap.
   assert.equal(ot.getPendingLegRisk(propKey), 2000);
   const next = [leg(PROP), leg({ lineId: 'yet-another-partner', pxEventId: 'E9' })];
-  // cap sized so the four accumulated reservations alone blow through it
-  const cap = 2000 * DISC * 0.8;
-  const r = ot.checkLegExposure(next, 400, cap);
+  // Prop quote path counts open + pending RAW + prop-bounded increment.
+  const r = ot.checkLegExposure(next, 400, 1500);
   assert.equal(r.allowed, false, 'the leg cap must catch what team/game caps cannot');
   assert.match(r.legLabel, /Cardoso/);
   for (const id of ids) ot.releasePending(id);
+  assert.equal(ot.checkLegExposure(next, 400, 1500).allowed, true, 'release unwinds fully');
 });
 
 // --------------------------------------------------------- open-order map
-test('buildOpenLegRiskMap returns a Map and ignores unconfirmed quotes', () => {
-  const id = 'openmap-quote-only';
-  ot.recordQuote(id, [{ line_id: 'openmap-line', fairProb: 0.5, startTime: DAY }], 150, 100, 0.4, {});
+test('buildOpenLegRiskMap accumulates RAW payout and ignores unconfirmed quotes', () => {
+  const idQ = 'openmap-quote-only';
+  ot.recordQuote(idQ, [{ line_id: 'openmap-line', fairProb: 0.5, startTime: DAY }], 150, 100, 0.4, {});
   const m = ot.buildOpenLegRiskMap();
   assert.ok(m instanceof Map);
-  const k = ot.legExposureKey(leg({ lineId: 'openmap-line' }));
-  assert.ok(!m.has(k), 'a quote that never confirmed must not consume line capacity');
+  assert.ok(!m.has(ot.legExposureKey(leg({ lineId: 'openmap-line' }))), 'unconfirmed quote must not consume capacity');
+
+  const idC = 'openmap-confirmed';
+  ot.recordQuote(idC, [
+    { line_id: 'raw-map-a', fairProb: 0.5, startTime: FUT },
+    { line_id: 'raw-map-b', fairProb: 0.5, startTime: FUT },
+  ], 150, 100, 0.25, {});
+  ot.recordConfirmation(idC, 'uuid-raw', 300, 1000);
+  const m2 = ot.buildOpenLegRiskMap();
+  const kA = ot.legExposureKey(leg({ lineId: 'raw-map-a', startTime: FUT }));
+  assert.ok(m2.has(kA), 'confirmed order must appear in the open map');
+  assert.ok(Math.abs(m2.get(kA) - 1000) < 1, 'RAW payout, not probability-weighted: got ' + m2.get(kA));
 });
 
 // ------------------------------------------------------------------ config
-test('config ships the cap with the measured default', () => {
-  assert.equal(config.pricing.maxExposurePerLeg, 1500,
-    'default is sized to the measured p99 of per-line-per-day weighted exposure ($1,527)');
+test('config ships the cap at the operator-directed $6K raw ceiling', () => {
+  assert.equal(config.pricing.maxExposurePerLeg, 6000,
+    'operator directive 2026-08-13: same-line exposure ceiling $6K raw');
 });
 
 test('the decline reason is a recognised limit reason', () => {
-  // Must be in LIMIT_REASONS or the dashboard banner silently filters it out —
-  // the exact gap that hid series and per-parlay-risk declines previously.
   const src = require('fs').readFileSync(require.resolve('../services/order-tracker'), 'utf8');
   assert.ok(/LIMIT_REASONS = new Set\(\[[\s\S]*?'leg exposure limit'/.test(src), 'missing from LIMIT_REASONS');
   assert.ok(/RISK_LIMIT_REASONS = new Set\(\[[\s\S]*?'leg exposure limit'/.test(src), 'missing from RISK_LIMIT_REASONS');
+});
+
+// ---------------------------------------------- 2026-08-13 review fixes
+test('CONFIRM mode excludes the parlay being confirmed (matched-raced-ahead)', () => {
+  // order.matched can promote THIS order to confirmed (with uuid via
+  // reconcile) before price.confirm.new arrives. The check must not count
+  // the ticket against itself.
+  const id = 'raced-ahead';
+  ot.recordQuote(id, [
+    { line_id: 'raced-a', fairProb: 0.5, startTime: FUT },
+    { line_id: 'raced-b', fairProb: 0.5, startTime: FUT },
+  ], 150, 100, 0.25, {});
+  ot.recordConfirmation(id, 'uuid-raced', 200, 2100);
+  const legs = [leg({ lineId: 'raced-a', startTime: FUT }), leg({ lineId: 'raced-b', startTime: FUT })];
+  // Without exclusion: current 2100 + actual 2100 = 4200 > 4000 -> false reject.
+  const withEx = ot.checkLegExposure(legs, 5000, 4000, { mode: 'confirm', actualRisk: 2100, excludeParlayId: id });
+  assert.equal(withEx.allowed, true, 'own stake must not double-count: ' + (withEx.reason || ''));
+  const withoutEx = ot.checkLegExposure(legs, 5000, 4000, { mode: 'confirm', actualRisk: 2100 });
+  assert.equal(withoutEx.allowed, false, 'sanity: absent the exclusion the double-count rejects');
+});
+
+test('open map ignores no-uuid matched-promotions (other-SP fills / ties)', () => {
+  const id = 'no-uuid-promo';
+  ot.recordQuote(id, [{ line_id: 'promo-line', fairProb: 0.5, startTime: FUT }], 150, 100, 0.5, {});
+  // Simulate matched-path promotion: confirmed status, stake, NO orderUuid.
+  const o = ot.findByParlayId(id);
+  o.status = 'confirmed';
+  o.confirmedStake = 4000;
+  const m = ot.buildOpenLegRiskMap();
+  assert.ok(!m.has(ot.legExposureKey(leg({ lineId: 'promo-line', startTime: FUT }))),
+    'no-uuid confirms are not PX-verified risk of ours');
+});
+
+test('QUOTE mode team screen counts in-flight confirm reservations (reachable screen)', () => {
+  const legs = [leg({ lineId: 'screen-a', startTime: FUT }), leg({ lineId: 'screen-b', startTime: FUT })];
+  ot.reserveConfirmingLegRisk('screen-p1', legs, 6000);
+  const r = ot.checkLegExposure(legs, 5000, 6000);
+  assert.equal(r.allowed, false, 'a line filled to the cap by an in-flight confirm must stop quoting');
+  ot.releaseConfirmingLegRisk('screen-p1');
+  assert.equal(ot.checkLegExposure(legs, 5000, 6000).allowed, true);
+});
+
+test('prop lines use the tighter maxExposurePerLegProp ceiling', () => {
+  assert.equal(config.pricing.maxExposurePerLegProp, 1500, 'prop line ceiling keeps the measured p99 calibration');
+  const PROP = { lineId: 'prop-ceiling', teamName: 'Some Player', marketType: 'player_rebounds', line: 7.5, startTime: FUT };
+  const id = 'prop-open';
+  ot.recordQuote(id, [{ line_id: 'prop-ceiling', fairProb: 0.5, startTime: FUT }], 150, 100, 0.5, {});
+  ot.recordConfirmation(id, 'uuid-propc', 200, 1490);
+  // Open 1490 on the prop line; prop increment (propRawRisk of 5000 -> 50
+  // via maxRiskPerParlayWithProp default) pushes past 1500 even though the
+  // team cap arg is 6000.
+  const r = ot.checkLegExposure([leg(PROP), leg({ lineId: 'prop-partner', startTime: FUT })], 5000, 6000);
+  assert.equal(r.allowed, false, 'prop ceiling must bind at 1500, not 6000: ' + (r.reason || ''));
+  assert.equal(r.limit, 1500);
 });

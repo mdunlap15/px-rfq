@@ -474,24 +474,18 @@ function buildPendingReservation(legs, worstCaseRisk, offerValidSeconds) {
         pitcherKeys.push({ key: pkey, risk: worstCaseRisk });
       }
     }
-    // Per-LINE key. Team lines stay WEIGHTED, matching gameKeys: we only lose
-    // this ticket if the other legs also land, so the risk attributable to
-    // this one line is payout × P(other legs). PROP legs use RAW payout
-    // (2026-08-11 audit): the duplicate-stacking pattern pairs one prop
-    // opinion with near-coinflip ML carriers, so otherProb≈0.5 weighting let
-    // ~2x the intended cap through — post-8/6-cap clusters (Dobbins ×3
-    // $4.3K, Burns ×6 $5.2K) proved the weighted basis leaks. The check +
-    // open-map sides use the same per-leg basis (checkLegExposure /
-    // buildOpenLegRiskMap) — all three must match or pending is understated.
+    // Per-LINE key — PROP legs ONLY (2026-08-13). The prop quote path reads
+    // pending line risk (prop estimates are accurate: bounded by
+    // maxRiskPerParlayWithProp). Team lines deliberately emit NO pending
+    // entry: their reservations would carry the generic $5K estimate
+    // (~100x a retail fill) and any future reader summing them against the
+    // line cap would quote-dark every popular line — team-line screening
+    // reads open risk + in-flight CONFIRM reservations (actual stakes),
+    // and exact enforcement happens at confirm time.
     const lkey = legExposureKey(li);
     if (lkey) {
       const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(li.marketType || li.market || ''));
-      // Prop RAW risk is bounded by the PROP parlay cap, not the generic
-      // worst-case estimate: a prop-containing parlay can never risk more
-      // than maxRiskPerParlayWithProp, and charging the generic estimate
-      // ($4-5K) raw against a $1,500 line cap would decline every
-      // prop-containing RFQ outright (adversarial-review blocker, 8/11).
-      legKeys.push({ key: lkey, risk: isPropLine ? _propRawRisk(worstCaseRisk) : weightedRisk });
+      if (isPropLine) legKeys.push({ key: lkey, risk: _propRawRisk(worstCaseRisk) });
     }
   }
   return {
@@ -538,7 +532,7 @@ const pendingPlayerRiskByKey = new Map(); // key → running risk total
 // Observed 2026-08-05: creator f88b95dc sent 998 quotes covering 573 distinct
 // leg-sets, with a single line (Kamilla Cardoso rebounds 7.5) in 357 of them,
 // and built $3,654 of raw risk on one pitcher's strikeout line across 8 tickets.
-const pendingLegRiskByKey = new Map(); // key → running WEIGHTED risk total
+const pendingLegRiskByKey = new Map(); // key → running RAW risk total (PROP legs only since 2026-08-13 — team-line quote screening reads open + confirm reservations instead)
 
 function _addToIndex(idx, key, risk) {
   idx.set(key, (idx.get(key) || 0) + risk);
@@ -4629,28 +4623,35 @@ function checkGameExposure(legs, estPayout, maxPerGame) {
  * is one pass over open confirmed orders (tens to low hundreds), which is
  * nothing next to the RFQ path's ~14ms median.
  */
-function buildOpenLegRiskMap() {
+function buildOpenLegRiskMap(excludeParlayId = null) {
   const map = new Map();
   for (const o of Object.values(orders)) {
     if (o.status !== 'confirmed') continue;
     if (isOrderStalePhantom(o)) continue;
+    // Exclude the parlay currently being confirm-checked (2026-08-13 review):
+    // order.matched can race ahead of price.confirm.new and promote this very
+    // order to 'confirmed' with its stake — counting it in `current` AND as
+    // actualRisk double-charges the ticket and falsely rejects a legit fill.
+    if (excludeParlayId && o.parlayId === excludeParlayId) continue;
+    // No-uuid confirms are matched-path promotions (other SPs' fills / ties /
+    // bettor backouts pending the phantom sweep) — not PX-verified risk of
+    // ours. Counting them raw quote-darked hot lines for up to 10 minutes.
+    // Mirrors the dashboard's isRealConfirmed discipline (orderUuid required).
+    if (!o.orderUuid) continue;
     const legs = getLegsForExposure(o);
     if (!legs.length) continue;
     if (isParlayAlreadyDead(legs)) continue;
     const payout = getOrderPayout(o);
     if (!payout) continue;
-    const probs = legs.map(legEffectiveProb);
     for (let i = 0; i < legs.length; i++) {
       const key = legExposureKey(legs[i]);
       if (!key) continue;
-      // PROP legs accumulate RAW payout (2026-08-11) — must match the basis
-      // used by buildPendingReservation's legKeys and checkLegExposure.
-      const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(legs[i].marketType || legs[i].market || ''));
-      let other = 1;
-      if (!isPropLine) {
-        for (let j = 0; j < legs.length; j++) if (j !== i) other *= probs[j];
-      }
-      map.set(key, (map.get(key) || 0) + payout * other);
+      // RAW payout for every leg (2026-08-13): the map answers "how many
+      // dollars ride on this line" in the same units the operator set the
+      // cap in. Probability weighting understated a $5K near-coinflip
+      // 2-leg ticket to ~$2.5K per line — half the softening that let the
+      // Shelton/Swiatek stack through.
+      map.set(key, (map.get(key) || 0) + payout);
     }
   }
   return map;
@@ -4669,25 +4670,74 @@ function buildOpenLegRiskMap() {
  * tickets, and $3,744 of open risk resting on ~3 prop outcomes. Team and game
  * caps never came close to binding because each ticket's partner leg differed.
  *
- * WEIGHTED, not raw, matching checkGameExposure: we only lose a ticket if the
- * OTHER legs also land, so risk attributable to one line is payout × P(others).
- * Using raw would double-count every multi-leg parlay against every line it
- * touches. The raw figure is still reported in the decline detail.
- *
- * Default cap $1,500. Book-wide, per-line-per-day weighted exposure runs
- * p50 $30 / p90 $276 / p95 $534 / p99 $1,527, so this binds on ~1% of
- * line-days — the concentrated tail — while leaving ordinary flow untouched.
- * It would have bound on the two worst lines of the case that motivated it
- * (peak $1,821 weighted). 0 disables.
+ * RAW dollars since 2026-08-13 (the original weighted-with-discount basis
+ * plus a lineId key mismatch meant this cap fired ZERO times in production
+ * while $8,729 stacked on one line pair). Operator directive: $6K raw
+ * same-line ceiling for team lines; prop lines keep the tighter
+ * maxExposurePerLegProp (default $1,500, the measured prop-pattern p99).
+ * QUOTE mode screens open + in-flight-confirm actuals; CONFIRM mode
+ * enforces exactly with the actual stake. 0 disables.
  */
-function checkLegExposure(legs, estPayout, maxPerLeg) {
+// In-flight confirm reservations for the per-line cap (2026-08-13). The
+// confirm-time check reads the open map, but recordConfirmation lands only
+// after PX round-trips — two whale confirms racing through that window would
+// both read pre-fill open risk. Reserve synchronously at check-pass; released
+// by releaseConfirmingLegRisk (both outcomes) with a TTL sweep as backstop.
+const confirmingLegRisk = new Map(); // key -> [{parlayId, risk, at}]
+function _confirmingRiskFor(key) {
+  const now = Date.now();
+  const list = (confirmingLegRisk.get(key) || []).filter(e => now - e.at < 120000);
+  if (list.length) confirmingLegRisk.set(key, list); else confirmingLegRisk.delete(key);
+  return list.reduce((s, e) => s + e.risk, 0);
+}
+function reserveConfirmingLegRisk(parlayId, legs, risk) {
+  for (const leg of legs) {
+    const key = legExposureKey(leg.lineInfo || leg);
+    if (!key) continue;
+    const list = confirmingLegRisk.get(key) || [];
+    list.push({ parlayId, risk, at: Date.now() });
+    confirmingLegRisk.set(key, list);
+  }
+}
+function releaseConfirmingLegRisk(parlayId) {
+  for (const [key, list] of confirmingLegRisk) {
+    const kept = list.filter(e => e.parlayId !== parlayId);
+    if (kept.length) confirmingLegRisk.set(key, kept); else confirmingLegRisk.delete(key);
+  }
+}
+
+// Per-line cap semantics (2026-08-13 rework, operator directive: "$6K
+// same-line ceiling, not the $8.5K they got to"). RAW dollars, no
+// probability weighting, no pending discount — those two softeners plus a
+// key mismatch (registered lineInfos carried no lineId, so quote-time keys
+// never matched the open map's) meant this cap fired ZERO times in
+// production while $8.7K stacked on one line pair.
+//
+// Two modes, because an RFQ does not carry its eventual size:
+//  - QUOTE ('quote', default): screen on OPEN risk only — a full line stops
+//    quoting. Pending is deliberately excluded: reservations carry the
+//    GENERIC $5K worst-case estimate per in-flight quote (~100x a typical
+//    retail fill), so counting them would quote-dark every popular line.
+//    Prop legs keep the full open+pending+increment formula — their
+//    estimates are bounded by maxRiskPerParlayWithProp (accurate), and the
+//    prop stacking pattern is same-minute bursts where pending is the guard.
+//  - CONFIRM ('confirm', opts.actualRisk): exact enforcement with the stake
+//    PX is confirming — open + in-flight confirms + actual > cap rejects.
+function checkLegExposure(legs, estPayout, maxPerLeg, opts = {}) {
   if (!maxPerLeg || maxPerLeg <= 0) return { allowed: true };
-  let discount = 1.0;
+  const mode = opts.mode === 'confirm' ? 'confirm' : 'quote';
+
+  // Prop lines keep their own (tighter) ceiling — the cap was CREATED for
+  // the prop duplicate-stacking pattern and calibrated to its measured p99
+  // ($1,527); the operator's $6K directive addressed team-line whale
+  // doubles. One shared knob would quietly loosen the prop guard 4x
+  // (2026-08-13 review). Env MAX_EXPOSURE_PER_LEG_PROP.
+  let propCap = maxPerLeg;
   try {
     const { config } = require('../config');
-    const d = config?.pricing?.pendingReservationDiscount;
-    if (Number.isFinite(d) && d > 0 && d <= 1) discount = d;
-  } catch { /* ignore */ }
+    const pc = config?.pricing?.maxExposurePerLegProp;
+    if (Number.isFinite(pc) && pc > 0) propCap = Math.min(pc, maxPerLeg);
+  } catch { /* config unavailable — shared cap */ }
 
   let openMap = null; // built lazily — most RFQs never reach the cap
   for (let i = 0; i < legs.length; i++) {
@@ -4695,51 +4745,53 @@ function checkLegExposure(legs, estPayout, maxPerLeg) {
     const key = legExposureKey(li);
     if (!key) continue;
 
-    // PROP legs (2026-08-11 audit): RAW payout, NO pending discount. The
-    // duplicate-stacking pattern this cap exists for (one prop opinion ×
-    // many ML carriers, fired in same-minute bursts) was slipping through
-    // both softeners: otherProb≈0.5 halved each ticket's contribution and
-    // pendingReservationDiscount (prod 0.1) let ~10 duplicates pass before
-    // pending risk registered. Team lines keep the weighted/discounted
-    // basis — their duplication profile is broad flow, not burst-stacking.
     const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(li.marketType || li.market || ''));
-    const legDiscount = isPropLine ? 1.0 : discount;
-    let otherProb = 1;
-    if (!isPropLine) {
-      for (let j = 0; j < legs.length; j++) {
-        if (j === i) continue;
-        otherProb *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
-      }
+    const capForLeg = isPropLine ? propCap : maxPerLeg;
+    let newRiskRaw;
+    let pendingRaw = 0;
+    if (mode === 'confirm') {
+      newRiskRaw = Number(opts.actualRisk) || 0;
+      pendingRaw = _confirmingRiskFor(key);
+    } else if (isPropLine) {
+      // Prop RAW bounded by the prop parlay cap — the generic estimate
+      // ($5K) raw against the line cap would decline every prop RFQ
+      // before any duplication exists (adversarial-review blocker, 8/11).
+      newRiskRaw = _propRawRisk(estPayout);
+      pendingRaw = getPendingLegRisk(key);
+    } else {
+      // Size unknown pre-confirm — screen on open + in-flight confirm
+      // reservations (those carry ACTUAL stakes, not estimates, so they
+      // dark only genuinely-full lines). Without the >= and the in-flight
+      // term the screen was unreachable: the confirm gate keeps open <=
+      // cap, so `open > cap` never fired and every near-full-line RFQ
+      // became a venue-visible confirm reject (2026-08-13 review).
+      newRiskRaw = 0;
+      pendingRaw = _confirmingRiskFor(key);
     }
-    // Prop legs: RAW but bounded by the prop parlay cap — estPayout here is
-    // the GENERIC worst-case estimate (maxRiskPerParlay, $4-5K in prod);
-    // charging it raw against the $1,500 line cap would decline every
-    // prop-containing RFQ before any duplication exists (review blocker).
-    const newRiskRaw = (isPropLine ? _propRawRisk(estPayout) : estPayout) * otherProb;
-    const newRiskEff = newRiskRaw * legDiscount;
+    const newRiskEff = newRiskRaw;
 
-    if (!openMap) openMap = buildOpenLegRiskMap();
+    if (!openMap) openMap = buildOpenLegRiskMap(mode === 'confirm' ? (opts.excludeParlayId || null) : null);
     const current = openMap.get(key) || 0;
-    const pendingRaw = getPendingLegRisk(key);
-    const pendingEff = pendingRaw * legDiscount;
-    const wouldBe = current + pendingEff + newRiskEff;
+    const wouldBe = current + pendingRaw + newRiskEff;
+    const capHit = mode === 'quote' && !isPropLine
+      ? wouldBe >= capForLeg   // full line stops quoting (screen has no increment)
+      : wouldBe > capForLeg;
 
-    if (wouldBe > maxPerLeg) {
+    if (capHit) {
       const label = (li.teamName || li.team || 'line') +
         (li.marketType || li.market ? ' ' + (li.marketType || li.market) : '') +
         (li.line != null ? ' ' + li.line : '');
-      const discTag = legDiscount < 1 ? ` (discount ${Math.round(legDiscount * 100)}%)` : '';
       return {
         allowed: false,
-        reason: `Line "${label}" open $${Math.round(current)} + pending $${Math.round(pendingEff)} + new $${Math.round(newRiskEff)} > max $${Math.round(maxPerLeg)}${discTag}`,
+        reason: `Line "${label}" open $${Math.round(current)}${pendingRaw ? ' + pending $' + Math.round(pendingRaw) : ''}${newRiskEff ? ' + new $' + Math.round(newRiskEff) : ''} > max $${Math.round(capForLeg)} [${mode}]`,
         legLabel: label,
         legKey: key,
         wouldBe,
-        limit: maxPerLeg,
+        limit: capForLeg,
         currentOpen: Math.round(current * 100) / 100,
         pendingRaw: Math.round(pendingRaw * 100) / 100,
         newRiskRaw: Math.round(newRiskRaw * 100) / 100,
-        reservationDiscount: legDiscount,
+        mode,
       };
     }
   }
@@ -7611,6 +7663,8 @@ module.exports = {
   getGameExposureSnapshot,
   checkGameExposure,
   checkLegExposure,
+  reserveConfirmingLegRisk,
+  releaseConfirmingLegRisk,
   legExposureKey,
   buildOpenLegRiskMap,
   getPendingLegRisk,

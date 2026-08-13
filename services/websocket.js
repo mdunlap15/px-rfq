@@ -1818,6 +1818,11 @@ async function handleConfirm(data) {
   const orderUuid = payload.order_uuid || payload.orderUuid;
   const callbackUrl = payload.callback_url || payload.callbackUrl;
   const confirmedStake = payload.stake || payload.confirmed_stake;
+  // Hoisted like parlayId — the finally reads it. Set true ONLY on the
+  // acceptUnknown path, where the (likely booked) risk isn't yet visible to
+  // the open map and the per-line confirm reservation must outlive the
+  // handler (TTL-bounded) until verifyAcceptUnknown resolves ground truth.
+  let holdLegReservation = false;
   try {
     const confirmedOdds = payload.odds || payload.confirmed_odds;
 
@@ -2056,6 +2061,34 @@ async function handleConfirm(data) {
       return;
     }
 
+    // Per-LINE exposure — the EXACT enforcement point (2026-08-13, operator
+    // directive: max $6K stacked on one line). The quote-time screen can only
+    // gate on open risk because an RFQ carries no size; here `ourRisk` is the
+    // actual stake PX is confirming. reserveConfirmingLegRisk closes the race
+    // between this check and recordConfirmation landing in the orders map
+    // (two whale confirms in the same window would both read pre-fill open
+    // risk); released in both outcomes below via the shared finally path.
+    const legConfirmCheck = orderTracker.checkLegExposure(
+      legsForCheck, ourRisk, config.pricing.maxExposurePerLeg,
+      // excludeParlayId: order.matched can race ahead of this confirm and
+      // promote THIS order to 'confirmed' with its stake already in the open
+      // map — without the exclusion we'd double-count the ticket against
+      // itself and falsely reject a legitimate fill (2026-08-13 review).
+      { mode: 'confirm', actualRisk: ourRisk, excludeParlayId: parlayId }
+    );
+    if (!legConfirmCheck.allowed) {
+      log.warn('Confirm', `Rejecting: ${legConfirmCheck.reason}`);
+      orderTracker.recordRejection(parlayId, legConfirmCheck.reason);
+      orderTracker.recordExposureRejection(parlayId, ourRisk, 'leg exposure limit', [{
+        team: legConfirmCheck.legLabel || 'line', wouldBe: legConfirmCheck.wouldBe, limit: legConfirmCheck.limit,
+      }]);
+      if (callbackUrl) {
+        await px.confirmOrder(callbackUrl, orderUuid, 'reject');
+      }
+      return;
+    }
+    orderTracker.reserveConfirmingLegRisk(parlayId, legsForCheck, ourRisk);
+
     // Script-aware prop game caps + experimental-combo tier re-check (SGP
     // roadmap Stage 0). Quote-time checks ran against worst-case risk;
     // re-check here with the ACTUAL confirmed stake — and the experiment
@@ -2189,6 +2222,14 @@ async function handleConfirm(data) {
         // to finalize if the failure came after their commit.
         log.warn('Confirm', `Accept POST errored for ${parlayId}: ${acceptErr.message} — will verify via PX REST in 3s`);
         _recordConfirmOutcome(parlayId, 'acceptUnknown', acceptErr.message, confirmedStake);
+        // HOLD the per-line confirm reservation on this path (2026-08-13
+        // review): PX frequently DID book the bet despite the error, but the
+        // risk lands in the orders map only when verifyAcceptUnknown imports
+        // it (3-78s). Releasing here would let a same-line whale burst
+        // restack past the cap during exactly the PX-degradation windows
+        // where accept errors cluster. The 120s reservation TTL covers the
+        // full verify retry schedule and then expires on its own.
+        holdLegReservation = true;
         orderTracker.markAcceptUnknown(parlayId, orderUuid, confirmedOdds, confirmedStake, acceptErr.message);
         setTimeout(() => {
           verifyAcceptUnknown(parlayId, orderUuid, confirmedOdds, confirmedStake).catch(err =>
@@ -2241,6 +2282,17 @@ async function handleConfirm(data) {
       orderTracker.recordRejection(parlayId, `confirm-handler-error: ${err.message}`);
     } catch (e2) {
       log.warn('Confirm', `error-path reject POST failed for parlay=${parlayId}: ${e2.message}`);
+    }
+  } finally {
+    // Release the per-line confirm reservation on every exit EXCEPT the
+    // acceptUnknown hold (see holdLegReservation above — there the 120s TTL
+    // is the release). Correct on the accept path: recordConfirmation has
+    // landed the risk in the orders map, which the open-risk side of
+    // checkLegExposure reads — keeping the reservation would double-count.
+    // Early rejects and throws release here too. No-op when nothing was
+    // reserved for this parlayId.
+    if (!holdLegReservation) {
+      try { orderTracker.releaseConfirmingLegRisk(parlayId); } catch (_) { /* never block the handler exit */ }
     }
   }
 }
