@@ -7781,7 +7781,7 @@
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
       html += '<td colspan="14" style="padding:12px 16px;">';
       html += buildLegTable(psLegs.length > 0 ? psLegs : legs, { pad: '2px 6px', vig: order.meta?.vig || order.vig || 0 });
-      html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '</div>';
+      html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '<br>' + counterpartyChip(order) + '</div>';
       html += '</td></tr>';
     }
     html += '</table></div>';

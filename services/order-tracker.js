@@ -3417,6 +3417,43 @@ function getRecentOrders(limit = 200, opts = {}) {
   }).sort((a, b) => (b.quotedAt || '').localeCompare(a.quotedAt || ''));
 }
 
+// Daily P&L rollup from the IN-MEMORY orders map (2026-08-13). The Supabase
+// version (db.getDailyPnL) paginates every settled row out of the free-tier
+// DB — measured 139 SECONDS for days=400 — so the dashboard's authoritative
+// P&L series almost never arrived and the Daily P&L chart's "All" range
+// silently rendered only the capped /orders fallback (bars reaching back
+// just ~5 weeks — the confirm dates of the 400 most-recently-settled rows).
+// The orders map already holds the full settled history (LOAD_CAP=200k),
+// so this is the same rollup in <10ms. Shape matches db.getDailyPnL rows:
+// { date, pnl, wins, losses, pushes, risk, fills }, ET-bucketed, ascending.
+// Pure helper exported for tests; the getter binds the live map.
+function _rollupDailyPnL(list, days = 30, groupBy = 'settled_at') {
+  const field = groupBy === 'quoted_at' ? 'quotedAt' : 'settledAt';
+  const cutoff = Date.now() - days * 24 * 3600 * 1000;
+  const byDay = {};
+  for (const o of list) {
+    if (!o || !o.status || !String(o.status).startsWith('settled_')) continue;
+    const ts = o[field];
+    if (!ts) continue;
+    const ms = new Date(ts).getTime();
+    if (!Number.isFinite(ms) || ms < cutoff) continue;
+    const day = new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (!byDay[day]) byDay[day] = { date: day, pnl: 0, wins: 0, losses: 0, pushes: 0, risk: 0, fills: 0 };
+    const d = byDay[day];
+    d.pnl += Number(o.pnl || 0);
+    d.fills++;
+    if (o.status === 'settled_won') d.wins++;
+    else if (o.status === 'settled_lost') d.losses++;
+    else d.pushes++;
+    d.risk += Number(o.confirmedStake || 0);
+  }
+  return Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function getDailyPnLFromMemory(days = 30, groupBy = 'settled_at') {
+  return _rollupDailyPnL(Object.values(orders), days, groupBy);
+}
+
 // Realized ROI over a trailing window (default 15 days): sum of settled parlay
 // P&L ÷ sum of settled parlay stake, for orders SETTLED within `days`. Computed
 // from the in-memory orders map (loadFromDb holds the full fill history up to
@@ -7592,6 +7629,8 @@ module.exports = {
   __isOddsTie: _isOddsTie,
   __toBettorSideOdds: _toBettorSideOdds,
   getRoiWindow,
+  getDailyPnLFromMemory,
+  _rollupDailyPnL,
   getEvCurve,
   getVoidAdjustedCalibration,
   getStats,

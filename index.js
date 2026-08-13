@@ -4433,7 +4433,14 @@ function startStatusServer() {
     const days = parseInt(req.query.days) || 30;
     const groupBy = req.query.groupBy === 'quoted_at' ? 'quoted_at' : 'settled_at';
     try {
-      const daily = await db.getDailyPnL(days, { groupBy });
+      // In-memory rollup first (2026-08-13): the Supabase pagination took
+      // ~139s at days=400, so the dashboard's authoritative P&L series
+      // almost never landed and the Daily P&L chart's "All" range silently
+      // fell back to the capped /orders payload (~5 weeks of bars). The
+      // orders map holds full settled history — same rollup, <10ms.
+      // Supabase remains the fallback for a cold/empty map (early boot).
+      let daily = orderTracker.getDailyPnLFromMemory(days, groupBy);
+      if (!daily.length) daily = await db.getDailyPnL(days, { groupBy });
       const totalPnL = await db.getTotalPnL();
       res.json({ daily, totalPnL, groupBy });
     } catch (err) {
