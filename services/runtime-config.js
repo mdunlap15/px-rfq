@@ -118,6 +118,14 @@ const REGISTRY = [
   { key: 'maxExposurePerGame', path: 'maxExposurePerGame', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_GAME', label: 'Max exposure per game' },
   { key: 'maxExposurePerPlayerDefault', path: 'maxExposurePerPlayerDefault', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_PLAYER_DEFAULT', label: 'Max exposure per player (default)' },
   { key: 'maxExposurePerPlayerBySport', path: 'maxExposurePerPlayerBySport', type: 'numMap', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_PLAYER_BY_SPORT', label: 'Max exposure per player by sport' },
+  // Registered 2026-08-14. These two were env-only, so the 8/14 prop-blackout
+  // (every prop RFQ declining on an empty line) could only be corrected by a
+  // Railway edit + redeploy — a restart during live hours. Every cap that can
+  // dark a market must be adjustable without one.
+  { key: 'maxExposurePerLeg', path: 'maxExposurePerLeg', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_LEG',
+    label: 'Max exposure per line/selection (0 = off)', help: 'RAW worst-case payout on one line-day. Enforced exactly at confirm; quote time only darks an already-full line.' },
+  { key: 'maxExposurePerLegProp', path: 'maxExposurePerLegProp', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_LEG_PROP',
+    label: 'Max exposure per PROP line (0 = use the shared cap)', help: 'Tighter ceiling for player-prop lines; min() with the shared per-line cap.' },
   { key: 'maxOdds', path: 'maxOdds', type: 'number', min: 100, max: 1000000, group: 'risk', danger: true, env: 'MAX_ODDS', label: 'Max offered odds (American)' },
   { key: 'maxLegs', path: 'maxLegs', type: 'number', min: 1, max: 20, group: 'risk', danger: true, env: 'MAX_LEGS', label: 'Max legs' },
   { key: 'useRawPerTeamExposure', path: 'useRawPerTeamExposure', type: 'bool', group: 'risk', danger: true, env: 'USE_RAW_PER_TEAM_EXPOSURE', label: 'Use RAW per-team exposure as primary cap' },
