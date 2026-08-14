@@ -4747,35 +4747,28 @@ function checkLegExposure(legs, estPayout, maxPerLeg, opts = {}) {
 
     const isPropLine = /^(player_|pitcher_|hitter_|batter_)/.test(String(li.marketType || li.market || ''));
     const capForLeg = isPropLine ? propCap : maxPerLeg;
-    let newRiskRaw;
-    let pendingRaw = 0;
-    if (mode === 'confirm') {
-      newRiskRaw = Number(opts.actualRisk) || 0;
-      pendingRaw = _confirmingRiskFor(key);
-    } else if (isPropLine) {
-      // Prop RAW bounded by the prop parlay cap — the generic estimate
-      // ($5K) raw against the line cap would decline every prop RFQ
-      // before any duplication exists (adversarial-review blocker, 8/11).
-      newRiskRaw = _propRawRisk(estPayout);
-      pendingRaw = getPendingLegRisk(key);
-    } else {
-      // Size unknown pre-confirm — screen on open + in-flight confirm
-      // reservations (those carry ACTUAL stakes, not estimates, so they
-      // dark only genuinely-full lines). Without the >= and the in-flight
-      // term the screen was unreachable: the confirm gate keeps open <=
-      // cap, so `open > cap` never fired and every near-full-line RFQ
-      // became a venue-visible confirm reject (2026-08-13 review).
-      newRiskRaw = 0;
-      pendingRaw = _confirmingRiskFor(key);
-    }
-    const newRiskEff = newRiskRaw;
+    // QUOTE mode charges NO increment for any line type (2026-08-14). An RFQ
+    // does not carry the bettor's stake, so the only honest quote-time inputs
+    // are open risk plus in-flight confirms (ACTUAL stakes, not estimates).
+    //
+    // The retired prop branch charged _propRawRisk(estPayout) — the generic
+    // worst-case — against the line cap. That was survivable while the prop
+    // parlay cap was $50, but raising it to $3,000 made every prop RFQ charge
+    // $3,000 against a $1,500 prop line cap and BLACKED OUT prop quoting
+    // outright: 11 declines in 15 minutes, all reading
+    // `Gerrit Cole player_strikeouts 5.5 open $0 + new $3000 > max $1500`.
+    // A $50 prop ticket was being charged as if it were a $3,000 one.
+    // Exact enforcement belongs at confirm, where the real stake is known and
+    // reserveConfirmingLegRisk covers the burst window.
+    const newRiskRaw = mode === 'confirm' ? (Number(opts.actualRisk) || 0) : 0;
+    const pendingRaw = _confirmingRiskFor(key);
 
     if (!openMap) openMap = buildOpenLegRiskMap(mode === 'confirm' ? (opts.excludeParlayId || null) : null);
     const current = openMap.get(key) || 0;
-    const wouldBe = current + pendingRaw + newRiskEff;
-    const capHit = mode === 'quote' && !isPropLine
-      ? wouldBe >= capForLeg   // full line stops quoting (screen has no increment)
-      : wouldBe > capForLeg;
+    const wouldBe = current + pendingRaw + newRiskRaw;
+    // Quote screen has no increment, so a FULL line must stop quoting at the
+    // cap (>=); confirm compares the real total against it (>).
+    const capHit = mode === 'quote' ? wouldBe >= capForLeg : wouldBe > capForLeg;
 
     if (capHit) {
       const label = (li.teamName || li.team || 'line') +
@@ -4783,7 +4776,7 @@ function checkLegExposure(legs, estPayout, maxPerLeg, opts = {}) {
         (li.line != null ? ' ' + li.line : '');
       return {
         allowed: false,
-        reason: `Line "${label}" open $${Math.round(current)}${pendingRaw ? ' + pending $' + Math.round(pendingRaw) : ''}${newRiskEff ? ' + new $' + Math.round(newRiskEff) : ''} > max $${Math.round(capForLeg)} [${mode}]`,
+        reason: `Line "${label}" open $${Math.round(current)}${pendingRaw ? ' + pending $' + Math.round(pendingRaw) : ''}${newRiskRaw ? ' + new $' + Math.round(newRiskRaw) : ''} ${mode === 'quote' ? '>=' : '>'} max $${Math.round(capForLeg)} [${mode}]`,
         legLabel: label,
         legKey: key,
         wouldBe,

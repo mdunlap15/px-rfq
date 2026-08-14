@@ -134,30 +134,49 @@ test('releasing an unknown confirm reservation is a no-op', () => {
 });
 
 // -------------------------------------------------------------- prop path
-test('QUOTE mode, prop legs: pending accumulation still binds (burst guard)', () => {
-  const PROP = { lineId: 'cardoso-reb-75', teamName: 'Kamilla Cardoso', marketType: 'player_rebounds', line: 7.5 };
+test('QUOTE mode, prop legs: NO estimate is charged — the blackout regression', () => {
+  // 2026-08-14: quote mode used to charge _propRawRisk(estPayout) against the
+  // prop line cap. Harmless at a $50 prop parlay cap; catastrophic once the
+  // operator raised it to $3,000 — every prop RFQ charged $3,000 against the
+  // $1,500 prop line cap and prop quoting went dark (11 declines/15min:
+  // "Gerrit Cole player_strikeouts 5.5 open $0 + new $3000 > max $1500").
+  // A $50 prop ticket must never be screened as if it were a $3,000 one.
+  const PROP = { lineId: 'cole-k-55', teamName: 'Gerrit Cole', marketType: 'player_strikeouts', line: 5.5 };
+  const legs = [leg(PROP), leg({ lineId: 'partner', pxEventId: 'E9' })];
+  // Fresh line, generic $3,000 worst-case estimate, $1,500 prop cap -> MUST quote.
+  assert.equal(ot.checkLegExposure(legs, 3000, 1500).allowed, true,
+    'a fresh prop line must quote regardless of the generic estimate');
+  // Pending generic reservations must not dark it either.
   const propKey = ot.legExposureKey(leg(PROP));
-  const ids = [];
-  for (let i = 0; i < 4; i++) {
-    const id = 'spread-' + i;
-    ids.push(id);
-    ot.releasePending(id);
-    ot.reservePending(id, {
-      expiresAt: Date.now() + 120000,
-      teamKeys: [{ key: 'team' + i + '|E' + i + '|2026-08-05', risk: 500, rawRisk: 1000 }],
-      gameKeys: [{ key: 'E' + i + '|2026-08-05', risk: 500 }],
-      pitcherKeys: [],
-      legKeys: [{ key: propKey, risk: 500 }],
-    });
+  ot.releasePending('blackout-1');
+  ot.reservePending('blackout-1', {
+    expiresAt: Date.now() + 120000,
+    teamKeys: [], gameKeys: [], pitcherKeys: [],
+    legKeys: [{ key: propKey, risk: 3000 }],
+  });
+  try {
+    assert.equal(ot.checkLegExposure(legs, 3000, 1500).allowed, true,
+      'in-flight generic estimates must not dark a prop line at quote time');
+  } finally {
+    ot.releasePending('blackout-1');
   }
-  assert.equal(ot.getPendingLegRisk(propKey), 2000);
-  const next = [leg(PROP), leg({ lineId: 'yet-another-partner', pxEventId: 'E9' })];
-  // Prop quote path counts open + pending RAW + prop-bounded increment.
-  const r = ot.checkLegExposure(next, 400, 1500);
-  assert.equal(r.allowed, false, 'the leg cap must catch what team/game caps cannot');
-  assert.match(r.legLabel, /Cardoso/);
-  for (const id of ids) ot.releasePending(id);
-  assert.equal(ot.checkLegExposure(next, 400, 1500).allowed, true, 'release unwinds fully');
+});
+
+test('CONFIRM mode is where prop concentration is enforced (burst guard moved)', () => {
+  // The protection did not disappear — it moved to the point where the real
+  // stake is known. In-flight confirm reservations cover the same-minute burst
+  // the quote-time estimate used to (badly) approximate.
+  const PROP = { lineId: 'burst-k-55', teamName: 'Burst Pitcher', marketType: 'player_strikeouts', line: 5.5, startTime: FUT };
+  const legs = [leg(PROP), leg({ lineId: 'burst-partner', pxEventId: 'E9', startTime: FUT })];
+  const CAPP = 1500;
+  assert.equal(ot.checkLegExposure(legs, 3000, CAPP, { mode: 'confirm', actualRisk: 900 }).allowed, true);
+  ot.reserveConfirmingLegRisk('burst-p1', legs, 900);
+  try {
+    const second = ot.checkLegExposure(legs, 3000, CAPP, { mode: 'confirm', actualRisk: 900 });
+    assert.equal(second.allowed, false, '900 + 900 > 1500 must reject at confirm');
+  } finally {
+    ot.releaseConfirmingLegRisk('burst-p1');
+  }
 });
 
 // --------------------------------------------------------- open-order map
@@ -233,15 +252,19 @@ test('QUOTE mode team screen counts in-flight confirm reservations (reachable sc
 });
 
 test('prop lines use the tighter maxExposurePerLegProp ceiling', () => {
-  assert.equal(config.pricing.maxExposurePerLegProp, 1500, 'prop line ceiling keeps the measured p99 calibration');
+  assert.equal(config.pricing.maxExposurePerLegProp, 1500, 'prop line ceiling keeps its own calibration');
   const PROP = { lineId: 'prop-ceiling', teamName: 'Some Player', marketType: 'player_rebounds', line: 7.5, startTime: FUT };
+  const partner = leg({ lineId: 'prop-partner', startTime: FUT });
   const id = 'prop-open';
   ot.recordQuote(id, [{ line_id: 'prop-ceiling', fairProb: 0.5, startTime: FUT }], 150, 100, 0.5, {});
-  ot.recordConfirmation(id, 'uuid-propc', 200, 1490);
-  // Open 1490 on the prop line; prop increment (propRawRisk of 5000 -> 50
-  // via maxRiskPerParlayWithProp default) pushes past 1500 even though the
-  // team cap arg is 6000.
-  const r = ot.checkLegExposure([leg(PROP), leg({ lineId: 'prop-partner', startTime: FUT })], 5000, 6000);
-  assert.equal(r.allowed, false, 'prop ceiling must bind at 1500, not 6000: ' + (r.reason || ''));
-  assert.equal(r.limit, 1500);
+  ot.recordConfirmation(id, 'uuid-propc', 200, 1500);
+  // Open 1500 on the prop line. The PROP ceiling (1500) must bind even though
+  // the team cap passed in is 6000 — at quote time via the full-line screen...
+  const q = ot.checkLegExposure([leg(PROP), partner], 5000, 6000);
+  assert.equal(q.allowed, false, 'prop ceiling must bind at 1500, not 6000: ' + (q.reason || ''));
+  assert.equal(q.limit, 1500);
+  // ...and at confirm time against the actual stake.
+  const c = ot.checkLegExposure([leg(PROP), partner], 5000, 6000, { mode: 'confirm', actualRisk: 1 });
+  assert.equal(c.allowed, false, 'confirm must also enforce the 1500 prop ceiling');
+  assert.equal(c.limit, 1500);
 });

@@ -165,17 +165,18 @@ test('prop legs reserve RAW risk BOUNDED by the prop parlay cap; team legs emit 
   assert.equal(mlEntry, undefined, 'team lines must not emit a pending leg entry');
 });
 
-test('prop leg check is raw + undiscounted (but prop-cap-bounded)', () => {
-  const propCap = config.pricing.maxRiskPerParlayWithProp; // 50 default
-  // Cap below the prop-bounded raw risk -> declines.
-  const r = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 1000, propCap - 10);
-  assert.equal(r.allowed, false, 'raw prop basis must trip a cap below the prop-bounded risk');
-  assert.match(r.reason, /Cardoso/);
-  // A prop-containing RFQ with ZERO existing exposure must still QUOTE at
-  // the default cap (the review blocker: generic $4-5K estimate raw vs
-  // the line cap = unconditional decline).
-  const ok = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 5000, config.pricing.maxExposurePerLeg);
-  assert.equal(ok.allowed, true, 'first prop RFQ must not be blacked out by the generic estimate: ' + (ok.reason || ''));
+test('prop leg QUOTE check charges NO estimate (2026-08-14 blackout fix)', () => {
+  // SUPERSEDED CONTRACT: this used to assert the quote path charged
+  // _propRawRisk(estPayout) against the line cap. That estimate blacked out
+  // prop quoting the moment the prop parlay cap was raised to $3,000
+  // (11 declines/15min: "open $0 + new $3000 > max $1500"). Quote mode now
+  // charges nothing for any line type; exact enforcement is confirm-time.
+  const r = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 3000, 1500);
+  assert.equal(r.allowed, true, 'a fresh prop line must quote: ' + (r.reason || ''));
+  // Confirm mode still enforces exactly, with the real stake.
+  const c = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 3000, 1500, { mode: 'confirm', actualRisk: 1600 });
+  assert.equal(c.allowed, false, 'confirm must reject an actual stake over the prop line cap');
+  assert.match(c.reason, /Cardoso/);
 });
 
 test('team-line QUOTE check screens on open risk only (2026-08-13 semantics)', () => {
@@ -186,23 +187,26 @@ test('team-line QUOTE check screens on open risk only (2026-08-13 semantics)', (
   assert.equal(r.allowed, true, 'fresh team lines must quote: ' + (r.reason || ''));
 });
 
-test('same-minute duplicate prop burst is caught: pending counts raw + undiscounted', () => {
-  const propCap = config.pricing.maxRiskPerParlayWithProp; // 50 default
-  // Three in-flight duplicates on the same prop line, each reserving the
-  // prop-bounded raw risk. A 4th ticket: pending 3x50 raw + new 50 = 200.
-  // Pre-fix: (3x50x0.5x0.2)+(50x0.5x0.2) = 20 -> a cap of 180 never tripped.
+test('same-minute duplicate prop burst is caught at CONFIRM (moved 2026-08-14)', () => {
+  // The burst guard moved from a quote-time estimate to confirm-time
+  // in-flight reservations, which carry ACTUAL stakes instead of the generic
+  // worst case. Same protection, no blackout.
+  const CAPP = 1500;
   const ids = [];
   try {
     for (let i = 0; i < 3; i++) {
-      const res = orderTracker.buildPendingReservation([PROP_LEG, ML_LEG], 900, 120);
-      const id = 'burst-test-' + i;
-      orderTracker.reservePending(id, res);
-      ids.push(id);
+      const id = 'burst-confirm-' + i;
+      const check = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 900, CAPP, { mode: 'confirm', actualRisk: 500 });
+      if (i < 3 && check.allowed) {
+        orderTracker.reserveConfirmingLegRisk(id, [PROP_LEG, ML_LEG], 500);
+        ids.push(id);
+      }
     }
-    const r = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 900, 3.6 * propCap);
-    assert.equal(r.allowed, false, 'duplicate burst must trip the cap (raw, undiscounted pending)');
+    // 3 x 500 in flight = 1500; a 4th confirm must reject.
+    const r = orderTracker.checkLegExposure([PROP_LEG, ML_LEG], 900, CAPP, { mode: 'confirm', actualRisk: 500 });
+    assert.equal(r.allowed, false, 'duplicate confirm burst must trip the cap via in-flight reservations');
   } finally {
-    for (const id of ids) orderTracker.releasePending(id);
+    for (const id of ids) orderTracker.releaseConfirmingLegRisk(id);
   }
 });
 
