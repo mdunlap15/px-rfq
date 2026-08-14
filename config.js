@@ -189,6 +189,35 @@ const config = {
     // instead of advertising it. $1 matches the floor the offer builder has
     // always applied to max_risk; raise it if PX's real minimum is higher.
     pxMinStake: parseFloat(process.env.PX_MIN_STAKE) || 1,
+    // Per-sport-AND-market base vig override, JSON keyed "<sport>.<marketType>"
+    // (e.g. {"baseball_mlb.total":0.010}). Takes precedence over VIG_BY_SPORT,
+    // which is sport-wide and therefore cannot express "we are absent from MLB
+    // totals but competitive on MLB moneyline" — the exact shape the 2026-08-14
+    // outbid-margin study measured (MLB totals won 5.9% of contests we entered,
+    // spreads 3.2%, both in the one market family proven CALIBRATED, so the
+    // width was buying us nothing).
+    //
+    // Applies to the BASE vig only: the favorite ramp, prop floor, MMA/golf
+    // minimums, SGP multiplier and the 20% ceiling all still layer on top, so
+    // an override can never take a prop or MMA leg below its own floor.
+    // Values must be >0 and <=0.20 (matching the hard vig ceiling in
+    // getEffectiveVig and the runtime-config bound) — a 0 or malformed entry
+    // is DROPPED (falls
+    // back to the sport vig) rather than quoting at fair. Empty default = off.
+    vigBySportMarket: (() => {
+      const out = {};
+      try {
+        const raw = JSON.parse(process.env.VIG_BY_SPORT_MARKET || '{}');
+        for (const [k, v] of Object.entries(raw)) {
+          const n = parseFloat(v);
+          // Lowercase on insert: the lookup builds `${sport}.${marketType}`
+          // from already-lowercase values, so a mixed-case key would validate,
+          // show up in /status, and silently never fire.
+          if (/^[a-z0-9_]+\.[a-z0-9_]+$/i.test(k) && Number.isFinite(n) && n > 0 && n <= 0.20) out[k.toLowerCase()] = n;
+        }
+      } catch { /* bad JSON -> empty (off) */ }
+      return out;
+    })(),
     vigMmaMin: parseFloat(process.env.VIG_MMA_MIN) || 0.03,
     // Additive favorite markup for MMA MONEYLINE legs (2026-08-11 audit):
     // MMA ML favorites in the 0.65-0.85 fair band realize ~8-14pp above our

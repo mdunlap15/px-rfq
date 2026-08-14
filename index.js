@@ -1103,6 +1103,10 @@ function startStatusServer() {
         // off" every time. Every armed-but-unsurfaced control goes here.)
         vigMinPp: config.pricing.vigMinPp,
         vigMinRoi: config.pricing.vigMinRoi,
+        vigBySportMarket: config.pricing.vigBySportMarket,
+        pxMinStake: config.pricing.pxMinStake,
+        maxExposurePerLegProp: config.pricing.maxExposurePerLegProp,
+        footballSgpEnabled: config.pricing.footballSgpEnabled,
         vigDnbFavMarkup: config.pricing.vigDnbFavMarkup,
         vigDnbFavThreshold: config.pricing.vigDnbFavThreshold,
         vigDnbFavCap: config.pricing.vigDnbFavCap,
@@ -9679,12 +9683,28 @@ function startStatusServer() {
       'soccer_germany_bundesliga', 'soccer_france_ligue_one',
       'golf_matchups', 'mma_mixed_martial_arts', 'boxing_boxing',
     ];
+    // Per-market overrides SHADOW the sport value in resolveBaseVig, so a
+    // sport row alone can display a number no leg of that market receives —
+    // and a widen typed here would silently not apply to the shadowed market.
+    // Surface both (2026-08-14 review).
+    const byMarket = config.pricing.vigBySportMarket || {};
+    const marketOverridesFor = (s) => {
+      const out = {};
+      for (const [k, v] of Object.entries(byMarket)) {
+        if (k.startsWith(s + '.')) out[k.slice(s.length + 1)] = v;
+      }
+      return out;
+    };
     const effective = {};
     for (const s of sports) {
+      const mo = marketOverridesFor(s);
       effective[s] = {
         vig: vigBySport[s] != null ? vigBySport[s] : defaultVig,
         isOverride: vigBySport[s] != null,
         pct: ((vigBySport[s] != null ? vigBySport[s] : defaultVig) * 100).toFixed(2) + '%',
+        // Non-empty => the sport number does NOT apply to these markets.
+        marketOverrides: mo,
+        hasMarketOverrides: Object.keys(mo).length > 0,
       };
     }
     res.json({
@@ -9744,12 +9764,31 @@ function startStatusServer() {
     // with the boot env baseline so a later Railway vig-env change still wins.
     try { require('./services/vig-config-store').persist(); } catch (_) { /* best-effort */ }
 
+    // Loud warning when the edited sport is SHADOWED by a per-market override
+    // (2026-08-14 review): resolveBaseVig checks vigBySportMarket first, so a
+    // widen typed here would be accepted, persisted, logged as success — and
+    // never reach those markets. Silence there is how an emergency widen fails.
+    const shadowed = [];
+    if (body.sport) {
+      for (const k of Object.keys(config.pricing.vigBySportMarket || {})) {
+        if (k.startsWith(body.sport + '.')) shadowed.push(k);
+      }
+      if (shadowed.length) {
+        log.warn('Config', `Vig edit for ${body.sport} does NOT apply to ${shadowed.join(', ')} — those markets are pinned by VIG_BY_SPORT_MARKET. Edit vigBySportMarket (runtime-config) to move them.`);
+      }
+    }
+
     res.json({
       ok: true,
       defaultVig: config.pricing.defaultVig,
       defaultVigPct: (config.pricing.defaultVig * 100).toFixed(2) + '%',
       overrides: config.pricing.vigBySport,
       parlayLevelVig: !!config.pricing.parlayLevelVig,
+      // Non-empty => the edit above did NOT reach these markets.
+      shadowedByMarketOverride: shadowed,
+      warning: shadowed.length
+        ? `Per-market overrides take precedence: ${shadowed.join(', ')} unaffected by this edit.`
+        : undefined,
     });
   });
 

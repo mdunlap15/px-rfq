@@ -81,7 +81,13 @@ const REGISTRY = [
   { key: 'defaultVig', path: 'defaultVig', type: 'number', min: 0, max: 0.2, group: 'pricing', env: 'DEFAULT_VIG',
     label: 'Default vig', help: 'Base per-leg vig when a sport has no override.' },
   { key: 'vigBySport', path: 'vigBySport', type: 'numMap', min: 0, max: 0.2, group: 'pricing', env: 'VIG_BY_SPORT',
-    label: 'Vig by sport', help: 'Per-sport vig overriding the default.' },
+    label: 'Vig by sport', help: 'Per-sport vig overriding the default. NOTE: shadowed per-market by vigBySportMarket — check that map before concluding a sport edit took effect.' },
+  // Registered so the highest-precedence vig knob is live-editable. Without a
+  // row here it would be env-only, meaning the ONLY way to widen a narrowed
+  // market mid-bleed is a Railway edit + redeploy — a restart during peak,
+  // which is exactly what the push-timing rule exists to avoid.
+  { key: 'vigBySportMarket', path: 'vigBySportMarket', type: 'numMap', min: 0.0001, max: 0.2, group: 'pricing', env: 'VIG_BY_SPORT_MARKET',
+    label: 'Vig by sport+market', help: 'Keys "<sport>.<marketType>" (e.g. baseball_mlb.total). Takes PRECEDENCE over Vig by sport. Base vig only — prop/MMA/golf floors and the favorite ramp still layer on top. NOTE: on markets with Pinnacle/FD/DK coverage the consensus floor (PRICE_FLOOR_VS_CONSENSUS_PP) usually sets the price, so this knob is inert there; it reaches a price mainly on legs with no book consensus.' },
   { key: 'vigByLegCount', path: 'vigByLegCount', type: 'numMap', min: 0.1, max: 10, group: 'pricing', env: 'VIG_BY_LEG_COUNT',
     label: 'Vig multiplier by leg count', help: 'MULTIPLIER on vig per leg count. Measured 2026-08-03: this drives most of the price gap vs sharp on 5+ leg tickets.' },
   { key: 'parlayLevelVig', path: 'parlayLevelVig', type: 'bool', group: 'pricing', env: 'PARLAY_LEVEL_VIG',

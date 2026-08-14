@@ -668,10 +668,31 @@ function getConsensusImplied(lineInfo) {
  * would I quote on this single leg if someone asked for it alone?"
  * Not used in the actual pricing path — that stays in priceParlay.
  */
+/**
+ * Base vig for a leg: per-sport-AND-market override first, then the sport
+ * override, then the global default.
+ *
+ * MODULE-LEVEL ON PURPOSE. priceParlay's closure and computeSingleLegVig (the
+ * dashboard's single-leg display) both resolve base vig, and this codebase has
+ * already been bitten by those two drifting — the Single-Leg chart showed a
+ * price the RFQ path would never quote. One function, both callers.
+ *
+ * Reads config at CALL time so runtime-config edits apply without a restart.
+ */
+function resolveBaseVig(sport, marketType) {
+  const byMarket = config.pricing.vigBySportMarket || {};
+  if (sport && marketType) {
+    const hit = byMarket[`${sport}.${marketType}`];
+    if (hit != null) return hit;
+  }
+  const bySport = config.pricing.vigBySport || {};
+  if (sport && bySport[sport] != null) return bySport[sport];
+  return config.pricing.defaultVig;
+}
+
 function computeSingleLegVig(fairProb, sport, marketType) {
   if (!(fairProb > 0 && fairProb < 1)) return null;
-  const vigBySport = config.pricing.vigBySport || {};
-  const baseVig = (sport && vigBySport[sport] != null) ? vigBySport[sport] : config.pricing.defaultVig;
+  const baseVig = resolveBaseVig(sport, marketType);
   // Player props: flat floor at vigPropFloor (default 3%). Mirrors the
   // priceParlay-internal getEffectiveVig logic for player_<type> markets.
   if (marketType && /^player_/.test(marketType)) {
@@ -2248,13 +2269,15 @@ function priceParlay(legs, opts = {}) {
   // This widens the price to compensate for positive same-game correlation
   // without triggering PX's "invalid estimated prices" rejection that
   // multiplicative correlation boosts used to hit.
-  const globalBaseVig = config.pricing.defaultVig;
-  const vigBySport = config.pricing.vigBySport || {};
+  // (Base-vig lookup lives in the module-level resolveBaseVig — the former
+  // globalBaseVig / vigBySport closure locals were removed with it so nobody
+  // tunes a variable that no longer reaches a price.)
 
-  // Per-sport base vig: uses sport-specific override if set, else global default.
-  function getBaseVigForSport(sport) {
-    if (sport && vigBySport[sport] != null) return vigBySport[sport];
-    return globalBaseVig;
+  // Base vig: per-sport-AND-market override, else sport, else global default.
+  // Delegates to the module-level resolver so the dashboard's single-leg
+  // display and the real quoting path can never disagree.
+  function getBaseVigForSport(sport, marketType) {
+    return resolveBaseVig(sport, marketType);
   }
 
   // Smoothly scaling vig: linear ramp above fairProb 0.50.
@@ -2278,7 +2301,7 @@ function priceParlay(legs, opts = {}) {
   const favFloor = config.pricing.vigFavoriteFloor;
   const seriesMinVig = config.pricing.vigSeriesMin || 0;
   function getEffectiveVig(fairProb, sport, marketType, vigBump = 0) {
-    const baseVig = getBaseVigForSport(sport);
+    const baseVig = getBaseVigForSport(sport, marketType);
     // Player props (Phase-2 launch types + K-prop): flat per-leg vig at
     // the VIG_PROP_FLOOR floor (default 3%). Skips the favorite-slope
     // ramp because props don't have favorites in the team-line sense —
@@ -5346,6 +5369,9 @@ module.exports = {
   // Exported for test/dnb-book-comparator.test.js — pins the draw-no-bet
   // product-matching rule that book comparisons depend on.
   __bookImpliedForLeg: bookImpliedForLeg,
+  // Exported for test/vig-by-market.test.js — the single base-vig resolver
+  // shared by the quoting path and the dashboard's single-leg display.
+  resolveBaseVig,
   priceParlay,
   shouldDecline,
   validateForConfirmation,
