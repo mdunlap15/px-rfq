@@ -47,7 +47,8 @@ client/
 | `VIG_BY_SPORT` | No | JSON map of per-sport base vig overriding `DEFAULT_VIG` (e.g. `{"soccer":0.03}`) |
 | `PROP_LAUNCH_ALLOWLIST` | No | Comma-separated `<sport>.<propType>` keys that may quote (e.g. `baseball_mlb.hitter_hr,soccer.goalscorer`). Props not listed never register. |
 | `MAX_RISK_PER_PARLAY` | No | Default: 500 |
-| `MAX_RISK_PER_PARLAY_WITH_PROP` | No | Default: 50. Cap for any parlay containing a player-prop leg. |
+| `MAX_RISK_PER_PARLAY_WITH_PROP` | No | Default: 50. Cap on **OUR max risk** (payout liability) for any parlay containing a player-prop leg. Prod: 3000 (2026-08-13). |
+| `PX_MIN_STAKE` | No | Default: 1. PX's minimum bookable stake. A per-parlay RISK cap is sent to PX as a *bettor stake* cap (Rule 3: `stake = risk × p/(1−p)`) floored at $1 — so when a cap converts to a sub-$1 stake cap, the smallest fill PX can book already breaches it and we are certain to reject at confirm. `priceParlay` declines those at quote time (`unfillable within risk cap`). Bites only where a small cap meets long odds (a $15 experimental-SGP cap past ~+1500); at the $3,000 prop cap it needs beyond +300000. |
 | `MAX_EXPOSURE_PER_TEAM` | No | Default: 50 |
 | `MAX_LEGS` | No | Default: 8 |
 | `STALE_PRICE_MINUTES` | No | Default: 15 |

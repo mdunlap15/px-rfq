@@ -182,6 +182,13 @@ const config = {
     // ~4-5%; we can widen without losing flow. Applied as a floor on
     // top of the normal baseVig + favorite ramp. Tunable via
     // VIG_MMA_MIN env var.
+    // PX's minimum bookable stake, in dollars. Used by the unfillable-within-cap
+    // gate in priceParlay: when a per-parlay RISK cap converts to a bettor stake
+    // cap below this, PX cannot book any fill that respects our cap, so the
+    // offer is guaranteed to be rejected at confirm — decline at quote time
+    // instead of advertising it. $1 matches the floor the offer builder has
+    // always applied to max_risk; raise it if PX's real minimum is higher.
+    pxMinStake: parseFloat(process.env.PX_MIN_STAKE) || 1,
     vigMmaMin: parseFloat(process.env.VIG_MMA_MIN) || 0.03,
     // Additive favorite markup for MMA MONEYLINE legs (2026-08-11 audit):
     // MMA ML favorites in the 0.65-0.85 fair band realize ~8-14pp above our

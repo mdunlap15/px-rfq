@@ -3331,7 +3331,33 @@ function priceParlay(legs, opts = {}) {
   // the payout number as the stake cap let a winning requester collect up to
   // payout*(decimal-1) — at +400 that is 4x our intended liability.
   const _offeredP = Math.min(0.999999, Math.max(1e-6, cappedProb));
-  const maxRiskStake = Math.max(1, Math.round(maxRisk * _offeredP / (1 - _offeredP)));
+  const _rawStakeCap = maxRisk * _offeredP / (1 - _offeredP);
+  const maxRiskStake = Math.max(1, Math.round(_rawStakeCap));
+
+  // UNFILLABLE-WITHIN-CAP GATE (2026-08-13). The Math.max(1, ...) floor above
+  // means that whenever the true stake cap rounds below PX's minimum stake,
+  // the offer we publish is one we are MATHEMATICALLY CERTAIN to reject at
+  // confirm: the smallest stake PX can book already exceeds maxRisk.
+  // Measured 2026-08-13: three 3-leg HR-over parlays at +11048/+14821 under a
+  // $50 prop cap → true stake cap $0.45, floored to $1, and a $1 stake at
+  // those odds costs us $110-$148. All three quoted, all three confirmed by
+  // the bettor, all three rejected by us — pure advertise-and-decline (the
+  // PX Rule 2 surface) plus a wasted round trip for the counterparty.
+  // Decline at QUOTE time instead. Fires only where a small cap meets long
+  // odds: at the $3,000 prop cap it needs odds beyond +300000 (never), at the
+  // $15 experimental-SGP cap it starts biting past ~+1500 — exactly the
+  // combos whose caps make them unquotable at long prices.
+  const _minStake = config.pricing.pxMinStake || 1;
+  if (maxRisk > 0 && _rawStakeCap < _minStake) {
+    const _needOdds = decimalToAmerican(1 + maxRisk / _minStake);
+    log.info('Pricing', `Declined: unfillable within cap — risk cap $${Math.round(maxRisk)} at offered ${(_offeredP * 100).toFixed(2)}% implies a $${_rawStakeCap.toFixed(2)} stake cap, below PX min $${_minStake} (a $${_minStake} stake would risk $${Math.round(_minStake * (1 / _offeredP - 1))}). Quotable only at or below ${_needOdds}.`);
+    priceParlay._lastFailure = {
+      reason: 'unfillable within risk cap',
+      detail: `risk cap $${Math.round(maxRisk)} implies $${_rawStakeCap.toFixed(2)} stake cap < PX min $${_minStake}`,
+      blockerLeg: null,
+    };
+    return null;
+  }
 
   // valid_until in nanoseconds. Prop-containing parlays get the shorter
   // validity window (default 30s vs 60s) — prop prices move on lineup/usage
