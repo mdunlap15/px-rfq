@@ -15323,6 +15323,28 @@
         }
       }
 
+      // Player-prop legs — WNBA/NBA points-rebounds-assists, MLB hitter/
+      // pitcher props, NHL SOG, WC goalscorer, etc. The selection here is a
+      // PLAYER name ("Caitlin Clark", "Diamond Miller"), so it matches none
+      // of the competing-team branches above and the row lands with zero game
+      // context — the operator can't tell which game the player is in
+      // (operator request 2026-08-18: "I don't know the teams of some of
+      // these players"). Append the full matchup "· AWAY @ HOME" in gray.
+      // Fires for EVERY sport's props, not just WNBA — the gap is identical
+      // for MLB hitter props and the rest. Mirrors containsPlayerProp's
+      // single-leg test. bareOU legs are game/team totals (already carry
+      // "ARI @ TOR" upstream), not player props, so they're excluded.
+      else if (!bareOU
+               && l.homeTeam && l.awayTeam
+               && (l.propType || /^player_/.test(mkt) || _PROP_TYPE_BUCKETS.has(mkt))) {
+        const awayCtx = (typeof teamAbbr === 'function' && teamAbbr(l.awayTeam)) || l.awayTeam;
+        const homeCtx = (typeof teamAbbr === 'function' && teamAbbr(l.homeTeam)) || l.homeTeam;
+        if (awayCtx && homeCtx) {
+          teamLabel += ' <span style="color:var(--text3); font-size:10px;">· '
+                    + escapeHtml(awayCtx) + ' @ ' + escapeHtml(homeCtx) + '</span>';
+        }
+      }
+
       // DNB badge for soccer 2-way moneyline legs so operators can tell
       // apart DNB vs 3-way at a glance. Pin/FD/DK odds columns
       // on this row are DNB-equivalent (renormalized to exclude the draw)
