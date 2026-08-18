@@ -2984,7 +2984,11 @@ function _getResolveFailure(lineId) {
 async function resolveUnknownLine(rfqLeg) {
   const lineId = rfqLeg.line_id || rfqLeg.lineId || rfqLeg;
   if (!lineId) return null;
-  if (lineIndex[lineId]) return lineIndex[lineId]; // already resolved
+  if (lineIndex[lineId]) {
+    // Already resolved — any failure record from an earlier attempt is moot.
+    _failuresByLineId.delete(lineId);
+    return lineIndex[lineId];
+  }
 
   // Clear stale failure state at the START of each call. _lastFailure is
   // kept as a back-compat alias of the most-recently-recorded failure;
@@ -2992,10 +2996,41 @@ async function resolveUnknownLine(rfqLeg) {
   // _failuresByLineId. Clearing the singleton keeps lineId-unguarded
   // readers from getting stale data.
   resolveUnknownLine._lastFailure = null;
-  // Drop any prior failure for this exact lineId so the categorization
-  // step doesn't see a stale entry if resolveUnknownLine succeeds this
-  // time (success path writes to lineIndex but not to _failuresByLineId).
-  _failuresByLineId.delete(lineId);
+
+  // DELIBERATELY NOT deleting _failuresByLineId[lineId] here (2026-08-18).
+  //
+  // It used to be wiped synchronously at this point, "so the categorization
+  // step doesn't see a stale entry if we succeed this time". That reasoning
+  // was sound but the placement was not: the record is only re-written after
+  // an awaited px.fetchMarkets ~50-150ms later, and BOTH readers run
+  // synchronously in the meantime, so they read the hole rather than the
+  // truth. Two things broke:
+  //
+  //   1. TELEMETRY. websocket.js fires this function WITHOUT awaiting for
+  //      known-failing legs, then immediately categorizes the decline off
+  //      getResolveFailure(). It got null every time — measured resolveReason
+  //      null on 6,937/6,953 MLB legs over 14 days — so declines fell through
+  //      to a line-VALUE heuristic and were labelled by guesswork. That is
+  //      what made 'baseball_low_line_ambiguous' (and sub_game / alt_spread /
+  //      alt_total / other_line) report as alt run-lines and game totals when
+  //      ~100% of them are player props. 107/107 sampled line_ids had already
+  //      been seen CORRECTLY labelled earlier the same day.
+  //
+  //   2. LATENCY, the one that actually costs money. The getFail(lid) probe
+  //      in websocket.js decides fire-and-forget vs AWAIT precisely so we
+  //      don't block an RFQ on a line we already know fails (operator
+  //      incident 2026-06-07: the prop flood collapsed win rate 62% -> ~5%
+  //      through exactly this latency). Wiping the record at entry makes a
+  //      repeat offender look unseen again for the duration of the fetch, so
+  //      concurrent RFQs on that line get re-AWAITED — silently defeating the
+  //      fast path in the flood conditions it was built for.
+  //
+  // The record is now cleared where the original reasoning actually applies:
+  // on the SUCCESS path (below), which is the only case that can strand a
+  // stale entry. Failure paths call _recordResolveFailure, which overwrites.
+  // This also fixes the in-flight variant: a concurrent duplicate call used
+  // to wipe a record the in-flight promise had already written, then return
+  // early at the inFlightResolutions check without ever rewriting it.
 
   // Sample log: capture RFQ leg shape (first 20 unknown legs only)
   if (!resolveUnknownLine._sampleCount) resolveUnknownLine._sampleCount = 0;
@@ -4077,6 +4112,10 @@ async function resolveUnknownLine(rfqLeg) {
         log.debug('Lines', `JIT warm (resolveUnknown) swallowed error: ${err.message}`);
       });
 
+      // Resolved. Drop any failure record from an earlier attempt so the
+      // decline categorizer can never read a stale entry for a line that is
+      // now registered. This is the clear that used to sit at function entry.
+      _failuresByLineId.delete(lineId);
       return foundInfo;
     } finally {
       inFlightResolutions.delete(lineId);

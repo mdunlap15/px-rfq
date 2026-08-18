@@ -1244,12 +1244,25 @@ async function handleRFQ(data) {
                 category = 'hitter_binary_prop';
                 detail = `line 0.5 (binary YES/NO hitter prop)`;
               } else if (eventSport.includes('baseball') && (absLine === 1.5 || absLine === 2.5 || absLine === 3.5)) {
-                // Ambiguous at line=1.5/2.5: real alt run-line OR ladder
-                // hitter prop (Total Hits 2+, Total Bases 2+, etc.). Without
-                // marketName populated by resolveUnknownLine we can't tell —
-                // tag as ambiguous so the next analysis distinguishes them.
+                // MEASURED 2026-08-18, superseding the old "alt run-line OR
+                // hitter ladder" guess: this bucket is ~100% PLAYER PROPS.
+                // Across ~125 resolved unique line_ids there were ZERO alt
+                // run-lines, zero game totals, zero team totals — dominated by
+                // pitcher Total Earned Runs Allowed and hitter Total Hits,
+                // Runs & RBIs. Negative control: genuine alt run-lines at the
+                // same |line| appear 3,600x in 28d, register normally, and
+                // never land here.
+                //
+                // Reaching this branch at all was itself the bug — the
+                // categorizer read a failure record that resolveUnknownLine had
+                // just wiped (fixed 2026-08-18, see line-manager.js
+                // resolveUnknownLine + test/resolve-failure-race.test.js), so
+                // marketName was null on 6,937/6,953 legs and everything fell
+                // through to this line-VALUE heuristic. With the record intact
+                // these legs categorize as 'player_prop' off their real market
+                // name; anything still landing here is a genuine leftover.
                 category = 'baseball_low_line_ambiguous';
-                detail = `line ${lineNum} (alt run-line OR hitter ladder)`;
+                detail = `line ${lineNum} (unresolved; historically ~100% player props)`;
               } else if (eventSport.includes('baseball') && absLine >= 5 && absLine <= 15) {
                 category = 'alt_total';
                 detail = `line ${lineNum}`;
