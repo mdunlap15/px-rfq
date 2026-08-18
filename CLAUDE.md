@@ -337,8 +337,13 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
 - **DK segregates MMA by league page** (found 2026-08-11): `/leagues/mma/ufc`
   carries numbered cards ONLY — Tuesday **Dana White's Contender Series** lives at
   `/leagues/mma/dana-white's-contender-series`, and the UFC page silently returns
-  zero of its fighters. Our MoV scrape hits the UFC page, so Contender Series MoV
-  legs have an empty board and fail closed (safe decline, known coverage gap).
+  zero of its fighters. **FIXED 2026-08-11 (c70f599)**: `dk-scraper._movLeagueUrls()` now scrapes
+  BOTH the UFC page and the Contender Series page
+  (`.../leagues/mma/dana-white%E2%80%99s-contender-series` — note the
+  **typographic apostrophe** `%E2%80%99`, not an ASCII quote; the ASCII slug
+  404s). Verified live 2026-08-18: all 5 Tuesday CS fights priceable on the MoV
+  board. A CS fight now fails closed only for the ordinary reasons (PX posts no
+  method markets for it — common on prelims — or the board goes stale).
 - **A standalone operator routine posts single-market MoV NO lines** on PX
   (DK raw mirror, offers tagged `claude_mov_`, $500-$2,000 tiers). Those positions
   are INVISIBLE to this trader's exposure tracker — a parlay MoV quote on the same
