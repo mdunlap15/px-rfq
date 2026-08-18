@@ -2574,8 +2574,19 @@ let _watchdogLastFireAt = 0;
 // it and fills just stop with no error (2026-06-10 & 2026-06-11 outages, both
 // recovered by a manual /reconnect). Detect: we're actively submitting offers
 // but have seen ZERO confirm events in N minutes → channel dead → reconnect.
-const _confirmStallMs = (Number(process.env.WS_CONFIRM_STALL_MINUTES) || 12) * 60 * 1000;
-const _confirmStallMinOffers = Number(process.env.WS_CONFIRM_STALL_MIN_OFFERS) || 40;
+// Defaults recalibrated 2026-08-18. The originals (12min / 40 offers) sat at the
+// MEDIAN of normal behaviour, not the tail: conversion is ~3.6% (~27 offers per
+// confirm), so 40 offers with no confirm is a routine lull. Over 4 healthy days
+// (15,908 offers / 581 confirm events) the confirm-gap p99 was 230 offers / 106
+// min and the MAX was 434 offers / 362 min — with fills resuming fine. The old
+// pair therefore fired 143 times in 4 days (~21/day, first fire 17 min after
+// boot) and never once caught a real outage. 250/30 yields 4 over the same
+// window. Deliberately NOT set to the observed max (434) — that would be fitting
+// to the sample and one quiet stretch would blow past it. Cost of a false fire is
+// low (measured reconnect p50 0.6s, max 3.7s, 0 failures in 143); the real damage
+// was diagnostic, since the log line reads like a PX-side channel outage.
+const _confirmStallMs = (Number(process.env.WS_CONFIRM_STALL_MINUTES) || 30) * 60 * 1000;
+const _confirmStallMinOffers = Number(process.env.WS_CONFIRM_STALL_MIN_OFFERS) || 250;
 let _lastConfirmEventAt = Date.now();
 let _offersSinceConfirmEvent = 0;
 
