@@ -880,6 +880,19 @@ const config = {
         'boxing_boxing': 5,
         'americanfootball_nfl': 4,
         'americanfootball_ncaaf': 4,
+        // Preseason had NO entry until 2026-08-21 and was flapping stale
+        // between refresh cycles — observed live at ageMinutes 3.3 and 4.3
+        // both flagged stale, while a healthy refresh brought it back to 0.1.
+        // A stale cache DECLINES every RFQ for that sport, so the flap was
+        // silently costing football quotes on nights with a full slate.
+        // Same cause the comment above describes: the refresh loop iterates
+        // the supported-sports list with spacing, and that list is now 22
+        // sports (it was ~17 when these were tuned), so the loop takes longer
+        // than it used to and a tight gate can no longer clear the cadence.
+        // 5 matches mma/boxing/ncaab — keeps news-move protection, clears the
+        // loop. Preseason lines are also softer and move less than regular
+        // season, so a slightly older consensus is still tradeable.
+        'americanfootball_nfl_preseason': 5,
         'basketball_ncaab': 5,
         'tennis': 4,
         'basketball_wnba': 5,
