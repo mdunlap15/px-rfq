@@ -39,7 +39,9 @@ client/
 | `PX_ACCESS_KEY` | Yes | ProphetX partner API access key |
 | `PX_SECRET_KEY` | Yes | ProphetX partner API secret key |
 | `PX_BASE_URL` | No | Default: `https://cash.api.prophetx.co` (production) |
-| `SHARP_ODDS_API_KEY` | Yes | SharpAPI key (primary odds source, DK+FD free tier) |
+| `SHARP_ODDS_API_KEY` | No | SharpAPI key. **SharpAPI is DECOMMISSIONED** — subscription cancelled 2026-06-25 and every former call-site now checks one gate, `_sharpEnabled()`, which is false unless `SHARPAPI_ENABLED='true'` AND the key is present. A stale key lingering in the environment issues **no** requests. Was "Required: Yes / primary odds source" until 2026-08-21; that was wrong for ~8 weeks. |
+| `SHARPAPI_ENABLED` | No | Emergency re-enable for SharpAPI. Must be the literal string `'true'`. Leave unset — the overlap-window fall-throughs fail closed to TOA (a stale gate declines if TOA is empty), which is the intended behavior. |
+| `TOA_PRIMARY_SPORTS` | No | Comma-separated sport keys for which The Odds API is PRIMARY rather than a fallback. The one-sport-at-a-time migration toggle off SharpAPI; with Sharp decommissioned this now governs which sports take the TOA-primary path. |
 | `THE_ODDS_API_KEY` | No | The Odds API key (fallback for NCAAB, alt lines from Pinnacle) |
 | `SUPABASE_URL` | No | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | No | Supabase service role key |
@@ -169,8 +171,10 @@ is why no golf outright leg had ever been registered or quoted. Registered via
     `T = ties RAW sum ÷ book_overround` = the true ties-included field sum. Measured on The Open:
     T(top_5)=**6.35**, T(top_10)=**12.32** — ties add ~1.35 players at top-5 and ~2.3 at top-10, and
     ties being commoner deeper is an independent check that the derivation is sound. Both sums must
-    come from the SAME player intersection. `datagolf.fetchDeadHeatAnchor()` supplies the anchor and
-    is the ONLY sanctioned use of DataGolf top-N data — it is a calibration constant, never a price.
+    come from the SAME player intersection. `datagolf.fetchDeadHeatAnchor()` supplies the anchor.
+    (Until 2026-07-30 the anchor was the only sanctioned use of DataGolf top-N data — "a calibration
+    constant, never a price". That is no longer true: PRIORITY 2 prices top-N off DataGolf directly,
+    with the same dead-heat gap corrected by `GOLF_TOPN_TIES_UPLIFT` instead of a per-event anchor.)
   - **Coverage**: DK served Winner + Top 5 + Top 10 for The Open but **no Top 20 / no Make Cut**.
     ⚠ **Registration is deliberately NOT gated on the board being warm** (gate REMOVED 2026-07-15).
     The old rule — "a top-N line is registered ONLY when its DK board is loaded, so PX can't send a
@@ -198,8 +202,8 @@ is why no golf outright leg had ever been registered or quoted. Registered via
 
 ## Odds Sources
 
-- **SharpAPI** (`api.sharpapi.io`): Primary source for NBA, MLB, NHL, tennis, soccer. Free tier covers DraftKings + FanDuel
-- **The Odds API** (`api.the-odds-api.com`): Fallback for NCAAB. Also used on-demand for alternate spread/total lines (Pinnacle, DK, FD)
+- **The Odds API** (`api.the-odds-api.com`): **the primary odds source.** Also used on-demand for alternate spread/total lines (Pinnacle, DK, FD). Which sports take the TOA-primary path is governed by `TOA_PRIMARY_SPORTS`.
+- **SharpAPI** (`api.sharpapi.io`): **DECOMMISSIONED** (subscription cancelled 2026-06-25). Formerly primary for NBA/MLB/NHL/tennis/soccer. Every call-site is behind `_sharpEnabled()` (`odds-feed.js:503`) and issues no request unless `SHARPAPI_ENABLED='true'`. Do not describe it as a live source or plan around its coverage.
 - **DK World Cup props scraper** (`scripts/dk-wc-props.js`): NEITHER API above carries
   DraftKings for soccer player props (shots/SoT/goalscorer/assists — BetRivers/FanDuel only,
   and they diverge badly from DK). This scraper pulls them straight off the DK site:
