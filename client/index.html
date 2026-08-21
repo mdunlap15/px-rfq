@@ -1526,6 +1526,12 @@
       // scan, so refetching every cycle piled overlapping scans on the DB and
       // made the timeouts worse.
       if (!window._dvDailyPnlPayload || (Date.now() - (window._dvPnlFetchedAt || 0)) > 90000) {
+        // Daily VOLUME series (count/risk/toWin). Server-side and uncapped so
+        // this table matches /viewer exactly — see GET /daily-volume.
+        fetchJSON('/daily-volume?days=400').then(v => {
+          window._dvDailyVolumePayload = v;
+          if (window._odvLastOrders) renderOrdersDailyVolume(window._odvLastOrders);
+        }).catch(() => {});
         fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
           window._dvDailyPnlPayload = d;
           window._dvPnlFetchedAt = Date.now();
@@ -10266,6 +10272,31 @@
       if (o.pnl != null) {
         byDay[day].pnl += o.pnl;
         byDay[day].settled++;
+      }
+    }
+
+    // count / risk / toWin authoritative from /daily-volume — a server-side
+    // rollup over ALL confirmed+settled orders. The byDay buffer above is built
+    // from the CAPPED /orders payload, and this table renders in two apps that
+    // capped it differently (index.html settled=400, viewer.html settled=800)
+    // and dropped the cap on different UI triggers — so the same day showed
+    // different totals depending on which app and tab you had open, and any day
+    // past the cap was short in both. Empty-array guard for the same reason the
+    // /daily-pnl override has one: a timed-out payload is a truthy [] that would
+    // otherwise blank the columns and never repopulate.
+    //
+    // Applied BEFORE the /daily-pnl override below so that override's
+    // settled-basis risk still wins wherever it has a row; this only supplies
+    // count/toWin and fills risk on days /daily-pnl doesn't cover.
+    const _odvVol = (window._dvDailyVolumePayload && Array.isArray(window._dvDailyVolumePayload.daily)) ? window._dvDailyVolumePayload.daily : null;
+    if (_odvVol && _odvVol.length) {
+      for (const row of _odvVol) {
+        const day = row.date;
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        byDay[day].count = row.count;
+        byDay[day].risk = row.risk;
+        byDay[day].toWin = row.toWin;
       }
     }
 

@@ -3448,6 +3448,58 @@ function getDailyPnLFromMemory(days = 30, groupBy = 'settled_at') {
   return _rollupDailyPnL(Object.values(orders), days, groupBy);
 }
 
+/**
+ * Daily VOLUME rollup — count / risk / toWin per ET day, bucketed on the FILL
+ * date (confirmedAt, falling back to quotedAt) across confirmed AND settled
+ * parlays. Deliberately mirrors renderOrdersDailyVolume's client-side
+ * bucketing, including its reconstructed-row guard, so the Daily Volume & P&L
+ * table can be sourced entirely server-side.
+ *
+ * WHY THIS EXISTS (2026-08-21): those three columns were summed from the
+ * /orders payload, which is capped (?settled=N) — and the two clients used
+ * DIFFERENT caps (index.html 400, viewer.html 800) with DIFFERENT uncap
+ * triggers (desktop on the analytics/lost sections, viewer on the settled
+ * positions tab). So the same day rendered different totals depending on which
+ * app you opened and which tab was active, and every day past the cap was
+ * silently short in BOTH. This rollup runs over the full in-memory orders map,
+ * so every client sees identical, untruncated numbers by construction.
+ *
+ * Scope is deliberately narrow: P&L and settled counts still come from
+ * /daily-pnl on its settled_at basis. Duplicating them here would give the
+ * table two competing sources for the same cell.
+ */
+function _rollupDailyVolume(list, days = 400) {
+  const cutoff = Date.now() - days * 24 * 3600 * 1000;
+  const byDay = {};
+  for (const o of list) {
+    if (!o || !o.status) continue;
+    if (o.status !== 'confirmed' && !String(o.status).startsWith('settled_')) continue;
+    // Same guard the client applies: a reconstructed row with no quote time is
+    // a phantom, not a fill.
+    if (!o.quotedAt && o.meta && o.meta.reconstructed) continue;
+    const ts = o.confirmedAt || o.quotedAt;
+    if (!ts) continue;
+    const ms = new Date(ts).getTime();
+    if (!Number.isFinite(ms) || ms < cutoff) continue;
+    const day = new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (!byDay[day]) byDay[day] = { date: day, count: 0, risk: 0, toWin: 0 };
+    const d = byDay[day];
+    d.count++;
+    const stake = Number(o.confirmedStake || 0);
+    d.risk += stake;
+    // Mirrors the client's calcSpProfit: our profit is the bettor's stake, so
+    // at American odds it is stake × 100 / |odds|. Sub-100 odds are not a real
+    // PX price and contribute 0 rather than a divide-by-tiny blowup.
+    const odds = Math.abs(Number(o.offeredOdds || 0));
+    if (stake && odds >= 100) d.toWin += stake * 100 / odds;
+  }
+  return Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function getDailyVolumeFromMemory(days = 400) {
+  return _rollupDailyVolume(Object.values(orders), days);
+}
+
 // Realized ROI over a trailing window (default 15 days): sum of settled parlay
 // P&L ÷ sum of settled parlay stake, for orders SETTLED within `days`. Computed
 // from the in-memory orders map (loadFromDb holds the full fill history up to
@@ -7677,7 +7729,9 @@ module.exports = {
   __toBettorSideOdds: _toBettorSideOdds,
   getRoiWindow,
   getDailyPnLFromMemory,
+  getDailyVolumeFromMemory,
   _rollupDailyPnL,
+  _rollupDailyVolume,
   getEvCurve,
   getVoidAdjustedCalibration,
   getStats,

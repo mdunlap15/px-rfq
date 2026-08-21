@@ -878,7 +878,7 @@ function startStatusServer() {
   // Viewers cannot reach /, /index.html, or any admin POST endpoint —
   // the middleware below rejects with 403.
   const AUTH_VIEWER_PATHS = new Set(
-    (process.env.AUTH_VIEWER_PATHS || '/edge-vs-fair.html,/viewer,/viewer.html,/status,/orders,/me,/bankroll,/daily-pnl,/viewer/manifest.json,/viewer/sw.js,/viewer/icon-192.svg,/viewer/icon-512.svg,/push/vapid-key,/push/subscribe,/push/unsubscribe,/push/mute-prefs,/wow-analysis,/wow-analysis.html')
+    (process.env.AUTH_VIEWER_PATHS || '/edge-vs-fair.html,/viewer,/viewer.html,/status,/orders,/me,/bankroll,/daily-pnl,/daily-volume,/viewer/manifest.json,/viewer/sw.js,/viewer/icon-192.svg,/viewer/icon-512.svg,/push/vapid-key,/push/subscribe,/push/unsubscribe,/push/mute-prefs,/wow-analysis,/wow-analysis.html')
       .split(',').map(s => s.trim()).filter(Boolean)
   );
   if (AUTH_ENABLED) {
@@ -4449,6 +4449,20 @@ function startStatusServer() {
       res.json({ daily, totalPnL, groupBy });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Daily VOLUME series (count / risk / toWin per ET day) for the Daily Volume
+  // & P&L table. Server-side so the desktop dashboard and /viewer render the
+  // SAME numbers: both used to sum these three columns out of the capped
+  // /orders payload using different caps (400 vs 800) and different uncap
+  // triggers, so their daily totals disagreed. See getDailyVolumeFromMemory.
+  app.get('/daily-volume', (req, res) => {
+    const days = parseInt(req.query.days) || 400;
+    try {
+      res.json({ ok: true, days, daily: orderTracker.getDailyVolumeFromMemory(days) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
