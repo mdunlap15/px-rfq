@@ -8546,6 +8546,7 @@
       'icehockey_nhl': 'NHL',
       'tennis': 'Tennis',
       'americanfootball_nfl': 'NFL',
+      'americanfootball_nfl_preseason': 'NFL Preseason',
       'americanfootball_ncaaf': 'NCAAF',
       'americanfootball_cfl': 'CFL',
       'soccer': 'Soccer',
@@ -8654,6 +8655,7 @@
     if (s === 'mma_mixed_martial_arts' || s === 'mma' || s === 'ufc') return 'MMA';
     if (s === 'boxing_boxing' || s === 'boxing') return 'Boxing';
     // Football (unlikely today but supported sports key)
+    if (s === 'americanfootball_nfl_preseason' || s === 'nfl_preseason') return 'NFL Preseason';
     if (s === 'americanfootball_nfl' || s === 'nfl') return 'NFL';
     if (s === 'americanfootball_ncaaf' || s === 'ncaaf') return 'NCAAF';
     // Last resort — Title-case the raw value so it still renders readably
@@ -15986,6 +15988,10 @@
     { value: 'basketball_ncaab', label: 'NCAAB' },
     { value: 'americanfootball_ncaaf', label: 'NCAAF' },
     { value: 'americanfootball_nfl', label: 'NFL' },
+    // Preseason is a SEPARATE sport key with its own lines. Without this entry
+    // selecting "NFL" filtered to the regular-season key (0 lines in August)
+    // and every preseason line was unreachable from this dropdown.
+    { value: 'americanfootball_nfl_preseason', label: 'NFL Preseason' },
     { value: 'icehockey_nhl', label: 'NHL' },
     { value: 'soccer_usa_nwsl', label: 'NWSL' },
     { value: 'soccer_italy_serie_a', label: 'Serie A' },
