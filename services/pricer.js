@@ -5,6 +5,7 @@ const oddsFeed = require('./odds-feed');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
 const ufcMov = require('./ufc-mov');
+const nflConsensus = require('./nfl-consensus');
 // UFC method-of-victory market types. PX posts them typed 'moneyline'; the
 // parser retags by market NAME (see prophetx.parseMarketSelections).
 const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
@@ -1188,6 +1189,38 @@ function priceParlay(legs, opts = {}) {
       }
       fairProbs[i] = hit.fairProb;   // getMovFairForLine already applied the yes/no side
       continue;
+    }
+    // FOOTBALL — operator's PX Order Book sourcing methodology (2026-08-21):
+    // TOA per-event across us,us2,uk,eu,au over a 9-book universe, per-side
+    // MEDIAN of raw implied probs, >= 2 books on that exact line or decline,
+    // then de-vigged here because priceParlay multiplies FAIR probs (the
+    // operator's consensus deliberately RETAINS vig — it mirrors the retail
+    // price a counterparty pays, so feeding it in raw would charge the book's
+    // margin twice). Also the only path that sources 1st-quarter and team-total
+    // legs at all.
+    //
+    // COLD board falls through to the legacy odds path — a missing line costs
+    // the whole market while a decline costs one RFQ (the golf top-N lesson).
+    // A FRESH board that can't price the line DECLINES, because that is the
+    // 2-book rule doing its job and falling through would quote the very line
+    // the rule exists to refuse.
+    if (s.lineInfo && nflConsensus.isFootball(s.lineInfo.sport)) {
+      const li = s.lineInfo;
+      const hit = nflConsensus.getNflFairForLine(li);
+      if (hit != null) {
+        fairProbs[i] = hit.fairProb;
+        s.fairBasis = hit.basis;
+        continue;
+      }
+      if (nflConsensus.hasFreshBoard(li.sport, li.homeTeam, li.awayTeam)) {
+        priceParlay._lastFailure = {
+          reason: 'no_fair_value',
+          detail: `${li.teamName || '?'} ${li.marketType}${li.line != null ? ' ' + li.line : ''} — football consensus has <2 books on that exact line`,
+          blockerLeg: { team: li.teamName, market: li.marketType, sport: li.sport },
+        };
+        return null;
+      }
+      // cold board — fall through to the legacy path below
     }
     if (s.lineInfo && s.lineInfo.sport === 'golf_outrights') {
       const hit = golfOutrightFair(s.lineInfo);

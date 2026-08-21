@@ -161,6 +161,7 @@ function _classifySoccerProp(marketName) {
 const log = require('./logger');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
+const nflConsensus = require('./nfl-consensus');
 const dataGolf = require('./datagolf');
 const golfTopN = require('./golf-topn');
 const ufcMov = require('./ufc-mov');
@@ -1621,6 +1622,15 @@ async function seedAllLines() {
           || /^set\s*1\s+moneyline\s*$/i.test(m.name || '')
           || /^total\s+sets\s*$/i.test(m.name || '')
           || /\bto\s+win\s+at\s+least\s+(?:one|1)\s+set\s*$/i.test(m.name || ''));
+      // ⚠ FOOTBALL 1st QUARTER is deliberately still excluded here. TOA does
+      // serve h2h_q1 (and services/nfl-consensus sources it), so the fair value
+      // is available — but PX types "1st Quarter Moneyline" as plain
+      // `moneyline`, "1st Quarter Spread" as `spread` and "1st Quarter Total
+      // Points" as `total` (probe 2026-08-21, Jets @ Steelers). That is the
+      // BTTS/MoV trap: relaxing this line alone would let a Q1 leg parse as a
+      // FULL-GAME leg and be priced off the full-game line. Q1 needs a
+      // name-based retag in parseMarketSelections to first_quarter_* FIRST;
+      // only then is admitting it here safe.
       if (!isTennisSetsMarket && excludePatterns.test(m.name)) return false;
       // Allow F5 markets by name pattern
       const isF5 = f5NamePattern.test(m.name || '');
@@ -2584,6 +2594,23 @@ async function seedAllLines() {
         await oddsFeed.ensureBtts(sportKey, matchedHome, matchedAway, event.scheduled || null);
       } catch (err) {
         log.warn('Lines', `btts pre-seed error for ${event.name}: ${err.message}`);
+      }
+    }
+
+    // ----- PRE-SEED FOOTBALL CONSENSUS (same guarantee, same reason) -----
+    // services/nfl-consensus reads a SYNC cache on the RFQ hot path, so a game
+    // whose board was never warmed prices off nothing. Warming here — the same
+    // place team_totals and BTTS are warmed — is what makes the wider region
+    // set and 9-book median actually reach a quote. Single-flighted, TTL-cached
+    // and internally paced (~1 req/s) because TOA rate-limits on request
+    // FREQUENCY and a 429 reads downstream as "no coverage", not as an error.
+    // Fail-open: a miss leaves the board cold and the pricer falls through to
+    // the legacy odds path for this cycle.
+    if (nflConsensus.isFootball(sportKey) && matchedHome && matchedAway) {
+      try {
+        await nflConsensus.ensureNflConsensus(sportKey, matchedHome, matchedAway, event.scheduled || null);
+      } catch (err) {
+        log.warn('Lines', `football consensus pre-seed error for ${event.name}: ${err.message}`);
       }
     }
 
