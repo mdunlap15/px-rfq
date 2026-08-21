@@ -793,9 +793,29 @@ const FIRST_HALF_MARKET_TYPES = [
   '1st_half_total_points',
 ];
 
+// 1st-QUARTER market types, produced by prophetx.parseMarketSelections' quarter
+// retag. Only Q1 is registered (see the carve-out in the seed filter): TOA
+// serves h2h_q1/spreads_q1/totals_q1 and nothing for Q2-Q4, so admitting the
+// later quarters would register lines that can only ever decline.
+const QUARTER_1_MARKET_TYPES = [
+  'quarter_1_moneyline',
+  'quarter_1_spread',
+  'quarter_1_total',
+];
+
+// Sports whose 1st-quarter markets we register. Football only — the quarter
+// retag itself is sport-agnostic, but the SOURCE (services/nfl-consensus) is
+// football-only, so registering NBA quarters would just add declines.
+const FOOTBALL_Q1_SPORTS = new Set([
+  'americanfootball_nfl',
+  'americanfootball_nfl_preseason',
+  'americanfootball_ncaaf',
+]);
+
 // Sports whose team-total markets we inline-source at seed time (team totals
 // live only on TOA's per-event endpoint; see oddsFeed.ensureTeamTotals). NBA/
-// NHL are offseason now but wired for their return.
+// NHL are offseason now but wired for their return. Football team totals are
+// sourced by services/nfl-consensus instead, so they are NOT listed here.
 const TEAM_TOTAL_SEED_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
 
 // ---------------------------------------------------------------------------
@@ -1622,16 +1642,26 @@ async function seedAllLines() {
           || /^set\s*1\s+moneyline\s*$/i.test(m.name || '')
           || /^total\s+sets\s*$/i.test(m.name || '')
           || /\bto\s+win\s+at\s+least\s+(?:one|1)\s+set\s*$/i.test(m.name || ''));
-      // ⚠ FOOTBALL 1st QUARTER is deliberately still excluded here. TOA does
-      // serve h2h_q1 (and services/nfl-consensus sources it), so the fair value
-      // is available — but PX types "1st Quarter Moneyline" as plain
-      // `moneyline`, "1st Quarter Spread" as `spread` and "1st Quarter Total
-      // Points" as `total` (probe 2026-08-21, Jets @ Steelers). That is the
-      // BTTS/MoV trap: relaxing this line alone would let a Q1 leg parse as a
-      // FULL-GAME leg and be priced off the full-game line. Q1 needs a
-      // name-based retag in parseMarketSelections to first_quarter_* FIRST;
-      // only then is admitting it here safe.
-      if (!isTennisSetsMarket && excludePatterns.test(m.name)) return false;
+      // FOOTBALL 1st QUARTER carve-out (2026-08-21). excludePatterns rejects
+      // "1st quarter" for every sport because we had no source for quarters —
+      // still true everywhere except football, where TOA serves h2h_q1 /
+      // spreads_q1 / totals_q1 and services/nfl-consensus sources them under
+      // the operator's 2-book median rule.
+      //
+      // SAFE because the type collision is already handled upstream:
+      // prophetx.parseMarketSelections retags these by NAME to
+      // quarter_1_moneyline / quarter_1_spread / quarter_1_total, so a Q1 leg
+      // can never alias the full-game line (PX types all three as plain
+      // moneyline/spread/total — the BTTS/MoV trap). That retag covers Q1-Q4;
+      // we admit ONLY 1st quarter here because TOA has no source for Q2-Q4.
+      //
+      // Anchored to the exact PX names, so no other quarter derivative slips
+      // through. Registration is NOT gated on the consensus board being warm:
+      // pricing fails closed on a cold board, and de-registering churns PX's
+      // supported set (the golf top-N lesson).
+      const isFootballQ1Market = FOOTBALL_Q1_SPORTS.has(sportKey)
+        && /^1st\s+quarter\s+(moneyline|spread|total\s+points)\s*$/i.test(m.name || '');
+      if (!isTennisSetsMarket && !isFootballQ1Market && excludePatterns.test(m.name)) return false;
       // Allow F5 markets by name pattern
       const isF5 = f5NamePattern.test(m.name || '');
       const isH1 = h1NamePattern.test(m.name || '') || FIRST_HALF_MARKET_TYPES.includes(m.type);
@@ -3259,7 +3289,7 @@ async function resolveUnknownLine(rfqLeg) {
 
       // First pass: find which market contains this line_id (any type)
       // so we can log unsupported market types for diagnostics.
-      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...MOV_MARKET_TYPES, ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES];
+      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...MOV_MARKET_TYPES, ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES, ...QUARTER_1_MARKET_TYPES];
       // Series markets (winner/spread/total) are structurally
       // moneyline/spread/total but named "Series Winner/Spread/Total
       // Games". resolveUnknownLine accepts the regular PX types and

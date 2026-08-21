@@ -49,7 +49,9 @@ const NFL_REGIONS = process.env.NFL_CONSENSUS_REGIONS || 'us,us2,uk,eu,au';
 // Market keys pulled in ONE call per event. spreads_q1/totals_q1 are ours, not
 // in the operator's list: PX posts "1st Quarter Spread" and "1st Quarter Total
 // Points" for every game, and without these two keys those legs register but
-// can never price.
+// can never price. Types match prophetx.parseMarketSelections' quarter retag
+// (quarter_1_*), which already exists and is what stops a Q1 leg aliasing the
+// full-game line.
 const NFL_MARKET_KEYS = (process.env.NFL_CONSENSUS_MARKETS
   || 'h2h,h2h_h1,h2h_q1,spreads,alternate_spreads,spreads_h1,spreads_q1,'
    + 'totals,alternate_totals,totals_h1,totals_q1,team_totals,alternate_team_totals')
@@ -74,15 +76,15 @@ const FOOTBALL_SPORTS = new Set([
 const MARKET_MAP = {
   h2h:                     { type: 'moneyline' },
   h2h_h1:                  { type: 'first_half_moneyline' },
-  h2h_q1:                  { type: 'first_quarter_moneyline' },
+  h2h_q1:                  { type: 'quarter_1_moneyline' },
   spreads:                 { type: 'spread', main: true },
   alternate_spreads:       { type: 'spread' },
   spreads_h1:              { type: 'first_half_spread', main: true },
-  spreads_q1:              { type: 'first_quarter_spread', main: true },
+  spreads_q1:              { type: 'quarter_1_spread', main: true },
   totals:                  { type: 'total', main: true },
   alternate_totals:        { type: 'total' },
   totals_h1:               { type: 'first_half_total', main: true },
-  totals_q1:               { type: 'first_quarter_total', main: true },
+  totals_q1:               { type: 'quarter_1_total', main: true },
   team_totals:             { type: 'team_total', main: true },
   alternate_team_totals:   { type: 'team_total' },
 };

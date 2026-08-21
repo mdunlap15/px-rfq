@@ -167,7 +167,7 @@ test('quarter markets are carried through with their own marketType', () => {
     mkBook('betrivers', [{ key: 'h2h_q1', outcomes: [
       { name: 'Pittsburgh Steelers', price: -125 }, { name: 'New York Jets', price: 105 }] }]),
   ]));
-  assert.ok(b.markets.first_quarter_moneyline, 'q1 moneyline is sourced');
+  assert.ok(b.markets.quarter_1_moneyline, 'q1 moneyline is sourced');
   assert.ok(!b.markets.moneyline, 'and does not leak into the full-game bucket');
 });
 
