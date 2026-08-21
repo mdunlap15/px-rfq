@@ -141,8 +141,21 @@ is why no golf outright leg had ever been registered or quoted. Registered via
   - `win` — sum of P(win) over the field is EXACTLY 1 (a 72-hole tie goes to a playoff), so the
     book field is **power-normalized to 1.0** → a true fair. Verified field sum 1.01.
   - `make_cut` — binary; **power 2-way de-vig** of make vs miss (see Odds Sources).
-  - `top_5/10/20` — **DK's "(Including Ties)" board ONLY** (`services/golf-topn.js`).
-    **DataGolf must NEVER price these**: it CONVERTS book odds to DEAD-HEAT rather than relaying the
+  - `top_5/10/20` — **TWO-TIER chain** (`pricer.js` `golfOutrightFair`), not DK-only:
+    **PRIORITY 1** = the operator's DK "(Including Ties)" paste / scrape board (`golf-topn.js`);
+    **PRIORITY 2** = DataGolf, **RESTORED 2026-07-30** (operator directive: quote outrights for
+    every tournament from a reliable source — DataGolf carries 11-14 books per market pre-tournament,
+    which neither the Railway-blocked DK scrape nor a manual paste can match).
+    The 2026-07-18 removal was about **BASIS, not reliability**, and that basis is now corrected
+    inside `datagolf.fetchOutrightBoard`: top-N is power-normalized to `N × GOLF_TOPN_TIES_UPLIFT`,
+    **default 1.27, ON by default** (not opt-in — uncorrected, our YES price is ~25% too cheap and
+    we lay the NO, so the gap is our loss on every ticket). 1.27 is measured: T(top_5)=6.35 vs
+    nominal 5 is exact; 10×1.27=12.70 sits ~3% ABOVE the measured T(top_10)=12.32 — deliberately the
+    safe direction. `GOLF_TOPN_TIES_UPLIFT=0` falls back to raw consensus.
+    ⚠ So `/golf-topn` reporting `priceable:false` does **NOT** mean top-N is dark — it describes
+    PRIORITY 1 only. Verify tier 2 before declaring an outage (2026-08-21: `/golf-topn` was 50h
+    stale with Chromium failing to launch on Railway, and outrights were quoting fine off DataGolf).
+    The reason DataGolf can't be used **raw** still stands: it CONVERTS book odds to DEAD-HEAT rather than relaying the
     book's posted price. Proven on The Open, same book/market/moment — Scheffler "Top 5 (Including
     Ties)" on DK's site **+144 (41.0%)** vs DataGolf's `draftkings` top_5 **+178 (36.0%)**; field
     sums DK-site **7.96** vs DataGolf **6.27** (nominal 5); top_10 **14.54** vs **11.80**. All ~150
@@ -159,7 +172,17 @@ is why no golf outright leg had ever been registered or quoted. Registered via
     come from the SAME player intersection. `datagolf.fetchDeadHeatAnchor()` supplies the anchor and
     is the ONLY sanctioned use of DataGolf top-N data — it is a calibration constant, never a price.
   - **Coverage**: DK served Winner + Top 5 + Top 10 for The Open but **no Top 20 / no Make Cut**.
-    A top-N line is registered ONLY when its DK board is loaded, so PX can't send a leg we'd decline.
+    ⚠ **Registration is deliberately NOT gated on the board being warm** (gate REMOVED 2026-07-15).
+    The old rule — "a top-N line is registered ONLY when its DK board is loaded, so PX can't send a
+    leg we'd decline" — was actively harmful: the DK scrape takes ~150s while seeds run every ~2min,
+    and `seedAllLines` is **build-then-swap**, so skipping a line DELETES it from the live index.
+    Top-N registration FLAPPED on every boot and scrape hiccup, PX stopped sending those RFQs, and
+    it surfaced as "we aren't quoting Top 5". **A missing line is far worse than a declined RFQ** —
+    a decline costs one RFQ; a missing line costs the whole market and churns PX's supported set.
+    Registration means "PX may ask us"; PRICING decides whether we answer, and it fails closed
+    (`getTopNFairProbSync` returns null on a cold/stale/absent board). make_cut is the same shape:
+    all ~156 players register though only ~97 can price. **Do not "fix" this by de-registering
+    stale lines.**
   - **DK scrape is ~142s (Puppeteer)** → background warm on `GOLF_TOPN_TTL_MIN`, sync cache read on
     the hot path. Cold-start is by design: first seed registers win/make_cut only; the next seed
     picks up top-N. `golf-topn.js` also refuses if DK's market name doesn't literally say
@@ -252,7 +275,7 @@ PX and odds APIs use different team names. Matching strategies (in order):
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
 | `/ufc-mov` | GET | UFC method-of-victory board: per-fight de-vigged KO/SUB/DEC/ITD fairs, age, `priceable`. **First stop when a MoV leg won't quote.** `?force=1` kicks a fresh scrape. |
-| `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. **First stop when top-N isn't quoting**: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. |
+| `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. Diagnose with: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. ⚠ **This reports PRIORITY 1 ONLY.** `priceable:false` does NOT mean top-N is dark — DataGolf is priority 2 and quotes fine on its own. To test whether outrights actually price, call `datagolf.getOutrightFairProbSync(player, marketType, tournament)` after a warm, or read `basis` on a live quote. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
 | `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |
 
