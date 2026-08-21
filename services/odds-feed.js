@@ -1176,6 +1176,19 @@ const H1_SUPPLEMENT_SPORTS = new Set(
     || 'basketball_nba,americanfootball_nfl,americanfootball_nfl_preseason,americanfootball_ncaaf')
     .split(',').map(s => s.trim()).filter(Boolean)
 );
+// 1st-QUARTER add-on (2026-08-21). Same per-event-endpoint trap as H1, and
+// TOA serves h2h_q1/spreads_q1/totals_q1 for football (verified on a
+// not-started preseason event: 42 books, 20 market keys incl. all three).
+// Football only — Q2-Q4 have no source, so we never ask for them. Riding the
+// H1 supplement rather than adding a second per-event call matters: TOA rate-
+// limits on request FREQUENCY, so one call carrying both sets is strictly
+// cheaper than two.
+const Q1_SUPPLEMENT_SPORTS = new Set(
+  (process.env.Q1_SUPPLEMENT_SPORTS
+    || 'americanfootball_nfl,americanfootball_nfl_preseason,americanfootball_ncaaf')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+
 // Log/retry label: keeps the NBA strings byte-identical to the pre-
 // generalization implementation (dashboards and log greps key on them).
 const _h1Label = (sport) => sport === 'basketball_nba' ? 'NBA H1' : `${sport} H1`;
@@ -1854,7 +1867,16 @@ async function getRfiFair(sport, homeTeam, awayTeam, commenceTime) {
 // for this cycle (no worse than today). Fail-closed on started/unknown-start
 // games (we don't quote team totals live).
 // ---------------------------------------------------------------------------
-const TEAM_TOTAL_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
+// Football joined 2026-08-21: PX posts BOTH team totals on every NFL event
+// (27 markets across one not-started slate) and TOA serves team_totals +
+// alternate_team_totals for preseason. Until football was in this set the
+// per-event fetch never ran, so oddsEvt.markets.team_totals stayed empty and
+// the T1.8 football fail-closed guard in line-manager correctly refused to
+// register the lines. Adding it here is what lets that guard pass honestly.
+const TEAM_TOTAL_SPORTS = new Set([
+  'baseball_mlb', 'basketball_nba', 'icehockey_nhl',
+  'americanfootball_nfl', 'americanfootball_nfl_preseason', 'americanfootball_ncaaf',
+]);
 const TEAM_TOTAL_BOOKMAKERS = process.env.TEAM_TOTAL_BOOKMAKERS || 'pinnacle,draftkings,fanduel,betmgm';
 const TEAM_TOTAL_TTL_MS = (parseInt(process.env.TEAM_TOTAL_TTL_SECONDS) || 240) * 1000;
 const _teamTotalCache = {};    // key -> { at, tt|null, toaHome, toaAway }
@@ -2215,7 +2237,9 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
     const arr = Array.isArray(entry) ? entry : [entry];
     for (const ev of arr) {
       if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
-      if (ev.markets && ev.markets.h2h_h1 && ev.markets.spreads_h1 && ev.markets.totals_h1) continue;
+      const _needQ1 = Q1_SUPPLEMENT_SPORTS.has(sport)
+        && !(ev.markets && ev.markets.h2h_q1 && ev.markets.spreads_q1 && ev.markets.totals_q1);
+      if (ev.markets && ev.markets.h2h_h1 && ev.markets.spreads_h1 && ev.markets.totals_h1 && !_needQ1) continue;
       candidates.push(ev);
     }
   }
@@ -2237,7 +2261,7 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
       const url = `https://api.the-odds-api.com/v4/sports/${resolved.oddsApiSport || sport}/events/${resolved.eventId}/odds`
         + `?apiKey=${theOddsApiKey}`
         + `&regions=us,eu`
-        + `&markets=h2h_h1,spreads_h1,totals_h1`
+        + `&markets=h2h_h1,spreads_h1,totals_h1${Q1_SUPPLEMENT_SPORTS.has(sport) ? ',h2h_q1,spreads_q1,totals_q1' : ''}`
         + `&bookmakers=pinnacle,draftkings,fanduel`
         + `&oddsFormat=american`;
 
@@ -2248,9 +2272,33 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
         const data = await resp.json();
 
         const mlPairs = [], spreadPairs = [], totalPairs = [];
+        const q1MlPairs = [], q1SpreadPairs = [], q1TotalPairs = [];
         for (const book of (data.bookmakers || [])) {
           for (const m of (book.markets || [])) {
-            if (m.key === 'h2h_h1') {
+            if (m.key === 'h2h_q1' || m.key === 'spreads_q1' || m.key === 'totals_q1') {
+              // 1st quarter — identical pair shapes to H1, kept in their own
+              // accumulators so a Q1 price can never be folded into an H1
+              // consensus (they are different markets with similar numbers).
+              if (m.key === 'h2h_q1') {
+                const home = m.outcomes?.find(o => o.name === data.home_team);
+                const away = m.outcomes?.find(o => o.name === data.away_team);
+                if (home && away) q1MlPairs.push({ book: book.key,
+                  home: { odds_probability: americanToImpliedProb(home.price), odds_american: home.price },
+                  away: { odds_probability: americanToImpliedProb(away.price), odds_american: away.price } });
+              } else if (m.key === 'spreads_q1') {
+                const home = m.outcomes?.find(o => o.name === data.home_team);
+                const away = m.outcomes?.find(o => o.name === data.away_team);
+                if (home && away) q1SpreadPairs.push({ book: book.key,
+                  home: { odds_probability: americanToImpliedProb(home.price), odds_american: home.price, point: home.point, line: home.point },
+                  away: { odds_probability: americanToImpliedProb(away.price), odds_american: away.price, point: away.point, line: away.point } });
+              } else {
+                const over = m.outcomes?.find(o => o.name === 'Over');
+                const under = m.outcomes?.find(o => o.name === 'Under');
+                if (over && under) q1TotalPairs.push({ book: book.key,
+                  over: { odds_probability: americanToImpliedProb(over.price), odds_american: over.price, point: over.point, line: over.point },
+                  under: { odds_probability: americanToImpliedProb(under.price), odds_american: under.price, point: under.point, line: under.point } });
+              }
+            } else if (m.key === 'h2h_h1') {
               const home = m.outcomes?.find(o => o.name === data.home_team);
               const away = m.outcomes?.find(o => o.name === data.away_team);
               if (home && away) {
@@ -2291,6 +2339,17 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
         if (spreadPairs.length > 0) {
           const sp = buildConsensusSpread(spreadPairs);
           if (sp) { ev.markets.spreads_h1 = _mergeSupplementedMarket(ev.markets.spreads_h1, sp); spreadCount++; }
+        }
+        if (q1MlPairs.length > 0) {
+          const mk = buildConsensusMoneyline(q1MlPairs);
+          if (mk) ev.markets.h2h_q1 = _mergeSupplementedMarket(ev.markets.h2h_q1, mk);
+        }
+        if (q1SpreadPairs.length > 0) {
+          const sp = buildConsensusSpread(q1SpreadPairs);
+          if (sp) ev.markets.spreads_q1 = _mergeSupplementedMarket(ev.markets.spreads_q1, sp);
+        }
+        if (q1TotalPairs.length > 0) {
+          ev.markets.totals_q1 = _mergeSupplementedMarket(ev.markets.totals_q1, buildConsensusTotals(q1TotalPairs));
         }
         if (totalPairs.length > 0) {
           ev.markets.totals_h1 = _mergeSupplementedMarket(ev.markets.totals_h1, buildConsensusTotals(totalPairs));

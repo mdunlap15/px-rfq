@@ -770,6 +770,11 @@ const MARKET_TYPE_MAP = {
   '1st_half_total': 'totals_h1',
   'first_half_total_points': 'totals_h1',
   '1st_half_total_points': 'totals_h1',
+  // 1st Quarter (football). Without these the seed resolved oddsApiMarket to
+  // undefined and dropped every Q1 selection before it could register.
+  'quarter_1_moneyline': 'h2h_q1',
+  'quarter_1_spread': 'spreads_q1',
+  'quarter_1_total': 'totals_q1',
 };
 
 const F5_MARKET_TYPES = [
@@ -816,7 +821,10 @@ const FOOTBALL_Q1_SPORTS = new Set([
 // live only on TOA's per-event endpoint; see oddsFeed.ensureTeamTotals). NBA/
 // NHL are offseason now but wired for their return. Football team totals are
 // sourced by services/nfl-consensus instead, so they are NOT listed here.
-const TEAM_TOTAL_SEED_SPORTS = new Set(['baseball_mlb', 'basketball_nba', 'icehockey_nhl']);
+const TEAM_TOTAL_SEED_SPORTS = new Set([
+  'baseball_mlb', 'basketball_nba', 'icehockey_nhl',
+  'americanfootball_nfl', 'americanfootball_nfl_preseason', 'americanfootball_ncaaf',
+]);
 
 // ---------------------------------------------------------------------------
 // GOLF OUTRIGHTS — parlay leg registration
@@ -2007,6 +2015,20 @@ async function seedAllLines() {
             }
           } else if (sel.marketType.includes('total')) {
             oddsApiSelection = sel.selection; // 'over' or 'under'
+          }
+        } else if (QUARTER_1_MARKET_TYPES.includes(sel.marketType)) {
+          // 1st Quarter (football) — same selection logic as full-game.
+          // WITHOUT this branch oddsApiSelection stays null and the gate below
+          // drops every Q1 selection, which is exactly why relaxing the seed's
+          // exclude filter for Q1 registered ZERO lines (measured 2026-08-21).
+          if (sel.marketType.includes('moneyline')) {
+            if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'home') oddsApiSelection = 'home';
+            else if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'away') oddsApiSelection = 'away';
+          } else if (sel.marketType.includes('spread')) {
+            if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'home') oddsApiSelection = 'home';
+            else if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'away') oddsApiSelection = 'away';
+          } else if (sel.marketType.includes('total')) {
+            oddsApiSelection = sel.selection; // 'over' | 'under'
           }
         } else if (FIRST_HALF_MARKET_TYPES.includes(sel.marketType)) {
           // First Half (NBA) — same selection logic as full-game for h2h/spreads/totals
