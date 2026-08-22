@@ -2944,6 +2944,58 @@ async function fetchFromTheOddsApi(sport) {
       };
     }
 
+    // --- 3-WAY moneyline (home / draw / away) ---
+    //
+    // markets.h2h above deliberately DROPS the draw and 2-way de-vigs the
+    // home/away pair, which is the right input for PX's "Moneyline (2 Way)"
+    // draw-no-bet product. But PX ALSO posts the true 3-way as separate
+    // markets -- "<Team> to Win (90 Min)" and "Draw (90 Min)" -- and those
+    // cannot be priced off a DNB number: a DNB home price is P(home | no
+    // draw), which is materially higher than P(home). Quoting one as the
+    // other would systematically overprice every home/away win leg.
+    //
+    // So store the 3-way separately rather than changing h2h. Nothing reads
+    // this yet; it exists so the 3-way markets have a correct basis to price
+    // from. Measured on the live board (Bristol City @ Birmingham City,
+    // 2026-08-22): raw 56.52/28.57/22.22 summing to 107.32% de-vigs to
+    // 54.15/26.00/19.85. The DNB home number for the same game is ~73%,
+    // which is why these must not be interchanged.
+    const threeWay = [];
+    for (const book of allBooks) {
+      const mk = book.markets?.find(m => m.key === 'h2h');
+      if (!mk) continue;
+      const h = mk.outcomes?.find(o => o.name === event.home_team);
+      const a = mk.outcomes?.find(o => o.name === event.away_team);
+      const d = mk.outcomes?.find(o => String(o.name).toLowerCase() === 'draw');
+      // No draw outcome means this is a genuine 2-way sport, not a soccer
+      // book that happens to be missing one leg -- skip silently.
+      if (!h || !a || !d) continue;
+      const ph = americanToImpliedProb(h.price);
+      const pd = americanToImpliedProb(d.price);
+      const pa = americanToImpliedProb(a.price);
+      const fair = deVig3WayPower(ph, pd, pa);
+      if (!fair) continue;
+      threeWay.push({ book: book.key, fair, raw: { home: h.price, draw: d.price, away: a.price } });
+    }
+    if (threeWay.length > 0) {
+      // Same book-quality filter the 2-way consensus uses, so a high-vig
+      // outlier cannot drag the 3-way mean where it cannot drag the 2-way.
+      const kept = filterSharpBooks(
+        excludeKalshiFromConsensus(threeWay),
+        t => [t.fair[0], t.fair[2]],
+        'toa-moneyline-3way'
+      );
+      const use = kept.length > 0 ? kept : threeWay;
+      const pick = (i) => avg(use.map(t => t.fair[i]));
+      markets.h2h_3way = {
+        home: { fairProb: pick(0), rawOdds: use[0].raw.home },
+        draw: { fairProb: pick(1), rawOdds: use[0].raw.draw },
+        away: { fairProb: pick(2), rawOdds: use[0].raw.away },
+        books: use.length,
+        source: 'toa-3way-power',
+      };
+    }
+
     // Spreads — line-aware consensus. Tag each book's pair with its posted
     // line so buildConsensusSpread keys de-vig BY LINE (modal line = primary,
     // every other posted line preserved in byLine for alt-line RFQs). The
@@ -3647,6 +3699,39 @@ function buildConsensusTotals(bookPairs) {
 // ---------------------------------------------------------------------------
 // DE-VIG
 // ---------------------------------------------------------------------------
+
+// Power (odds-ratio) de-vig for a 3-way market: home / draw / away.
+//
+// Soccer books do NOT spread their margin evenly across the three outcomes --
+// they load it on the longshots (the draw and the underdog). Proportional
+// de-vig therefore underrates the favourite, the same bias measured on the
+// structurally identical golf make-cut board (-4.15pp proportional vs -0.83pp
+// power) and on the UFC 6-way method-of-victory board. Power normalisation
+// solves for the exponent k where sum(p_i^k) == 1, which shrinks longshots
+// harder than favourites and matches book behaviour.
+//
+// Returns [home, draw, away] summing to 1, or null if any input is unusable.
+// Falls back to proportional when no root exists in the bracket, which is the
+// same conservative behaviour deVig2WayPower uses in services/datagolf.js.
+function deVig3WayPower(pHome, pDraw, pAway) {
+  const ps = [pHome, pDraw, pAway];
+  if (!ps.every(p => typeof p === 'number' && p > 0 && p < 1)) return null;
+  const f = (k) => ps.reduce((acc, p) => acc + Math.pow(p, k), 0) - 1;
+  let lo = 0.2, hi = 8;
+  if (f(lo) * f(hi) > 0) {
+    const t = ps[0] + ps[1] + ps[2];
+    return t > 0 ? ps.map(p => p / t) : null;
+  }
+  for (let i = 0; i < 60; i++) {
+    const k = (lo + hi) / 2;
+    if (f(k) > 0) lo = k; else hi = k;
+  }
+  const k = (lo + hi) / 2;
+  const out = ps.map(p => Math.pow(p, k));
+  const sum = out[0] + out[1] + out[2];
+  if (!(sum > 0)) return null;
+  return out.map(v => v / sum);
+}
 
 function deVig2Way(prob1, prob2) {
   const total = prob1 + prob2;
@@ -10452,6 +10537,7 @@ module.exports = {
   refreshAllSportsDelta,
   normalizeTeamName,
   deVig2Way,
+  deVig3WayPower,
   americanToImpliedProb,
   getRfiFair,
   ensureTeamTotals,
