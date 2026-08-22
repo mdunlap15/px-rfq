@@ -761,6 +761,11 @@ const MARKET_TYPE_MAP = {
   'total': 'totals',
   'team_total': 'team_totals',
   'btts': 'btts',
+  // Soccer 3-way -> the true home/draw/away board stored by the TOA ingest.
+  // Deliberately NOT 'h2h': that key is a draw-no-bet basis and quoting a
+  // win leg off it overprices by ~17pp.
+  'soccer_win_3way': 'h2h_3way',
+  'soccer_draw_3way': 'h2h_3way',
   'both_teams_to_score': 'btts',
   // Method of victory — identity-mapped: the fair comes from services/ufc-mov
   // (DK 6-way board), not from an odds-feed market key, but oddsApiMarket must
@@ -905,6 +910,14 @@ const MOV_MARKET_RE = /\bto\s+win\s+(?:by\s+(?:ko\/tko(?:\/dq)?|submission|decis
 const MOV_MARKET_TYPES = ['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd'];
 
 const BTTS_MARKET_RE = /^both\s+teams\s+to\s+score\b/i;
+// Soccer 3-way. PX types BOTH of these 'moneyline' -- identical to the real
+// draw-no-bet market -- so like BTTS they clear supportedBase and would then
+// die on the fullGameNames allowlist (neither is NAMED like a moneyline).
+// Anchored on 90 Min: we have no 3-way source for period-qualified
+// variants, so those must keep failing the gate rather than be priced off
+// the full-match board.
+const SOCCER_WIN_3WAY_RE = /\bto\s+win\s*\(\s*90\s*min\s*\)\s*$/i;
+const SOCCER_DRAW_3WAY_RE = /^draw\s*\(\s*90\s*min\s*\)\s*$/i;
 const BTTS_PERIOD_RE = /\b(1st|2nd|first|second)\s*(half|period)\b|\bhalf\b|\bperiod\b/i;
 
 /**
@@ -1634,7 +1647,7 @@ async function seedAllLines() {
           ? ['moneyline', 'total']
           : isGolfSport
             ? ['moneyline']
-            : ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance'];
+            : ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'soccer_win_3way', 'soccer_draw_3way'];
       // Series markets include PX's 'sup_moneyline' type (Series Game Spread,
       // Series Total Games — live probe 2026-04-18). Let those through the
       // supportedBase check; parseMarketSelections retags them to 'spread'
@@ -1670,6 +1683,11 @@ async function seedAllLines() {
         && m.type === 'moneyline'
         && BTTS_MARKET_RE.test(name)
         && !BTTS_PERIOD_RE.test(name);
+      // Soccer 3-way ("<Team> to Win (90 Min)" / "Draw (90 Min)") — full-match
+      // markets typed 'moneyline', same bypass shape as BTTS.
+      const isSoccer3Way = /soccer|fifa/i.test(sportKey || '')
+        && m.type === 'moneyline'
+        && (SOCCER_WIN_3WAY_RE.test(name) || SOCCER_DRAW_3WAY_RE.test(name));
       // MMA method-of-victory — full-fight market, same bypass shape as BTTS.
       const isMmaMov = isMmaSport && m.type === 'moneyline' && MOV_MARKET_RE.test(name);
       if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
@@ -1677,6 +1695,7 @@ async function seedAllLines() {
       // would otherwise look prop-ish) — it is a full-event market.
       if (isSoccerAdvance) return true;
       if (isSoccerBtts) return true;
+      if (isSoccer3Way) return true;
       if (isMmaMov) return true;
       // Series markets bypass the sub-game/prop filter and the name-
       // allowlist + bounds checks. Each variant must match one of:
@@ -2028,6 +2047,23 @@ async function seedAllLines() {
           const teamSide = resolveTeamTotalSide(sel.teamName, matchedHome, matchedAway);
           if (!teamSide) continue; // Skip if we can't determine the side
           oddsApiSelection = teamSide + '_' + (sel.selection || 'over'); // "home_over", "away_under", etc.
+        } else if (sel.marketType === 'soccer_win_3way') {
+          // "<Team> to Win (90 Min)": YES/NO on a per-club market. The club is
+          // in sel.teamName, parsed from the market NAME -- the selections are
+          // just YES/NO. Resolving BOTH candidates together lets the matcher's
+          // ambiguity guards engage; a one-element array satisfies them
+          // unconditionally and silently mis-sides the leg.
+          const side = resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway);
+          if (!side) continue; // fail closed rather than guess the club
+          const yn = (sel.selection || '').toLowerCase();
+          if (yn === 'yes') oddsApiSelection = side;
+          else if (yn === 'no') oddsApiSelection = 'no_' + side;
+          else continue;
+        } else if (sel.marketType === 'soccer_draw_3way') {
+          const yn = (sel.selection || '').toLowerCase();
+          if (yn === 'yes') oddsApiSelection = 'draw';
+          else if (yn === 'no') oddsApiSelection = 'no_draw';
+          else continue;
         } else if (sel.marketType === 'btts' || sel.marketType === 'both_teams_to_score') {
           // Yes/No selection from parseMarketSelections
           oddsApiSelection = (sel.selection || '').toLowerCase();
@@ -3366,7 +3402,7 @@ async function resolveUnknownLine(rfqLeg) {
 
       // First pass: find which market contains this line_id (any type)
       // so we can log unsupported market types for diagnostics.
-      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...MOV_MARKET_TYPES, ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES, ...QUARTER_1_MARKET_TYPES];
+      const SUPPORTED_TYPES = ['moneyline', 'spread', 'total', 'team_total', 'btts', 'both_teams_to_score', 'double_chance', 'soccer_win_3way', 'soccer_draw_3way', 'series_winner', 'series_spread', 'series_total', 'sup_moneyline', ...MOV_MARKET_TYPES, ...F5_MARKET_TYPES, ...FIRST_HALF_MARKET_TYPES, ...QUARTER_1_MARKET_TYPES];
       // Series markets (winner/spread/total) are structurally
       // moneyline/spread/total but named "Series Winner/Spread/Total
       // Games". resolveUnknownLine accepts the regular PX types and
@@ -3921,7 +3957,24 @@ async function resolveUnknownLine(rfqLeg) {
             const teamSide = resolveTeamTotalSide(sel.teamName, matchedHome, matchedAway);
             if (!teamSide) continue;
             oddsApiSelection = teamSide + '_' + (sel.selection || 'over');
-          } else if (sel.marketType === 'btts' || sel.marketType === 'both_teams_to_score') {
+          } else if (sel.marketType === 'soccer_win_3way') {
+          // "<Team> to Win (90 Min)": YES/NO on a per-club market. The club is
+          // in sel.teamName, parsed from the market NAME -- the selections are
+          // just YES/NO. Resolving BOTH candidates together lets the matcher's
+          // ambiguity guards engage; a one-element array satisfies them
+          // unconditionally and silently mis-sides the leg.
+          const side = resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway);
+          if (!side) continue; // fail closed rather than guess the club
+          const yn = (sel.selection || '').toLowerCase();
+          if (yn === 'yes') oddsApiSelection = side;
+          else if (yn === 'no') oddsApiSelection = 'no_' + side;
+          else continue;
+        } else if (sel.marketType === 'soccer_draw_3way') {
+          const yn = (sel.selection || '').toLowerCase();
+          if (yn === 'yes') oddsApiSelection = 'draw';
+          else if (yn === 'no') oddsApiSelection = 'no_draw';
+          else continue;
+        } else if (sel.marketType === 'btts' || sel.marketType === 'both_teams_to_score') {
             oddsApiSelection = (sel.selection || '').toLowerCase();
           } else if (sel.marketType === 'double_chance') {
             oddsApiSelection = sel.selection;

@@ -6664,6 +6664,22 @@ function getFairProb(sport, homeTeam, awayTeam, marketType, selection, line, tar
     }
     if (dir === 'over') return teamData.over?.fairProb || null;
     if (dir === 'under') return teamData.under?.fairProb || null;
+  } else if (marketType === 'h2h_3way') {
+    // True 3-way board: home / draw / away, summing to 1. NOT interchangeable
+    // with markets.h2h, which is a draw-no-bet basis -- see the ingest note.
+    // PX posts each outcome as its own YES/NO market, so the NO side is the
+    // complement of that single outcome (NOT the other two summed, though
+    // they are equal by construction since the triple normalises to 1).
+    if (selection === 'home' || selection === 'draw' || selection === 'away') {
+      const p = market[selection]?.fairProb;
+      return (typeof p === 'number' && p > 0 && p < 1) ? p : null;
+    }
+    const neg = /^no_(home|draw|away)$/.exec(selection || '');
+    if (neg) {
+      const p = market[neg[1]]?.fairProb;
+      return (typeof p === 'number' && p > 0 && p < 1) ? 1 - p : null;
+    }
+    return null;
   } else if (marketType === 'btts') {
     if (selection === 'yes') return market.yes?.fairProb || null;
     if (selection === 'no') return market.no?.fairProb || null;
@@ -8567,6 +8583,15 @@ function getCacheStatus() {
 
 function __debugGetCache(sport) {
   return oddsCache[sport] || null;
+}
+
+// TEST SEAM ONLY. Lets a test install a synthetic cache entry so the
+// selection-routing branches of getFairProb can be exercised without a live
+// fetch. Never called from production code -- a mis-mapped selection is the
+// ~17pp bug class (3-way win priced off the draw-no-bet board), so those
+// branches need coverage that does not depend on the network.
+function __debugSetCache(sport, entry) {
+  oddsCache[sport] = entry;
 }
 
 // ---------------------------------------------------------------------------
@@ -10530,6 +10555,7 @@ module.exports = {
   getAllCachedEvents,
   getCachedSportKeysWithPrefix,
   __debugGetCache,
+  __debugSetCache,
   captureClosingLines,
   getClosingLineSnapshot,
   getClosingLinesStatus,
