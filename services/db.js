@@ -396,6 +396,28 @@ async function loadOrdersByParlayIds(parlayIds) {
 // MATCHED PARLAYS
 // ---------------------------------------------------------------------------
 
+// matched_odds / our_odds are INTEGER columns, but PX occasionally reports a
+// computed decimal on the broadcast channel (observed 2026-08-22: -1019.82 on
+// a 4-leg match). Postgres rejects the whole row with
+//   invalid input syntax for type integer: "1019.82"
+// and because saveMatchedParlay only logs the error, the row is dropped
+// silently -- we lose that fill from market intelligence entirely.
+//
+// American odds are integers by convention, so rounding is the faithful
+// representation, not a lossy workaround: at these magnitudes one unit is far
+// below the resolution anything downstream uses. Rounding here rather than
+// widening the column keeps existing rows and queries untouched.
+function _intOdds(v) {
+  if (v == null) return null;
+  // Number('') and Number('   ') are 0, not NaN -- an empty string would be
+  // written as odds of ZERO, which is worse than the crash it replaced:
+  // it corrupts market intelligence silently instead of loudly. Reject any
+  // value that is not a non-blank numeric.
+  if (typeof v === 'string' && v.trim() === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
 async function saveMatchedParlay(entry) {
   const db = getClient();
   if (!db) return;
@@ -403,11 +425,11 @@ async function saveMatchedParlay(entry) {
   try {
     const row = {
       parlay_id: entry.parlayId,
-      matched_odds: entry.matchedAmericanOdds,
+      matched_odds: _intOdds(entry.matchedAmericanOdds),
       matched_stake: entry.matchedStake,
       legs: entry.legs || [],
       we_quoted: entry.weQuoted || false,
-      our_odds: entry.ourAmericanOdds,
+      our_odds: _intOdds(entry.ourAmericanOdds),
       outcome: entry.outcome,
       matched_at: entry.matchedAt,
     };
@@ -1623,6 +1645,9 @@ async function loadMatchedParlaysSince(fromIso, opts = {}) {
 }
 
 module.exports = {
+  // Test seam: the integer-column coercion that keeps a decimal from PX
+  // silently dropping a whole matched_parlays row.
+  _intOdds,
   getClient,
   isEnabled,
   saveOrder,
