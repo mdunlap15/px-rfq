@@ -454,6 +454,21 @@ const TEAM_NAME_OVERRIDES = {
   //     same-name pairing could have priced the wrong game).
   'ca union': 'Union Santa Fe',
   'aa estudiantes': 'Estudiantes de Río Cuarto',
+  // Soccer clubs whose PX name defeats the generic matcher (verified against
+  // the live TOA boards 2026-08-22).
+  //
+  // 'RCD Espanyol de Barcelona' is the DANGEROUS one. It contains both
+  // "Espanyol" and "Barcelona", so the substring tier saw two candidates,
+  // bailed to the last-word tier, and resolved it to BARCELONA -- a different
+  // club. It failed closed only because Barcelona were not playing Real Madrid
+  // that night; in a week where they are, the pairing resolves to a REAL event
+  // and Espanyol's line gets priced at Barcelona's number. That is the
+  // fail-OPEN direction described in resolveHomeAwaySide's header.
+  'rcd espanyol de barcelona': 'Espanyol',
+  // TOA anglicises the city ('Bayern Munich'); PX keeps the German
+  // ('FC Bayern München'). munchen != munich under every tier, so the whole
+  // fixture went dark.
+  'fc bayern munchen': 'Bayern Munich',
   // SharpAPI abbreviates some NHL city names
   'washington capitals': 'WAS Capitals',
   'columbus blue jackets': 'CBJ Blue Jackets',
@@ -1471,8 +1486,11 @@ async function seedAllLines() {
             .flatMap(e => [e.homeTeam, e.awayTeam]))];
           _pooled += pool.length;
           if (pool.length === 0) { _diag.push(`${tryKey}:no-cache`); continue; }
-          const h = matchTeamName(homeComp.name, pool) ? 'ok' : 'MISS';
-          const a = matchTeamName(awayComp.name, pool) ? 'ok' : 'MISS';
+          // Report the RESOLVED NAME, not just ok/MISS. A bare 'ok' hid a
+          // wrong-club resolution on 2026-08-22: 'RCD Espanyol de Barcelona'
+          // matched BARCELONA and still reported ok, which reads as success.
+          const h = matchTeamName(homeComp.name, pool) || 'MISS';
+          const a = matchTeamName(awayComp.name, pool) || 'MISS';
           _diag.push(`${tryKey}(${pool.length} teams):home=${h},away=${a}`);
         }
         unmatchedEvents.push({

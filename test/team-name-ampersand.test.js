@@ -70,3 +70,30 @@ test('every configured sport has a TOA fallback entry (or is SharpAPI-only)', ()
     + `so fetchOddsForSport will never issue a request for them: ${missing.join(', ')}`
   );
 });
+
+// ---------------------------------------------------------------------------
+// Wrong-club resolution. These overrides exist because the generic matcher
+// resolved a club to a DIFFERENT club, which fails open when the bad pairing
+// happens to be a real fixture.
+// ---------------------------------------------------------------------------
+const LA_LIGA = ['Sevilla', 'Athletic Bilbao', 'Celta Vigo', 'Valencia', 'Real Madrid',
+  'Espanyol', 'Villarreal', 'Atlético Madrid', 'Getafe', 'Barcelona', 'Elche CF',
+  'Levante', 'CA Osasuna', 'Real Betis', 'Real Sociedad'];
+const BUNDESLIGA = ['VfB Stuttgart', 'Bayern Munich', 'TSG Hoffenheim', '1. FC Köln',
+  'Bayer Leverkusen', 'RB Leipzig', 'Union Berlin', 'Borussia Dortmund', 'SC Freiburg', 'Augsburg'];
+
+test('Espanyol does not resolve to Barcelona', () => {
+  // The PX name contains BOTH club names. Without the override this returned
+  // "Barcelona" -- a different club -- and would price Espanyol's line at
+  // Barcelona's number whenever that pairing is a real fixture.
+  assert.strictEqual(
+    lineManager.matchTeamName('RCD Espanyol de Barcelona', LA_LIGA), 'Espanyol');
+});
+
+test('plain Barcelona still resolves to Barcelona', () => {
+  assert.strictEqual(lineManager.matchTeamName('Barcelona', LA_LIGA), 'Barcelona');
+});
+
+test('München resolves to TOA\'s anglicised Munich', () => {
+  assert.strictEqual(lineManager.matchTeamName('FC Bayern München', BUNDESLIGA), 'Bayern Munich');
+});
