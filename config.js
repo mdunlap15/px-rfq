@@ -1641,7 +1641,7 @@ const config = {
   // September regular season). Without it, fetchOddsForSport emits no HTTP
   // request for preseason and every Aug game fails team-matching.
   // ⚠ Same env-override warning: Railway SUPPORTED_SPORTS must also add it.
-  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_mexico_ligamx,soccer_brazil_campeonato,soccer_conmebol_libertadores,soccer_argentina_primera_division,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl,americanfootball_nfl_preseason')
+  supportedSports: (process.env.SUPPORTED_SPORTS || 'basketball_nba,basketball_nba_summer_league,basketball_ncaab,basketball_wnba,baseball_mlb,icehockey_nhl,tennis,soccer,soccer_usa_mls,soccer_epl,soccer_brazil_campeonato,soccer_conmebol_libertadores,soccer_argentina_primera_division,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_efl_champ,soccer_england_league1,soccer_uefa_champs_league_qualification,americanfootball_nfl,americanfootball_ncaaf,americanfootball_cfl,americanfootball_nfl_preseason')
     .split(',').map(s => s.trim()),
   // Maps our sport keys to ProphetX sport_name values
   // Note: NBA and NCAAB both map to 'Basketball' — line manager handles both
@@ -1695,6 +1695,12 @@ const config = {
     'soccer_argentina_primera_division': 'Soccer',
     'soccer_conmebol_libertadores': 'Soccer',
     'soccer_efl_champ': 'Soccer',
+    'soccer_england_league1': 'Soccer',
+    // UCL proper is INACTIVE on TOA outside the league phase (starts ~mid-Sep).
+    // PX's "UEFA Champions League" events in August are QUALIFIERS, which TOA
+    // serves under this separate key — matched 7-for-7 against PX on 2026-08-21.
+    // That mismatch is why soccer_uefa_champs_league fetched 0 events all month.
+    'soccer_uefa_champs_league_qualification': 'Soccer',
     'golf_pga_championship': 'Golf',
     'golf_matchups': 'Golf',
     // PX uses 'MMA' (short form) as sport_name, not 'Mixed Martial Arts'.
