@@ -46,3 +46,27 @@ test('& normalization does not collapse two distinct clubs onto one', () => {
   // null (fail closed) rather than pick one.
   assert.strictEqual(m('United FC', ['Atlanta United', 'Minnesota United']), null);
 });
+
+// ---------------------------------------------------------------------------
+// Routing guard: SUPPORTED_SPORTS alone does NOT authorize an odds fetch.
+// fetchOddsForSport returns early for any sport with no ODDS_API_FALLBACK
+// entry, so a sport added to config but not to the map goes silently dark
+// (eventCount 0 / ageMinutes null). That shipped twice; this catches the third.
+// ---------------------------------------------------------------------------
+// NOTE: the real list lives at .config.supportedSports. Reading the module
+// root yields undefined, which an `|| []` would silently turn into a vacuous
+// pass -- this test asserts non-empty below precisely to catch that.
+const { config } = require('../config');
+
+test('every configured sport has a TOA fallback entry (or is SharpAPI-only)', () => {
+  const fallback = oddsFeed.__ODDS_API_FALLBACK;
+  const sports = config.supportedSports;
+  // Guard the guard: if this ever reads empty the assertion below is vacuous.
+  assert.ok(Array.isArray(sports) && sports.length > 0, 'supportedSports must be a non-empty array');
+  const missing = sports.filter(s => !fallback[s]);
+  assert.deepStrictEqual(
+    missing, [],
+    `these sports are in SUPPORTED_SPORTS but have no ODDS_API_FALLBACK entry, `
+    + `so fetchOddsForSport will never issue a request for them: ${missing.join(', ')}`
+  );
+});

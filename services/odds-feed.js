@@ -388,6 +388,31 @@ const ODDS_API_FALLBACK = {
     markets: 'h2h,spreads,totals',
     bookmakers: ODDS_API_BOOKMAKERS,
   },
+  // English League One and UEFA Champions League QUALIFICATION (added
+  // 2026-08-22). Both were added to SUPPORTED_SPORTS on 2026-08-21 but NOT
+  // here, and this map is what actually authorizes a fetch: fetchOddsForSport
+  // returns early for any sport with no entry, so neither league ever issued
+  // a single request. The symptom was eventCount 0 / ageMinutes null, which
+  // is indistinguishable at a glance from "fetched, found nothing" -- compare
+  // basketball_ncaab, which reports eventCount 0 with a REAL age because it
+  // does get fetched. Verified against the live TOA board: League One returns
+  // 11 fixtures, UCL qualification 7.
+  //
+  // Adding a key to SUPPORTED_SPORTS is NOT enough to make it quote. It needs
+  // an entry here too, or it silently goes dark.
+  'soccer_england_league1': {
+    oddsApiSport: 'soccer_england_league1',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
+  // NOTE: distinct from 'soccer_uefa_champs_league' above -- that is the
+  // league phase, which starts in September. August fixtures live under the
+  // qualification key. Both must stay registered across the changeover.
+  'soccer_uefa_champs_league_qualification': {
+    oddsApiSport: 'soccer_uefa_champs_league_qualification',
+    markets: 'h2h,spreads,totals',
+    bookmakers: ODDS_API_BOOKMAKERS,
+  },
   // Golf and combat sports — h2h only (no spreads/totals on these markets)
   'golf_pga_championship': {
     oddsApiSport: 'golf_pga_championship',
