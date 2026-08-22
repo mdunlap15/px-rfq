@@ -4194,6 +4194,45 @@ function shouldDecline(legs, parlayId) {
       }
     }
 
+    // ---- SOCCER 3-WAY: never allowed same-game with any other leg --------
+    //
+    // PX posts the 3-way as separate YES/NO markets: "<Team> to Win (90 Min)"
+    // x2 and "Draw (90 Min)". Every same-match pairing among these -- and
+    // between them and the DNB moneyline, the spread, or double chance -- is
+    // mutually exclusive or nested, so independent multiplication is wrong in
+    // the expensive direction:
+    //
+    //   Home to Win + Draw          -> mutually exclusive, TRUE P = 0
+    //   Home to Win + Away to Win    -> mutually exclusive, TRUE P = 0
+    //   Home to Win + Home DNB       -> nested; DNB is P(home | no draw), so
+    //                                   the joint is just P(home), not the
+    //                                   product (which understates it badly)
+    //   Home to Win + Home -0.5 spread -> the SAME event by another name
+    //   Home to Win + 1X double chance -> nested
+    //
+    // A P=0 parlay priced as live is the worst shape there is: it can only be
+    // taken by someone who noticed, and it never wins.
+    //
+    // EXPLICIT and UNCONDITIONAL for the same reason as the MoV block above --
+    // the generic SGP gate blocks these today only because no SGP_ALLOWED_COMBOS
+    // key happens to match, which evaporates silently the moment a key is added.
+    const SOCCER_3WAY_TYPES = new Set(['soccer_win_3way', 'soccer_draw_3way']);
+    const threeWayLegs = legInfos.filter(li => SOCCER_3WAY_TYPES.has(li.marketType));
+    if (threeWayLegs.length) {
+      for (const a of threeWayLegs) {
+        for (const b of legInfos) {
+          if (a === b) continue;
+          if (!a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+          const bDesc = `${b.teamName || b.playerName || '?'} ${b.marketType}${b.selection ? ':' + b.selection : ''}`;
+          return {
+            declined: true,
+            reason: 'soccer_3way_sgp_blocked',
+            detail: `soccer 3-way legs cannot be parlayed same-match: ${a.teamName || 'Draw'} ${a.marketType}:${a.selection} + ${bDesc} on event ${a.pxEventId} — 3-way outcomes are mutually exclusive with each other and nested within the draw-no-bet moneyline, spread and double chance`,
+          };
+        }
+      }
+    }
+
     // TENNIS SETS markets may NEVER be parlayed with anything else on the same
     // match. Like the MoV block above this is an EXPLICIT, UNCONDITIONAL
     // pre-pass rather than a reliance on the generic SGP gate, which blocks

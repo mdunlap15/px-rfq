@@ -791,6 +791,29 @@ function parseMarketSelections(market) {
     marketType = 'btts';
   }
 
+  // --- SOCCER 3-WAY (the BTTS/MoV trap again) ---
+  //
+  // PX types these plain 'moneyline', identical to the real "Moneyline
+  // (2 Way)" draw-no-bet market, and the selections are literally YES/NO.
+  // The TEAM only exists in the market NAME. Do NOT team-match the YES/NO
+  // selection against the competitors: that resolves to home/away and the
+  // pricer reads the leg as a straight DNB moneyline, which is a ~17pp
+  // overprice (P(home|no draw) quoted as P(home)).
+  //
+  // Anchored on "90 Min" deliberately. PX also posts period-qualified
+  // variants we have no 3-way source for; those must stay unclassified and
+  // drop rather than be priced off the full-match board.
+  const _mn = marketName.trim();
+  const _drawMatch = /^draw\s*\(\s*90\s*min\s*\)\s*$/i.test(_mn);
+  const _winMatch = _mn.match(/^(.+?)\s+to\s+win\s*\(\s*90\s*min\s*\)\s*$/i);
+  let soccerWinTeam = null;
+  if (_drawMatch) {
+    marketType = 'soccer_draw_3way';
+  } else if (_winMatch && _winMatch[1]) {
+    marketType = 'soccer_win_3way';
+    soccerWinTeam = _winMatch[1].trim();
+  }
+
   // F5 moneyline uses same structure as full-game moneyline (selections array)
   const isF5Moneyline = /first_5_innings_moneyline|first_five_innings_moneyline/.test(marketType);
   // F5 spread/total uses same structure as full-game spread/total (market_lines)
@@ -1012,6 +1035,26 @@ function parseMarketSelections(market) {
           marketType: 'btts',
           selection,
           teamName: sel.display_name || sel.name || '',
+          line: null,
+          competitorId: sel.competitor_id,
+          outcomeName: sel.name,
+        });
+      }
+    }
+  } else if ((marketType === 'soccer_win_3way' || marketType === 'soccer_draw_3way') && market.selections) {
+    // YES/NO shaped like BTTS. teamName carries the club parsed from the
+    // MARKET NAME (null for Draw, which has no team), never the YES/NO
+    // selection text -- see the trap note above.
+    for (const selGroup of market.selections) {
+      for (const sel of selGroup) {
+        if (!sel.line_id) continue;
+        const nameLC = (sel.name || sel.display_name || '').toLowerCase();
+        const selection = nameLC.includes('yes') ? 'yes' : nameLC.includes('no') ? 'no' : 'unknown';
+        results.push({
+          lineId: sel.line_id,
+          marketType,
+          selection,
+          teamName: soccerWinTeam,
           line: null,
           competitorId: sel.competitor_id,
           outcomeName: sel.name,
