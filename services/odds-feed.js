@@ -10374,6 +10374,10 @@ module.exports = {
   getDraftKingsOdds,
   getDNBFairProb,
   fetchAltLines,
+  // Exported for services/nfl-consensus.js, which resolves a TOA event id
+  // before its per-event board fetch. Omitted on the football build, so
+  // EVERY football consensus pre-seed threw "not a function" (fixed 2026-08-22).
+  resolveOddsApiEventId,
   backfillMissingH2h,
   mergeDkMmaFights,
   mergeDkTennisMatches,
