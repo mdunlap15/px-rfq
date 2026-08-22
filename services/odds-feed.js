@@ -8647,7 +8647,17 @@ function normalizeTeamName(name) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    // "&" is a REAL word, not punctuation. The [^a-z0-9 ] filter below deletes
+    // it outright, which both loses the word and leaves a double space that
+    // defeats substring comparison. TOA spells these clubs out ("Brighton and
+    // Hove Albion") while PX uses the ampersand ("Brighton & Hove Albion FC"),
+    // so the two never matched and the whole fixture went dark (measured
+    // against the live TOA board 2026-08-22). Collapse runs of whitespace for
+    // the same reason -- an interior double space is invisible but fatal to
+    // .includes().
+    .replace(/&/g, ' and ')
     .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 

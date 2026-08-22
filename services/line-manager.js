@@ -474,7 +474,17 @@ function normalizeTeamName(name) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    // "&" is a REAL word, not punctuation. The [^a-z0-9 ] filter below deletes
+    // it outright, which both loses the word and leaves a double space that
+    // defeats substring comparison. TOA spells these clubs out ("Brighton and
+    // Hove Albion") while PX uses the ampersand ("Brighton & Hove Albion FC"),
+    // so the two never matched and the whole fixture went dark (measured
+    // against the live TOA board 2026-08-22). Collapse runs of whitespace for
+    // the same reason -- an interior double space is invisible but fatal to
+    // .includes().
+    .replace(/&/g, ' and ')
     .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -1443,10 +1453,37 @@ async function seedAllLines() {
           deferred: true,
         });
       } else {
+        // DIAGNOSTIC ONLY -- recompute each side independently.
+        //
+        // The matching loop above assigns matchedHome/matchedAway only when
+        // the ENTIRE pairing resolves, so the report below printed
+        // "NO MATCH" for BOTH sides whenever the event failed -- even for a
+        // side that matched perfectly. That is actively misleading: it reads
+        // as a team-name problem when the real cause is usually an EMPTY
+        // candidate pool (the sport's odds cache never populated), and it
+        // cost a full misdiagnosis on 2026-08-22. Recording per-side truth
+        // plus the pool size separates the two causes at a glance.
+        const _diag = [];
+        let _pooled = 0;
+        for (const tryKey of possibleSportKeys) {
+          const pool = [...new Set(oddsApiEvents
+            .filter(e => e.sport === tryKey)
+            .flatMap(e => [e.homeTeam, e.awayTeam]))];
+          _pooled += pool.length;
+          if (pool.length === 0) { _diag.push(`${tryKey}:no-cache`); continue; }
+          const h = matchTeamName(homeComp.name, pool) ? 'ok' : 'MISS';
+          const a = matchTeamName(awayComp.name, pool) ? 'ok' : 'MISS';
+          _diag.push(`${tryKey}(${pool.length} teams):home=${h},away=${a}`);
+        }
         unmatchedEvents.push({
           pxEvent: event.name,
           pxHome: homeComp.name,
           pxAway: awayComp.name,
+          // When every candidate key has an empty pool this is a FETCH
+          // failure, not a naming failure -- check the odds refresh loop.
+          reason: _pooled === 0
+            ? `no odds cache for any candidate sport key [${possibleSportKeys.join(', ')}] -- odds fetch is failing for this sport, not a name mismatch`
+            : `${homeComp.name} vs ${awayComp.name} -- ${_diag.join(' | ')}`,
         });
         continue;
       }
