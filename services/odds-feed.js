@@ -1939,6 +1939,32 @@ const BTTS_SPORTS = new Set(
   (process.env.BTTS_SPORTS || 'soccer_usa_mls')
     .split(',').map(s => s.trim()).filter(Boolean)
 );
+// PER-SPORT bookmaker override. Some competitions are only quoted by books
+// outside the default sharp-ish list, and pulling those books into the GLOBAL
+// list would drag them into the MLS/EPL consensuses too -- degrading markets
+// that price well in order to add a competition that prices badly.
+//
+// Measured 2026-08-22 on UEFA Champions League qualification: PX posts BTTS on
+// 6 of 7 ties, but TOA carries it only from sportsbet / onexbet / virginbet /
+// livescorebet -- no Pinnacle, DK, FD or Matchbook. Overrounds run 7.1-8.8%,
+// i.e. above the >6% "different class" threshold the 2-way consensus filter
+// uses, so this is a knowingly softer basis confined to one competition.
+// Format: {"soccer_uefa_champs_league":"sportsbet,onexbet"}
+const BTTS_BOOKMAKERS_BY_SPORT = (() => {
+  const out = {};
+  try {
+    const raw = JSON.parse(process.env.BTTS_BOOKMAKERS_BY_SPORT || '{}');
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+    }
+  } catch (err) {
+    log.warn('OddsFeed', `BTTS_BOOKMAKERS_BY_SPORT is not valid JSON — ignoring: ${err.message}`);
+  }
+  return out;
+})();
+function _bttsBooksFor(sport) {
+  return BTTS_BOOKMAKERS_BY_SPORT[sport] || BTTS_BOOKMAKERS;
+}
 const BTTS_BOOKMAKERS = process.env.BTTS_BOOKMAKERS
   || 'pinnacle,draftkings,fanduel,betmgm,betrivers,williamhill,matchbook';
 const BTTS_TTL_MS = (parseInt(process.env.BTTS_TTL_SECONDS) || 240) * 1000;
@@ -2004,7 +2030,7 @@ async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
         + `?apiKey=${theOddsApiKey}`
         + `&regions=us,eu`
         + `&markets=btts`
-        + `&bookmakers=${BTTS_BOOKMAKERS}`
+        + `&bookmakers=${_bttsBooksFor(sport)}`
         + `&oddsFormat=american`;
 
       let data;
@@ -2057,6 +2083,35 @@ async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
         rawYes.push(yes.price); rawNo.push(no.price);
         books.push(book.key);
       }
+      // DEDUPE IDENTICAL PRICE PAIRS before counting. Retail skins share one
+      // trading desk and post byte-identical prices (measured: virginbet and
+      // livescorebet both -185/+128 on Celtic @ LASK). Counting them twice
+      // makes BTTS_MIN_BOOKS fiction -- two 'books' can be one opinion -- and
+      // double-weights that opinion in the average. Keep the first occurrence
+      // of each distinct (yes,no) pair.
+      const _seenPair = new Set();
+      const keepIdx = [];
+      for (let i = 0; i < books.length; i++) {
+        const sig = `${rawYes[i]}|${rawNo[i]}`;
+        if (_seenPair.has(sig)) continue;
+        _seenPair.add(sig);
+        keepIdx.push(i);
+      }
+      if (keepIdx.length < books.length) {
+        const dropped = books.filter((_, i) => !keepIdx.includes(i));
+        log.debug('OddsFeed', `btts ${sport}: dropped ${dropped.length} duplicate-price book(s) [${dropped.join(',')}]`);
+      }
+      const _fy = keepIdx.map(i => fairYes[i]);
+      const _fn = keepIdx.map(i => fairNo[i]);
+      const _ry = keepIdx.map(i => rawYes[i]);
+      const _rn = keepIdx.map(i => rawNo[i]);
+      const _bk = keepIdx.map(i => books[i]);
+      fairYes.length = 0; fairYes.push(..._fy);
+      fairNo.length = 0;  fairNo.push(..._fn);
+      rawYes.length = 0;  rawYes.push(..._ry);
+      rawNo.length = 0;   rawNo.push(..._rn);
+      books.length = 0;   books.push(..._bk);
+
       // Thin boards are noise — fail closed rather than quote off one book.
       if (books.length < BTTS_MIN_BOOKS) { _bttsCache[key] = { at: now, btts: null }; return null; }
 
@@ -10607,5 +10662,6 @@ module.exports = {
   _playerNamesMatch,
   __H1_SUPPLEMENT_SPORTS: H1_SUPPLEMENT_SPORTS,
   __ODDS_API_FALLBACK: ODDS_API_FALLBACK,
+  _bttsBooksFor,
 };
 
