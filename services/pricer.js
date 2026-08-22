@@ -1578,7 +1578,10 @@ function priceParlay(legs, opts = {}) {
     const displayFairProb = oddsFeed.getDisplayFairProb(
       lineInfo.oddsApiSport, lineInfo.homeTeam, lineInfo.awayTeam,
       lineInfo.oddsApiMarket, lineInfo.oddsApiSelection,
-      lineInfo.line != null ? Math.abs(lineInfo.line) : null,
+      // SIGNED, not Math.abs. Stripping the sign made a Dodgers +1.5 leg
+      // indistinguishable from Dodgers -1.5 inside getDisplayFairProb, which
+      // then returned the opposite side's fair to the dashboard.
+      lineInfo.line != null ? lineInfo.line : null,
       lineInfo.startTime
     );
 

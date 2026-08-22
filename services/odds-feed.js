@@ -6772,7 +6772,9 @@ function getDisplayFairProb(sport, homeTeam, awayTeam, marketType, selection, li
   // If it doesn't match (e.g. requested -0.5 but cache has -0.25), return null
   // so the dashboard shows a dash rather than the wrong line's fair value.
   // If line is null for spreads/totals, decline — can't verify match.
-  if (marketType === 'spreads' || marketType === 'totals') {
+  // Totals only. Spreads are handled in their own branch below because they
+  // need SIGN, not just magnitude -- see the note there.
+  if (marketType === 'totals') {
     if (line == null || market.line == null) return null;
     if (Math.abs(Math.abs(market.line) - Math.abs(line)) > 0.01) return null;
   }
@@ -6781,8 +6783,30 @@ function getDisplayFairProb(sport, homeTeam, awayTeam, marketType, selection, li
     if (selection === 'home') return market.home?.displayFairProb || market.home?.fairProb || null;
     if (selection === 'away') return market.away?.displayFairProb || market.away?.fairProb || null;
   } else if (marketType === 'spreads') {
-    if (selection === 'home') return market.home?.displayFairProb || market.home?.fairProb || null;
-    if (selection === 'away') return market.away?.displayFairProb || market.away?.fairProb || null;
+    // SIGN MATTERS HERE. The old gate compared MAGNITUDES only, so a leg on
+    // Dodgers +1.5 passed the check against a cached primary of Dodgers -1.5
+    // (|-1.5| === |+1.5|) and was handed the -1.5 side's fair. Observed live
+    // 2026-08-22 on parlay 01a02a90: the leg priced correctly off fairProb
+    // 0.7832 (~-361, consistent with Pinnacle -478 de-vigged) while the
+    // dashboard FAIR column showed displayFairProb 0.5156 (~-106) -- the
+    // number for the OPPOSITE run line. Pricing was never wrong; the operator
+    // was shown a fair that made a correct quote look badly mispriced.
+    //
+    // getFairProb has carried a sign check for this all along; this path did
+    // not, and the caller compounded it by passing Math.abs(line).
+    const side = selection === 'home' ? market.home
+      : selection === 'away' ? market.away : null;
+    if (!side) return null;
+    if (line != null && side.point != null && Math.abs(side.point - line) > 0.01) {
+      // Requested line differs from this side's primary (different magnitude
+      // OR different sign) -- resolve through byLine, which is keyed by
+      // SIGNED line per side. Fail closed to a dash rather than show another
+      // line's number.
+      const alt = market.byLine && market.byLine[`${selection}|${line}`];
+      if (alt) return alt.displayFairProb != null ? alt.displayFairProb : (alt.fairProb != null ? alt.fairProb : null);
+      return null;
+    }
+    return side.displayFairProb || side.fairProb || null;
   } else if (marketType === 'totals') {
     if (selection === 'over') return market.over?.displayFairProb || market.over?.fairProb || null;
     if (selection === 'under') return market.under?.displayFairProb || market.under?.fairProb || null;
