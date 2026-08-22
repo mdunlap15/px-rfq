@@ -1098,67 +1098,115 @@ async function loadOrdersInDateRange(fromIso, toIso, opts = {}) {
  * Returns rows shaped as { parlayId, quotedAt, confirmedAt, status, legs }.
  * Paginated with retries; caps at 'cap' rows to bound memory / boot time.
  */
-async function loadFillBucketRowsSince(cutoffIso, cap = 200000) {
-  const db = getClient();
+// ---------------------------------------------------------------------------
+// KEYSET PAGINATION
+//
+// OFFSET pagination collapses on these tables. Postgres has to walk and discard
+// every row before the offset on EVERY page, so cost grows with depth. Measured
+// against prod 2026-08-22 on `declines` (7-day window, 1000-row pages):
+//
+//     offset=0       737ms
+//     offset=60000   788ms
+//     offset=100000 2413ms
+//     offset=140000 5801ms   <-- and climbing as the table grows
+//
+// That is the 689s loadDeclinesSince and the loadFillBucketRowsSince statement
+// timeouts at offset 113000+. Keyset pagination reads the SAME data in flat
+// ~250-540ms per page at any depth (12000 rows in 3.7s).
+//
+// The composite tiebreak is REQUIRED, not defensive. A cursor on the timestamp
+// alone silently drops rows that share it, and ties are common here: a 3000-row
+// sample of `declines` had 248 repeated timestamps, up to 5 rows deep. The
+// PostgREST `or()` below expresses true (ts, id) keyset ordering, verified
+// against prod to return zero overlap with the preceding page.
+async function _pageKeyset(opts) {
+  const {
+    table, cols, tsCol, idCol, gteTs, ascending = true,
+    cap = 200000, pageSize = 1000, label = table, maxRetries = 4,
+    // Test seam only: production callers omit this and get the real client.
+    client,
+  } = opts;
+  const db = client || getClient();
   if (!db) return [];
-  const PAGE_SIZE = 1000;
-  const MAX_PAGE_RETRIES = 4;
   const all = [];
-  let offset = 0;
   const startMs = Date.now();
+  let cursor = null; // { ts, id } of the last row returned
+
+  while (all.length < cap) {
+    const want = Math.min(pageSize, cap - all.length);
+    let data = null;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      let q = db.from(table).select(cols).gte(tsCol, gteTs);
+      if (cursor) {
+        // Rows strictly beyond the cursor in the sort order, plus rows at the
+        // SAME timestamp with a later id -- which is what keeps ties intact.
+        const cmp = ascending ? 'gt' : 'lt';
+        q = q.or(
+          `${tsCol}.${cmp}."${cursor.ts}",`
+          + `and(${tsCol}.eq."${cursor.ts}",${idCol}.gt."${cursor.id}")`
+        );
+      }
+      const result = await q
+        .order(tsCol, { ascending })
+        .order(idCol, { ascending: true })
+        .limit(want);
+      if (!result.error) { data = result.data; lastError = null; break; }
+      lastError = result.error;
+      log.warn('DB', `${label} keyset page attempt ${attempt + 1}/${maxRetries} failed: ${result.error.message}`);
+      await new Promise(r => setTimeout(r, 250 * Math.pow(2, attempt)));
+    }
+
+    if (lastError) {
+      // Partial data is still useful to callers; they log and degrade.
+      log.error('DB', `${label}: gave up after ${maxRetries} retries (${all.length} rows so far)`);
+      break;
+    }
+    if (!data || data.length === 0) break;
+
+    all.push(...data);
+    const last = data[data.length - 1];
+    const nextTs = last[tsCol];
+    const nextId = last[idCol];
+    // Without a usable cursor we would re-request page 1 forever.
+    if (nextTs == null || nextId == null) {
+      log.warn('DB', `${label}: row missing ${tsCol}/${idCol}; stopping to avoid a paging loop`);
+      break;
+    }
+    cursor = { ts: nextTs, id: nextId };
+    if (data.length < want) break;
+  }
+
+  log.info('DB', `${label}: ${all.length} rows (${Date.now() - startMs}ms, keyset)`);
+  if (all.length >= cap) log.warn('DB', `${label} hit cap ${cap} — history may be incomplete`);
+  return all;
+}
+async function loadFillBucketRowsSince(cutoffIso, cap = 200000) {
   try {
-    while (all.length < cap) {
-      const pageSize = Math.min(PAGE_SIZE, cap - all.length);
-      let data = null;
-      let lastError = null;
-      for (let attempt = 0; attempt < MAX_PAGE_RETRIES; attempt++) {
-        const result = await db
-          .from('parlay_orders')
-          .select('parlay_id, status, legs, quoted_at, confirmed_at')
-          .gte('quoted_at', cutoffIso)
-          .order('quoted_at', { ascending: true })
-          .range(offset, offset + pageSize - 1);
-        if (!result.error) {
-          data = result.data;
-          lastError = null;
-          break;
-        }
-        lastError = result.error;
-        log.warn('DB', `loadFillBucketRowsSince offset ${offset} attempt ${attempt + 1}/${MAX_PAGE_RETRIES} failed: ${result.error.message}`);
-        await new Promise(r => setTimeout(r, 250 * Math.pow(2, attempt)));
-      }
-      if (lastError) {
-        log.error('DB', `loadFillBucketRowsSince offset ${offset}: gave up after ${MAX_PAGE_RETRIES} retries`);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      for (const row of data) {
-        all.push({
-          parlayId: row.parlay_id,
-          status: row.status,
-          legs: row.legs || [],
-          quotedAt: row.quoted_at,
-          confirmedAt: row.confirmed_at,
-        });
-      }
-      if (data.length < pageSize) break;
-      offset += pageSize;
-    }
-    log.info('DB', `loadFillBucketRowsSince: ${all.length} rows (${Date.now() - startMs}ms)`);
-    if (all.length >= cap) {
-      log.warn('DB', `loadFillBucketRowsSince hit cap ${cap} — fill-bucket history may be incomplete`);
-    }
-    return all;
+    const rows = await _pageKeyset({
+      table: 'parlay_orders',
+      cols: 'parlay_id, status, legs, quoted_at, confirmed_at',
+      tsCol: 'quoted_at',
+      idCol: 'parlay_id',
+      gteTs: cutoffIso,
+      ascending: true,
+      cap,
+      label: 'loadFillBucketRowsSince',
+    });
+    return rows.map(row => ({
+      parlayId: row.parlay_id,
+      status: row.status,
+      legs: row.legs || [],
+      quotedAt: row.quoted_at,
+      confirmedAt: row.confirmed_at,
+    }));
   } catch (err) {
     log.error('DB', `loadFillBucketRowsSince error: ${err.message}`);
-    return all;
+    return [];
   }
 }
 
-/**
- * Get the total P&L sum directly from Supabase (source of truth).
- * Sums the pnl column for all settled orders — no in-memory drift.
- */
 async function getTotalPnL() {
   const db = getClient();
   if (!db) return null;
@@ -1519,66 +1567,25 @@ async function savePropShadowQuote(entry) {
 // up to MAX_ROWS so a busy week doesn't get silently truncated.
 
 async function loadDeclinesSince(fromIso, opts = {}) {
-  const client = getClient();
-  if (!client) return [];
-  const PAGE_SIZE = 1000;
-  const MAX_PAGE_RETRIES = 4;
-  const MAX_ROWS = opts.maxRows || 200000;
-  const cols = opts.cols || 'parlay_id, reason, declined_at, is_limit, known_legs';
-  const all = [];
-  let offset = 0;
-  const start = Date.now();
+  // DESC so that when the row count exceeds maxRows we keep the MOST RECENT
+  // declines. Truncating the other way drops today's -- the ones the dashboard
+  // actually reads.
   try {
-    while (all.length < MAX_ROWS) {
-      const pageSize = Math.min(PAGE_SIZE, MAX_ROWS - all.length);
-      let data = null;
-      let lastErr = null;
-      for (let attempt = 0; attempt < MAX_PAGE_RETRIES; attempt++) {
-        const result = await client
-          .from('declines')
-          .select(cols)
-          .gte('declined_at', fromIso)
-          // DESC (was ASC): when the row count exceeds MAX_ROWS the tail is
-          // dropped, so we want to keep the MOST RECENT declines, not the
-          // oldest — otherwise today's/yesterday's declines (the ones the
-          // dashboard cares about) get truncated out of the 7-day window.
-          // Secondary sort on parlay_id makes offset pagination deterministic
-          // across pages (Supabase REST pagination needs a tiebreak on a
-          // non-unique sort key).
-          .order('declined_at', { ascending: false })
-          .order('parlay_id', { ascending: true })
-          .range(offset, offset + pageSize - 1);
-        if (!result.error) { data = result.data; lastErr = null; break; }
-        lastErr = result.error;
-        await new Promise(r => setTimeout(r, 250 * Math.pow(2, attempt)));
-      }
-      if (lastErr) {
-        log.warn('DB', `loadDeclinesSince offset ${offset}: ${lastErr.message}`);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      all.push(...data);
-      if (data.length < pageSize) break;
-      offset += pageSize;
-    }
-    log.info('DB', `loadDeclinesSince ${fromIso}: ${all.length} rows (${Date.now() - start}ms)`);
-    return all;
+    return await _pageKeyset({
+      table: 'declines',
+      cols: opts.cols || 'parlay_id, reason, declined_at, is_limit, known_legs',
+      tsCol: 'declined_at',
+      idCol: 'parlay_id',
+      gteTs: fromIso,
+      ascending: false,
+      cap: opts.maxRows || 200000,
+      label: `loadDeclinesSince ${fromIso}`,
+    });
   } catch (err) {
     log.warn('DB', `loadDeclinesSince error: ${err.message}`);
-    return all;
+    return [];
   }
 }
-
-/**
- * 7-day decline/missed-volume rollup via SQL aggregate RPCs (declines_rollup,
- * declines_leg_histogram, matched_missed_rollup — defined in
- * scripts/_declines_rollup_rpc.sql). Returns the three aggregated row sets, or
- * NULL when the RPCs aren't deployed yet (caller falls back to the in-Node
- * aggregation). This is the durable fix for loadDeclinesSince pulling 200k+
- * rows into Node — which, once the declines table grew large, both took
- * 78-119s/pass AND collapsed the 7-day risk-limit breakdown to a single day
- * (the DESC row cap filled entirely with today's declines).
- */
 async function getDeclinesRollup7d(fromIso) {
   const client = getClient();
   if (!client) return null;
@@ -1645,6 +1652,9 @@ async function loadMatchedParlaysSince(fromIso, opts = {}) {
 }
 
 module.exports = {
+  // Test seam: keyset pager, exercised with a fake client in
+  // test/keyset-pagination.test.js (ties, cap, retry, loop guard).
+  _pageKeyset,
   // Test seam: the integer-column coercion that keeps a decimal from PX
   // silently dropping a whole matched_parlays row.
   _intOdds,
