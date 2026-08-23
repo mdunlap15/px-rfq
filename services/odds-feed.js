@@ -7939,6 +7939,63 @@ function getEventMarkets(sport, homeTeam, awayTeam, targetTime) {
     ...revEvents.map(ev => ({ ev, flipped: true })),
   ];
 
+  // Golf is exempt from every time-based guard below: a tournament "event"
+  // legitimately spans ~4 days, so a round-4 matchup's PX start can sit 3+
+  // days from the tournament-start odds event.
+  const timeGuarded = typeof sport === 'string' && !sport.startsWith('golf');
+
+  // IN-PLAY GUARD. An odds event that has ALREADY STARTED carries live
+  // in-play prices, which are not a fair value for a fixture that has not
+  // started. Baseball makes this the common case rather than the exotic one:
+  // 60 of 76 MLB matchups over 2026-08-09..23 were listed by PX on more than
+  // one date, because a series is the same team pair on consecutive days.
+  //
+  // The commence-time proximity guard below does NOT catch it. A back-to-back
+  // sits ~19-24h apart, comfortably inside the 36h ceiling -- and that ceiling
+  // is deliberately generous, so tightening it to exclude a back-to-back would
+  // break same-day doubleheaders and timezone jitter instead. Nor does the
+  // closest-by-time selection help when the correct day's event is simply
+  // ABSENT from the board: a lone candidate wins by default.
+  //
+  // Measured 2026-08-23, New York Mets at Chicago White Sox. The cache held
+  // exactly one event for the pair, commenceTime 2026-08-22T23:10:35Z --
+  // Saturday's game, then in the 4th inning. PX event 10079241 was SUNDAY's
+  // game (start 2026-08-23T18:10:00Z, 19h later). We priced Sunday off
+  // Saturday's live line: the White Sox ML ran +441 -> +1255 on Pinnacle
+  // within one hour as they fell behind, dragging the leg's fair from 0.157 to
+  // 0.0835 against a true pregame ~0.25. Two parlays confirmed at the extreme
+  // for $4,451 of our risk at roughly -$400 EV. The counterparty only has to
+  // watch tonight's game to pick off tomorrow's price, repeatedly.
+  //
+  // So: when the PX fixture is still in the future, drop every candidate that
+  // has already commenced and choose among the rest. If nothing survives,
+  // return null and let the leg decline -- a declined RFQ is free, a leg
+  // priced off a live line is not. Legs on a genuinely in-progress PX event
+  // are already declined upstream by the started-check, so this costs no
+  // legitimate match. The grace absorbs posted-vs-actual first-pitch jitter.
+  const IN_PLAY_GRACE_MS = 15 * 60 * 1000;
+  if (timeGuarded && targetTime) {
+    const targetMsPre = new Date(targetTime).getTime();
+    const nowMs = Date.now();
+    if (!isNaN(targetMsPre) && targetMsPre > nowMs + IN_PLAY_GRACE_MS) {
+      const notStarted = [];
+      let droppedLive = 0;
+      for (const c of candidates) {
+        const evMs = new Date(c.ev.commenceTime).getTime();
+        // Unparseable commenceTime fails OPEN, matching _withinMatchWindow.
+        if (!isNaN(evMs) && evMs + IN_PLAY_GRACE_MS < nowMs) { droppedLive++; continue; }
+        notStarted.push(c);
+      }
+      if (droppedLive > 0) {
+        if (notStarted.length === 0) {
+          log.debug('OddsFeed', `Event match rejected for ${homeTeam} v ${awayTeam} (${sport}): only odds event(s) for this pair have already started — would price a future fixture off a live line`);
+          return null;
+        }
+        candidates.length = 0;
+        candidates.push(...notStarted);
+      }
+    }
+  }
   let closestC = candidates[0];
   if (candidates.length > 1 && targetTime) {
     const targetMs = new Date(targetTime).getTime();
@@ -7969,10 +8026,7 @@ function getEventMarkets(sport, homeTeam, awayTeam, targetTime) {
   // preseason collision is ~5 WEEKS. So a generous ceiling separates them
   // cleanly. When the only candidate is too far off, return null (leg declines)
   // rather than price off the wrong game. Skipped when targetTime is absent.
-  // Golf is exempt: a tournament "event" legitimately spans ~4 days, so a
-  // round-4 matchup's PX start can sit 3+ days from the tournament-start odds
-  // event. Golf also has no weekly same-pair collision to guard against.
-  const timeGuarded = typeof sport === 'string' && !sport.startsWith('golf');
+  // Golf exemption already applied via `timeGuarded` above.
   if (timeGuarded && targetTime && !_withinMatchWindow(targetTime, closest.commenceTime, config.oddsMatchMaxDeltaHours)) {
     const dh = Math.round(Math.abs(new Date(closest.commenceTime).getTime() - new Date(targetTime).getTime()) / 3600000);
     log.debug('OddsFeed', `Event match rejected for ${homeTeam} v ${awayTeam} (${sport}): nearest odds event ${dh}h from PX start — wrong fixture`);
