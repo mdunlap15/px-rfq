@@ -1578,6 +1578,36 @@ async function _supplementDkGameLines(parsedEvents, sport) {
   log.info('OddsFeed', `${sport} DK game-line supplement applied: ${applied}/${candidates.length} events filled`);
 }
 
+// F5 BOOK COVERAGE. The supplement used to hard-request exactly three books:
+// pinnacle, draftkings, fanduel. Probing TOA live on 2026-08-23 (5 MLB events,
+// no bookmakers filter) shows that is badly short:
+//   h2h_1st_5_innings      13 distinct books available
+//   spreads/totals_1st_5   9 distinct books available
+// and PINNACLE DOES NOT QUOTE F5 MONEYLINE AT ALL (0/5 events), though it does
+// quote F5 spreads and totals (3/5). So our worst-performing market was priced
+// off FanDuel plus an occasional DraftKings -- frequently a ONE-BOOK 'consensus'.
+// Measured on quoted legs: 0% of F5 legs ever carried all three named books;
+// the F5 run line carried exactly one 74% of the time.
+// Empty string = send no bookmakers filter and take every book in the requested
+// regions, letting the existing MAX_BOOK_VIG sharp filter drop the outliers.
+const F5_BOOKMAKERS = process.env.F5_BOOKMAKERS || '';
+// Minimum books before an F5 market is attached at all. 0/1 disables the floor.
+// parseInt is checked explicitly so F5_MIN_BOOKS=0 turns it OFF rather than
+// falling through a falsy-zero default back to 2.
+const F5_MIN_BOOKS = (() => {
+  const v = parseInt(process.env.F5_MIN_BOOKS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 2;
+})();
+
+function _f5OddsUrl(eventId, apiKey) {
+  return `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds`
+    + `?apiKey=${apiKey}`
+    + `&regions=us,eu`
+    + `&markets=h2h_1st_5_innings,spreads_1st_5_innings,totals_1st_5_innings`
+    + (F5_BOOKMAKERS ? `&bookmakers=${F5_BOOKMAKERS}` : '')
+    + `&oddsFormat=american`;
+}
+
 async function supplementMlbF5Markets(parsedEvents) {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey) return;
@@ -1604,6 +1634,7 @@ async function supplementMlbF5Markets(parsedEvents) {
   }
 
   let h2hCount = 0, spreadCount = 0, totalCount = 0, calls = 0, matchFails = 0, apiFails = 0;
+  let thinH2h = 0, thinSpread = 0, thinTotal = 0;
   const CONCURRENCY = 3;
   let idx = 0;
   async function worker() {
@@ -1612,12 +1643,7 @@ async function supplementMlbF5Markets(parsedEvents) {
       const resolved = await resolveOddsApiEventId('baseball_mlb', ev.homeTeam, ev.awayTeam, ev.commenceTime);
       if (!resolved) { matchFails++; continue; }
 
-      const url = `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${resolved.eventId}/odds`
-        + `?apiKey=${theOddsApiKey}`
-        + `&regions=us,eu`
-        + `&markets=h2h_1st_5_innings,spreads_1st_5_innings,totals_1st_5_innings`
-        + `&bookmakers=pinnacle,draftkings,fanduel`
-        + `&oddsFormat=american`;
+      const url = _f5OddsUrl(resolved.eventId, theOddsApiKey);
 
       try {
         const resp = await fetch(url);
@@ -1662,18 +1688,23 @@ async function supplementMlbF5Markets(parsedEvents) {
           }
         }
 
-        if (h2hPairs.length > 0) {
+        // MIN-BOOK FLOOR. `> 0` meant one book was a 'consensus'. F5 is thinner
+        // and softer than the full game, and it measured -2.82 sigma (F5
+        // moneyline) / -2.19 (F5 total) against expectation over 2026-05-19..08-23,
+        // -$20,788 between them. Fail closed instead: a declined leg costs one
+        // RFQ, a leg priced off one soft book costs money.
+        if (h2hPairs.length >= F5_MIN_BOOKS) {
           const mk = buildConsensusMoneyline(h2hPairs);
           if (mk) { ev.markets.h2h_f5 = _mergeSupplementedMarket(ev.markets.h2h_f5, mk); h2hCount++; }
-        }
-        if (spreadPairs.length > 0) {
+        } else if (h2hPairs.length > 0) { thinH2h++; }
+        if (spreadPairs.length >= F5_MIN_BOOKS) {
           const sp = buildConsensusSpread(spreadPairs);
           if (sp) { ev.markets.spreads_f5 = _mergeSupplementedMarket(ev.markets.spreads_f5, sp); spreadCount++; }
-        }
-        if (totalPairs.length > 0) {
+        } else if (spreadPairs.length > 0) { thinSpread++; }
+        if (totalPairs.length >= F5_MIN_BOOKS) {
           ev.markets.totals_f5 = _mergeSupplementedMarket(ev.markets.totals_f5, buildConsensusTotals(totalPairs));
           totalCount++;
-        }
+        } else if (totalPairs.length > 0) { thinTotal++; }
       } catch (err) {
         apiFails++;
       }
@@ -1682,7 +1713,8 @@ async function supplementMlbF5Markets(parsedEvents) {
   const workers = [];
   for (let i = 0; i < Math.min(CONCURRENCY, candidates.length); i++) workers.push(worker());
   await Promise.all(workers);
-  log.info('OddsFeed', `MLB F5 supplement (per-event): ${calls}/${candidates.length} calls, h2h+${h2hCount} spread+${spreadCount} total+${totalCount}, matchFails=${matchFails} apiFails=${apiFails}`);
+  log.info('OddsFeed', `MLB F5 supplement (per-event): ${calls}/${candidates.length} calls, h2h+${h2hCount} spread+${spreadCount} total+${totalCount}, matchFails=${matchFails} apiFails=${apiFails}`
+    + (F5_MIN_BOOKS > 1 ? `, dropped-thin(<${F5_MIN_BOOKS} books) h2h=${thinH2h} spread=${thinSpread} total=${thinTotal}` : ''));
 
   // DK scraper fallback: if any MLB events STILL lack h2h_f5 after the
   // TOA per-event supplement, scrape DK directly. DK posts F5 markets
@@ -1702,6 +1734,18 @@ async function supplementMlbF5Markets(parsedEvents) {
     }
   }
   if (stillMissingF5.length === 0) return;
+
+  // The DK scrape produces a SINGLE-book fair (it sets `books: 1` below), so it
+  // cannot satisfy a floor above one. Without this guard the floor is cosmetic:
+  // every event the floor just rejected falls straight through to here and gets
+  // priced off one book anyway -- the exact thing the floor exists to stop.
+  // NOTE this narrows the earlier operator directive of '100% F5 coverage on MLB
+  // regardless of upstream API gaps'. That directive predates the measurement
+  // that single-book F5 is where the money went; set F5_MIN_BOOKS=1 to restore it.
+  if (F5_MIN_BOOKS > 1) {
+    log.info('OddsFeed', `MLB F5: ${stillMissingF5.length} events lack F5 after TOA supplement — DK single-book fallback SKIPPED (F5_MIN_BOOKS=${F5_MIN_BOOKS})`);
+    return;
+  }
 
   log.info('OddsFeed', `MLB F5: ${stillMissingF5.length} events still lack F5 after TOA supplement — invoking DK scraper`);
   let dkScrape;
@@ -10741,5 +10785,9 @@ module.exports = {
   __H1_SUPPLEMENT_SPORTS: H1_SUPPLEMENT_SPORTS,
   __ODDS_API_FALLBACK: ODDS_API_FALLBACK,
   _bttsBooksFor,
+  __debugF5Config: () => ({ bookmakers: F5_BOOKMAKERS, minBooks: F5_MIN_BOOKS }),
+  __debugF5Url: _f5OddsUrl,
+  __debugF5Accepts: (bookCount) => bookCount >= F5_MIN_BOOKS,
+  __debugF5DkFallbackAllowed: () => !(F5_MIN_BOOKS > 1),
 };
 
