@@ -3055,6 +3055,21 @@ function startStatusServer() {
     }
   });
 
+  // Leg-level PRICE calibration: for each prop family, did the legs we priced at
+  // p% actually hit p% of the time? Ticket P&L cannot answer this -- five
+  // strikeout tickets carried the entire 2026 deficit, so leverage swamps a 2pp
+  // pricing error. This scores individual legs against box scores instead.
+  // ?days=60&minN=25
+  app.get('/prop-leg-calibration', async (req, res) => {
+    try {
+      const ps = require('./services/prop-settlement');
+      const days = parseInt(req.query.days) || 60;
+      const minN = parseInt(req.query.minN) || 25;
+      res.json(await ps.getLegCalibration({ days, minN }));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
   // Operator trigger: settle finished MLB hitter-prop parlays against box
   // scores now and upsert into prop_settlements. The daily job does this
   // automatically when PROP_SETTLEMENT_ENABLED=true; this lets you run it on
