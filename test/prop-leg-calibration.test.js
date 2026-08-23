@@ -160,3 +160,63 @@ test('over and under are scored as separate families', async () => {
     assert.deepStrictEqual(keys, ['pitcher_strikeouts.over', 'pitcher_strikeouts.under']);
   });
 });
+
+test('a guessed side is recovered from our own order, and the outcome re-derived', async () => {
+  // Most matched_parlays rows predate the selection fix, so the settler assumed
+  // OVER and flagged sideKnown:false. `won` on those rows is computed against the
+  // guess, so an actual UNDER is recorded inverted. We hold the order we wrote,
+  // and our selection is authoritative — so take the side from there and
+  // re-derive the result from stat vs line.
+  const settlements = [{ parlay_id: 'u1', matched_at: new Date().toISOString(), we_quoted: true,
+    sport: 'baseball_mlb', leg_results: [
+      // Pitcher threw 3 Ks on a 4.5 line. Recorded as over/won:false (the guess).
+      { propType: 'pitcher_strikeouts', line: 4.5, player: 'Under Guy', stat: 3,
+        side: 'over', sideKnown: false, won: false, graded: true },
+      // Threw 9 on 4.5. Guess happens to be right.
+      { propType: 'pitcher_strikeouts', line: 4.5, player: 'Over Guy', stat: 9,
+        side: 'over', sideKnown: false, won: true, graded: true },
+    ] }];
+  const orders = [{ parlay_id: 'u1', legs: [
+    { market: 'player_strikeouts', team: 'Under Guy', line: 4.5, selection: 'under', fairProb: 0.5 },
+    { market: 'player_strikeouts', team: 'Over Guy', line: 4.5, selection: 'over', fairProb: 0.5 },
+  ] }];
+  await withDb({ prop_settlements: settlements, parlay_orders: orders }, async () => {
+    const out = await ps.getLegCalibration({ days: 60, minN: 1 });
+    assert.strictEqual(out.legsScored, 2);
+    assert.strictEqual(out.sidesRecoveredFromOrder, 2);
+    const under = out.families.find((f) => f.family === 'pitcher_strikeouts.under');
+    const over = out.families.find((f) => f.family === 'pitcher_strikeouts.over');
+    assert.ok(under, 'the under leg must be re-filed under its true side');
+    // 3 Ks vs a 4.5 line: the under WON, though the row said won:false.
+    assert.strictEqual(under.realizedPct, 100, 'outcome must be re-derived, not trusted');
+    assert.strictEqual(over.realizedPct, 100);
+  });
+});
+
+test('a leg with no recorded side anywhere is still dropped, and counted', async () => {
+  const settlements = [{ parlay_id: 'v1', matched_at: new Date().toISOString(), we_quoted: true,
+    sport: 'baseball_mlb', leg_results: [
+      { propType: 'pitcher_strikeouts', line: 4.5, player: 'Nobody Knows', stat: 6,
+        side: 'over', sideKnown: false, won: true, graded: true }] }];
+  const orders = [{ parlay_id: 'v1',
+    legs: [{ market: 'player_strikeouts', team: 'Nobody Knows', line: 4.5, fairProb: 0.5 }] }]; // no selection
+  await withDb({ prop_settlements: settlements, parlay_orders: orders }, async () => {
+    const out = await ps.getLegCalibration({ days: 60, minN: 1 });
+    assert.strictEqual(out.legsScored, 0);
+    assert.strictEqual(out.legsDroppedUnknownSide, 1);
+  });
+});
+
+test('recovery respects a push on an integer line', async () => {
+  const settlements = [{ parlay_id: 'w1', matched_at: new Date().toISOString(), we_quoted: true,
+    sport: 'baseball_mlb', leg_results: [
+      { propType: 'pitcher_strikeouts', line: 6, player: 'Push Guy', stat: 6,
+        side: 'over', sideKnown: false, won: true, graded: true }] }];
+  const orders = [{ parlay_id: 'w1',
+    legs: [{ market: 'player_strikeouts', team: 'Push Guy', line: 6, selection: 'under', fairProb: 0.5 }] }];
+  await withDb({ prop_settlements: settlements, parlay_orders: orders }, async () => {
+    const out = await ps.getLegCalibration({ days: 60, minN: 1 });
+    const f = out.families.find((x) => x.family === 'pitcher_strikeouts.under');
+    assert.strictEqual(f.realizedPct, 0, 'exactly on an integer line is a push, not an under win');
+  });
+});

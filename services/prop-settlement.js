@@ -401,13 +401,12 @@ async function getLegCalibration(opts = {}) {
   }
 
   const fams = {};
-  let matched = 0, unmatched = 0;
+  let matched = 0, unmatched = 0, recovered = 0, guessedSide = 0;
   for (const r of rows) {
     const legs = orders.get(r.parlay_id);
     if (!legs) continue;
     for (const lr of (r.leg_results || [])) {
       if (lr.won == null) continue;              // ungraded leg
-      if (lr.sideKnown === false) continue;      // side was guessed, not recorded
       // Match on family + line + player. Line disambiguates a player appearing
       // twice; player name guards against two legs sharing a family and line.
       const m = legs.find((l) => _propType(l) === lr.propType
@@ -416,11 +415,33 @@ async function getLegCalibration(opts = {}) {
       if (!m || m.fairProb == null) { unmatched++; continue; }
       const p = Number(m.fairProb);
       if (!(p > 0 && p < 1)) { unmatched++; continue; }
+
+      // SIDE RECOVERY. Most matched_parlays rows predate the selection fix, so
+      // _settleLeg had to assume OVER and flagged it sideKnown:false -- 1,427 of
+      // our own strikeout legs against only ~324 with a recorded side. Dropping
+      // them wasted 80% of the sample. But we are already holding the ORDER we
+      // wrote, and OUR selection is authoritative, so take the side from there
+      // and re-derive the outcome. `won` on the row was computed against the
+      // guessed side and is inverted whenever the truth was an under.
+      let side = lr.side || 'over';
+      let won = !!lr.won;
+      if (lr.sideKnown === false) {
+        const sel = String(m.selection || '').toLowerCase();
+        if (sel !== 'over' && sel !== 'under' && sel !== 'yes' && sel !== 'no') { guessedSide++; continue; }
+        side = (sel === 'under' || sel === 'no') ? 'under' : 'over';
+        const lineNum = Number(lr.line);
+        const stat = Number(lr.stat);
+        if (!Number.isFinite(lineNum) || !Number.isFinite(stat)) { guessedSide++; continue; }
+        const overWin = stat >= Math.ceil(lineNum);
+        const isPush = Number.isInteger(lineNum) && stat === lineNum;
+        won = isPush ? false : (side === 'under' ? !overWin : overWin);
+        recovered++;
+      }
       matched++;
-      const key = lr.propType + '.' + (lr.side || 'over');
-      const f = fams[key] || (fams[key] = { key, propType: lr.propType, side: lr.side || 'over', n: 0, wins: 0, expWins: 0, varSum: 0 });
+      const key = lr.propType + '.' + side;
+      const f = fams[key] || (fams[key] = { key, propType: lr.propType, side, n: 0, wins: 0, expWins: 0, varSum: 0 });
       f.n++; f.expWins += p; f.varSum += p * (1 - p);
-      if (lr.won) f.wins++;
+      if (won) f.wins++;
     }
   }
 
@@ -442,6 +463,7 @@ async function getLegCalibration(opts = {}) {
     };
   }).sort((a, b) => b.legs - a.legs);
 
-  return { ok: true, windowDays: days, minN, legsScored: matched, legsUnmatched: unmatched, families };
+  return { ok: true, windowDays: days, minN, legsScored: matched, legsUnmatched: unmatched,
+    sidesRecoveredFromOrder: recovered, legsDroppedUnknownSide: guessedSide, families };
 }
 module.exports = { settleRecent, getCalibration, getLegCalibration, __settleLeg: _settleLeg, __propType: _propType };
