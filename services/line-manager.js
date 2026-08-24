@@ -1821,6 +1821,11 @@ async function seedAllLines() {
       // from "only previously RFQ'd" (~23) to "every K-prop SharpAPI knows
       // about" (~60+) so the Lines tab reflects actual quotability.
       if (sportKey === 'baseball_mlb' && market.type === 'total' && isPitcherStrikeoutMarket(market.name || '')) {
+        // Master kill-switch (default off). When disabled, skip the K-prop
+        // market entirely so no player_strikeouts line registers and PX never
+        // sends a K-prop RFQ. `continue` (not fall through) so it isn't
+        // reprocessed by the standard total path as a bogus game total.
+        if (!(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
         const playerName = extractPitcherNameFromKMarket(market.name);
         if (!playerName) {
           log.debug('Lines', `K-prop seed: name extract failed for "${market.name}"`);
@@ -3479,6 +3484,10 @@ async function resolveUnknownLine(rfqLeg) {
         // 'prop_pricing_not_ready' reason. Vig structure + decline rules
         // come in M2/M3 before live quoting.
         if (market.type === 'total' && isPitcherStrikeoutMarket(market.name || '')) {
+          // Master kill-switch (default off) — same gate as the seed branch.
+          // When disabled, don't resolve K-prop lines on demand either, so an
+          // RFQ for a K-prop lineId we never seeded stays unresolved/declined.
+          if (!(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
           const parsedK = px.parseMarketSelections(market);
           const matchingK = parsedK.find(s => s.lineId === lineId);
           if (matchingK) {

@@ -332,6 +332,15 @@ const config = {
     // the fit is degenerate). strikeoutDistFair kept as a legacy alias.
     countPropDistFair: !/^(0|false|no)$/i.test(process.env.COUNT_PROP_DIST_FAIR || process.env.STRIKEOUT_DIST_FAIR || ''),
     strikeoutDistFair: !/^(0|false|no)$/i.test(process.env.STRIKEOUT_DIST_FAIR || ''),
+    // Master kill-switch for quoting pitcher-strikeout props (marketType
+    // 'player_strikeouts'). DISABLED by default (2026-08-24 operator directive).
+    // K-props register via a DEDICATED seed branch (line-manager K-prop seed) and
+    // an on-demand path that predate PROP_LAUNCH_ALLOWLIST and never consulted it,
+    // so removing the allowlist entry did NOT stop them — this flag is the real
+    // gate. When false, both registration paths skip, so no player_strikeouts line
+    // exists and PX never sends a K-prop RFQ. Re-enable with the literal string
+    // PITCHER_K_PROPS_ENABLED='true'.
+    pitcherKPropsEnabled: process.env.PITCHER_K_PROPS_ENABLED === 'true',
     // Pre-game window gate for ALL MLB player props (pitcher K + hitter props).
     // The OVERNIGHT prop market is immature (starter/lineup barely set, thin/soft
     // early books), so even a correct fair is built on bad input and gets picked
