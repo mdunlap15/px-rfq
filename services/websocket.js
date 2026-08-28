@@ -1,6 +1,7 @@
 const Pusher = require('pusher-js');
 const { config, getBankroll } = require('../config');
 const log = require('./logger');
+const { legLineId } = require('./leg-id');
 const px = require('./prophetx');
 const pricer = require('./pricer');
 const orderTracker = require('./order-tracker');
@@ -1014,7 +1015,7 @@ async function handleRFQ(data) {
     //     rate (first hit on each new line) for ~95ms p95 latency win.
     const lineManagerEarly = require('./line-manager');
     const unknownAtStart = legs.filter(l => {
-      const lid = l.line_id || l.lineId || l;
+      const lid = legLineId(l);
       return !lineManagerEarly.lookupLine(lid);
     });
     if (unknownAtStart.length > 0) {
@@ -1047,7 +1048,7 @@ async function handleRFQ(data) {
         const getFail = lineManagerEarly.getResolveFailure;
         const toAwait = [];
         for (const leg of unknownAtStart) {
-          const lid = leg.line_id || leg.lineId || leg;
+          const lid = legLineId(leg);
           if (getFail && getFail(lid)) {
             lineManagerEarly.resolveUnknownLine(leg).catch(err => log.debug('Resolve', `async resolve failed: ${err.message}`));
           } else {
@@ -1092,7 +1093,7 @@ async function handleRFQ(data) {
       const unknownSports = [];
       const unknownCategories = []; // granular categorization for each unknown leg
       for (const l of legs) {
-        const lineId = l.line_id || l.lineId || l;
+        const lineId = legLineId(l);
         const info = lineManager.lookupLine(lineId);
         if (info) {
           const mt = info.marketType || '';
@@ -1926,7 +1927,30 @@ async function handleConfirm(data) {
     // Example: bettor wagered $100 at +1774, to-win $1774. PX sent stake=$1774
     // and odds=-1774 (SP side). Our risk on this parlay is $1774.
     // Our risk = confirmedStake directly, no multiplication.
-    const ourRisk = confirmedStake || 0;
+    //
+    // FAIL CLOSED when the money fields are unreadable. This used to be
+    // `const ourRisk = confirmedStake || 0`, which made `undefined`
+    // indistinguishable from a legitimate zero — and a 0 risk turns EVERY
+    // confirm-time cap below into a no-op, because `0 > maxRisk` is false at
+    // the per-parlay/prop/series/experimental gate (:1965) and at the
+    // team/game/leg checks after it. A malformed payload was therefore
+    // ACCEPTED at unlimited size, silently: no throw, and the reject log at
+    // :1970 never runs. It then propagated as confirmedStake into
+    // px.confirmOrder and recordConfirmation, storing NULL booked risk, so
+    // P&L, exposure and the dashboard all under-reported a real liability.
+    // A confirm whose size or price we cannot read must never be accepted.
+    if (!_confirmMoneyIsReadable(confirmedStake, confirmedOdds)) {
+      log.error('Confirm', `Rejecting: unreadable stake/odds — parlay=${parlayId}, order=${orderUuid}, stake=${confirmedStake}, odds=${confirmedOdds}`);
+      log.error('Confirm', `UNREADABLE PAYLOAD: ${JSON.stringify(payload)}`);
+      orderTracker.recordRejection(parlayId, 'confirm missing stake/odds');
+      _recordConfirmOutcome(parlayId, 'unreadableMoney', 'missing stake/odds', confirmedStake);
+      if (callbackUrl) {
+        try { await px.confirmOrder(callbackUrl, orderUuid, 'reject'); }
+        catch (e) { log.warn('Confirm', `Unreadable-money reject POST failed for ${parlayId}: ${e.message}`); }
+      }
+      return;
+    }
+    const ourRisk = Number(confirmedStake);
     const origLegs = originalOrder.legs || originalOrder.meta?.legs || [];
     const legsForCheck = origLegs.map(l => ({ ...l, lineInfo: l, team: l.team || l.teamName, fairProb: l.fairProb }));
 
@@ -2619,6 +2643,26 @@ const _confirmCounts = { received: 0, accepted: 0, acceptUnknown: 0, error: 0, n
 const _confirmLog = [];
 const _CONFIRM_LOG_MAX = 200;
 let _confirmErrorsSeen = 0; // snapshot for the conversion watchdog (Edit G)
+/**
+ * Are the money fields on a price.confirm.new payload usable?
+ *
+ * The confirm handler FAILS CLOSED on false: a confirm whose size or price we
+ * cannot read is rejected, never accepted. This exists as a named, exported
+ * function rather than an inline expression so the regression test drives the
+ * REAL predicate — an earlier version of the test hand-copied the logic, which
+ * meant deleting the guard entirely still left the suite green, and a green
+ * suite is the gate for the unattended 1am auto-push.
+ *
+ * Rejects: undefined/null (e.g. a renamed field), NaN, non-numeric strings,
+ * zero or negative stake (no legitimate fill has either), and zero odds.
+ * Accepts numeric strings — PX has sent both shapes.
+ */
+function _confirmMoneyIsReadable(stake, odds) {
+  const s = Number(stake);
+  const o = Number(odds);
+  return Number.isFinite(s) && s > 0 && Number.isFinite(o) && o !== 0;
+}
+
 function _recordConfirmOutcome(parlayId, outcome, reason, stake) {
   if (_confirmCounts[outcome] != null) _confirmCounts[outcome]++;
   _confirmLog.push({
@@ -3207,6 +3251,7 @@ module.exports = {
   getConfirmActivity,
   getPxSubmitErrorsByCombo,
   getRecentQuotes,
+  _confirmMoneyIsReadable, // exposed so the fail-closed confirm guard has real regression coverage
   _classifyMlbProp: classifyMlbProp, // exposed for /prop-opportunity sanity testing
   _classifyNbaProp: classifyNbaProp, // exposed for /prop-opportunity sanity testing
   _classifyNhlProp: classifyNhlProp, // exposed for /prop-opportunity sanity testing

@@ -1,5 +1,6 @@
 const { config, getBankroll } = require('../config');
 const log = require('./logger');
+const { legLineId } = require('./leg-id');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const orderTracker = require('./order-tracker');
@@ -908,7 +909,7 @@ function priceParlay(legs, opts = {}) {
   // ---------------------------------------------------------------------
   if (config.pricing.declineTeamTotals !== false) {
     for (const leg of legs) {
-      const lineId = leg.line_id || leg.lineId || leg;
+      const lineId = legLineId(leg);
       const lineInfo = (opts.resolvedLineInfos && opts.resolvedLineInfos.get(lineId)) || lineManager.lookupLine(lineId);
       if (lineInfo && (lineInfo.marketType === 'team_total' || lineInfo.oddsApiMarket === 'team_totals')) {
         log.info('Pricing', `Declined: team_total leg on defensive block (${lineInfo.teamName} ${lineInfo.line} — audit pending on consensus pairing)`);
@@ -954,7 +955,7 @@ function priceParlay(legs, opts = {}) {
     return staleCache[key];
   };
   for (const leg of legs) {
-    const lineId = leg.line_id || leg.lineId || leg;
+    const lineId = legLineId(leg);
     const lineInfo = (preResolved && preResolved.get(lineId)) || lineManager.lookupLine(lineId);
 
     if (!lineInfo) {
@@ -4114,7 +4115,7 @@ function shouldDecline(legs, parlayId) {
   // markets we already price. Expand cautiously if other patterns surface.
   const NOVELTY_PATTERN = /\b(?:tip\s*off|tipoff|first\s+(?:basket|field\s+goal|fg|touchdown|to\s+score)|race\s+to\s+\d+|winning\s+margin|method\s+of\s+(?:victory|finish|win)|exact\s+(?:score|result)|coin\s+toss|opening\s+(?:kickoff|drive|possession)|first\s+possession)\b/i;
   for (const leg of legs) {
-    const lineId = leg.line_id || leg.lineId || leg;
+    const lineId = legLineId(leg);
     const lineInfo = lineManager.lookupLine(lineId);
     if (!lineInfo) continue; // main loop handles unknown legs
     const ev = String(lineInfo.pxEventName || '');
@@ -4159,7 +4160,7 @@ function shouldDecline(legs, parlayId) {
     const legInfos = [];
     for (const l of (legs || [])) {
       if (!l) continue;
-      const lid = l.line_id || l.lineId || l;
+      const lid = legLineId(l);
       let li = l.lineInfo;
       if (!li) { try { li = lineManager.lookupLine(lid); } catch (_) { li = null; } }
       if (li) legInfos.push(li);
@@ -4414,7 +4415,7 @@ function shouldDecline(legs, parlayId) {
     const golfLegs = [];
     for (const l of (legs || [])) {
       if (!l) continue;
-      const lineId = l.line_id || l.lineId || l;
+      const lineId = legLineId(l);
       let li = l.lineInfo;
       if (!li) { try { li = lineManager.lookupLine(lineId); } catch (_) { li = null; } }
       if (!li) continue;
@@ -4522,7 +4523,7 @@ function shouldDecline(legs, parlayId) {
       .normalize('NFD').replace(/[̀-ͯ]/g, '')
       .toLowerCase().replace(/[.'`]/g, '').replace(/\s+/g, ' ').trim();
     for (const leg of legs) {
-      const lineId = leg.line_id || leg.lineId || leg;
+      const lineId = legLineId(leg);
       const lineInfo = lineManager.lookupLine(lineId);
       if (!lineInfo) continue; // unknown leg — main loop handles
       const mt = lineInfo.marketType || '';
@@ -4584,7 +4585,7 @@ function shouldDecline(legs, parlayId) {
             if (legsByEvent[eid].others.length === 0) {
               for (const otherLeg of legs) {
                 if (otherLeg === leg) break;
-                const oid = otherLeg.line_id || otherLeg.lineId || otherLeg;
+                const oid = legLineId(otherLeg);
                 const oInfo = lineManager.lookupLine(oid);
                 if (!oInfo || !oInfo.pxEventId) continue;
                 if (oInfo.pxEventId !== eid) continue;
@@ -4651,7 +4652,7 @@ function shouldDecline(legs, parlayId) {
   const resolvedLegs = [];
   const nowMs = Date.now();
   for (const leg of legs) {
-    const lineId = leg.line_id || leg.lineId || leg;
+    const lineId = legLineId(leg);
     const lineInfo = lineManager.lookupLine(lineId);
     if (!lineInfo) return { declined: true, reason: 'unknown legs', detail: null };
 

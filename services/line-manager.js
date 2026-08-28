@@ -159,6 +159,7 @@ function _classifySoccerProp(marketName) {
   return null;
 }
 const log = require('./logger');
+const { legLineId } = require('./leg-id');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
 const nflConsensus = require('./nfl-consensus');
@@ -221,6 +222,13 @@ let _supportedReconcileDone = false;
 // lineIndex cannot produce stale prices: line_ids are immutable per market,
 // and pricer.shouldDecline catches event-started lines via startTime.
 let _seedIndexTarget = null;
+// How many times the build-then-swap breaker has refused to install a
+// collapsed index this process. Surfaced so a dark book is visible as a number
+// rather than only as a log line nobody is watching.
+let _seedSwapBreakerFires_count = 0;
+// Consecutive refusals, reset on any successful swap. Bounds the breaker so a
+// genuine book shrink cannot pin a stale index forever (see the override).
+let _seedSwapBreakerConsecutive = 0;
 let _seedPrimaryTarget = null;
 
 // Seed-side line writer. Routes to staging during warm refresh, to live
@@ -1127,6 +1135,34 @@ function _removalBreakerFires(trackedSize, removeCount, pct) {
   const p = Number(pct) > 0 ? Number(pct) : 60;
   if (p >= 100) return false;                 // 100 = breaker disabled
   return removeCount / trackedSize > p / 100;
+}
+
+/**
+ * Build-then-swap circuit breaker decision. seedAllLines stages a fresh index
+ * into _seedIndexTarget and then WIPES the live lineIndex and replaces it. That
+ * is atomic and correct when the build succeeded — but when the build produced
+ * (almost) nothing, the swap DELETES a working index and the service goes dark
+ * with no exception: PX stops sending RFQs and the only signal is a seed log
+ * reading "0 lines parsed".
+ *
+ * Any upstream shape change collapses the parse to zero — a PX field rename
+ * (line_id -> strike_id / market_lines -> market_strikes), an auth blip that
+ * empties the event fetch, or a bad market payload. Keeping the previous index
+ * for a cycle is strictly safer: stale-price gates still protect pricing, the
+ * supported-lines diff in 6b reads the (unchanged) live index so nothing is
+ * de-registered at PX, and the next successful seed swaps normally.
+ *
+ * Mirrors _removalBreakerFires: small previous sets are exempt because a
+ * genuinely small book is legitimately lumpy, and cold start (prev 0) must
+ * always be allowed to populate. Set SEED_SWAP_BREAKER_PCT=0 to disable.
+ */
+function _seedSwapBreakerFires(prevSize, newSize, pct, minPrev) {
+  const floor = Number.isFinite(Number(minPrev)) ? Number(minPrev) : 200;
+  if (!(prevSize >= floor)) return false;     // cold start / small book: always swap
+  const p = Number(pct);
+  const eff = Number.isFinite(p) && p >= 0 ? p : 10;
+  if (eff === 0) return false;                // 0 = breaker disabled
+  return newSize < prevSize * (eff / 100);
 }
 
 async function seedAllLines() {
@@ -2791,12 +2827,43 @@ async function seedAllLines() {
   // Cold start: _seedIndexTarget is null and this block is a no-op (seed
   // wrote directly to live as before).
   if (_seedIndexTarget && _seedPrimaryTarget) {
-    for (const k of Object.keys(lineIndex)) delete lineIndex[k];
-    Object.assign(lineIndex, _seedIndexTarget);
-    for (const k of Object.keys(primaryByEvent)) delete primaryByEvent[k];
-    Object.assign(primaryByEvent, _seedPrimaryTarget);
-    _seedIndexTarget = null;
-    _seedPrimaryTarget = null;
+    // SWAP CIRCUIT BREAKER — refuse to replace a working index with an empty
+    // one. See _seedSwapBreakerFires. Without this, any upstream shape change
+    // that collapses the parse (a PX field rename, an auth blip, a bad market
+    // payload) silently DELETES the live index on the very next refresh and
+    // PX stops sending RFQs. Keeping the old index costs one stale cycle;
+    // swapping in an empty one costs the whole book.
+    const _prevSize = Object.keys(lineIndex).length;
+    const _newSize = Object.keys(_seedIndexTarget).length;
+    // The breaker buys TIME, it must never wedge permanently. Unlike the
+    // removal breaker (whose tracked set advances, so it self-clears), keeping
+    // the old index also keeps _prevSize high — so a LEGITIMATE collapse (a
+    // season ending, the book genuinely emptying) would re-fire every cycle
+    // forever and pin a stale index until someone restarted the process. After
+    // _SEED_SWAP_BREAKER_MAX consecutive refusals we accept the small index and
+    // say so loudly: a real outage does not persist across that many seeds,
+    // and a real shrink must eventually be allowed through.
+    const _maxConsec = Number(process.env.SEED_SWAP_BREAKER_MAX) > 0
+      ? Number(process.env.SEED_SWAP_BREAKER_MAX) : 3;
+    const _wouldFire = _seedSwapBreakerFires(_prevSize, _newSize, process.env.SEED_SWAP_BREAKER_PCT, 200);
+    if (_wouldFire && _seedSwapBreakerConsecutive >= _maxConsec) {
+      log.error('Lines', `BREAKER OVERRIDE: seed has built a collapsed index ${_seedSwapBreakerConsecutive + 1}x in a row (${_newSize} vs ${_prevSize} live). Accepting it — a transient outage would have cleared by now, so this is treated as a real book shrink. If quoting goes dark, THIS is the line to look at.`);
+    }
+    if (_wouldFire && _seedSwapBreakerConsecutive < _maxConsec) {
+      _seedSwapBreakerFires_count++;
+      _seedSwapBreakerConsecutive++;
+      log.error('Lines', `BREAKER: seed built only ${_newSize} lines vs ${_prevSize} live — refusing the build-then-swap and KEEPING the existing index (refusal ${_seedSwapBreakerConsecutive}/${_maxConsec}). Something upstream collapsed the parse (PX shape change, empty event fetch, auth failure). Quoting continues on the previous index; stale-price gates still apply.`);
+      _seedIndexTarget = null;
+      _seedPrimaryTarget = null;
+    } else {
+      _seedSwapBreakerConsecutive = 0;
+      for (const k of Object.keys(lineIndex)) delete lineIndex[k];
+      Object.assign(lineIndex, _seedIndexTarget);
+      for (const k of Object.keys(primaryByEvent)) delete primaryByEvent[k];
+      Object.assign(primaryByEvent, _seedPrimaryTarget);
+      _seedIndexTarget = null;
+      _seedPrimaryTarget = null;
+    }
   }
 
   // 6b. Sync our PX "supported lines" set. RULE 1 (Anthony 2026-06-25): the set
@@ -3196,7 +3263,7 @@ function _getResolveFailure(lineId) {
  * spread/total during startup seeding.
  */
 async function resolveUnknownLine(rfqLeg) {
-  const lineId = rfqLeg.line_id || rfqLeg.lineId || rfqLeg;
+  const lineId = legLineId(rfqLeg);
   if (!lineId) return null;
   if (lineIndex[lineId]) {
     // Already resolved — any failure record from an earlier attempt is moot.
@@ -4616,6 +4683,8 @@ module.exports = {
   lookupLine,
   // Exported for test/line-removal-breaker.test.js
   _removalBreakerFires,
+  _seedSwapBreakerFires,
+  getSeedSwapBreakerFires: () => _seedSwapBreakerFires_count,
   lookupLineAsync,
   __debugGetLineIndex,
   // Exposed for tests + one-off audits of side attribution (see
