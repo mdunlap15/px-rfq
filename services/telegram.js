@@ -21,6 +21,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID || null;
 
 let warned = false;
+let _disabledLogged = false;   // log the suppression once, not per alert
 function _warnIfUnconfigured() {
   if (warned) return false;
   warned = true;
@@ -37,6 +38,21 @@ function _warnIfUnconfigured() {
  * Never throws — caller can fire-and-forget.
  */
 async function sendMessage(text, opts = {}) {
+  // MASTER KILL-SWITCH (operator directive 2026-08-28: "disable all Telegram
+  // alerts for now"). DISABLED BY DEFAULT — re-enable with the literal string
+  // TELEGRAM_ALERTS_ENABLED='true'.
+  //
+  // Gated here rather than at the call sites because every alert in the service
+  // funnels through this one function, so this is the only place that cannot be
+  // bypassed by a future caller. Read from process.env on each call (not at
+  // module load) so flipping it back on takes effect without a restart.
+  if (process.env.TELEGRAM_ALERTS_ENABLED !== 'true') {
+    if (!_disabledLogged) {
+      _disabledLogged = true;
+      log.info('Telegram', 'Alerts DISABLED (TELEGRAM_ALERTS_ENABLED is not "true") — suppressing all sends');
+    }
+    return { ok: false, error: 'alerts_disabled' };
+  }
   if (!BOT_TOKEN || !CHAT_ID) {
     _warnIfUnconfigured();
     return { ok: false, error: 'not_configured' };
@@ -75,4 +91,7 @@ function isConfigured() {
   return Boolean(BOT_TOKEN && CHAT_ID);
 }
 
-module.exports = { sendMessage, isConfigured };
+/** True only if alerts are enabled AND credentials are present. */
+function alertsEnabled() { return process.env.TELEGRAM_ALERTS_ENABLED === 'true'; }
+
+module.exports = { sendMessage, isConfigured, alertsEnabled };
