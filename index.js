@@ -6438,6 +6438,18 @@ function startStatusServer() {
   // ±0.5 golf matchup spread board (BetOnline). First stop when a spread leg
   // will not quote: check priceable, ageMinutes and impliedTieRate. A tie rate
   // outside ~8-11% means the board is not the ±0.5 product we think it is.
+  // Golf outright QUOTING WINDOW state. First stop when outrights are (or are
+  // not) quoting unexpectedly: shows whether the window is open, when it next
+  // opens/closes in ET, and how fresh the DataGolf field data is. `?force=1`
+  // refetches tee times.
+  app.get('/golf-outright-window', async (req, res) => {
+    try {
+      const win = require('./services/golf-round-window');
+      if (req.query.force === '1') await win.refresh({ force: true });
+      res.json({ ok: true, ...win.getStatus() });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.get('/golf-matchup-spreads', async (req, res) => {
     try {
       const bo = require('./services/betonline-golf-matchups');

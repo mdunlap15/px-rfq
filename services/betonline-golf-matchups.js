@@ -46,6 +46,8 @@ function puppeteer() {
 }
 
 const NAV_TIMEOUT_MS = 60000;
+// Entry point for round discovery when no explicit URL is configured.
+const GOLF_INDEX_URL = 'https://www.betonline.ag/sportsbook/golf';
 
 let _board = null;      // { at, url, rows: [...] }
 let _inFlight = null;
@@ -132,7 +134,9 @@ function impliedTieRate(rows) {
   return ts[ts.length >> 1];
 }
 
-async function _scrape(url) {
+async function _scrape({ round = null, url = null } = {}) {
+  let resolvedUrl = url;
+  let resolvedRound = round;
   const browser = await puppeteer().launch({
     headless: true,
     args: [
@@ -153,19 +157,77 @@ async function _scrape(url) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
+    // ROUND SUBSTITUTION rather than discovery. Measured 2026-08-28: the ONLY
+    // page that hydrates its nav is a valid round URL itself — the homepage,
+    // /sportsbook, /sportsbook/golf and the tournament's fed-ex-events page all
+    // render chrome with ZERO board links, so there is no neutral page to
+    // discover from. The round number is the only part of the URL that changes
+    // between rounds, so swap it in directly: the configured URL becomes a
+    // per-TOURNAMENT setting and rounds advance on their own.
+    let entry = url;
+    if (entry && round != null) {
+      const swapped = entry.replace(/round-\d+/i, `round-${round}`);
+      if (swapped !== entry) log.info('BoGolf', `Round ${round}: ${entry} -> ${swapped}`);
+      entry = swapped;
+    }
+    await page.goto(entry || GOLF_INDEX_URL, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
     await new Promise(r => setTimeout(r, 10000));
 
-    // The deep link renders the HOMEPAGE. Click the round's own nav link to
-    // make the SPA actually route to the board.
-    const slug = (url.split('/sportsbook/')[1] || '').split('/').slice(0, 3).join('/');
-    const clicked = await page.evaluate((s) => {
-      const a = [...document.querySelectorAll('a')]
-        .find(x => (x.getAttribute('href') || '').includes(s));
+    // Enumerate every round link the SPA rendered. Discovery beats slugifying
+    // the tournament name: PX says "2026 The Open" while the book's slug is
+    // "the-open-championship", so a slugifier is wrong exactly when it matters
+    // (the same trap GOLF_DK_SLUG_MAP exists to paper over for DK).
+    // Match ONLY the round BOARD link: exactly two segments after /golf/.
+    // The page also renders one link per matchup
+    // (/sportsbook/golf/fedex-round-2/game/491114549), and a looser pattern
+    // matches all 14 of those instead — which then reads as "14 tournaments"
+    // and aborts. Note the board slug is `fed-ex-round-2` while the game links
+    // use `fedex-round-2`, so the segment count is the reliable discriminator,
+    // not the slug spelling.
+    const links = await page.evaluate(() => [...document.querySelectorAll('a')]
+      .map(a => a.getAttribute('href') || '')
+      .filter(h => /^\/sportsbook\/golf\/[^/]*round-\d+\/[^/?#]+$/i.test(h)));
+    const seen = [...new Set(links)];
+    const parseRound = (h) => { const m = /round-(\d+)/i.exec(h); return m ? parseInt(m[1], 10) : null; };
+
+    let target = null;
+    if (round != null) {
+      // The loaded round page renders exactly its own board link. Requiring it
+      // to match the round we asked for is what catches a silently wrong page
+      // (a round that does not exist yet redirects rather than 404ing).
+      const exact = seen.filter(h => parseRound(h) === round);
+      if (exact.length === 1) target = exact[0];
+      else if (exact.length > 1) {
+        throw new Error(`round ${round} matched ${exact.length} boards (${exact.join(', ')}) — set BETONLINE_GOLF_URL to disambiguate`);
+      }
+    }
+    if (!target && url) {
+      const want = (entry.split('/sportsbook/')[1] || '').split(/[?#]/)[0];
+      target = seen.find(h => h.includes(want)) || null;
+    } else if (!target && round != null) {
+      const cands = seen.filter(h => parseRound(h) === round);
+      // More than one tournament could be running (PGA + Champions/Euro). Refuse
+      // to guess — quoting one tournament's board against another's pairings
+      // would fail the both-players lookup anyway, but silently and late.
+      if (cands.length === 1) target = cands[0];
+      else if (cands.length > 1) {
+        throw new Error(`round ${round} matched ${cands.length} tournaments (${cands.join(', ')}) — set BETONLINE_GOLF_URL to disambiguate`);
+      }
+    }
+    if (!target) {
+      throw new Error(`no BetOnline link found for round ${round == null ? '(unspecified)' : round}` +
+        (seen.length ? ` — saw: ${seen.slice(0, 6).join(', ')}` : ' — the golf section rendered no round links at all'));
+    }
+
+    // The deep link does NOT hydrate — the SPA must route via its own nav link.
+    const clicked = await page.evaluate((h) => {
+      const a = [...document.querySelectorAll('a')].find(x => (x.getAttribute('href') || '') === h);
       if (a) { a.click(); return true; }
       return false;
-    }, slug.split('/').slice(1, 3).join('/'));
-    if (!clicked) log.warn('BoGolf', `No in-page nav link matched "${slug}" — board may not hydrate`);
+    }, target);
+    if (!clicked) throw new Error(`found link ${target} but could not click it`);
+    resolvedUrl = target.startsWith('http') ? target : `https://www.betonline.ag${target}`;
+    resolvedRound = parseRound(target);
     await new Promise(r => setTimeout(r, 12000));
     for (let i = 0; i < 5; i++) {
       await page.evaluate(() => window.scrollBy(0, 900));
@@ -182,7 +244,7 @@ async function _scrape(url) {
       return out;
     });
     const rows = raw.map(parseRow).filter(Boolean);
-    return { rows, rawCount: raw.length };
+    return { rows, rawCount: raw.length, resolvedUrl, resolvedRound };
   } finally {
     try { await browser.close(); } catch (_) { /* best effort */ }
   }
@@ -193,26 +255,28 @@ async function _scrape(url) {
  * Throws on an empty parse: "loaded but no matchups" is indistinguishable from
  * the two silent-failure modes above, so it must never be cached as a miss.
  */
-async function fetchBoard({ force = false } = {}) {
+async function fetchBoard({ force = false, round = null } = {}) {
   const cfg = config.betonlineGolf || {};
-  const url = cfg.url;
-  if (!url) { _lastError = 'no BETONLINE_GOLF_URL configured'; return null; }
+  const url = cfg.url || null;   // optional now — absent means DISCOVER the round link
   const ttlMs = (cfg.ttlMinutes || 10) * 60000;
-  if (!force && _board && Date.now() - _board.at < ttlMs) return _board;
+  // A board for a DIFFERENT round is not merely stale, it is wrong: pairings
+  // are re-drawn every round, so it must be refetched even inside the TTL.
+  const roundMismatch = round != null && _board && _board.round != null && _board.round !== round;
+  if (!force && !roundMismatch && _board && Date.now() - _board.at < ttlMs) return _board;
   if (_inFlight) return _inFlight;
 
   _inFlight = (async () => {
     const started = Date.now();
     try {
-      const { rows, rawCount } = await _scrape(url);
+      const { rows, rawCount, resolvedUrl, resolvedRound } = await _scrape({ round, url });
       if (!rows.length) {
         throw new Error(`board parsed 0 matchups from ${rawCount} candidate rows — treat as scrape failure, not an empty slate`);
       }
       const tie = impliedTieRate(rows);
-      _board = { at: Date.now(), url, rows };
+      _board = { at: Date.now(), url: resolvedUrl || url, round: resolvedRound, rows };
       _lastError = null;
       _consecutiveFailures = 0;
-      log.info('BoGolf', `Board: ${rows.length} matchups in ${((Date.now() - started) / 1000).toFixed(0)}s` +
+      log.info('BoGolf', `Board: ${rows.length} matchups (round ${resolvedRound == null ? '?' : resolvedRound}) in ${((Date.now() - started) / 1000).toFixed(0)}s` +
         (tie != null ? ` · implied tie rate ${(100 * tie).toFixed(1)}%` : ''));
       // A tie rate far outside the measured 8-11% band means the two markets
       // are not what we think they are — surface it rather than quoting blind.
@@ -239,11 +303,17 @@ async function fetchBoard({ force = false } = {}) {
  * pull the wrong row (the failure that stamped one Magomedov's prices onto the
  * other on the MoV board).
  */
-function getSpreadFairSync(player, opponent) {
+function getSpreadFairSync(player, opponent, round) {
   if (!_board || !player || !opponent) return null;
   const cfg = config.betonlineGolf || {};
   const maxAgeMs = (cfg.maxAgeMinutes || 45) * 60000;
   if (Date.now() - _board.at > maxAgeMs) return null;    // stale → decline
+  // ROUND MUST MATCH. Pairings are re-drawn every round, so an R3 board against
+  // an R2 leg is not "slightly stale" — it is a different tournament draw. The
+  // both-players lookup below would usually miss anyway, but usually is not a
+  // guarantee: a pairing CAN repeat across rounds, and then we would quote
+  // yesterday's price on today's market. Fail closed instead.
+  if (round != null && _board.round != null && _board.round !== round) return null;
 
   const p = normName(player), o = normName(opponent);
   const matches = _board.rows.filter(r => {
@@ -274,6 +344,8 @@ function getStatus() {
     matchups: _board ? _board.rows.length : 0,
     ageMinutes: _board ? +((Date.now() - _board.at) / 60000).toFixed(1) : null,
     maxAgeMinutes: cfg.maxAgeMinutes || 45,
+    round: _board ? _board.round : null,
+    resolvedUrl: _board ? _board.url : null,
     priceable: !!(_board && Date.now() - _board.at <= (cfg.maxAgeMinutes || 45) * 60000),
     impliedTieRate: _board ? impliedTieRate(_board.rows) : null,
     lastError: _lastError,

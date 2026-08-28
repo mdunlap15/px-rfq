@@ -1396,6 +1396,26 @@ async function seedAllLines() {
     // which is why no golf outright leg has ever been registered or quoted.
     // Registered YES-side only (operator directive): the counterparty takes YES.
     if (golfOutrightsEnabled() && event.sport_name === 'Golf' && event.sub_type === 'outrights') {
+      // QUOTING WINDOW (operator directive 2026-08-28): outrights are quotable
+      // only between 19:00 ET and the next round's first tee. Gate REGISTRATION
+      // rather than just pricing, so we never advertise a line we would decline
+      // — the PX Rule 2 problem the ±0.5 spread hit. Fails CLOSED, so a dark
+      // DataGolf feed withholds the lines rather than quoting blind mid-round.
+      try {
+        const win = require('./golf-round-window');
+        // Fire-and-forget refresh; the read below uses whatever is cached.
+        win.refresh().catch(() => { /* logged inside */ });
+        const st = win.getWindow();
+        if (!st.open) {
+          if (!seedAllLines._loggedWindowClosed || Date.now() - seedAllLines._loggedWindowClosed > 15 * 60000) {
+            seedAllLines._loggedWindowClosed = Date.now();
+            log.info('Lines', `Golf outrights withheld — quoting window closed (${st.reason})`);
+          }
+          continue;
+        }
+      } catch (err) {
+        log.warn('Lines', `Golf outright window check failed: ${err.message}`);
+      }
       try {
         // Warm the DataGolf boards so the RFQ hot path only does a sync cache
         // read. No-ops inside its TTL, so calling per-event is cheap.
@@ -1418,7 +1438,13 @@ async function seedAllLines() {
     // one decline. Same lesson as the top-N registration flap.
     if (event.sport_name === 'Golf' && /round\s*\d+\s*matchup/i.test(event.name || '')
         && config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url) {
-      require('./betonline-golf-matchups').fetchBoard()
+      // Pass the ROUND PX is actually posting. The board then discovers its own
+      // URL for that round, so the operator never edits a URL when the round
+      // rolls over, and a board built for another round is refetched rather
+      // than served from TTL.
+      const _rm = /round\s*(\d+)\s*matchup/i.exec(event.name || '');
+      require('./betonline-golf-matchups')
+        .fetchBoard({ round: _rm ? parseInt(_rm[1], 10) : null })
         .catch(err => log.warn('Lines', `±0.5 matchup board warm failed: ${err.message}`));
     }
 

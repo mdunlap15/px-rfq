@@ -1268,10 +1268,21 @@ function priceParlay(legs, opts = {}) {
     // moneyline does, so we keep the book's margin rather than stripping it
     // and re-applying a thinner floor.
     if (s.lineInfo && s.lineInfo.marketType === 'golf_matchup_spread') {
+      // Round: prefer the registered value, else recover it from the event
+      // name (older seed paths left roundNum null — same fallback the matchup
+      // moneyline path already uses). Passing it makes the board refuse a
+      // round mismatch rather than quoting another round's draw.
+      let _round = s.lineInfo.roundNum;
+      if (_round == null) {
+        const _m = /round\s*(\d+)\s*matchup/i.exec(
+          `${s.lineInfo.pxEventName || ''} ${s.lineInfo.marketName || ''}`);
+        _round = _m ? parseInt(_m[1], 10) : null;
+      }
       const hit = golfSpreadBoard().getSpreadFairSync(
         s.lineInfo.teamName,
         // The opponent is the OTHER competitor on this pairing.
         s.lineInfo.teamName === s.lineInfo.homeTeam ? s.lineInfo.awayTeam : s.lineInfo.homeTeam,
+        _round,
       );
       if (!hit || !(hit.fairProb > 0) || !(hit.fairProb < 1)) {
         log.info('Pricing', `Declined: no ±0.5 board price for ${s.lineInfo.teamName} (cold/stale/unknown pairing)`);

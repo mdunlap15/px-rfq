@@ -35,6 +35,27 @@ const config = {
     apiKey: process.env.DATAGOLF_API_KEY,
     baseUrl: 'https://feeds.datagolf.com',
   },
+  // Golf OUTRIGHT quoting window (services/golf-round-window.js).
+  // Operator directive 2026-08-28: quote outrights from 19:00 ET each day a
+  // tournament is in play until the next round's first tee, and NOT during a
+  // round. Tee times come from DataGolf /field-updates (the FULL field) — PX
+  // posts only some pairings, so its earliest matchup is an upper bound on the
+  // round start (measured: field 11:00 vs PX 11:12 at the TOUR Championship,
+  // and hours apart on a full 156-player event).
+  golfOutrightWindow: {
+    // Default OFF — turning it on stops outright quoting for most of the day,
+    // which must be a deliberate choice rather than something a deploy does.
+    enabled: process.env.GOLF_OUTRIGHT_WINDOW_ENABLED === 'true',
+    // When the window opens each day, ET. DST-correct (resolved via the
+    // America/New_York zone, not a fixed offset).
+    openEt: process.env.GOLF_OUTRIGHT_WINDOW_OPEN_ET || '19:00',
+    tour: process.env.GOLF_OUTRIGHT_WINDOW_TOUR || 'pga',
+    ttlMinutes: (() => { const v = parseFloat(process.env.GOLF_OUTRIGHT_WINDOW_TTL_MIN); return Number.isFinite(v) && v > 0 ? v : 15; })(),
+    // Beyond this the field data is treated as unusable and the window FAILS
+    // CLOSED. Generous because tee times barely change once published; the
+    // point is to catch a feed that has genuinely gone dark.
+    maxAgeMinutes: (() => { const v = parseFloat(process.env.GOLF_OUTRIGHT_WINDOW_MAX_AGE_MIN); return Number.isFinite(v) && v > 0 ? v : 180; })(),
+  },
   // BetOnline golf ROUND MATCHUP board — the ±0.5 spread source
   // (services/betonline-golf-matchups.js).
   //
