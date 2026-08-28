@@ -174,3 +174,33 @@ test('depth on ONE side only still requires the other side to exist', () => {
      { name: 'SCH -0.5', odds: -180, line_id: 'schid' }]));
   assert.deepStrictEqual(out, [], 'one side with depth is still half a matchup');
 });
+
+// --------------------------------------------------- kill-switch gates registration
+
+test('registration is gated by the kill-switch, not just pricing', () => {
+  // The ±0.5 board is the ONLY source that can price these legs. With the
+  // feature off they must not register at all — otherwise PX RFQs them and we
+  // decline every one, which wastes RFQs and breaches PX Rule 2 (the supported
+  // set must hold only lines we can actually quote). Observed live 2026-08-28:
+  // 26 spread lines registered while the board was unloaded.
+  const saved = process.env.BETONLINE_GOLF_ENABLED;
+  const savedUrl = process.env.BETONLINE_GOLF_URL;
+  try {
+    delete process.env.BETONLINE_GOLF_ENABLED;
+    delete process.env.BETONLINE_GOLF_URL;
+    delete require.cache[require.resolve('../config')];
+    const { config } = require('../config');
+    const gateOpen = !!(config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url);
+    assert.strictEqual(gateOpen, false, 'gate must be shut when the feature is off');
+
+    process.env.BETONLINE_GOLF_ENABLED = 'true';
+    process.env.BETONLINE_GOLF_URL = 'https://example.test/board';
+    delete require.cache[require.resolve('../config')];
+    const { config: on } = require('../config');
+    assert.ok(on.betonlineGolf.enabled && on.betonlineGolf.url, 'gate opens only with BOTH flag and url');
+  } finally {
+    if (saved != null) process.env.BETONLINE_GOLF_ENABLED = saved; else delete process.env.BETONLINE_GOLF_ENABLED;
+    if (savedUrl != null) process.env.BETONLINE_GOLF_URL = savedUrl; else delete process.env.BETONLINE_GOLF_URL;
+    delete require.cache[require.resolve('../config')];
+  }
+});

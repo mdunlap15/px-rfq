@@ -1750,7 +1750,17 @@ async function seedAllLines() {
       // the gate below without an explicit carve-out — the same shape as the
       // series / soccer-handicap / advance carve-outs above. Anchored on the
       // full name so it cannot admit other sup_moneyline markets.
+      // Gated on the kill-switch as well as the name. The ±0.5 board is the
+      // ONLY source that can price these, so with the feature off they would
+      // register and then decline every RFQ — wasted RFQs, and a PX Rule 2
+      // breach (the supported set must contain only lines we can actually
+      // quote). NOTE this gates on a STATIC config flag, not on the board
+      // being warm: gating registration on transient board state is what made
+      // top-N flap, because seedAllLines is build-then-swap and a skipped line
+      // is DELETED from the live index. Feature off ⇒ never advertise. Feature
+      // on but board cold ⇒ still register, and decline until it warms.
       const isGolfMatchupSpread = isGolfSport && m.type === 'sup_moneyline'
+        && !!(config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url)
         && px.GOLF_MATCHUP_SPREAD_RE.test(name);
       if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !isGolfMatchupSpread && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
       // Advance bypasses the sub-game/prop name filter below ("Next Round"
