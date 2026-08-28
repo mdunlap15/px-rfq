@@ -817,6 +817,15 @@ function parseMarketSelections(market) {
         const who = resolveGolfAbbrev(m[1], players);
         const line = parseFloat(m[2]);
         if (!who || !Number.isFinite(line)) continue;
+        // ORDER-BOOK DEPTH. PX returns one selection entry PER RESTING PRICE
+        // RUNG, all sharing the same line_id — observed live with 2 rungs on
+        // one side and 4 on the other. There are still only two SIDES. Dedupe
+        // on line_id (first rung wins; we price off our own board, so the
+        // resting odds here are irrelevant) or the integrity check below sees
+        // "6/2 sides" and declines the whole market. That failure only appears
+        // once a market has depth, so it would have registered zero lines in
+        // production while parsing fine against a fresh, empty book.
+        if (out.some(o => o.lineId === sel.line_id)) continue;
         out.push({
           lineId: sel.line_id,
           marketType: 'golf_matchup_spread',

@@ -144,3 +144,33 @@ test('GOLF_MATCHUP_SPREAD_RE: does not match the moneyline sibling or other sup_
   assert.ok(!re.test('Spread'), 'soccer asian handicap');
   assert.ok(!re.test('To Advance To The Next Round'), 'advance market');
 });
+
+// ------------------------------------------------------- order-book depth
+
+test('THE BUG: order-book depth (many rungs per side) still yields exactly 2 sides', () => {
+  // Captured live 2026-08-28: PX returns one selection entry PER RESTING PRICE
+  // RUNG, all sharing a line_id — here 2 rungs for SCH and 4 for ABE. Before
+  // the dedupe this parsed as "6/2 sides" and declined the whole market, so
+  // the feature would have registered ZERO lines in production the moment a
+  // market had depth, while parsing fine against a fresh empty book.
+  const out = px.parseMarketSelections(mkt(
+    'Ludvig Aberg vs. Scottie Scheffler (Round 2 Matchup) - Spread',
+    [{ name: 'SCH -0.5', odds: -150, line_id: 'schid' },
+     { name: 'SCH -0.5', odds: -180, line_id: 'schid' },
+     { name: 'ABE +0.5', odds: 125, line_id: 'abeid' },
+     { name: 'ABE +0.5', odds: 122, line_id: 'abeid' },
+     { name: 'ABE +0.5', odds: 120, line_id: 'abeid' },
+     { name: 'ABE +0.5', odds: 118, line_id: 'abeid' }]));
+  assert.strictEqual(out.length, 2, 'depth must collapse to two SIDES');
+  assert.deepStrictEqual(out.map(o => o.lineId).sort(), ['abeid', 'schid']);
+  assert.ok(out.find(o => o.teamName === 'Scottie Scheffler' && o.line === -0.5));
+  assert.ok(out.find(o => o.teamName === 'Ludvig Aberg' && o.line === 0.5));
+});
+
+test('depth on ONE side only still requires the other side to exist', () => {
+  const out = px.parseMarketSelections(mkt(
+    'Ludvig Aberg vs. Scottie Scheffler (Round 2 Matchup) - Spread',
+    [{ name: 'SCH -0.5', odds: -150, line_id: 'schid' },
+     { name: 'SCH -0.5', odds: -180, line_id: 'schid' }]));
+  assert.deepStrictEqual(out, [], 'one side with depth is still half a matchup');
+});
