@@ -50,6 +50,12 @@ const config = {
     // America/New_York zone, not a fixed offset).
     openEt: process.env.GOLF_OUTRIGHT_WINDOW_OPEN_ET || '19:00',
     tour: process.env.GOLF_OUTRIGHT_WINDOW_TOUR || 'pga',
+    // Stop quoting this many minutes BEFORE the next round's first tee, not at
+    // it. Operator directive: "until shortly before the start of Round 3".
+    // A buffer matters because de-registration is not instantaneous — the seed
+    // runs on REFRESH_INTERVAL_MINUTES (prod 2), so closing exactly at the tee
+    // would leave lines advertised for a minute or two into live play.
+    leadMinutes: (() => { const v = parseFloat(process.env.GOLF_OUTRIGHT_WINDOW_LEAD_MIN); return Number.isFinite(v) && v >= 0 ? v : 30; })(),
     ttlMinutes: (() => { const v = parseFloat(process.env.GOLF_OUTRIGHT_WINDOW_TTL_MIN); return Number.isFinite(v) && v > 0 ? v : 15; })(),
     // Beyond this the field data is treated as unusable and the window FAILS
     // CLOSED. Generous because tee times barely change once published; the

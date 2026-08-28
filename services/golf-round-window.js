@@ -130,13 +130,18 @@ function getWindow(nowMs = Date.now()) {
       currentRound: _cache.currentRound, eventName: _cache.eventName,
     };
   }
-  const open = nowMs < nextStart;
+  // Close EARLY by leadMinutes. De-registration is not instantaneous (the seed
+  // runs every couple of minutes), so closing exactly at the tee would leave
+  // outrights advertised into live play.
+  const leadMs = (cfg.leadMinutes != null ? cfg.leadMinutes : 30) * 60000;
+  const closeAt = nextStart - leadMs;
+  const open = nowMs < closeAt;
   return {
-    open, enabled: true, lastOpen, nextStart,
+    open, enabled: true, lastOpen, nextStart, closeAt, leadMinutes: leadMs / 60000,
     currentRound: _cache.currentRound, eventName: _cache.eventName,
     reason: open
-      ? `open — next round starts ${new Date(nextStart).toISOString()}`
-      : `closed — round started ${new Date(nextStart).toISOString()}, reopens ${new Date(lastEtBoundary(nowMs, cfg.openEt || '19:00') + 24 * 3600 * 1000).toISOString()}`,
+      ? `open — closing ${new Date(closeAt).toISOString()} (${leadMs / 60000}min before the ${new Date(nextStart).toISOString()} tee)`
+      : `closed — next tee ${new Date(nextStart).toISOString()}, reopens ${new Date(lastEtBoundary(nowMs, cfg.openEt || '19:00') + 24 * 3600 * 1000).toISOString()}`,
   };
 }
 
@@ -148,6 +153,7 @@ function getStatus() {
     ...w,
     lastOpenEt: w.lastOpen ? new Date(w.lastOpen).toLocaleString('en-US', { timeZone: 'America/New_York' }) : null,
     nextStartEt: w.nextStart ? new Date(w.nextStart).toLocaleString('en-US', { timeZone: 'America/New_York' }) : null,
+    closeAtEt: w.closeAt ? new Date(w.closeAt).toLocaleString('en-US', { timeZone: 'America/New_York' }) : null,
     fieldTeeTimes: _cache ? _cache.tees.length : 0,
     ageMinutes: _cache ? +((Date.now() - _cache.at) / 60000).toFixed(1) : null,
     lastError: _lastError,

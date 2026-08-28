@@ -63,9 +63,14 @@ test('THE ANCHORING CASE: closed mid-round even when tomorrow tees are published
   assert.strictEqual(r.open, false, 'must stay closed while the round is being played');
 });
 
-test('boundary: open one minute before the first tee, closed one minute after', () => {
-  assert.strictEqual(openAt(ET(2026, 7, 29, 10, 59)).open, true);
-  assert.strictEqual(openAt(ET(2026, 7, 29, 11, 1)).open, false);
+test('boundary is closeAt (tee minus lead), NOT the tee itself', () => {
+  // Superseded the original "open one minute before the tee" assertion when the
+  // 30min lead landed: 10:59 is now INSIDE the buffer and must be shut. That is
+  // the point of the buffer — de-registration is not instantaneous.
+  assert.strictEqual(openAt(ET(2026, 7, 29, 10, 29)).open, true,  'just before closeAt');
+  assert.strictEqual(openAt(ET(2026, 7, 29, 10, 31)).open, false, 'just after closeAt');
+  assert.strictEqual(openAt(ET(2026, 7, 29, 10, 59)).open, false, 'inside the buffer, before the tee');
+  assert.strictEqual(openAt(ET(2026, 7, 29, 11, 1)).open, false,  'after the tee');
 });
 
 test('open at exactly 19:00 ET', () => {
@@ -110,4 +115,23 @@ test('disabled means no gating at all — never accidentally blocks quoting', ()
     delete require.cache[require.resolve('../config')];
     delete require.cache[require.resolve('../services/golf-round-window')];
   }
+});
+
+// ------------------------------------------------- close-early lead time
+
+test('closes leadMinutes BEFORE the tee, not at it', () => {
+  // Default lead is 30min. R3 tees 11:00 ET Sat, so the window must shut 10:30.
+  const R3 = Date.UTC(2026, 7, 29, 15, 0);        // 11:00 ET Sat
+  const at = (ms) => { w._setCacheForTest([R3], ms, 2); return w.getWindow(ms); };
+  assert.strictEqual(at(ET(2026, 7, 29, 10, 25)).open, true,  '10:25 still open');
+  assert.strictEqual(at(ET(2026, 7, 29, 10, 35)).open, false, '10:35 must be shut — inside the 30min buffer');
+  assert.strictEqual(at(ET(2026, 7, 29, 10, 59)).open, false, 'and certainly not right at the tee');
+});
+
+test('closeAt is reported so the operator can see when quoting stops', () => {
+  const R3 = Date.UTC(2026, 7, 29, 15, 0);
+  w._setCacheForTest([R3], ET(2026, 7, 29, 2, 0), 2);
+  const r = w.getWindow(ET(2026, 7, 29, 2, 0));
+  assert.strictEqual(r.closeAt, R3 - 30 * 60000);
+  assert.strictEqual(r.leadMinutes, 30);
 });
