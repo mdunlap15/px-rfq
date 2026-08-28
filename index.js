@@ -11649,7 +11649,25 @@ function startStatusServer() {
         // RFQ time. Otherwise oddsFeed.getFairProb would hit DataGolf
         // first and the dashboard would show DataGolf's de-vigged fair
         // even with a manual override sitting in cache.
-        if (info.sport === 'golf_matchups') {
+        if (info.sport === 'golf_matchups' && info.marketType === 'golf_matchup_spread') {
+          // ±0.5 SPREAD (ties COUNT) has its own source — the BetOnline ±0.5
+          // board. getGolfMatchupFairProb deliberately REFUSES this marketType
+          // (everything it can reach is a ties-VOID price), so without this
+          // branch every spread row shows fairProb null. That is not just a
+          // cosmetic "-": the Lines tab's numeric range filters drop null-fair
+          // rows outright, so one Advanced filter makes the whole market
+          // vanish from the table.
+          try {
+            const boGolf = require('./services/betonline-golf-matchups');
+            const opponent = info.teamName === info.homeTeam ? info.awayTeam : info.homeTeam;
+            const hit = boGolf.getSpreadFairSync(info.teamName, opponent);
+            if (hit && hit.fairProb > 0 && hit.fairProb < 1) {
+              fairProb = hit.fairProb;
+              bookPriceOverride = hit.rawImplied;
+            }
+          } catch (_) { /* leave null — the row shows "-" until the board warms */ }
+        }
+        else if (info.sport === 'golf_matchups') {
           const golfRes = pricer.getGolfMatchupFairProb(info);
           if (golfRes != null && typeof golfRes === 'object') {
             fairProb = golfRes.fairProb;

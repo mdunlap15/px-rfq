@@ -4075,6 +4075,13 @@ async function resolveUnknownLine(rfqLeg) {
               oddsApiSelection = 'away';
             }
           } else if (sel.marketType === 'golf_matchup_spread') {
+            // Same kill-switch gate as the seed carve-out. Without it the seed
+            // gate is only half the story: PX keeps RFQ'ing spread lines we
+            // advertised BEFORE the feature was switched off, this path
+            // resolves them on demand, and they silently re-register — which
+            // is exactly what was observed live (26 lines still present with
+            // enabled=false, one full seed after the gate deployed).
+            if (!(config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url)) continue;
             // Golf matchup ±0.5 SPREAD (ties COUNT). parseMarketSelections has
             // already resolved PX's abbreviated code ('SCH'/'REIT') to a FULL
             // player name from the market name, and failed the whole market
