@@ -790,6 +790,11 @@ const MARKET_TYPE_MAP = {
   'mov_sub': 'mov_sub',
   'mov_dec': 'mov_dec',
   'mov_itd': 'mov_itd',
+  // Golf matchup ±0.5 SPREAD — identity-mapped like MoV above. The fair comes
+  // from services/betonline-golf-matchups.js (a ±0.5, ties-COUNT board), not
+  // from an odds-API market, so there is nothing to translate to. Without an
+  // entry here oddsApiMarket is undefined and the registration gate drops it.
+  'golf_matchup_spread': 'golf_matchup_spread',
   'double_chance': 'double_chance',
   // First 5 Innings (MLB) — PX market.type guesses; adjust based on decline-audit log
   'first_5_innings_moneyline': 'h2h_f5',
@@ -1403,6 +1408,20 @@ async function seedAllLines() {
       continue;
     }
 
+    // ±0.5 matchup board warm. FIRE-AND-FORGET on purpose: the scrape is ~40s
+    // of Puppeteer and the seed runs every ~2min, so awaiting it here would
+    // stall registration for the whole slate. fetchBoard single-flights and
+    // no-ops inside its TTL, so touching it once per golf matchup event is
+    // cheap. Registration is deliberately NOT gated on the board being warm —
+    // seedAllLines is build-then-swap, so skipping a line DELETES it from the
+    // live index; a missing line costs the whole market, a cold board costs
+    // one decline. Same lesson as the top-N registration flap.
+    if (event.sport_name === 'Golf' && /round\s*\d+\s*matchup/i.test(event.name || '')
+        && config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url) {
+      require('./betonline-golf-matchups').fetchBoard()
+        .catch(err => log.warn('Lines', `±0.5 matchup board warm failed: ${err.message}`));
+    }
+
     if (!homeComp || !awayComp) {
       log.debug('Lines', `Skipping ${event.name}: missing competitors`);
       continue;
@@ -1726,9 +1745,17 @@ async function seedAllLines() {
         && (SOCCER_WIN_3WAY_RE.test(name) || SOCCER_DRAW_3WAY_RE.test(name));
       // MMA method-of-victory — full-fight market, same bypass shape as BTTS.
       const isMmaMov = isMmaSport && m.type === 'moneyline' && MOV_MARKET_RE.test(name);
-      if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
+      // Golf matchup ±0.5 SPREAD. isGolfSport pins supportedBase to ['moneyline']
+      // (golf was h2h-only), so this type='sup_moneyline' market is rejected by
+      // the gate below without an explicit carve-out — the same shape as the
+      // series / soccer-handicap / advance carve-outs above. Anchored on the
+      // full name so it cannot admit other sup_moneyline markets.
+      const isGolfMatchupSpread = isGolfSport && m.type === 'sup_moneyline'
+        && px.GOLF_MATCHUP_SPREAD_RE.test(name);
+      if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !isGolfMatchupSpread && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
       // Advance bypasses the sub-game/prop name filter below ("Next Round"
       // would otherwise look prop-ish) — it is a full-event market.
+      if (isGolfMatchupSpread) return true;
       if (isSoccerAdvance) return true;
       if (isSoccerBtts) return true;
       if (isSoccer3Way) return true;
@@ -2077,6 +2104,16 @@ async function seedAllLines() {
           } else if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'away') {
             oddsApiSelection = 'away';
           }
+        } else if (sel.marketType === 'golf_matchup_spread') {
+          // Golf matchup ±0.5 SPREAD (ties COUNT). parseMarketSelections has
+          // already resolved PX's abbreviated code ("SCH"/"REIT") to a FULL
+          // player name from the market name, and failed the whole market
+          // closed if that was ambiguous — so sel.teamName is a full name here.
+          // Resolve it to home/away exactly like a moneyline, passing BOTH
+          // competitors so the matcher's ambiguity guards engage.
+          const gSide = resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway);
+          if (!gSide) continue; // fail closed rather than guess the player
+          oddsApiSelection = gSide;
         } else if (sel.marketType === 'total') {
           oddsApiSelection = sel.selection; // 'over' or 'under'
         } else if (sel.marketType === 'team_total') {
@@ -4027,6 +4064,16 @@ async function resolveUnknownLine(rfqLeg) {
             } else if (resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway) === 'away') {
               oddsApiSelection = 'away';
             }
+          } else if (sel.marketType === 'golf_matchup_spread') {
+            // Golf matchup ±0.5 SPREAD (ties COUNT). parseMarketSelections has
+            // already resolved PX's abbreviated code ('SCH'/'REIT') to a FULL
+            // player name from the market name, and failed the whole market
+            // closed if that was ambiguous — so sel.teamName is a full name here.
+            // Resolve it to home/away exactly like a moneyline, using BOTH
+            // competitors so the matcher's ambiguity guards engage.
+            const gSide = resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway);
+            if (!gSide) continue; // fail closed rather than guess the player
+            oddsApiSelection = gSide;
           } else if (sel.marketType === 'total') {
             oddsApiSelection = sel.selection;
           } else if (sel.marketType === 'team_total') {

@@ -541,6 +541,53 @@ async function fetchOrders(limit = 50, status = null) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Golf matchup ±0.5 SPREAD market name.
+ *   "Ludvig Aberg vs. Scottie Scheffler (Round 2 Matchup) - Spread"
+ * Anchored end-to-end on purpose: PX types this 'sup_moneyline', a type shared
+ * with series spreads/totals, soccer asian handicaps and football props, so a
+ * loose match would drag unrelated markets into golf handling.
+ */
+const GOLF_MATCHUP_SPREAD_RE =
+  /^(.+?)\s+vs\.?\s+(.+?)\s*\(\s*(?:round\s*(\d+)|tournament)\s+matchup\s*\)\s*[-–—]\s*spread\s*$/i;
+
+/** Accent/punctuation-insensitive name normaliser for golf player matching. */
+function golfNormName(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Resolve PX's abbreviated spread code ("SCH", "REIT") to one of the TWO full
+ * player names in this market. Returns null — never a guess — when the code is
+ * ambiguous or matches neither.
+ *
+ * Tier 1 is the surname prefix, PX's observed convention (SCH→Scheffler,
+ * ABE→Aberg, HEN→Henley, REIT→Reitan). Tier 2 tries any name token, which
+ * covers a first-name-derived code ("MIN" for Min Woo Lee).
+ *
+ * A tier that matches BOTH players returns null rather than falling through to
+ * a looser tier: ambiguity must fail closed, not escalate. That is what makes a
+ * same-surname pairing (Matt vs Alex Fitzpatrick, the two Hojgaards) go dark
+ * instead of paying the wrong side.
+ */
+function resolveGolfAbbrev(abbr, players) {
+  const a = golfNormName(abbr).replace(/ /g, '');
+  if (!a || !Array.isArray(players) || players.length !== 2) return null;
+  const tokensOf = (p) => golfNormName(p).split(' ').filter(Boolean);
+
+  const bySurname = players.filter((p) => {
+    const t = tokensOf(p);
+    return t.length && t[t.length - 1].startsWith(a);
+  });
+  if (bySurname.length === 1) return bySurname[0];
+  if (bySurname.length > 1) return null;            // ambiguous — fail closed
+
+  const byAnyToken = players.filter((p) => tokensOf(p).some((t) => t.startsWith(a)));
+  return byAnyToken.length === 1 ? byAnyToken[0] : null;
+}
+
+/**
  * Parse a ProphetX market response into a flat list of line entries.
  * Handles the nested selections structure for moneyline, spread, and total markets.
  *
@@ -725,6 +772,77 @@ function parseMarketSelections(market) {
       }
     }
     return results;
+  }
+
+  // GOLF MATCHUP ±0.5 SPREAD. PX posts TWO markets per matchup event:
+  //
+  //   "<A> vs. <B> (Round N Matchup)"            type='moneyline'      TIES VOID
+  //   "<A> vs. <B> (Round N Matchup) - Spread"   type='sup_moneyline'  TIES COUNT
+  //
+  // They are DIFFERENT PRODUCTS. Measured 2026-08-27 the single-round tie rate
+  // is 9.3% (8.1-9.9%, confirmed independently at 9.2% off PX's own two
+  // markets), so a ±0.5 leg priced from any ties-VOID feed gives away ~9pp on
+  // the +0.5 side against a 1-2pp parlay margin. It therefore gets its OWN
+  // marketType — never 'moneyline' (which would alias the ties-void sibling on
+  // the same event and price it off DataGolf) and never 'spread' (which would
+  // route it through the alt-spread bounds/blocks and let classifySgpCombo
+  // read a same-pairing pair as 'ml_spread').
+  //
+  // Two shape traps unique to this market:
+  //   1. sel.line is 0 on BOTH sides — the ±0.5 handicap exists ONLY in the
+  //      selection name, so the generic spread branches would register line 0
+  //      and tag both sides 'underdog' (undefined < 0 is false), pricing a
+  //      handicap as a pick'em.
+  //   2. Selections are ABBREVIATED player codes of INCONSISTENT length
+  //      ("SCH -0.5", "ABE +0.5", "HEN -0.5", "REIT +0.5"), and the full names
+  //      appear only in the market name. Nothing can be sliced by position.
+  //
+  // Resolution is scoped to the TWO players named in THIS market and fails
+  // closed on ambiguity — the UFC-MoV surname collision (Abus vs Shara
+  // Magomedov) one notch worse, since a prefix is less specific than a
+  // surname and the tour fields two Fitzpatricks, two Hojgaards and several
+  // Kims. A missed market costs one market; a swapped one pays the wrong side
+  // of a 56.6/43.4 line.
+  const golfSpreadMatch = GOLF_MATCHUP_SPREAD_RE.exec(marketName.trim());
+  if (golfSpreadMatch) {
+    const players = [golfSpreadMatch[1].trim(), golfSpreadMatch[2].trim()];
+    const roundNum = golfSpreadMatch[3] ? parseInt(golfSpreadMatch[3], 10) : null;
+    const out = [];
+    for (const selGroup of (market.selections || [])) {
+      for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
+        if (!sel || !sel.line_id) continue;
+        const raw = String(sel.name || sel.display_name || '').trim();
+        const m = /^([A-Za-z][A-Za-z'.’-]*)\s*([+-]0\.5)$/.exec(raw);
+        if (!m) continue;
+        const who = resolveGolfAbbrev(m[1], players);
+        const line = parseFloat(m[2]);
+        if (!who || !Number.isFinite(line)) continue;
+        out.push({
+          lineId: sel.line_id,
+          marketType: 'golf_matchup_spread',
+          // -0.5 must win outright; +0.5 wins or ties.
+          selection: line < 0 ? 'favorite' : 'underdog',
+          teamName: who,
+          playerName: who,
+          line,
+          roundNum,
+          competitorId: sel.competitor_id || null,
+          outcomeName: raw,
+        });
+      }
+    }
+    // Whole-market integrity: exactly two sides, two DIFFERENT players, and
+    // OPPOSITE handicaps. Anything else means the abbreviation resolver was
+    // fooled, and half a matchup priced as if whole is worse than no quote.
+    let bad = null;
+    if (out.length !== 2) bad = `resolved ${out.length}/2 sides (unmatched or ambiguous abbreviation)`;
+    else if (out[0].teamName === out[1].teamName) bad = `both sides resolved to the same player (${out[0].teamName})`;
+    else if (Math.sign(out[0].line) === Math.sign(out[1].line)) bad = `both sides carry the same handicap sign (${out[0].line})`;
+    if (bad) {
+      log.warn('PX-Markets', `Golf matchup spread "${marketName}": ${bad} — declining the whole market rather than registering a partial`);
+      return [];
+    }
+    return out;
   }
 
   // TENNIS SETS MARKETS. PX posts four per match (probe 2026-08-03, ATP
@@ -1136,5 +1254,8 @@ module.exports = {
   fetchOrders,
   fetchOrderByUuid,
   parseMarketSelections,
+  GOLF_MATCHUP_SPREAD_RE,
+  resolveGolfAbbrev,
+  golfNormName,
   isFootballPropMarketTypeSafe,
 };

@@ -412,10 +412,38 @@ function golfOutrightFair(lineInfo) {
   }
 }
 
+/**
+ * Payout-vig floor for a RAW book override on a golf matchup leg. Hoisted from
+ * the closure inside getGolfMatchupFairProb so the ±0.5 spread path can apply
+ * the identical floor — one definition, both callers, so the two cannot drift
+ * (the Single-Leg chart once showed a price the RFQ path would never quote).
+ * MAX-gate: a generous book line is lifted to the floor, a fatter one is kept.
+ */
+function clampGolfMatchupOverride(fair, override) {
+  if (!(fair > 0 && fair < 1) || override == null) return override;
+  const floor = config.pricing.vigGolfMatchupMin || 0;
+  const minOffered = 1 / (1 + (1 / fair - 1) * (1 - floor)); // payout-vig floor
+  return Math.max(override, Math.min(0.999, minOffered));
+}
+
+/** Lazy require — keeps Puppeteer out of the module graph until golf needs it. */
+let _golfSpreadBoard = null;
+function golfSpreadBoard() {
+  if (!_golfSpreadBoard) _golfSpreadBoard = require('./betonline-golf-matchups');
+  return _golfSpreadBoard;
+}
+
 function getGolfMatchupFairProb(lineInfo) {
   const sport = (lineInfo?.oddsApiSport || lineInfo?.sport || '').toLowerCase();
   if (!sport.includes('golf')) return null;
   const mt = lineInfo?.marketType || '';
+  // EXPLICIT, not incidental. Everything this function can reach — the manual
+  // upload, DataGolf's per-book matchup odds, the consensus fall-through — is
+  // a TIES-VOID price. The ±0.5 spread is a TIES-COUNT product (measured tie
+  // rate 9.3%), so pricing it here would hand the +0.5 side ~9pp against a
+  // 1-2pp parlay margin. It has its own source; refuse it loudly here so a
+  // future edit to the marketType gate cannot quietly re-open the path.
+  if (mt === 'golf_matchup_spread') return null;
   if (mt !== 'moneyline') return null; // golf matchups are h2h only
 
   // Min-margin clamp for a RAW book override. DataGolf's per-book matchup
@@ -429,12 +457,7 @@ function getGolfMatchupFairProb(lineInfo) {
   // paths to the same target — vigGolfMatchupMin=0.0909 → -110/-110 coinflip).
   // We NEVER quote a matchup tighter than that, while still keeping a fatter
   // book line when one exists.
-  const clampOverride = (fair, override) => {
-    if (!(fair > 0 && fair < 1) || override == null) return override;
-    const floor = config.pricing.vigGolfMatchupMin || 0;
-    const minOffered = 1 / (1 + (1 / fair - 1) * (1 - floor)); // payout-vig floor
-    return Math.max(override, Math.min(0.999, minOffered));
-  };
+  const clampOverride = clampGolfMatchupOverride;
 
   // Resolve roundNum with a parse-from-name fallback. Some golf matchup
   // lines were registered with lineInfo.roundNum=null (older seed paths,
@@ -1235,6 +1258,31 @@ function priceParlay(legs, opts = {}) {
       }
       // NO side (make_cut only — the other markets are blocked in shouldDecline)
       fairProbs[i] = s.lineInfo.selection === 'no' ? (1 - hit.fairProb) : hit.fairProb;
+      continue;
+    }
+    // ±0.5 GOLF MATCHUP SPREAD — ties COUNT. Exactly one legal source (the
+    // BetOnline ±0.5 board) and it must NEVER fall through: the generic paths
+    // below would reach a ties-VOID fair and give away ~9pp on the +0.5 side.
+    // So this either prices from the board or DECLINES, with nothing in
+    // between. Mirrors the book's raw posted price the same way the matchup
+    // moneyline does, so we keep the book's margin rather than stripping it
+    // and re-applying a thinner floor.
+    if (s.lineInfo && s.lineInfo.marketType === 'golf_matchup_spread') {
+      const hit = golfSpreadBoard().getSpreadFairSync(
+        s.lineInfo.teamName,
+        // The opponent is the OTHER competitor on this pairing.
+        s.lineInfo.teamName === s.lineInfo.homeTeam ? s.lineInfo.awayTeam : s.lineInfo.homeTeam,
+      );
+      if (!hit || !(hit.fairProb > 0) || !(hit.fairProb < 1)) {
+        log.info('Pricing', `Declined: no ±0.5 board price for ${s.lineInfo.teamName} (cold/stale/unknown pairing)`);
+        priceParlay._lastFailure = {
+          reason: 'golf_spread_no_board',
+          detail: `${s.lineInfo.teamName} ${s.lineInfo.line > 0 ? '+' : ''}${s.lineInfo.line}`,
+        };
+        return null;
+      }
+      fairProbs[i] = hit.fairProb;
+      s.bookPriceOverride = clampGolfMatchupOverride(hit.fairProb, hit.rawImplied);
       continue;
     }
     const golfFair = getGolfMatchupFairProb(s.lineInfo);

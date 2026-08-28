@@ -1,0 +1,300 @@
+'use strict';
+/**
+ * BetOnline golf ROUND MATCHUP board — the ±0.5 spread source.
+ *
+ * WHY THIS EXISTS
+ * PX posts two markets per golf matchup:
+ *   1. "<A> vs. <B> (Round N Matchup)"            type=moneyline     — TIES VOID
+ *   2. "<A> vs. <B> (Round N Matchup) - Spread"   type=sup_moneyline — ±0.5, TIES COUNT
+ * They are DIFFERENT PRODUCTS. Every widely-available matchup feed (DataGolf,
+ * and the books it aggregates) publishes the ties-VOID price. Measured
+ * 2026-08-27, the single-round tie probability is 9.3% (range 8.1-9.9%,
+ * independently confirmed at 9.2% from PX's own two markets). Pricing the
+ * ±0.5 spread off a ties-void fair therefore UNDERPRICES the +0.5 side by
+ * ~9pp — against a total parlay margin of 1-2pp. This module exists so the
+ * spread is priced off a ±0.5 board, same basis, no conversion.
+ *
+ * A useful side effect: the ±0.5 market never voids on a tie, which removes
+ * the void-leg artifact that corrupted the golf calibration numbers (golf was
+ * 22.6% of void-affected tickets — i.e. roughly the tie rate compounded).
+ *
+ * SCRAPING NOTES (both were load-bearing; a bare Puppeteer launch fails)
+ *   1. BetOnline serves a stripped ~1090-char shell to DETECTED AUTOMATION.
+ *      `--disable-blink-features=AutomationControlled` plus masking
+ *      navigator.webdriver is what makes the real page render. Without it the
+ *      page 200s and looks alive while containing zero odds — a silent empty.
+ *   2. The deep link DOES NOT HYDRATE. Loading the round URL directly renders
+ *      the homepage. You must let the SPA boot and then CLICK the round's own
+ *      nav link. Navigating straight to the URL and parsing yields nothing.
+ * Both failure modes look identical from the outside (page loads, no data), so
+ * the fetch below treats "board parsed but empty" as an ERROR, never as "no
+ * matchups today".
+ *
+ * Cost is ~40s per scrape, so this is warmed in the BACKGROUND and read
+ * synchronously on the RFQ hot path — same shape as services/golf-topn.js.
+ * TTL (warm cadence) and MAX_AGE (read tolerance) are deliberately separate:
+ * conflating them made top-N go dead for ~2.5min every cycle because the board
+ * expired at TTL while the re-scrape was still running.
+ */
+const log = require('./logger');
+const { config } = require('../config');
+
+let _puppeteer = null;
+function puppeteer() {
+  if (!_puppeteer) _puppeteer = require('puppeteer');
+  return _puppeteer;
+}
+
+const NAV_TIMEOUT_MS = 60000;
+
+let _board = null;      // { at, url, rows: [...] }
+let _inFlight = null;
+let _lastError = null;
+let _consecutiveFailures = 0;
+
+const imp = (o) => {
+  const n = Number(o);
+  if (!Number.isFinite(n) || n === 0) return null;
+  return n >= 0 ? 100 / (n + 100) : -n / (-n + 100);
+};
+
+/** Strip accents/punctuation so "Vinícius" and "Vinicius" compare equal. */
+function normName(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Parse one scraped row's text into a matchup.
+ * Row text (newline separated) looks like:
+ *   Tomorrow, | 11:12 AM | 7201 - | Kristoffer Reitan | 7202 - | Russell Henley
+ *   | Spread | +0.5 | +102 | -0.5 | -133 | Moneyline | +133 | -160
+ * Returns null (never a partial) if any required piece is missing — a
+ * half-parsed matchup priced as if whole is worse than no quote.
+ */
+function parseRow(text) {
+  const t = String(text).split('\n').map(s => s.trim()).filter(Boolean);
+  const players = [];
+  for (let i = 0; i < t.length; i++) {
+    if (/^\d{3,5}\s*-$/.test(t[i]) && t[i + 1] && /[a-z]/i.test(t[i + 1])) {
+      players.push({ id: t[i].replace(/\D/g, ''), name: t[i + 1] });
+    }
+  }
+  if (players.length !== 2) return null;
+
+  const si = t.findIndex(x => /^spread$/i.test(x));
+  const mi = t.findIndex(x => /^moneyline$/i.test(x));
+  if (si < 0) return null;
+
+  // Spread block: handicap, odds, handicap, odds — in player order.
+  const sp = t.slice(si + 1, mi > si ? mi : si + 5);
+  if (sp.length < 4) return null;
+  const h1 = sp[0], o1 = sp[1], h2 = sp[2], o2 = sp[3];
+  if (!/^[+-]0\.5$/.test(h1) || !/^[+-]0\.5$/.test(h2)) return null;
+  if (h1 === h2) return null;                       // must be opposite sides
+  const so1 = imp(o1), so2 = imp(o2);
+  if (so1 == null || so2 == null) return null;
+
+  // Moneyline block is optional — used only for the tie-rate sanity check.
+  let ml1 = null, ml2 = null;
+  if (mi > 0 && t[mi + 1] && t[mi + 2]) { ml1 = Number(t[mi + 1]); ml2 = Number(t[mi + 2]); }
+
+  const hold = so1 + so2;
+  if (!(hold > 1) || hold > 1.25) return null;      // sane 2-way overround only
+  return {
+    players: [players[0].name, players[1].name],
+    ids: [players[0].id, players[1].id],
+    spread: [
+      { player: players[0].name, handicap: h1, american: Number(o1), raw: so1, fair: so1 / hold },
+      { player: players[1].name, handicap: h2, american: Number(o2), raw: so2, fair: so2 / hold },
+    ],
+    holdPct: (hold - 1) * 100,
+    moneylineAmerican: (ml1 != null && ml2 != null) ? [ml1, ml2] : null,
+  };
+}
+
+/** The tie rate implied by this board's own spread-vs-moneyline gap. Pure sanity check. */
+function impliedTieRate(rows) {
+  const ts = [];
+  for (const r of rows) {
+    if (!r.moneylineAmerican) continue;
+    const [m1, m2] = r.moneylineAmerican.map(imp);
+    if (m1 == null || m2 == null) continue;
+    const mh = m1 + m2;
+    const favIdx = r.spread[0].handicap === '-0.5' ? 0 : 1;
+    const mlFav = (favIdx === 0 ? m1 : m2) / mh;
+    const t = mlFav > 0 ? 1 - (r.spread[favIdx].fair / mlFav) : NaN;
+    if (Number.isFinite(t)) ts.push(t);
+  }
+  if (!ts.length) return null;
+  ts.sort((a, b) => a - b);
+  return ts[ts.length >> 1];
+}
+
+async function _scrape(url) {
+  const browser = await puppeteer().launch({
+    headless: true,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+      // Load-bearing: without this BetOnline serves a stripped shell with no odds.
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1600,1400',
+    ],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      window.chrome = { runtime: {} };
+    });
+    await page.setViewport({ width: 1600, height: 1400 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
+    await new Promise(r => setTimeout(r, 10000));
+
+    // The deep link renders the HOMEPAGE. Click the round's own nav link to
+    // make the SPA actually route to the board.
+    const slug = (url.split('/sportsbook/')[1] || '').split('/').slice(0, 3).join('/');
+    const clicked = await page.evaluate((s) => {
+      const a = [...document.querySelectorAll('a')]
+        .find(x => (x.getAttribute('href') || '').includes(s));
+      if (a) { a.click(); return true; }
+      return false;
+    }, slug.split('/').slice(1, 3).join('/'));
+    if (!clicked) log.warn('BoGolf', `No in-page nav link matched "${slug}" — board may not hydrate`);
+    await new Promise(r => setTimeout(r, 12000));
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => window.scrollBy(0, 900));
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    const raw = await page.evaluate(() => {
+      const out = [];
+      for (const a of document.querySelectorAll('a[href*="/game/"]')) {
+        const t = (a.innerText || '').trim();
+        if (!/\d{3,5}\s*-/.test(t)) continue;
+        out.push(t);
+      }
+      return out;
+    });
+    const rows = raw.map(parseRow).filter(Boolean);
+    return { rows, rawCount: raw.length };
+  } finally {
+    try { await browser.close(); } catch (_) { /* best effort */ }
+  }
+}
+
+/**
+ * Fetch (and cache) the board. Background use only — ~40s.
+ * Throws on an empty parse: "loaded but no matchups" is indistinguishable from
+ * the two silent-failure modes above, so it must never be cached as a miss.
+ */
+async function fetchBoard({ force = false } = {}) {
+  const cfg = config.betonlineGolf || {};
+  const url = cfg.url;
+  if (!url) { _lastError = 'no BETONLINE_GOLF_URL configured'; return null; }
+  const ttlMs = (cfg.ttlMinutes || 10) * 60000;
+  if (!force && _board && Date.now() - _board.at < ttlMs) return _board;
+  if (_inFlight) return _inFlight;
+
+  _inFlight = (async () => {
+    const started = Date.now();
+    try {
+      const { rows, rawCount } = await _scrape(url);
+      if (!rows.length) {
+        throw new Error(`board parsed 0 matchups from ${rawCount} candidate rows — treat as scrape failure, not an empty slate`);
+      }
+      const tie = impliedTieRate(rows);
+      _board = { at: Date.now(), url, rows };
+      _lastError = null;
+      _consecutiveFailures = 0;
+      log.info('BoGolf', `Board: ${rows.length} matchups in ${((Date.now() - started) / 1000).toFixed(0)}s` +
+        (tie != null ? ` · implied tie rate ${(100 * tie).toFixed(1)}%` : ''));
+      // A tie rate far outside the measured 8-11% band means the two markets
+      // are not what we think they are — surface it rather than quoting blind.
+      if (tie != null && (tie < 0.04 || tie > 0.16)) {
+        log.warn('BoGolf', `Implied tie rate ${(100 * tie).toFixed(1)}% is outside the measured 8-11% band — verify the board is really ±0.5 vs ties-void`);
+      }
+      return _board;
+    } catch (err) {
+      _consecutiveFailures++;
+      _lastError = err.message;
+      log.error('BoGolf', `Board fetch failed (${_consecutiveFailures} consecutive): ${err.message}`);
+      return null;                      // keep any previous board; age gates it
+    } finally {
+      _inFlight = null;
+    }
+  })();
+  return _inFlight;
+}
+
+/**
+ * SYNC hot-path read. Returns the ±0.5 fair for `player` against `opponent`,
+ * or null. FAILS CLOSED on a cold, stale, unknown or ambiguous board.
+ * Scoped to the ONE matchup containing both names, so a shared surname cannot
+ * pull the wrong row (the failure that stamped one Magomedov's prices onto the
+ * other on the MoV board).
+ */
+function getSpreadFairSync(player, opponent) {
+  if (!_board || !player || !opponent) return null;
+  const cfg = config.betonlineGolf || {};
+  const maxAgeMs = (cfg.maxAgeMinutes || 45) * 60000;
+  if (Date.now() - _board.at > maxAgeMs) return null;    // stale → decline
+
+  const p = normName(player), o = normName(opponent);
+  const matches = _board.rows.filter(r => {
+    const [a, b] = r.players.map(normName);
+    return (a === p && b === o) || (a === o && b === p);
+  });
+  if (matches.length !== 1) return null;                 // 0 = unknown, >1 = ambiguous
+  const row = matches[0];
+  const side = row.spread.find(s => normName(s.player) === p);
+  if (!side || !(side.fair > 0) || !(side.fair < 1)) return null;
+  return {
+    fairProb: side.fair,
+    rawImplied: side.raw,
+    americanOdds: side.american,
+    handicap: side.handicap,
+    opponent: row.players.find(n => normName(n) !== p) || null,
+    boardAgeMs: Date.now() - _board.at,
+    source: 'betonline_spread_0.5',
+  };
+}
+
+function getStatus() {
+  const cfg = config.betonlineGolf || {};
+  return {
+    enabled: !!cfg.enabled,
+    url: cfg.url || null,
+    loaded: !!_board,
+    matchups: _board ? _board.rows.length : 0,
+    ageMinutes: _board ? +((Date.now() - _board.at) / 60000).toFixed(1) : null,
+    maxAgeMinutes: cfg.maxAgeMinutes || 45,
+    priceable: !!(_board && Date.now() - _board.at <= (cfg.maxAgeMinutes || 45) * 60000),
+    impliedTieRate: _board ? impliedTieRate(_board.rows) : null,
+    lastError: _lastError,
+    consecutiveFailures: _consecutiveFailures,
+    rows: _board ? _board.rows.map(r => ({
+      players: r.players,
+      spread: r.spread.map(s => `${s.player} ${s.handicap} ${s.american > 0 ? '+' : ''}${s.american} (fair ${(100 * s.fair).toFixed(1)}%)`),
+      holdPct: +r.holdPct.toFixed(2),
+    })) : [],
+  };
+}
+
+module.exports = {
+  fetchBoard,
+  getSpreadFairSync,
+  getStatus,
+  // test seams
+  parseRow,
+  impliedTieRate,
+  normName,
+  // Inject a board so the sync hot-path read (staleness, ambiguity, unknown
+  // player) is testable without a 40s scrape. Test-only.
+  _setBoardForTest: (rows, at) => { _board = rows ? { at: at || Date.now(), url: 'test', rows } : null; },
+};

@@ -35,6 +35,39 @@ const config = {
     apiKey: process.env.DATAGOLF_API_KEY,
     baseUrl: 'https://feeds.datagolf.com',
   },
+  // BetOnline golf ROUND MATCHUP board — the ±0.5 spread source
+  // (services/betonline-golf-matchups.js).
+  //
+  // PX posts a ties-VOID matchup moneyline AND a ±0.5 spread where ties COUNT.
+  // Those are different products: the measured single-round tie rate is 9.3%
+  // (8.1-9.9%, confirmed independently at 9.2% off PX's own two markets), so a
+  // ±0.5 leg priced from any ties-void feed (DataGolf, bet365) gives away ~9pp
+  // on the +0.5 side against a 1-2pp total parlay margin. This board is the
+  // only same-basis source we have.
+  betonlineGolf: {
+    // Kill-switch. DEFAULT OFF — this is a brand-new money path on a live
+    // book, so it must be turned on deliberately. Literal 'true' to enable.
+    enabled: process.env.BETONLINE_GOLF_ENABLED === 'true',
+    // Full round-board URL, e.g.
+    // https://www.betonline.ag/sportsbook/golf/fed-ex-round-2/tour-championship
+    // Round-specific by design: the slug carries the round, and quoting round 2
+    // lines off a round 3 board would be silently wrong rather than an error.
+    url: process.env.BETONLINE_GOLF_URL || null,
+    // Warm cadence. The scrape is ~40s of Puppeteer, background only.
+    ttlMinutes: (() => {
+      const v = parseFloat(process.env.BETONLINE_GOLF_TTL_MIN);
+      return Number.isFinite(v) && v > 0 ? v : 10;
+    })(),
+    // READ tolerance — how old a board may be and still price. Deliberately
+    // separate from ttlMinutes and larger than it: conflating the two made the
+    // top-N board go dead for ~2.5min every cycle, because it expired at TTL
+    // while the re-scrape was still running. Tighter than golf-topn's 180
+    // though — these are single-round lines that move, not 4-day outrights.
+    maxAgeMinutes: (() => {
+      const v = parseFloat(process.env.BETONLINE_GOLF_MAX_AGE_MIN);
+      return Number.isFinite(v) && v > 0 ? v : 45;
+    })(),
+  },
   // RFI (Run First Inning — YRFI/NRFI). "Did >=1 run score in the 1st inning."
   // Sourced from The Odds API market `totals_1st_1_innings` (the 1st-inning
   // total, NOT a game line): YES == book OVER 0.5, NO == book UNDER 0.5.

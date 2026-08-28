@@ -712,6 +712,13 @@ async function startup() {
     } catch (err) {
       log.warn('BetOnlineScraper', `Initial Zurich prime failed: ${err.message}`);
     }
+    // ±0.5 golf matchup board. Fire-and-forget: ~40s of Puppeteer must never
+    // delay boot or line registration. Gated by its own kill-switch, and a
+    // cold board simply declines those legs rather than blocking anything.
+    if (config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url) {
+      require('./services/betonline-golf-matchups').fetchBoard()
+        .catch(err => log.warn('BoGolf', `Initial ±0.5 board prime failed: ${err.message}`));
+    }
     // NOTE: creator-ID blocklist hydration moved to BEFORE websocket.connect
     // (see the "MUST run before websocket.connect" block above) so the RFQ-time
     // gate is armed from the first RFQ rather than after this slow pre-warm IIFE.
@@ -6428,6 +6435,17 @@ function startStatusServer() {
   // background); an empty `markets` = DK isn't serving that board (it had no
   // Top 20 for The Open). `uplift` is the DERIVED ties factor (T/N) — if it ever
   // drifts outside ~[1.0,1.6] the board is refused rather than priced.
+  // ±0.5 golf matchup spread board (BetOnline). First stop when a spread leg
+  // will not quote: check priceable, ageMinutes and impliedTieRate. A tie rate
+  // outside ~8-11% means the board is not the ±0.5 product we think it is.
+  app.get('/golf-matchup-spreads', async (req, res) => {
+    try {
+      const bo = require('./services/betonline-golf-matchups');
+      if (req.query.force === '1') await bo.fetchBoard({ force: true });
+      res.json({ ok: true, ...bo.getStatus() });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.get('/golf-topn', (req, res) => {
     try {
       const topN = require('./services/golf-topn');
