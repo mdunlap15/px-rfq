@@ -496,6 +496,12 @@ const TEAM_NAME_OVERRIDES = {
   'los angeles kings': 'LA Kings',
 };
 
+// How far AHEAD we will register at all. Env MAX_DAYS_AHEAD; default 6.
+const MAX_DAYS_AHEAD = (() => {
+  const v = parseFloat(process.env.MAX_DAYS_AHEAD);
+  return Number.isFinite(v) && v > 0 ? v : 6;
+})();
+
 function normalizeTeamName(name) {
   // Strip diacritics first (Godínez → Godinez, São Paulo → Sao Paulo) so
   // ASCII-only feeds can match international/combat-sport names. Without
@@ -1267,6 +1273,7 @@ async function seedAllLines() {
   const DEFAULT_CUTOFF_HOURS = 6;
   const nowMs = Date.now();
   let droppedAsStale = 0;
+  let droppedAsTooFar = 0;
   const events = allEvents.filter(e => {
     if (!pxSportNames.includes(e.sport_name)) return false;
     if (e.status && e.status === 'settled') return false;
@@ -1285,10 +1292,24 @@ async function seedAllLines() {
         droppedAsStale++;
         return false;
       }
+      // FUTURE CAP (operator directive 2026-08-29): never quote an event more
+      // than MAX_DAYS_AHEAD out. Measured that day, 294 NFL lines were
+      // registered 7-15 days ahead — season-opener spreads and totals sitting
+      // on the book for a fortnight, where our fair moves far more than the
+      // price does and there is no reason to be the one holding the risk.
+      //
+      // Deliberately ONE-SIDED: it caps how far FORWARD we look and never
+      // touches past/in-progress events. Golf outrights carry scheduled = R1
+      // tee, which is days in the PAST mid-tournament (358 such lines that
+      // day), and a two-sided window would have silently dropped every one.
+      if (Number.isFinite(startMs) && startMs > nowMs + MAX_DAYS_AHEAD * 86400000) {
+        droppedAsTooFar++;
+        return false;
+      }
     }
     return true;
   });
-  log.info('Lines', `Found ${events.length} supported sport events (of ${allEvents.length} total; dropped ${droppedAsStale} past per-sport stale cutoff)`);
+  log.info('Lines', `Found ${events.length} supported sport events (of ${allEvents.length} total; dropped ${droppedAsStale} past per-sport stale cutoff, ${droppedAsTooFar} beyond ${MAX_DAYS_AHEAD}d ahead)`);
 
   // Get all Odds API cached events for matching
   const oddsApiEvents = oddsFeed.getAllCachedEvents();
@@ -3445,6 +3466,19 @@ async function resolveUnknownLine(rfqLeg) {
     log.debug('Lines', `Cannot resolve ${lineId}: unknown event ${eventId}`);
     _recordResolveFailure(lineId, { lineId, reason: 'unknown_event', eventId });
     return null;
+  }
+  // FUTURE CAP, on-demand half. The seed drops events beyond MAX_DAYS_AHEAD,
+  // but eventIndex deliberately holds ALL events for name resolution, so this
+  // path could still register a far-future line PX asks about and quietly
+  // undo the cap. Gating only the seed is the same half-fix that let
+  // de-registered golf spreads re-register on demand.
+  if (event.scheduled) {
+    const _st = Date.parse(event.scheduled);
+    if (Number.isFinite(_st) && _st > Date.now() + MAX_DAYS_AHEAD * 86400000) {
+      _recordResolveFailure(lineId, { lineId, reason: 'beyond_max_days_ahead', eventId,
+        detail: `starts ${event.scheduled}, cap ${MAX_DAYS_AHEAD}d` });
+      return null;
+    }
   }
 
   // Determine sport key. Generic catch-all keys (e.g. 'soccer') are
