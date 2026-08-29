@@ -50,6 +50,11 @@ const config = {
     // America/New_York zone, not a fixed offset).
     openEt: process.env.GOLF_OUTRIGHT_WINDOW_OPEN_ET || '19:00',
     tour: process.env.GOLF_OUTRIGHT_WINDOW_TOUR || 'pga',
+    // Hard backstop for the case where NO tee time is published after the
+    // window opened. Without it that branch stays open forever and outrights
+    // quote into live play. Measured from the open boundary, so the default 12
+    // maps 19:00 -> 07:00 ET.
+    maxOpenHours: Number(process.env.GOLF_OUTRIGHT_WINDOW_MAX_OPEN_HOURS || 12),
     // Stop quoting this many minutes BEFORE the next round's first tee, not at
     // it. Operator directive: "until shortly before the start of Round 3".
     // A buffer matters because de-registration is not instantaneous — the seed

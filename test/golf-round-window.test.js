@@ -135,3 +135,36 @@ test('closeAt is reported so the operator can see when quoting stops', () => {
   assert.strictEqual(r.closeAt, R3 - 30 * 60000);
   assert.strictEqual(r.leadMinutes, 30);
 });
+
+// ------------------------------------------- backstop when no tee is published
+
+// The tour posts the next round's tee sheet only after the current round is
+// scored, so an evening with no future tee time is NORMAL and must stay open.
+// But it must not stay open FOREVER — that is how outrights leak into live
+// play. Default backstop is 12h from the 19:00 open, i.e. 07:00 ET.
+test('no published tee: open through the evening, shut by the backstop', () => {
+  // Only tee on record is THIS morning's R3, i.e. before the 19:00 open.
+  const R3 = Date.UTC(2026, 7, 29, 15, 55);       // 11:55 ET Sat
+  const at = (ms) => { w._setCacheForTest([R3], ms, 3); return w.getWindow(ms); };
+
+  const evening = at(ET(2026, 7, 29, 20, 0));     // 20:00 ET Sat
+  assert.strictEqual(evening.open, true, 'evening after the open must quote');
+  assert.strictEqual(evening.nextStart, null, 'precondition: no tee after lastOpen');
+  assert.strictEqual(evening.backstop, true, 'and it must say it is on the backstop');
+
+  assert.strictEqual(at(ET(2026, 7, 30, 6, 30)).open, true,  '06:30 ET still inside 12h');
+  assert.strictEqual(at(ET(2026, 7, 30, 7, 30)).open, false, '07:30 ET is past the backstop — must be shut');
+  assert.strictEqual(at(ET(2026, 7, 30, 11, 0)).open, false, 'and it must not reopen into live play');
+});
+
+test('a published tee still wins over the backstop', () => {
+  // Backstop must not loosen the normal path: an R4 tee at 09:00 ET closes the
+  // window at 08:30, hours before the 07:00-next-day backstop would have.
+  const R4 = Date.UTC(2026, 7, 30, 13, 0);        // 09:00 ET Sun
+  const at = (ms) => { w._setCacheForTest([R4], ms, 3); return w.getWindow(ms); };
+  const r = at(ET(2026, 7, 29, 20, 0));
+  assert.strictEqual(r.open, true);
+  assert.ok(!r.backstop, 'not a backstop decision when a tee is known');
+  assert.strictEqual(r.closeAt, R4 - 30 * 60000);
+  assert.strictEqual(at(ET(2026, 7, 30, 8, 45)).open, false, '08:45 is inside the 30min lead');
+});

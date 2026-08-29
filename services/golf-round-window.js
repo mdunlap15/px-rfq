@@ -124,9 +124,23 @@ function getWindow(nowMs = Date.now()) {
     if (t > lastOpen && (nextStart == null || t < nextStart)) nextStart = t;
   }
   if (nextStart == null) {
+    // No tee published after the window opened. That is NORMAL for a few hours
+    // (tours post the next round's tee sheet only once the current round is
+    // scored), so failing closed here would black out the evening the operator
+    // most wants to quote. But staying open UNBOUNDED is how outrights leak
+    // into live play: if the sheet never lands, `open:true` never flips back.
+    // Bound it with a hard backstop measured from lastOpen. Default 12h maps a
+    // 19:00 open to a 07:00 ET close, which is ahead of the earliest realistic
+    // first tee on any tour.
+    const backstopMs = (cfg.maxOpenHours != null ? cfg.maxOpenHours : 12) * 3600000;
+    const closeAt = lastOpen + backstopMs;
+    const open = nowMs < closeAt;
     return {
-      open: true, enabled: true, lastOpen, nextStart: null,
-      reason: `open since ${new Date(lastOpen).toISOString()} — no tee time published after it`,
+      open, enabled: true, lastOpen, nextStart: null, closeAt,
+      backstop: true, maxOpenHours: backstopMs / 3600000,
+      reason: open
+        ? `open since ${new Date(lastOpen).toISOString()} — no tee time published after it; backstop close ${new Date(closeAt).toISOString()}`
+        : `closed by backstop ${new Date(closeAt).toISOString()} — no tee time was ever published after ${new Date(lastOpen).toISOString()}`,
       currentRound: _cache.currentRound, eventName: _cache.eventName,
     };
   }
