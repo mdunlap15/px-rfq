@@ -1130,6 +1130,72 @@ function startStatusServer() {
         golfSameTournamentCorrelationCap: config.pricing.golfSameTournamentCorrelationCap,
         propFairCalibration: config.pricing.propFairCalibration,
       },
+      // KILL SWITCHES — every on/off gate that can silence a whole market,
+      // in one scannable block.
+      //
+      // Added 2026-08-29 after golf outrights went dark and NONE of these were
+      // readable from outside the process: diagnosing it meant inferring the
+      // flag's state from a MISSING counter in the seed trace. A kill switch
+      // you cannot read is a kill switch you cannot debug.
+      //
+      // `env` is the raw variable so an unset-vs-explicitly-false mistake is
+      // visible; `on` is the resolved boolean the code actually branches on.
+      // Note the defaults differ on purpose: golfOutrightsParlay defaults ON,
+      // everything else defaults OFF.
+      killSwitches: {
+        golfOutrightsParlay: {
+          on: config.pricing.golfOutrightsParlayEnabled,
+          env: process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED ?? null,
+          defaultsTo: true,
+          gates: 'golf outright (win/top-N/make-cut) line registration for parlays',
+        },
+        golfMatchupSpread: {
+          on: !!(config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url),
+          env: process.env.BETONLINE_GOLF_ENABLED ?? null,
+          urlSet: !!(config.betonlineGolf && config.betonlineGolf.url),
+          defaultsTo: false,
+          gates: 'PX ±0.5 golf matchup spread registration (needs BOTH the flag and a URL)',
+        },
+        golfOutrightWindow: {
+          on: !!(config.golfOutrightWindow && config.golfOutrightWindow.enabled),
+          env: process.env.GOLF_OUTRIGHT_WINDOW_ENABLED ?? null,
+          defaultsTo: false,
+          openEt: config.golfOutrightWindow && config.golfOutrightWindow.openEt,
+          leadMinutes: config.golfOutrightWindow && config.golfOutrightWindow.leadMinutes,
+          gates: 'time-of-day gate on outright registration; OFF means no gating at all',
+        },
+        pitcherKProps: {
+          on: config.pricing.pitcherKPropsEnabled,
+          env: process.env.PITCHER_K_PROPS_ENABLED ?? null,
+          defaultsTo: false,
+          gates: 'player_strikeouts registration (seed AND on-demand)',
+        },
+        telegramAlerts: {
+          on: process.env.TELEGRAM_ALERTS_ENABLED === 'true',
+          env: process.env.TELEGRAM_ALERTS_ENABLED ?? null,
+          defaultsTo: false,
+          configured: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+          gates: 'ALL Telegram sends; note it can be "configured" yet suppressed',
+        },
+        footballSgp: {
+          on: config.pricing.footballSgpEnabled,
+          env: process.env.FOOTBALL_SGP_ENABLED ?? null,
+          defaultsTo: false,
+          gates: 'football same-game parlays',
+        },
+        sharpApi: {
+          on: process.env.SHARPAPI_ENABLED === 'true',
+          env: process.env.SHARPAPI_ENABLED ?? null,
+          defaultsTo: false,
+          gates: 'SharpAPI calls — DECOMMISSIONED, should stay off',
+        },
+        rfi: {
+          on: !!(config.rfi && config.rfi.enabled),
+          env: process.env.RFI_ENABLED ?? null,
+          defaultsTo: false,
+          gates: 'YRFI/NRFI registration + quoting',
+        },
+      },
       websocket: websocket.getState(),
       lines: {
         registered: lineManager.getLineCount(),
