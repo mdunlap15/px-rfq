@@ -1297,6 +1297,15 @@ async function seedAllLines() {
     selectionsParsed: 0,     // individual selections across golf markets
     selectionsSkipped: 0,    // selections that got `continue` at the oddsApiSelection check
     linesRegistered: 0,      // golf lines that made it into lineIndex
+    // Outright branch instrumentation. Added 2026-08-29: outrights registered
+    // ZERO with every gate verifiably open, and the only signal was the ABSENCE
+    // of outrightLinesRegistered — which cannot distinguish "branch never ran"
+    // from "branch threw". These make the decision explicit.
+    outrightEventsSeen: 0,   // events matching sport=Golf && sub_type=outrights
+    outrightGateEnabled: null, // golfOutrightsEnabled() as the loop saw it
+    outrightWindowOpen: null,  // quoting-window verdict as the loop saw it
+    outrightSkipReason: null,  // why the last outright event was skipped
+    outrightError: null,       // error message if the branch threw
     sampleEventName: null,
     sampleMarketName: null,
     sampleSelectionTeam: null,
@@ -1395,6 +1404,13 @@ async function seedAllLines() {
     // with YES/NO selections. They therefore die on the !homeComp check below —
     // which is why no golf outright leg has ever been registered or quoted.
     // Registered YES-side only (operator directive): the counterparty takes YES.
+    // Instrument BEFORE the gate so "gate closed" is distinguishable from
+    // "event never seen" — the ambiguity that cost a full debugging session.
+    if (event.sport_name === 'Golf' && event.sub_type === 'outrights') {
+      golfTrace.outrightEventsSeen++;
+      golfTrace.outrightGateEnabled = golfOutrightsEnabled();
+      if (!golfOutrightsEnabled()) golfTrace.outrightSkipReason = 'golfOutrightsEnabled() false';
+    }
     if (golfOutrightsEnabled() && event.sport_name === 'Golf' && event.sub_type === 'outrights') {
       // QUOTING WINDOW (operator directive 2026-08-28): outrights are quotable
       // only between 19:00 ET and the next round's first tee. Gate REGISTRATION
@@ -1406,7 +1422,9 @@ async function seedAllLines() {
         // Fire-and-forget refresh; the read below uses whatever is cached.
         win.refresh().catch(() => { /* logged inside */ });
         const st = win.getWindow();
+        golfTrace.outrightWindowOpen = st.open;
         if (!st.open) {
+          golfTrace.outrightSkipReason = 'window closed: ' + st.reason;
           if (!seedAllLines._loggedWindowClosed || Date.now() - seedAllLines._loggedWindowClosed > 15 * 60000) {
             seedAllLines._loggedWindowClosed = Date.now();
             log.info('Lines', `Golf outrights withheld — quoting window closed (${st.reason})`);
@@ -1414,6 +1432,7 @@ async function seedAllLines() {
           continue;
         }
       } catch (err) {
+        golfTrace.outrightError = `window check: ${err.message}`;
         log.warn('Lines', `Golf outright window check failed: ${err.message}`);
       }
       try {
@@ -1423,6 +1442,7 @@ async function seedAllLines() {
         const n = await _registerGolfOutrightEvent(event);
         golfTrace.outrightLinesRegistered = (golfTrace.outrightLinesRegistered || 0) + n;
       } catch (err) {
+        golfTrace.outrightError = `${event.name}: ${err.message}`;
         log.warn('Lines', `Golf outright registration failed for ${event.name}: ${err.message}`);
       }
       continue;
