@@ -94,6 +94,14 @@ const config = {
       const v = parseFloat(process.env.BETONLINE_GOLF_MAX_AGE_MIN);
       return Number.isFinite(v) && v > 0 ? v : 45;
     })(),
+    // Freshness ceiling for an OPERATOR PASTE, deliberately longer than the
+    // scrape max-age: the operator pastes intentionally and stops via the kill
+    // switch, so we must not force a re-paste on the scrape cadence. Mirrors
+    // GOLF_OUTRIGHT_PASTE_MAX_AGE_MIN.
+    pasteMaxAgeMinutes: (() => {
+      const v = parseFloat(process.env.BETONLINE_GOLF_PASTE_MAX_AGE_MIN);
+      return Number.isFinite(v) && v > 0 ? v : 720;
+    })(),
   },
   // RFI (Run First Inning — YRFI/NRFI). "Did >=1 run score in the 1st inning."
   // Sourced from The Odds API market `totals_1st_1_innings` (the 1st-inning

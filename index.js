@@ -6516,6 +6516,32 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // Load an OPERATOR PASTE of the round matchup board.
+  // Body: { text: "<pasted board>" }  (text/plain also accepted)
+  //
+  // Needed because the scraped book and PX build DIFFERENT pairings from R3 on:
+  // measured 2026-08-29, only 2 of 14 scraped pairings matched PX's, leaving 12
+  // matchups registered but unpriceable. A paste on PX's OWN pairings fixes it;
+  // no amount of scraping can. Takes priority over the scrape while fresh.
+  app.post('/golf-matchup-spreads/paste', (req, res) => {
+    try {
+      const body = req.body || {};
+      const text = typeof body === 'string' ? body : (body.text || body.paste || '');
+      if (!text || typeof text !== 'string') {
+        return res.status(400).json({ ok: false, error: 'text (string) required' });
+      }
+      const bo = require('./services/betonline-golf-matchups');
+      const out = bo.loadPaste(text);
+      res.json({ ok: true, ...out, status: bo.getStatus() });
+    } catch (err) {
+      // loadPaste throws on a mixed-round paste, an unparseable board, or a
+      // tie rate outside 4-16% (which means it is probably not the +/-0.5
+      // product). Surface the reason rather than silently keeping the old board.
+      log.warn('API', `/golf-matchup-spreads/paste rejected: ${err.message}`);
+      res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
   app.get('/golf-matchup-spreads', async (req, res) => {
     try {
       const bo = require('./services/betonline-golf-matchups');
@@ -11764,7 +11790,20 @@ function startStatusServer() {
             const topN = require('./services/golf-topn');
             const dataGolf = require('./services/datagolf');
             let hit = topN.getTopNFairProbSync(info.playerName || info.teamName, info.marketType, info.tournamentName);
-            if (!hit && !/^outright_top_/.test(info.marketType || '')) {
+            // Fall through to DataGolf for EVERY outright market, including
+            // top-N. The old `!/^outright_top_/` guard here was stale: it dated
+            // from 2026-07-18 when DataGolf was dropped as a top-N source over
+            // the dead-heat-vs-ties basis gap, but DataGolf was RESTORED as
+            // PRIORITY 2 on 07-30 with the measured ties uplift and this
+            // display was never updated to match.
+            //
+            // The cost was a lie on the operator's screen: pricer.js
+            // golfOutrightFair has no such restriction, so Top 5/Top 10 were
+            // priced and quotable on live RFQs while the Lines table showed
+            // "-" for all 58 of them and only Tournament Winner appeared to
+            // work. A display that disagrees with the pricer is worse than no
+            // display — it sends you hunting a pricing bug that does not exist.
+            if (!hit) {
               hit = dataGolf.getOutrightFairProbSync(info.playerName || info.teamName, info.marketType,
                 [info.tournamentName, info.pxEventName]);
             }

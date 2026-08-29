@@ -134,6 +134,80 @@ function impliedTieRate(rows) {
   return ts[ts.length >> 1];
 }
 
+
+/**
+ * Parse an OPERATOR PASTE of a round matchup board.
+ *
+ * Exists because the scraped book and PX construct DIFFERENT pairings for the
+ * same round. Measured 2026-08-29 R3: only 2 of 14 scraped pairings matched
+ * PX's, so 12 matchups were registered-but-unpriceable. Round 2 matched 14/14
+ * because both sides used tee-time groupings; from R3 the books build their own
+ * head-to-heads (PX even lists one player in two matchups, which a tee-time
+ * pairing cannot do). No amount of scraping fixes that — only a board built on
+ * the SAME pairings PX uses will price them, and the operator can supply it.
+ *
+ * Block format (repeating, whitespace-trimmed):
+ *   ROUND <N> MATCHUP - <TOURNAMENT>
+ *   <date>            e.g. 08/29
+ *   <time>            e.g. 11:19
+ *   <player 1>
+ *   <player 2>
+ *   <moneyline 1>     ties-void
+ *   <moneyline 2>
+ *   <handicap 1>      +0.5 / -0.5
+ *   <spread odds 1>
+ *   <handicap 2>
+ *   <spread odds 2>
+ *
+ * Returns { round, rows } or throws. Rows use the SAME shape as the scraper so
+ * every downstream consumer is unchanged.
+ */
+function parsePasteText(text) {
+  const t = String(text || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const rows = [];
+  let round = null;
+  for (let i = 0; i < t.length; i++) {
+    const hdr = /^ROUND\s+(\d+)\s+MATCHUP/i.exec(t[i]);
+    if (!hdr) continue;
+    const r = parseInt(hdr[1], 10);
+    if (round == null) round = r;
+    else if (round !== r) throw new Error(`paste mixes rounds ${round} and ${r} — refusing`);
+    const b = t.slice(i + 1, i + 11);
+    if (b.length < 10) continue;
+    const [, , p1, p2, ml1, ml2, h1, o1, h2, o2] = b;
+    // Reuse the scraper's own row parser so paste and scrape cannot diverge in
+    // de-vig, validation or field names — one definition, two sources.
+    const row = parseRow([
+      '', '', '7001 -', p1, '7002 -', p2,
+      'Spread', h1, o1, h2, o2, 'Moneyline', ml1, ml2,
+    ].join('\n'));
+    if (row) rows.push(row);
+  }
+  if (!rows.length) throw new Error('no matchups parsed from paste');
+  return { round, rows };
+}
+
+/**
+ * Install an operator-pasted board. Takes PRIORITY over the scrape: the
+ * operator pastes deliberately, from the book whose pairings actually match
+ * PX's, so a later scrape must not silently replace it.
+ */
+function loadPaste(text) {
+  const { round, rows } = parsePasteText(text);
+  const tie = impliedTieRate(rows);
+  // Same basis gate the scraper applies. A board outside this band is probably
+  // not the ties-COUNT +/-0.5 product, and pricing PX's spread off a ties-void
+  // board gives away ~9pp on the +0.5 side.
+  if (tie != null && (tie < 0.04 || tie > 0.16)) {
+    throw new Error(`implied tie rate ${(100 * tie).toFixed(1)}% outside the 4-16% band — refusing (is this really a +/-0.5 board?)`);
+  }
+  _board = { at: Date.now(), url: 'operator-paste', round, rows, source: 'paste' };
+  _lastError = null;
+  log.info('BoGolf', `Paste accepted: ${rows.length} matchups, round ${round}` +
+    (tie != null ? `, implied tie rate ${(100 * tie).toFixed(1)}%` : ''));
+  return { round, matchups: rows.length, impliedTieRate: tie };
+}
+
 async function _scrape({ round = null, url = null } = {}) {
   let resolvedUrl = url;
   let resolvedRound = round;
@@ -261,6 +335,15 @@ async function fetchBoard({ force = false, round = null } = {}) {
   const ttlMs = (cfg.ttlMinutes || 10) * 60000;
   // A board for a DIFFERENT round is not merely stale, it is wrong: pairings
   // are re-drawn every round, so it must be refetched even inside the TTL.
+  // An operator paste OUTRANKS the scrape while it is fresh — it is the board
+  // whose pairings actually match PX's. Its own max-age knob is deliberately
+  // longer than the scrape TTL: the operator pastes intentionally and stops via
+  // the kill switch, so we must not force a re-paste on a scrape cadence.
+  if (_board && _board.source === 'paste') {
+    const pasteMaxMs = (cfg.pasteMaxAgeMinutes || 720) * 60000;
+    const sameRound = round == null || _board.round == null || _board.round === round;
+    if (sameRound && Date.now() - _board.at < pasteMaxMs) return _board;
+  }
   const roundMismatch = round != null && _board && _board.round != null && _board.round !== round;
   if (!force && !roundMismatch && _board && Date.now() - _board.at < ttlMs) return _board;
   if (_inFlight) return _inFlight;
@@ -345,6 +428,7 @@ function getStatus() {
     ageMinutes: _board ? +((Date.now() - _board.at) / 60000).toFixed(1) : null,
     maxAgeMinutes: cfg.maxAgeMinutes || 45,
     round: _board ? _board.round : null,
+    source: _board ? (_board.source || 'scrape') : null,
     resolvedUrl: _board ? _board.url : null,
     priceable: !!(_board && Date.now() - _board.at <= (cfg.maxAgeMinutes || 45) * 60000),
     impliedTieRate: _board ? impliedTieRate(_board.rows) : null,
@@ -360,6 +444,8 @@ function getStatus() {
 
 module.exports = {
   fetchBoard,
+  parsePasteText,
+  loadPaste,
   getSpreadFairSync,
   getStatus,
   // test seams
