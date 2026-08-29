@@ -448,6 +448,16 @@ const TEAM_NAME_OVERRIDES = {
   'rafael xavier': 'Rafael Alves',
   // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
   'british columbia lions': 'BC Lions',
+  // CFL SPREAD SELECTION CODES. PX types CFL spreads 'sup_moneyline' with the
+  // handicap in the selection name ("SAS -4.5", "BC -6.5"), so the code must
+  // resolve to a competitor. Most fall out of the substring matcher because the
+  // code IS a substring of the club name — sas/saskatchewan, tor/toronto,
+  // ott/ottawa — but "BC" is NOT a substring of "British Columbia Lions", so
+  // that side silently failed to resolve and the spread registered ONE-SIDED.
+  // Verified live 2026-08-29. If another CFL club shows the same symptom (a
+  // spread with only one side registered), its code needs an entry here too;
+  // only the four codes on PX that day could be verified.
+  'bc': 'British Columbia Lions',
   // Argentine Primera (verified against TOA 2026-07-24). Most PX club
   // prefixes (CA/SC/CR) fall out of the substring matcher fine — these two
   // do not:
@@ -1761,9 +1771,14 @@ async function seedAllLines() {
       // rejects every soccer spread → zero spread lines for sub-leagues
       // like EPL/UCL despite ML/total working fine. parseMarketSelections
       // retags marketType='spread' for these so downstream lookup works.
-      const isSoccerSupSpread = m.type === 'sup_moneyline'
+      const isSupNamedSpread = m.type === 'sup_moneyline'
         && !isSeriesMarket
-        && /soccer|fifa/i.test(sportKey || '')
+        // Widened from soccer-only 2026-08-29: PX also types CFL spreads
+        // 'sup_moneyline' with the market literally named "Spread" (verified
+        // Toronto @ Saskatchewan). NFL/NCAAF use type='spread', which is why
+        // only the leagues PX models this way were dark: CFL had moneylines
+        // and ZERO spreads.
+        && /soccer|fifa|americanfootball/i.test(sportKey || '')
         && /^spread\b/i.test(m.name || '');
       // "To Advance To The Next Round" — knockout qualification, also
       // type='sup_moneyline'. Same carve-out shape as the asian-handicap spread
@@ -1808,7 +1823,7 @@ async function seedAllLines() {
       const isGolfMatchupSpread = isGolfSport && m.type === 'sup_moneyline'
         && !!(config.betonlineGolf && config.betonlineGolf.enabled && config.betonlineGolf.url)
         && px.GOLF_MATCHUP_SPREAD_RE.test(name);
-      if (!isSupSeries && !isSoccerSupSpread && !isSoccerAdvance && !isGolfMatchupSpread && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
+      if (!isSupSeries && !isSupNamedSpread && !isSoccerAdvance && !isGolfMatchupSpread && !supportedBase.includes(m.type) && !F5_MARKET_TYPES.includes(m.type) && !FIRST_HALF_MARKET_TYPES.includes(m.type)) return false;
       // Advance bypasses the sub-game/prop name filter below ("Next Round"
       // would otherwise look prop-ish) — it is a full-event market.
       if (isGolfMatchupSpread) return true;

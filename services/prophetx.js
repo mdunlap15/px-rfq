@@ -1019,6 +1019,51 @@ function parseMarketSelections(market) {
     return results;
   }
 
+  // SPREAD TYPED 'sup_moneyline' WITH THE HANDICAP ONLY IN THE NAME.
+  // Verified live on CFL 2026-08-29 (Toronto @ Saskatchewan): PX posts
+  // type='sup_moneyline', market name "Spread", selections "SAS -4.5" /
+  // "TOR +4.5" — and sel.line is 0 on BOTH. NFL/NCAAF use type='spread' with a
+  // real sel.line, which is why this only bites the leagues PX models this way.
+  //
+  // Falling through to the generic spread path would register line 0 and, since
+  // `0 < 0` is false, tag BOTH sides 'underdog' — a -4.5 spread priced as a
+  // pick'em on the wrong side. Same shape as the golf matchup spread trap.
+  //
+  // Only claims the market when BOTH sides parse to a signed number; otherwise
+  // it falls through untouched so the existing soccer asian-handicap handling
+  // (which does carry sel.line) is unaffected.
+  if (isSupSoccerSpread && market.selections) {
+    const named = [];
+    for (const selGroup of market.selections) {
+      for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
+        if (!sel || !sel.line_id) continue;
+        const raw = (sel.display_name || sel.name || '').trim();
+        const mm = raw.match(/^(.+?)\s+([+-]\d+(?:\.\d+)?)$/);
+        if (!mm) continue;
+        const line = parseFloat(mm[2]);
+        if (!Number.isFinite(line)) continue;
+        named.push({
+          lineId: sel.line_id,
+          marketType: 'spread',
+          selection: line < 0 ? 'favorite' : 'underdog',
+          teamName: mm[1].trim(),
+          line,
+          competitorId: sel.competitor_id || null,
+          outcomeName: raw,
+        });
+      }
+    }
+    // Require a clean two-sided market with OPPOSITE signs. A half-parsed
+    // spread priced as if whole is worse than no quote.
+    const okPair = named.length === 2
+      && named[0].teamName !== named[1].teamName
+      && Math.sign(named[0].line) !== Math.sign(named[1].line);
+    if (okPair) return named;
+    if (named.length) {
+      log.warn('PX-Markets', `sup_moneyline spread "${marketName}": ${named.length}/2 sides parsed from names — falling through to the generic path`);
+    }
+  }
+
   if (isSupSeriesTotal && market.selections) {
     for (const selGroup of market.selections) {
       for (const sel of selGroup) {
