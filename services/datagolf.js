@@ -843,7 +843,25 @@ async function fetchOutrightBoard(tour, market) {
       const v = americanToImpliedProb(p[bk]);
       if (v != null && v > 0 && v < 1) entries.push({ dgId: p.dg_id, p: v });
     }
-    if (entries.length < 30) continue; // partial field ⇒ normalization invalid
+    // A book must cover essentially the WHOLE field, because power-normalizing
+    // to an exact target (1.0 for win, N×uplift for top-N) is only valid over
+    // the complete field — partial coverage sums low and inflates everyone.
+    //
+    // The old test was a flat `< 30`, which conflated "partial coverage of a
+    // big field" with "COMPLETE coverage of a SMALL field" and silently
+    // rejected every sub-30-man event. Measured 2026-08-29: the TOUR
+    // Championship has a 29-man field, so every book was skipped, bookNames
+    // came back empty, the whole pga board returned null, and all 87 registered
+    // outright lines carried a null fair — i.e. we advertised Win/Top-5/Top-10
+    // and declined every single RFQ. Same trap awaits the Hero World Challenge,
+    // Sentry and other limited-field events.
+    //
+    // Scale the floor to the field actually present, but never ABOVE the old
+    // 30 — this only relaxes for small fields, it never tightens a large one,
+    // so existing coverage on full-field events is unchanged.
+    const fieldSize = data.odds.length;
+    const minEntries = Math.min(30, Math.max(10, Math.ceil(fieldSize * 0.9)));
+    if (entries.length < minEntries) continue; // partial field ⇒ normalization invalid
     if (target) {
       const k = _powerNormalizeField(entries.map(e => e.p), target);
       if (k == null) continue;
