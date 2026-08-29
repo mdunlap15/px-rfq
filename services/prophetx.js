@@ -1037,6 +1037,14 @@ function parseMarketSelections(market) {
     for (const selGroup of market.selections) {
       for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
         if (!sel || !sel.line_id) continue;
+        // ORDER-BOOK DEPTH: PX returns one entry PER RESTING PRICE RUNG, all
+        // sharing a line_id — observed live on CFL as "SAS -4.5" twice (odds
+        // 100 and -110) plus "TOR +4.5", i.e. 3 entries for 2 SIDES. Without
+        // this dedupe the two-sided check below sees 3/2 and falls through to
+        // the generic path, which registers line 0 and tags both sides
+        // 'underdog'. Identical to the golf matchup spread depth bug; it only
+        // appears once a market HAS depth, so a fresh book parses fine.
+        if (named.some(x => x.lineId === sel.line_id)) continue;
         const raw = (sel.display_name || sel.name || '').trim();
         const mm = raw.match(/^(.+?)\s+([+-]\d+(?:\.\d+)?)$/);
         if (!mm) continue;

@@ -3086,6 +3086,14 @@ async function seedAllLines() {
     // surfaced. `deferred: true` entries did register (with pricing
     // fallbacks); entries without it were skipped entirely.
     unmatchedEventDetails: unmatchedEvents.slice(0, 25),
+    // Cap diagnostics. Added 2026-08-29: after MAX_DAYS_AHEAD deployed, the
+    // index still held 896 lines past the cap and there was no way from
+    // outside to tell whether the filter ran, what value it used, or how many
+    // it dropped. Same lesson as the golf outright branch — a gate you cannot
+    // read is a gate you cannot debug.
+    maxDaysAhead: MAX_DAYS_AHEAD,
+    droppedAsTooFar,
+    droppedAsStale,
     golfTrace,
   };
 
