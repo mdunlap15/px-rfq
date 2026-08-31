@@ -7538,6 +7538,10 @@ async function reconcileGhostConfirmed(px) {
  */
 async function cleanFalseConfirms(opts = {}) {
   const dryRun = opts.dryRun !== false; // default true — must explicitly pass false to write
+  // Cap writes per call so a large backlog cannot exceed the HTTP proxy
+  // timeout. The caller loops until `remaining` is 0; reverted rows no longer
+  // match status='confirmed', so repeat calls are idempotent.
+  const limit = opts.limit != null ? Math.max(1, Number(opts.limit)) : Infinity;
   const toIso = opts.toIso || new Date().toISOString();
   const fromIso = opts.fromIso || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   const ODDS_TOL = 5;
@@ -7547,9 +7551,36 @@ async function cleanFalseConfirms(opts = {}) {
     return { error: 'no DB client', dryRun, scanned: 0, candidates: 0, reverted: 0 };
   }
 
-  // Pull confirmed-no-uuid rows in window. Use loadOrdersInDateRange
-  // (paginated, retried) and filter in memory — keeps SQL simple.
-  const rows = await db.loadOrdersInDateRange(fromIso, toIso, { groupBy: 'confirmed_at', maxRows: 50000 });
+  // Pull ONLY the candidate rows, filtered server-side.
+  //
+  // This previously used loadOrdersInDateRange(maxRows: 50000) and filtered in
+  // memory. That scan could not finish inside Railway's proxy timeout: on
+  // 2026-08-31 a 95-day dry run died at "upstream error" with zero rows
+  // examined, and even a 7-day window timed out — the window size was never
+  // the problem, the 50k-row load was. The targeted query returns the ~754
+  // actual candidates in seconds.
+  //
+  // The in-memory status/order_uuid guards below are now redundant but are
+  // deliberately KEPT: they are the safety predicate for a destructive write,
+  // and they must not depend on the query staying correct.
+  const rows = [];
+  {
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await dbClient
+        .from('parlay_orders')
+        .select('*')
+        .eq('status', 'confirmed')
+        .is('order_uuid', null)
+        .gte('confirmed_at', fromIso)
+        .lte('confirmed_at', toIso)
+        .order('confirmed_at', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`candidate query failed: ${error.message}`);
+      rows.push(...(data || []));
+      if (!data || data.length < PAGE) break;
+    }
+  }
   let scanned = 0, candidates = 0, reverted = 0, skipped = 0;
   const samples = [];
   const skipReasons = { missingOdds: 0, hasOrderUuid: 0, notConfirmed: 0, isRealWin: 0 };
@@ -7579,6 +7610,7 @@ async function cleanFalseConfirms(opts = {}) {
       });
     }
 
+    if (!dryRun && reverted >= limit) { continue; }   // counted as a candidate, left for the next call
     if (!dryRun) {
       const newMeta = {
         ...(row.meta || {}),
@@ -7588,6 +7620,9 @@ async function cleanFalseConfirms(opts = {}) {
           ourOfferedOdds: Number(row.offered_odds),
           oddsDelta: (-Number(row.confirmed_odds)) - Number(row.offered_odds),
         },
+        // The update below nulls confirmed_stake; keep it here so this row is
+        // reversible on its own rather than only from an external backup.
+        falseConfirmPriorConfirmedStake: row.confirmed_stake,
         falseConfirmCleanedAt: new Date().toISOString(),
         falseConfirmCleanupReason: `confirmed_odds (${row.confirmed_odds}) + offered_odds (${row.offered_odds}) = ${(Number(row.confirmed_odds) + Number(row.offered_odds))} — not sign-flipped, was another SP's price`,
       };
@@ -7600,7 +7635,8 @@ async function cleanFalseConfirms(opts = {}) {
           confirmed_at: null,
           meta: newMeta,
         })
-        .eq('parlay_id', row.parlay_id);
+        .eq('parlay_id', row.parlay_id)
+        .eq('status', 'confirmed');   // never clobber a row that changed under us
       if (error) {
         log.warn('CleanFalseConfirms', `update ${row.parlay_id} failed: ${error.message}`);
       } else {
@@ -7622,6 +7658,7 @@ async function cleanFalseConfirms(opts = {}) {
 
   return {
     dryRun, fromIso, toIso, scanned, candidates, reverted, skipped, skipReasons, samples,
+    remaining: dryRun ? candidates : Math.max(0, candidates - reverted),
   };
 }
 

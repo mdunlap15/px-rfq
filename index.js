@@ -7038,7 +7038,8 @@ function startStatusServer() {
       const dryRun = !(req.query.apply === '1' || req.query.apply === 'true');
       const days = req.query.days != null ? Math.max(1, Number(req.query.days)) : 30;
       const fromIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
-      const result = await orderTracker.cleanFalseConfirms({ dryRun, fromIso });
+      const limit = req.query.limit != null ? Number(req.query.limit) : 250;
+      const result = await orderTracker.cleanFalseConfirms({ dryRun, fromIso, limit });
       res.json({ ok: true, ...result });
     } catch (err) {
       log.error('API', `/clean-false-confirms failed: ${err.message}`);
