@@ -896,6 +896,18 @@ const TEAM_TOTAL_SEED_SPORTS = new Set([
 // unchanged.
 const golfOutrightsEnabled = () => config.pricing.golfOutrightsParlayEnabled !== false;
 
+// config.js builds propLaunchAllowlist as a Set, but a /config/runtime
+// override writes an Array (strList). runtime-config now preserves Set-ness at
+// the source (_write), but normalise here as well: this gate degrading to
+// "empty" disables an entire revenue family with no error raised anywhere, and
+// that failure went unnoticed for 8 days on 2026-08-24. Belt and braces.
+function _propAllowlistSet() {
+  const raw = config.pricing && config.pricing.propLaunchAllowlist;
+  if (raw instanceof Set) return raw;
+  if (Array.isArray(raw)) return new Set(raw);
+  return new Set();
+}
+
 // Classify the market from the PX EVENT name (the event names the market; each
 // market inside it is one player). Mirrors golf-outrights.js's PX_EVENT_PATTERNS.
 // top_20 before top_10 before top_5 so "Top 20" can't be shadowed by /top.?2/.
@@ -2423,7 +2435,7 @@ async function seedAllLines() {
     // the existing fetch — within Hobby quota at typical volume. Each
     // call's response is cached so multi-player markets only fetch once.
     try {
-      const propAllowlist = (config.pricing && config.pricing.propLaunchAllowlist) || new Set();
+      const propAllowlist = _propAllowlistSet();
       if (propAllowlist.size > 0 && (matchedHome && matchedAway)) {
         const ws = _getWsModule();
         const minBooks = (config.pricing && config.pricing.propMinBooksWithBothSides) || 3;
@@ -3897,7 +3909,7 @@ async function resolveUnknownLine(rfqLeg) {
               propType = null;
               toaMarketKey = null;
             }
-            const allowlist = (config.pricing && config.pricing.propLaunchAllowlist) || new Set();
+            const allowlist = _propAllowlistSet();
             const allowKey = sportKey + '.' + propType;
             const allowed = propType && toaMarketKey && allowlist.has(allowKey);
 

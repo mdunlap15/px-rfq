@@ -176,6 +176,24 @@ function _read(def) {
 function _write(def, value) {
   const root = def.path.startsWith('@') ? config : config.pricing;
   const p = def.path.replace(/^@/, '');
+  // PRESERVE THE SHAPE config.js BUILT. config.js builds some keys as a Set
+  // (propLaunchAllowlist, experimentalSgpCombos) but strList.parse yields an
+  // Array. Writing an Array over a Set leaves `.size` undefined and `.has`
+  // missing, so every consumer silently reads the collection as EMPTY —
+  // no error, no log, and /config/runtime still displays a full list.
+  //
+  // On 2026-08-24T00:23Z an allowlist edit through this path did exactly that
+  // and took ALL player-prop registration dark for 8 days: the pre-seed gate
+  // (`propAllowlist.size > 0`), the pre-seed membership test and the on-demand
+  // RFQ bridge (`allowlist.has(...)`) all failed at once, while /status kept
+  // reporting a populated 21-entry allowlist.
+  //
+  // This runs on the hydrate() path too, which is the one that matters: the
+  // override is persisted, so without this every restart re-applied the Array.
+  if (root[p] instanceof Set && Array.isArray(value)) {
+    root[p] = new Set(value);
+    return;
+  }
   root[p] = value;
 }
 function _stable(v) {
