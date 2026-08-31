@@ -8716,6 +8716,21 @@ function _noteToa429(retryAfterSec) {
   return backoff;
 }
 
+// Wait out an open cooldown instead of skipping the sport. The goal of the
+// governor is a LOWER REQUEST RATE, not less coverage — and skipping is how
+// the first cut of this fix left 22 sports with no data at all after a
+// restart: every sport in the sweep hit the open cooldown, threw, and the
+// sweep accomplished nothing. Single-flight makes a slower sweep safe.
+// Returns ms actually waited so the caller can enforce a per-sweep budget.
+async function _awaitToaCooldown(maxWaitMs) {
+  const remaining = _toaCooldownRemainingMs();
+  if (remaining <= 0) return 0;
+  const wait = Math.min(remaining, Math.max(0, maxWaitMs));
+  if (wait <= 0) return 0;
+  await new Promise((r) => setTimeout(r, wait));
+  return wait;
+}
+
 function _noteToaSuccess() {
   _toaFreq.consecutive429 = 0;
   _toaFreq.cooldownUntil = 0;
@@ -8816,7 +8831,15 @@ async function _refreshAllSportsInner() {
   if (config.dataGolf && config.dataGolf.apiKey && !sportsToRefresh.includes('golf_matchups')) {
     sportsToRefresh.push('golf_matchups');
   }
+  // Per-sweep waiting budget. Waiting beats skipping (see _awaitToaCooldown),
+  // but an unbounded wait would let one bad streak stretch a sweep to ~56min
+  // (28 sports x the 120s cap). Once the budget is spent the remaining sports
+  // fall back to fail-fast and are picked up next sweep.
+  let cooldownBudgetMs = 120000;
   for (const sport of sportsToRefresh) {
+    if (cooldownBudgetMs > 0) {
+      cooldownBudgetMs -= await _awaitToaCooldown(cooldownBudgetMs);
+    }
     try {
       const events = await fetchOddsForSport(sport);
       results[sport] = { ok: true, events: Object.keys(events || {}).length };
@@ -10875,6 +10898,7 @@ module.exports = {
   _noteToa429,
   _noteToaSuccess,
   _toaCooldownRemainingMs,
+  _awaitToaCooldown,
   getFairProb,
   getFairProbAsync,
   getAltLineFairProbSync,

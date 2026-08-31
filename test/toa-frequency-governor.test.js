@@ -174,3 +174,50 @@ test('sequential calls do NOT coalesce — the guard must not suppress real refr
   assert.strictEqual(sweeps, 2, 'back-to-back sweeps must both run');
   assert.strictEqual(of.getRefreshStats().coalesced, 0, 'nothing was concurrent, so nothing coalesced');
 });
+
+// ------------------------------------------------- cooldown WAIT vs SKIP
+
+// The first cut of this fix made the sweep SKIP every sport while a cooldown
+// was open. On a restart that left 22 of 27 sports with no data at all — the
+// governor reduced coverage instead of reducing request rate. The sweep must
+// WAIT out a cooldown, not step over it.
+
+test('_awaitToaCooldown returns immediately when nothing is cooling', async () => {
+  of._resetToaFreqForTest();
+  const t0 = Date.now();
+  const waited = await of._awaitToaCooldown(60000);
+  assert.strictEqual(waited, 0, 'no cooldown -> no wait');
+  assert.ok(Date.now() - t0 < 50, 'must not sleep when clear');
+});
+
+test('_awaitToaCooldown actually waits out an open cooldown', async () => {
+  of._resetToaFreqForTest();
+  of._noteToa429('0.1'); // 100ms cooldown
+  const t0 = Date.now();
+  const waited = await of._awaitToaCooldown(60000);
+  const elapsed = Date.now() - t0;
+  assert.ok(waited > 0, 'must report a real wait');
+  assert.ok(elapsed >= 80, `must actually sleep (~100ms), slept ${elapsed}ms`);
+  assert.strictEqual(of._toaCooldownRemainingMs(), 0, 'cooldown elapsed');
+});
+
+test('_awaitToaCooldown honours the caller budget and never overruns it', async () => {
+  of._resetToaFreqForTest();
+  of._noteToa429('60'); // 60s cooldown
+  const t0 = Date.now();
+  const waited = await of._awaitToaCooldown(120); // caller only allows 120ms
+  const elapsed = Date.now() - t0;
+  assert.ok(waited <= 120, `must not wait beyond the budget, waited ${waited}`);
+  assert.ok(elapsed < 1000, `must return promptly, took ${elapsed}ms`);
+  assert.ok(of._toaCooldownRemainingMs() > 0, 'cooldown still open — caller falls back to fail-fast');
+});
+
+test('_awaitToaCooldown with a spent budget does not sleep', async () => {
+  of._resetToaFreqForTest();
+  of._noteToa429('60');
+  const t0 = Date.now();
+  const waited = await of._awaitToaCooldown(0);
+  assert.strictEqual(waited, 0, 'zero budget -> zero wait');
+  assert.ok(Date.now() - t0 < 50, 'must not sleep on a spent budget');
+  assert.strictEqual(await of._awaitToaCooldown(-5), 0, 'negative budget is treated as spent');
+});
