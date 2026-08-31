@@ -509,14 +509,28 @@ async function startup() {
     'soccer_conmebol_libertadores',
     'golf_pga_championship',
   ];
+  // Single-flight: this loop is sequential and shares the TOA key with
+  // refreshAllSports, so a slow sweep must not have a second copy started on
+  // top of it. Overlapping sweeps are what turned a frequency limit into a
+  // multi-hour blackout on 2026-08-31.
+  let fastRefreshInFlight = false;
   setInterval(async () => {
-    for (const sport of FAST_REFRESH_SPORTS) {
-      if (!config.supportedSports.includes(sport)) continue;
-      try {
-        await oddsFeed.fetchOddsForSport(sport);
-      } catch (err) {
-        log.debug('Refresh', `Fast refresh ${sport} failed: ${err.message}`);
+    if (fastRefreshInFlight) {
+      log.debug('Refresh', 'Fast refresh still in flight — skipping this tick');
+      return;
+    }
+    fastRefreshInFlight = true;
+    try {
+      for (const sport of FAST_REFRESH_SPORTS) {
+        if (!config.supportedSports.includes(sport)) continue;
+        try {
+          await oddsFeed.fetchOddsForSport(sport);
+        } catch (err) {
+          log.debug('Refresh', `Fast refresh ${sport} failed: ${err.message}`);
+        }
       }
+    } finally {
+      fastRefreshInFlight = false;
     }
   }, 150 * 1000);
 
@@ -1031,6 +1045,12 @@ function startStatusServer() {
       paused: ws.paused,
       lineCount: lineManager.getLineCount(),
       oddsCacheStatus: oddsFeed.getCacheStatus(),
+      // Visible WITHOUT Telegram. The stale-sport alarm was log.error-only and
+      // Telegram was disabled 2026-08-28, so the 2026-08-31 TOA frequency
+      // outage rang into a disconnected speaker for hours.
+      staleSports: oddsFeed.getStaleSports(),
+      toaFrequency: oddsFeed.getToaFreqState(),
+      oddsRefresh: oddsFeed.getRefreshStats(),
     });
   });
 

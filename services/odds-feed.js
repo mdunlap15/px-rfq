@@ -1646,8 +1646,21 @@ async function supplementMlbF5Markets(parsedEvents) {
       const url = _f5OddsUrl(resolved.eventId, theOddsApiKey);
 
       try {
+        // TOA frequency governor. A per-event supplement is a BURST — 3-way
+        // concurrency, up to ~260 calls for one NFL slate — and is by far the
+        // largest consumer of request frequency on this key. Firing it into an
+        // open cooldown is what tipped a transient limit into a multi-hour
+        // blackout on 2026-08-31 (NFL apiFails=61, NCAAF=42 in one cycle, all
+        // silently counted and ignored). Bail out of the whole burst instead
+        // of grinding through hundreds of doomed calls.
+        if (_toaCooldownRemainingMs() > 0) { apiFails++; break; }
         const resp = await fetch(url);
         calls++;
+        if (resp.status === 429) {
+          apiFails++;
+          _noteToa429(resp.headers.get('retry-after'));
+          break;
+        }
         if (!resp.ok) { apiFails++; continue; }
         const data = await resp.json();
 
@@ -2390,8 +2403,21 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
         + `&oddsFormat=american`;
 
       try {
+        // TOA frequency governor. A per-event supplement is a BURST — 3-way
+        // concurrency, up to ~260 calls for one NFL slate — and is by far the
+        // largest consumer of request frequency on this key. Firing it into an
+        // open cooldown is what tipped a transient limit into a multi-hour
+        // blackout on 2026-08-31 (NFL apiFails=61, NCAAF=42 in one cycle, all
+        // silently counted and ignored). Bail out of the whole burst instead
+        // of grinding through hundreds of doomed calls.
+        if (_toaCooldownRemainingMs() > 0) { apiFails++; break; }
         const resp = await fetch(url);
         calls++;
+        if (resp.status === 429) {
+          apiFails++;
+          _noteToa429(resp.headers.get('retry-after'));
+          break;
+        }
         if (!resp.ok) { apiFails++; continue; }
         const data = await resp.json();
 
@@ -2950,16 +2976,27 @@ async function fetchFromTheOddsApi(sport) {
   // stale and real games missing from the cache at seed time (5 MLB games
   // dark all day 2026-07-23, ~$43K of network fills missed). One bounded
   // retry after a short backoff absorbs the transient collisions.
+  // Fail FAST while the frequency governor is cooling down — sending the
+  // request would only extend the limit we are already inside.
+  const cooling = _toaCooldownRemainingMs();
+  if (cooling > 0) {
+    _toaFreq.skippedInCooldown++;
+    throw new Error(`The Odds API frequency cooldown for ${sport}: ${Math.ceil(cooling / 1000)}s remaining (no request sent)`);
+  }
+
   let resp = await fetch(url);
   if (resp.status === 429) {
-    log.warn('OddsFeed', `TOA 429 (freq limit) for ${sport} — retrying once in 3s`);
-    await new Promise(r => setTimeout(r, 3000));
-    resp = await fetch(url);
+    const backoff = _noteToa429(resp.headers.get('retry-after'));
+    // Deliberately NO immediate retry: this is a FREQUENCY limit, so retrying
+    // adds load and lengthens the cycle past the refresh interval. Skip the
+    // sport, let the governor cool, pick it up next cycle.
+    throw new Error(`The Odds API 429 (frequency limit) for ${sport} — cooling down ${Math.round(backoff / 1000)}s, skipping this cycle`);
   }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`The Odds API ${resp.status} for ${sport}: ${text}`);
   }
+  _noteToaSuccess();
 
   const remaining = resp.headers.get('x-requests-remaining');
     _checkToaQuota(remaining);
@@ -8626,6 +8663,84 @@ function getSharpEvents(sport) {
   return sharpEventsIndex[sport]?.events || [];
 }
 
+// ---------------------------------------------------------------------------
+// TOA request-FREQUENCY governor (2026-08-31 outage).
+//
+// The Odds API rate-limits by request FREQUENCY, separately from quota. On
+// 2026-08-31 we sat on 22.5M remaining requests while every sport 429'd and 26
+// of 28 caches went 4.5-9h stale — with stalePriceMinutes=5 that declines 100%
+// of RFQs on those sports, and fills stopped for hours.
+//
+// The bug was that a 429 triggered an immediate 3s retry. That is exactly
+// backwards: the remedy for a FREQUENCY limit is to send FEWER requests, not
+// to retry harder. Worse, ~28 sports x (3s retry + 0.5s spacing) pushed a
+// cycle to 167s against a 120s timer, so refreshAllSports invocations
+// OVERLAPPED — doubling concurrent request rate, causing more 429s, causing
+// longer cycles. A self-reinforcing loop, which is why the damage ramped over
+// six days (173 -> 900 stale-odds declines/day) instead of breaking cleanly.
+//
+// Governor: on a 429, open a short global cooldown and let subsequent TOA
+// calls fail FAST without touching the network until it expires. Backoff is
+// exponential and capped; any success clears it. Callers already treat a
+// throw as "skip this sport this cycle", so a cooldown costs one cycle, never
+// a wedge.
+const TOA_BACKOFF_BASE_MS = 5000;
+const TOA_BACKOFF_MAX_MS = 120000;
+const _toaFreq = {
+  cooldownUntil: 0,
+  consecutive429: 0,
+  total429: 0,
+  skippedInCooldown: 0,
+  lastAt: null,
+  lastRetryAfterSec: null,
+};
+
+function _toaCooldownRemainingMs(now) {
+  return Math.max(0, _toaFreq.cooldownUntil - (now == null ? Date.now() : now));
+}
+
+// Honour Retry-After when the server sends one; otherwise exponential from
+// the consecutive-429 count. Capped so a bad streak can never self-inflict a
+// long outage.
+function _noteToa429(retryAfterSec) {
+  const now = Date.now();
+  _toaFreq.total429++;
+  _toaFreq.consecutive429++;
+  _toaFreq.lastAt = now;
+  const ra = Number(retryAfterSec);
+  _toaFreq.lastRetryAfterSec = Number.isFinite(ra) && ra > 0 ? ra : null;
+  const backoff = _toaFreq.lastRetryAfterSec != null
+    ? Math.min(_toaFreq.lastRetryAfterSec * 1000, TOA_BACKOFF_MAX_MS)
+    : Math.min(TOA_BACKOFF_BASE_MS * Math.pow(2, _toaFreq.consecutive429 - 1), TOA_BACKOFF_MAX_MS);
+  _toaFreq.cooldownUntil = Math.max(_toaFreq.cooldownUntil, now + backoff);
+  return backoff;
+}
+
+function _noteToaSuccess() {
+  _toaFreq.consecutive429 = 0;
+  _toaFreq.cooldownUntil = 0;
+}
+
+function getToaFreqState() {
+  return {
+    cooldownMsRemaining: _toaCooldownRemainingMs(),
+    consecutive429: _toaFreq.consecutive429,
+    total429: _toaFreq.total429,
+    skippedInCooldown: _toaFreq.skippedInCooldown,
+    lastAt: _toaFreq.lastAt ? new Date(_toaFreq.lastAt).toISOString() : null,
+    lastRetryAfterSec: _toaFreq.lastRetryAfterSec,
+  };
+}
+
+function _resetToaFreqForTest() {
+  _toaFreq.cooldownUntil = 0;
+  _toaFreq.consecutive429 = 0;
+  _toaFreq.total429 = 0;
+  _toaFreq.skippedInCooldown = 0;
+  _toaFreq.lastAt = null;
+  _toaFreq.lastRetryAfterSec = null;
+}
+
 // Stale-sport watchdog state: sport -> last alert ms (throttle to 1/15min).
 const _staleAlertAt = {};
 const STALE_ALERT_AGE_MS = 30 * 60 * 1000;
@@ -8644,7 +8759,54 @@ function _alertStaleSports() {
   }
 }
 
+// Single-flight guard. Without it, a cycle that runs longer than
+// REFRESH_INTERVAL_MINUTES gets a SECOND concurrent invocation from the timer,
+// which doubles request frequency against a key that is already frequency
+// limited — the 2026-08-31 feedback loop. Overlapping calls now return the
+// in-flight promise instead of starting a competing sweep.
+let _refreshAllInFlight = null;
+const _refreshAllStats = { runs: 0, coalesced: 0, lastMs: null, lastAt: null };
+
+function getRefreshStats() {
+  return Object.assign({}, _refreshAllStats, { inFlight: !!_refreshAllInFlight });
+}
+
+// Extracted so the guard can be unit-tested WITHOUT running a real sweep.
+// (A first cut tested it by calling refreshAllSports directly, which fired
+// ~370 live Odds API requests from the test suite — adding frequency load in
+// the exact scenario this guard exists to prevent.)
+function _singleFlight(fn) {
+  if (_refreshAllInFlight) {
+    _refreshAllStats.coalesced++;
+    return _refreshAllInFlight;
+  }
+  const started = Date.now();
+  // Promise.resolve().then(fn) so a SYNCHRONOUS throw inside fn still routes
+  // through .finally and releases the latch. A guard that leaks on error is
+  // worse than no guard: the feed would never refresh again until restart.
+  _refreshAllInFlight = Promise.resolve().then(fn)
+    .finally(() => {
+      _refreshAllInFlight = null;
+      _refreshAllStats.runs++;
+      _refreshAllStats.lastMs = Date.now() - started;
+      _refreshAllStats.lastAt = new Date().toISOString();
+    });
+  return _refreshAllInFlight;
+}
+
+function _resetRefreshStatsForTest() {
+  _refreshAllInFlight = null;
+  _refreshAllStats.runs = 0;
+  _refreshAllStats.coalesced = 0;
+  _refreshAllStats.lastMs = null;
+  _refreshAllStats.lastAt = null;
+}
+
 async function refreshAllSports() {
+  return _singleFlight(_refreshAllSportsInner);
+}
+
+async function _refreshAllSportsInner() {
   // Refresh events index first — line-manager uses it for matching
   await refreshEventsIndex();
 
@@ -8756,6 +8918,26 @@ function getCacheStatus() {
     } : { eventCount: 0, ageMinutes: null, stale: true };
   }
   return status;
+}
+
+// Sports whose cache is old enough that every RFQ on them is being declined.
+// Surfaced in /status and /health so this is visible WITHOUT Telegram — the
+// stale-sport alarm was log.error-only and Telegram was disabled 2026-08-28,
+// so the 2026-08-31 outage rang into a disconnected speaker for hours.
+function getStaleSports() {
+  const now = Date.now();
+  const out = [];
+  const sports = [...config.supportedSports];
+  if (oddsCache['golf_matchups'] && !sports.includes('golf_matchups')) sports.push('golf_matchups');
+  for (const sport of sports) {
+    const cache = oddsCache[sport];
+    if (!cache || !cache.fetchedAt) continue;
+    const evCount = Object.keys(cache.events || {}).length;
+    if (evCount === 0) continue; // empty cache = sport legitimately idle
+    const ageMin = Math.round((now - cache.fetchedAt) / 60000);
+    if (ageMin >= STALE_ALERT_AGE_MS / 60000) out.push({ sport, ageMinutes: ageMin, eventCount: evCount });
+  }
+  return out.sort(function (a, b) { return b.ageMinutes - a.ageMinutes; });
 }
 
 function __debugGetCache(sport) {
@@ -10684,6 +10866,15 @@ function getPropRowsCacheStatus() {
 module.exports = {
   fetchOddsForSport,
   refreshAllSports,
+  getToaFreqState,
+  getRefreshStats,
+  getStaleSports,
+  _resetToaFreqForTest,
+  _singleFlight,
+  _resetRefreshStatsForTest,
+  _noteToa429,
+  _noteToaSuccess,
+  _toaCooldownRemainingMs,
   getFairProb,
   getFairProbAsync,
   getAltLineFairProbSync,
