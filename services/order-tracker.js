@@ -1970,35 +1970,76 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
         log.warn('Orders', `order.matched exposure-check threw: ${err.message} — proceeding with promotion`);
       }
 
-      ourQuote.status = 'confirmed';
       // Arm signature-cooldown lock at this side-channel path too. This is
       // the path that historically did NOT propagate to templateExposure's
       // confirmation map, leaving the existing cooldown blind to recently-
       // confirmed parlays. By locking here, the back-to-back same-sig
       // pattern is blocked regardless of which path confirms first.
+      // Deliberately fires on a TIE as well as a canonical win: it is a
+      // risk-limiting behaviour and the market is demonstrably live on that
+      // signature either way.
       try {
         const sigCd = require('./sig-cooldown');
         sigCd.lockSignature(ourQuote.legs || (ourQuote.meta && ourQuote.meta.legs) || [], parlayId);
       } catch (_) { /* never break the matched-path on observability errors */ }
-      if (matchedOdds != null) {
-        // PX sends matched_odds in bettor-side convention; our format is
-        // SP-side (negated). Store the confirmed price in our format.
-        ourQuote.confirmedOdds = -matchedOdds;
+
+      // PROMOTE ONLY ON A CANONICAL WIN.
+      //
+      // This block used to run for a bare odds TIE too, which manufactured
+      // every phantom fill in the book: a tie is NOT proof we won — PX
+      // broadcasts order.matched to every SP that quoted, so another SP can
+      // take the same price first. Promoting on a tie wrote status='confirmed'
+      // plus confirmedOdds/Stake on a parlay we most likely lost, and because
+      // no order_uuid ever arrives those rows never settle. Measured
+      // 2026-08-31: 742 such rows since 6/1 ($88,363 of nominal risk we never
+      // held), 100% of them inside ODDS_TIE_TOL — max |confirmed-offered| = 5,
+      // not one above it. They inflated fill counts by ~10.9% overall and 42%
+      // of "confirms" after 8/24, and the ghost-sweep had to chase each one
+      // afterwards to release its exposure and flag meta.phantom.
+      //
+      // A tie that WAS ours is not lost: recordConfirmation reconciles
+      // 'tied_lost' -> 'won' when our orderUuid arrives, and that is the
+      // canonical signal. This branch was only ever an opportunistic backup
+      // for order.matched racing ahead of price.confirm.new.
+      //
+      // The exposure check above still runs in both cases — that is why this
+      // block is entered for a tie at all, and the "PX matched past our cap"
+      // alert must not regress.
+      if (hasCanonicalWin) {
+        ourQuote.status = 'confirmed';
+        if (matchedOdds != null) {
+          // PX sends matched_odds in bettor-side convention; our format is
+          // SP-side (negated). Store the confirmed price in our format.
+          ourQuote.confirmedOdds = -matchedOdds;
+        } else {
+          // offeredOdds is stored in BETTOR-side convention (decimalToAmerican
+          // of the parlay's bettor decimal; positive for longshots). Our
+          // confirmedOdds contract is SP-side, so negate when falling back.
+          // Previously we stored offeredOdds directly, which meant every
+          // affected parlay had confirmedOdds with the wrong sign — and
+          // americanOddsToProfit(confirmedOdds, confirmedStake) used to
+          // derive bettor-wager flipped from its true value, inflating the
+          // "Stakes Held" column in Game/Team Exposure by a factor of
+          // roughly odds/100. Observed in production as $62k Stakes Held
+          // on games where actual bettor wagers summed to under $5k.
+          ourQuote.confirmedOdds = ourQuote.offeredOdds != null ? -ourQuote.offeredOdds : null;
+        }
+        if (matchedStake != null) ourQuote.confirmedStake = matchedStake;
+        ourQuote.confirmedAt = ourQuote.confirmedAt || new Date().toISOString();
       } else {
-        // offeredOdds is stored in BETTOR-side convention (decimalToAmerican
-        // of the parlay's bettor decimal; positive for longshots). Our
-        // confirmedOdds contract is SP-side, so negate when falling back.
-        // Previously we stored offeredOdds directly, which meant every
-        // affected parlay had confirmedOdds with the wrong sign — and
-        // americanOddsToProfit(confirmedOdds, confirmedStake) used to
-        // derive bettor-wager flipped from its true value, inflating the
-        // "Stakes Held" column in Game/Team Exposure by a factor of
-        // roughly odds/100. Observed in production as $62k Stakes Held
-        // on games where actual bettor wagers summed to under $5k.
-        ourQuote.confirmedOdds = ourQuote.offeredOdds != null ? -ourQuote.offeredOdds : null;
+        // Tie we cannot claim. Leave status='quoted' and record the same
+        // diagnostic shape the outbid ('other_sp') path uses, so the tie is
+        // still visible on the dashboard without being counted as a fill.
+        ourQuote.meta = ourQuote.meta || {};
+        ourQuote.meta.matchedTieUnclaimed = {
+          observedAt: new Date().toISOString(),
+          matchedOdds, matchedStake,
+          ourOfferedOdds: offered,
+          matchedOddsBettorSide: matchedBettorSide,
+          oddsDelta: (matchedBettorSide != null && offered != null)
+            ? (matchedBettorSide - offered) : null,
+        };
       }
-      if (matchedStake != null) ourQuote.confirmedStake = matchedStake;
-      ourQuote.confirmedAt = ourQuote.confirmedAt || new Date().toISOString();
 
       if (exposureOverride) {
         ourQuote.meta = ourQuote.meta || {};
