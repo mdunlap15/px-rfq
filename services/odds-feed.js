@@ -1282,21 +1282,29 @@ async function _runPostParseSupplements(sport, parsed) {
   }
 
   // 1st-Half markets (separate from full-game) — NBA + football.
-  if (H1_SUPPLEMENT_SPORTS.has(sport)) {
+  if (H1_SUPPLEMENT_SPORTS.has(sport) && _supplementDue(sport, 'h1')) {
     try {
+      const before = _countSupplementedMarkets(parsed, ['h2h_h1', 'spreads_h1', 'totals_h1']);
       await supplementH1Markets(parsed, sport);
+      const after = _countSupplementedMarkets(parsed, ['h2h_h1', 'spreads_h1', 'totals_h1']);
+      _noteSupplementResult(sport, 'h1', after - before);
     } catch (err) {
       log.warn('OddsFeed', `${_h1Label(sport)} supplement failed: ${err.message}`);
+      _noteSupplementResult(sport, 'h1', 0);
     }
     _scheduleSupplementRetry(sport, _h1Label(sport), supplementH1Markets, parsed, sport);
   }
 
   // Team totals for NBA/MLB/NHL (gap-fill from TOA on the refresh cycle).
-  if (['basketball_nba', 'baseball_mlb', 'icehockey_nhl'].includes(sport)) {
+  if (['basketball_nba', 'baseball_mlb', 'icehockey_nhl'].includes(sport) && _supplementDue(sport, 'team_totals')) {
     try {
+      const before = _countSupplementedMarkets(parsed, ['team_totals']);
       await supplementTeamTotals(parsed, sport);
+      const after = _countSupplementedMarkets(parsed, ['team_totals']);
+      _noteSupplementResult(sport, 'team_totals', after - before);
     } catch (err) {
       log.warn('OddsFeed', `${sport} team_totals supplement failed: ${err.message}`);
+      _noteSupplementResult(sport, 'team_totals', 0);
     }
     _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
   }
@@ -1310,6 +1318,22 @@ async function _runPostParseSupplements(sport, parsed) {
     }
     _scheduleSupplementRetry(sport, `${sport} btts`, supplementBtts, parsed, sport);
   }
+}
+
+// Count how many events currently carry any of `keys`. Used to measure what a
+// per-event supplement actually ATTACHED, which drives its backoff. Counting
+// the merged result rather than trusting the supplement's own tallies keeps
+// the signal honest if a supplement changes its internal bookkeeping.
+function _countSupplementedMarkets(parsedEvents, keys) {
+  let n = 0;
+  for (const ev of Object.values(parsedEvents || {})) {
+    const list = Array.isArray(ev) ? ev : [ev];
+    for (const e of list) {
+      if (!e || !e.markets) continue;
+      for (const k of keys) if (e.markets[k]) n++;
+    }
+  }
+  return n;
 }
 
 // Merge a freshly-supplemented sub-game market (h2h_f5/spreads_f5/
@@ -8756,6 +8780,77 @@ function _resetToaFreqForTest() {
   _toaFreq.lastRetryAfterSec = null;
 }
 
+// ---------------------------------------------------------------------------
+// Per-event supplement backoff, and cold-sport skipping (2026-08-31).
+//
+// The per-event supplements (1st-half, team totals) are AWAITED inside
+// fetchOddsForSport, so they run on every sweep for every eligible sport. One
+// NFL slate is ~260 calls and NCAAF ~100, at 3-way concurrency with no pacing
+// — by far the largest consumer of TOA request frequency, and the reason a
+// sweep cannot finish inside its own staleness gate.
+//
+// Measured 2026-08-31: NFL 260/260 calls attaching h2h+0 spread+0 total+0 with
+// apiFails=61; NCAAF 100/100 attaching 0 with apiFails=42. 360 calls per cycle
+// buying nothing while starving the MAIN markets that actually gate pricing.
+//
+// Backoff is PRODUCTIVITY-BASED rather than a flat TTL, which makes it safe in
+// both directions: a supplement that is attaching markets keeps running every
+// sweep, and one attaching nothing backs off. Crucially, when it attaches
+// nothing there is nothing to carry forward, so skipping it cannot drop
+// markets out of the cache — which a naive TTL WOULD do, because each fetch
+// rebuilds the parsed cache from scratch.
+const SUPPLEMENT_DRY_STREAK = Number(process.env.SUPPLEMENT_DRY_STREAK || 2);
+const SUPPLEMENT_BACKOFF_MS = Number(process.env.SUPPLEMENT_BACKOFF_MINUTES || 20) * 60000;
+const _supplementState = {};   // "sport|name" -> { dry, nextAt }
+
+function _supplementDue(sport, name) {
+  const k = sport + '|' + name;
+  const st = _supplementState[k];
+  if (!st) return true;
+  if (st.dry < SUPPLEMENT_DRY_STREAK) return true;
+  return Date.now() >= (st.nextAt || 0);      // probe again after the backoff
+}
+
+// attached = markets this run actually merged into the cache.
+function _noteSupplementResult(sport, name, attached) {
+  const k = sport + '|' + name;
+  const st = _supplementState[k] || { dry: 0, nextAt: 0 };
+  if (attached > 0) { st.dry = 0; st.nextAt = 0; }
+  else { st.dry++; st.nextAt = Date.now() + SUPPLEMENT_BACKOFF_MS; }
+  _supplementState[k] = st;
+}
+
+function getSupplementState() {
+  const out = {};
+  for (const [k, v] of Object.entries(_supplementState)) {
+    out[k] = { dryStreak: v.dry, backingOff: v.dry >= SUPPLEMENT_DRY_STREAK,
+      nextProbeInSec: v.nextAt ? Math.max(0, Math.round((v.nextAt - Date.now()) / 1000)) : 0 };
+  }
+  return out;
+}
+
+// Sports that return zero events on a SUCCESSFUL fetch are out of season.
+// Re-probe periodically so a sport coming back into season is picked up; a
+// failed fetch must never count as "empty" or a 429 storm would permanently
+// retire live sports.
+const COLD_SPORT_STREAK = 3;
+const COLD_SPORT_REPROBE_EVERY = 10;
+const _emptyStreak = {};
+let _sweepCounter = 0;
+
+function _isColdSport(sport) {
+  return (_emptyStreak[sport] || 0) >= COLD_SPORT_STREAK
+    && (_sweepCounter % COLD_SPORT_REPROBE_EVERY) !== 0;
+}
+function _noteSportEventCount(sport, count) {
+  if (count > 0) _emptyStreak[sport] = 0;
+  else _emptyStreak[sport] = (_emptyStreak[sport] || 0) + 1;
+}
+function getColdSports() {
+  return Object.entries(_emptyStreak).filter(([, v]) => v >= COLD_SPORT_STREAK)
+    .map(([k, v]) => ({ sport: k, emptyStreak: v }));
+}
+
 // Stale-sport watchdog state: sport -> last alert ms (throttle to 1/15min).
 const _staleAlertAt = {};
 const STALE_ALERT_AGE_MS = 30 * 60 * 1000;
@@ -8836,13 +8931,20 @@ async function _refreshAllSportsInner() {
   // (28 sports x the 120s cap). Once the budget is spent the remaining sports
   // fall back to fail-fast and are picked up next sweep.
   let cooldownBudgetMs = 120000;
+  _sweepCounter++;
   for (const sport of sportsToRefresh) {
+    // Out-of-season sports cost a call and a slice of the frequency budget
+    // every sweep. Skip them, but re-probe periodically so a sport returning
+    // to season comes back on its own.
+    if (_isColdSport(sport)) { results[sport] = { ok: true, skipped: 'cold' }; continue; }
     if (cooldownBudgetMs > 0) {
       cooldownBudgetMs -= await _awaitToaCooldown(cooldownBudgetMs);
     }
     try {
       const events = await fetchOddsForSport(sport);
-      results[sport] = { ok: true, events: Object.keys(events || {}).length };
+      const n = Object.keys(events || {}).length;
+      _noteSportEventCount(sport, n);          // only a SUCCESSFUL fetch counts
+      results[sport] = { ok: true, events: n };
     } catch (err) {
       log.error('OddsFeed', `Failed to fetch ${sport}: ${err.message}`);
       results[sport] = { ok: false, error: err.message };
@@ -10892,6 +10994,13 @@ module.exports = {
   getToaFreqState,
   getRefreshStats,
   getStaleSports,
+  getSupplementState,
+  getColdSports,
+  _supplementDue,
+  _noteSupplementResult,
+  _noteSportEventCount,
+  _isColdSport,
+  _countSupplementedMarkets,
   _resetToaFreqForTest,
   _singleFlight,
   _resetRefreshStatsForTest,
