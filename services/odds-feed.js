@@ -48,6 +48,13 @@ const ODDS_API_FETCH_TIMEOUT_MS = (() => {
 // under any TOA tier's rate limit while still keeping warm cycles fast.
 // The existing WARM_REQUEST_DELAY_MS/WARM_CONCURRENCY per-worker sleeps are
 // harmless with the gate in place — they just add extra spacing on top.
+// ODDS_API_FETCH_TIMEOUT_MS defaults to 500ms, which is right for the
+// latency-sensitive on-demand callers but far too tight for the bulk sport
+// sweep (measured 2026-09-01: 67-352ms idle, and slower under load). The
+// sweep and per-event supplements pass these explicitly so routing them
+// through the gate does not convert 429s into mass aborts.
+const TOA_BULK_TIMEOUT_MS = parseInt(process.env.TOA_BULK_TIMEOUT_MS) || 12000;
+const TOA_EVENT_TIMEOUT_MS = parseInt(process.env.TOA_EVENT_TIMEOUT_MS) || 8000;
 const _TOA_MIN_INTERVAL_MS = parseInt(process.env.TOA_MIN_INTERVAL_MS) || 50;
 const _TOA_MAX_CONCURRENT  = parseInt(process.env.TOA_MAX_CONCURRENT)  || 4;
 let   _toaInFlight = 0;
@@ -69,20 +76,38 @@ function _toaRelease() {
 
 async function abortableFetch(url, options, timeoutMs) {
   const isToa = typeof url === 'string' && url.includes('the-odds-api.com');
-  if (isToa) await _toaAcquire();
   const t = timeoutMs != null ? timeoutMs : ODDS_API_FETCH_TIMEOUT_MS;
-  try {
-    // 0 disables the timeout entirely
-    if (!t || t <= 0) return await fetch(url, options);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), t);
+
+  // 0 disables the timeout entirely.
+  if (!t || t <= 0) {
+    let held = false;
     try {
-      return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
+      if (isToa) { await _toaAcquire(); held = true; }
+      return await fetch(url, options);
+    } finally { if (held) _toaRelease(); }
+  }
+
+  // START THE CLOCK BEFORE QUEUEING. The gate slot used to be acquired first,
+  // so `timeoutMs` bounded only the network call and the QUEUE WAIT was
+  // unbounded. That was harmless while only background callers used the gate,
+  // but the bulk sweep and the per-event bursts now share it — a 500ms
+  // RFQ-hot-path caller (alt lines, event resolve, prop odds) could otherwise
+  // block behind up to TOA_MAX_CONCURRENT bulk fetches at TOA_BULK_TIMEOUT_MS
+  // each. The caller's budget must cover queue + fetch end to end.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), t);
+  let held = false;
+  try {
+    if (isToa) { await _toaAcquire(); held = true; }
+    if (controller.signal.aborted) {
+      const err = new Error(`TOA gate wait exceeded ${t}ms for ${String(url).slice(0, 80)}`);
+      err.name = 'AbortError';
+      throw err;                      // released by the finally below — never leaks the slot
     }
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
-    if (isToa) _toaRelease();
+    clearTimeout(timer);
+    if (held) _toaRelease();
   }
 }
 
@@ -1253,7 +1278,93 @@ async function _refreshMlbProbablePitchers() {
   log.debug('OddsFeed', `MLB probable pitchers from StatsAPI: ${updated} games`);
 }
 
-async function _runPostParseSupplements(sport, parsed) {
+// Supplement market keys that are attached AFTER the base parse. Because
+// fetchOddsForSport REPLACES oddsCache[sport] wholesale, any of these missing
+// from a fresh parse is simply GONE until its supplement next runs.
+const SUPPLEMENT_MARKET_KEYS = [
+  'h2h_h1', 'spreads_h1', 'totals_h1',
+  'h2h_q1', 'spreads_q1', 'totals_q1',
+  // CACHE market names, not TOA wire keys. The wire keys are
+  // h2h_1st_5_innings/etc; _mergeSupplementedMarket stores them as *_f5.
+  // Using the wire names here silently protected nothing for MLB F5.
+  'h2h_f5', 'spreads_f5', 'totals_f5',
+  'team_totals', 'btts',
+];
+
+// How long a carried-forward market may keep being re-attached. WITHOUT this
+// the carry-forward launders staleness: it re-attaches the SAME object every
+// cycle while oddsCache[sport].fetchedAt is re-stamped on every replace, and
+// isStale() measures only fetchedAt — so a 40-minute-old 1H line reads as
+// fresh at every gate, including the pre-kickoff guard. This repo already hit
+// exactly this and fixed it the same way; see BOVADA_TENNIS_REAPPLY_MAX_AGE_MS
+// ("the re-apply stamps fetchedAt, which would otherwise launder the age").
+// Past the bound we stop carrying and the market simply disappears, i.e. the
+// supplement fails CLOSED again instead of quoting a frozen price.
+const SUPPLEMENT_CARRY_MAX_AGE_MS =
+  Number(process.env.SUPPLEMENT_CARRY_MAX_AGE_SECONDS || 1200) * 1000;
+
+// Snapshot the supplement markets currently in cache, keyed by matchup+eventId
+// so doubleheaders don't cross-contaminate. Records when the snapshot was
+// taken so carried markets can age out.
+function _snapshotSupplementMarkets(sport) {
+  const out = {};
+  const cache = oddsCache[sport];
+  if (!cache || !cache.events) return out;
+  const at = Date.now();
+  for (const [key, entry] of Object.entries(cache.events)) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev || !ev.markets) continue;
+      const held = {};
+      for (const k of SUPPLEMENT_MARKET_KEYS) if (ev.markets[k]) held[k] = ev.markets[k];
+      if (Object.keys(held).length) out[key + '|' + (ev.eventId || ev.commenceTime || '')] = { at, markets: held };
+    }
+  }
+  return out;
+}
+
+// Re-attach supplement markets that the fresh parse lacks.
+//
+// Needed because supplements are now throttled (SUPPLEMENT_MIN_INTERVAL /
+// dry-streak backoff) while the cache is rebuilt on EVERY fetch. Without this,
+// a throttled supplement silently drops its markets for the whole interval —
+// e.g. NCAAF H1 legs would decline for up to 10 minutes out of every 10. The
+// throttle exists to stop a measured ~60k TOA credits/hour burn; carry-forward
+// keeps that saving without paying for it in coverage.
+//
+// Only fills GAPS: a market the supplement just attached always wins, so this
+// can never overwrite fresher data with older.
+function _carryForwardSupplements(sport, parsed, snapshot, nowMs) {
+  if (!snapshot || !Object.keys(snapshot).length) return { restored: 0, expired: 0, oldestMs: 0 };
+  const now = nowMs == null ? Date.now() : nowMs;
+  let restored = 0, expired = 0, oldestMs = 0;
+  for (const [key, entry] of Object.entries(parsed || {})) {
+    for (const ev of (Array.isArray(entry) ? entry : [entry])) {
+      if (!ev) continue;
+      const slot = snapshot[key + '|' + (ev.eventId || ev.commenceTime || '')];
+      if (!slot || !slot.markets) continue;
+      // Never resurrect a market for an event that has already started — both
+      // suppliers fail closed on that and carry-forward must not reverse it.
+      const startMs = ev.commenceTime ? new Date(ev.commenceTime).getTime() : null;
+      if (startMs && startMs <= now) continue;
+      ev.markets = ev.markets || {};
+      for (const [k, v] of Object.entries(slot.markets)) {
+        if (ev.markets[k]) continue;                      // a fresh attach always wins
+        // First carry stamps the market's true age; later carries preserve it,
+        // so the clock does NOT restart each cycle.
+        const firstAt = (v && v.__cfFirstAt) || slot.at;
+        const age = now - firstAt;
+        if (age > SUPPLEMENT_CARRY_MAX_AGE_MS) { expired++; continue; }
+        if (v && typeof v === 'object') { try { v.__cfFirstAt = firstAt; } catch (_) { /* frozen */ } }
+        ev.markets[k] = v;
+        restored++;
+        if (age > oldestMs) oldestMs = age;
+      }
+    }
+  }
+  return { restored, expired, oldestMs };
+}
+
+async function _runPostParseSupplements(sport, parsed, suppSnapshot) {
   // First-5-Innings markets for MLB (separate from full-game)
   if (sport === 'baseball_mlb') {
     try {
@@ -1288,11 +1399,15 @@ async function _runPostParseSupplements(sport, parsed) {
       await supplementH1Markets(parsed, sport);
       const after = _countSupplementedMarkets(parsed, ['h2h_h1', 'spreads_h1', 'totals_h1']);
       _noteSupplementResult(sport, 'h1', after - before);
+      // Retry chain only when NOTHING attached (late TOA event registration — its purpose).
+      // A successful sweep is min-interval-gated; retrying it re-ran the full per-event sweep
+      // at +60/+120s and defeated the SUPPLEMENT_MIN_INTERVAL gate (2026-09-01 credit audit).
+      if (after - before === 0) _scheduleSupplementRetry(sport, _h1Label(sport), supplementH1Markets, parsed, sport);
     } catch (err) {
       log.warn('OddsFeed', `${_h1Label(sport)} supplement failed: ${err.message}`);
       _noteSupplementResult(sport, 'h1', 0);
+      _scheduleSupplementRetry(sport, _h1Label(sport), supplementH1Markets, parsed, sport);
     }
-    _scheduleSupplementRetry(sport, _h1Label(sport), supplementH1Markets, parsed, sport);
   }
 
   // Team totals for NBA/MLB/NHL (gap-fill from TOA on the refresh cycle).
@@ -1302,11 +1417,12 @@ async function _runPostParseSupplements(sport, parsed) {
       await supplementTeamTotals(parsed, sport);
       const after = _countSupplementedMarkets(parsed, ['team_totals']);
       _noteSupplementResult(sport, 'team_totals', after - before);
+      if (after - before === 0) _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
     } catch (err) {
       log.warn('OddsFeed', `${sport} team_totals supplement failed: ${err.message}`);
       _noteSupplementResult(sport, 'team_totals', 0);
+      _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
     }
-    _scheduleSupplementRetry(sport, `${sport} team_totals`, supplementTeamTotals, parsed, sport);
   }
 
   // BTTS for soccer. Per-event only — the bulk endpoint 422s on `btts`.
@@ -1317,6 +1433,29 @@ async function _runPostParseSupplements(sport, parsed) {
       log.warn('OddsFeed', `${sport} btts supplement failed: ${err.message}`);
     }
     _scheduleSupplementRetry(sport, `${sport} btts`, supplementBtts, parsed, sport);
+  }
+
+  // Re-attach anything the (possibly throttled) supplements above did not
+  // refresh this cycle. Genuinely LAST now — it previously sat above the BTTS
+  // block and pre-filled `btts`, which emptied that supplement's candidate
+  // list and made its attach-ratio diagnostic read as a dead pipeline.
+  //
+  // The snapshot is passed IN rather than read from a module slot: a
+  // module-level per-sport slot is clobbered when the 150s fast-refresh and
+  // the sweep touch the same sport concurrently, silently discarding the very
+  // snapshot it exists to protect.
+  try {
+    if (suppSnapshot) {
+      const r = _carryForwardSupplements(sport, parsed, suppSnapshot);
+      _refreshAllStats.lastCarryForward = { sport, ...r, at: new Date().toISOString() };
+      if (r.restored > 0 || r.expired > 0) {
+        log.info('OddsFeed', `${sport}: carried forward ${r.restored} supplement market(s)`
+          + (r.expired ? `, DROPPED ${r.expired} past the ${SUPPLEMENT_CARRY_MAX_AGE_MS / 60000}min carry bound` : '')
+          + (r.oldestMs ? ` (oldest ${Math.round(r.oldestMs / 60000)}min)` : ''));
+      }
+    }
+  } catch (err) {
+    log.warn('OddsFeed', `${sport} supplement carry-forward failed: ${err.message}`);
   }
 }
 
@@ -1678,7 +1817,9 @@ async function supplementMlbF5Markets(parsedEvents) {
         // silently counted and ignored). Bail out of the whole burst instead
         // of grinding through hundreds of doomed calls.
         if (_toaCooldownRemainingMs() > 0) { apiFails++; break; }
-        const resp = await fetch(url);
+        // Through the global TOA gate: this loop runs 3 workers with no
+        // pacing and was the single largest unmetered consumer on the key.
+        const resp = await abortableFetch(url, undefined, TOA_EVENT_TIMEOUT_MS);
         calls++;
         if (resp.status === 429) {
           apiFails++;
@@ -2435,7 +2576,9 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
         // silently counted and ignored). Bail out of the whole burst instead
         // of grinding through hundreds of doomed calls.
         if (_toaCooldownRemainingMs() > 0) { apiFails++; break; }
-        const resp = await fetch(url);
+        // Through the global TOA gate: this loop runs 3 workers with no
+        // pacing and was the single largest unmetered consumer on the key.
+        const resp = await abortableFetch(url, undefined, TOA_EVENT_TIMEOUT_MS);
         calls++;
         if (resp.status === 429) {
           apiFails++;
@@ -2740,7 +2883,7 @@ async function fetchPinnacleRows(sport) {
  */
 async function fetchDynamicSports(sport, fallback, apiKey) {
   // Step 1: discover active tournaments matching the prefix
-  const sportsResp = await fetch(`https://api.the-odds-api.com/v4/sports/?apiKey=${apiKey}`);
+  const sportsResp = await abortableFetch(`https://api.the-odds-api.com/v4/sports/?apiKey=${apiKey}`, undefined, TOA_BULK_TIMEOUT_MS);
   if (!sportsResp.ok) throw new Error(`The Odds API sports list: ${sportsResp.status}`);
   const allSports = await safeJsonFetch(sportsResp);
   let activeTournaments = allSports.filter(s => s.key.startsWith(fallback.sportPrefix) && s.active);
@@ -2780,7 +2923,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
       + `&oddsFormat=american`;
 
     try {
-      const resp = await fetch(url);
+      const resp = await abortableFetch(url, undefined, TOA_BULK_TIMEOUT_MS);
       if (!resp.ok) {
         log.warn('OddsFeed', `The Odds API ${resp.status} for ${tournament.key}`);
         continue;
@@ -3008,7 +3151,13 @@ async function fetchFromTheOddsApi(sport) {
     throw new Error(`The Odds API frequency cooldown for ${sport}: ${Math.ceil(cooling / 1000)}s remaining (no request sent)`);
   }
 
-  let resp = await fetch(url);
+  // Through the GLOBAL TOA GATE. This call site bypassed it entirely, which
+  // broke the gate's stated invariant ("All requests to the-odds-api.com go
+  // through this gate so no single code path can cause a 429 storm by
+  // itself") — the sweep and both per-event burst loops were raw fetch(),
+  // i.e. unlimited concurrency, no pacing and NO TIMEOUT. That is why a
+  // single sweep could run 287s and why 429s reached 1,040 in one session.
+  let resp = await abortableFetch(url, undefined, TOA_BULK_TIMEOUT_MS);
   if (resp.status === 429) {
     const backoff = _noteToa429(resp.headers.get('retry-after'));
     // Deliberately NO immediate retry: this is a FREQUENCY limit, so retrying
@@ -3288,6 +3437,10 @@ async function fetchFromTheOddsApi(sport) {
     }
   }
 
+  // Snapshot BEFORE the replace — this is the only moment the previous
+  // supplement markets are still reachable. Kept as a LOCAL and threaded
+  // through, so concurrent fetches of the same sport cannot clobber it.
+  const _suppSnapshot = _snapshotSupplementMarkets(sport);
   oddsCache[sport] = { fetchedAt: Date.now(), events: parsed };
   const totalEvents = Object.values(parsed).reduce((s, arr) => s + arr.length, 0);
   log.info('OddsFeed', `Cached ${totalEvents} events (${Object.keys(parsed).length} matchups) for ${sport} (The Odds API fallback)`);
@@ -3295,7 +3448,7 @@ async function fetchFromTheOddsApi(sport) {
   auditCacheForDuplicateEvents(sport);
   // Sub-game/backstop supplements (F5/H1/team totals/DK) — hoisted shared
   // step so TOA-primary sports keep them (SharpAPI-removal audit).
-  await _runPostParseSupplements(sport, parsed);
+  await _runPostParseSupplements(sport, parsed, _suppSnapshot);
   return parsed;
 }
 
@@ -8799,24 +8952,43 @@ function _resetToaFreqForTest() {
 // nothing there is nothing to carry forward, so skipping it cannot drop
 // markets out of the cache — which a naive TTL WOULD do, because each fetch
 // rebuilds the parsed cache from scratch.
+// Ceiling on one full sweep. Must stay comfortably under the staleness
+// horizon or sports expire faster than the sweep can revisit them.
+const SWEEP_DEADLINE_MS = Number(process.env.SWEEP_DEADLINE_MINUTES || 4) * 60000;
+// Sports the previous sweep could not reach before its deadline. They are
+// spliced to the FRONT of the next sweep so the tail of the list cannot starve.
+let _deadlineCarry = [];
 const SUPPLEMENT_DRY_STREAK = Number(process.env.SUPPLEMENT_DRY_STREAK || 2);
 const SUPPLEMENT_BACKOFF_MS = Number(process.env.SUPPLEMENT_BACKOFF_MINUTES || 20) * 60000;
 const _supplementState = {};   // "sport|name" -> { dry, nextAt }
 
+// MIN RE-RUN INTERVAL FOR SUCCESSFUL SUPPLEMENTS (Mike 2026-09-01, TOA credit audit).
+// _supplementDue previously throttled only DRY supplements; a successful attach reset to
+// "due immediately", so the NCAAF H1/Q1 per-event supplement (103 events x ~6 market-keys x
+// regions) re-fired on EVERY 150s fast-refresh tick -- measured at roughly 60k TOA credits/hour,
+// the majority of a 107k/hr account-wide burn that was also 429-starving every other consumer of
+// the shared key (this app's own prop refreshes included: "serving stale cache 16min old").
+// A supplement that ATTACHED data now waits SUPPLEMENT_MIN_INTERVAL before re-running; the
+// dry-streak probe backoff is unchanged. Env-tunable.
+const SUPPLEMENT_MIN_INTERVAL_MS = (parseInt(process.env.SUPPLEMENT_MIN_INTERVAL_SECONDS) || 600) * 1000;
 function _supplementDue(sport, name) {
   const k = sport + '|' + name;
   const st = _supplementState[k];
   if (!st) return true;
-  if (st.dry < SUPPLEMENT_DRY_STREAK) return true;
-  return Date.now() >= (st.nextAt || 0);      // probe again after the backoff
+  return Date.now() >= (st.nextAt || 0);      // min-interval after success, backoff after dries
 }
 
 // attached = markets this run actually merged into the cache.
 function _noteSupplementResult(sport, name, attached) {
   const k = sport + '|' + name;
   const st = _supplementState[k] || { dry: 0, nextAt: 0 };
-  if (attached > 0) { st.dry = 0; st.nextAt = 0; }
-  else { st.dry++; st.nextAt = Date.now() + SUPPLEMENT_BACKOFF_MS; }
+  if (attached > 0) { st.dry = 0; st.nextAt = Date.now() + SUPPLEMENT_MIN_INTERVAL_MS; }
+  else {
+    st.dry++;
+    // pre-streak dries also wait the min interval (they cost the same credits as a success);
+    // once the streak trips, the longer probe backoff takes over exactly as before.
+    st.nextAt = Date.now() + (st.dry >= SUPPLEMENT_DRY_STREAK ? SUPPLEMENT_BACKOFF_MS : SUPPLEMENT_MIN_INTERVAL_MS);
+  }
   _supplementState[k] = st;
 }
 
@@ -8931,12 +9103,37 @@ async function _refreshAllSportsInner() {
   // (28 sports x the 120s cap). Once the budget is spent the remaining sports
   // fall back to fail-fast and are picked up next sweep.
   let cooldownBudgetMs = 120000;
+  // HARD DEADLINE. single-flight means a slow sweep blocks every later one
+  // (they coalesce into it), so an unbounded sweep converts one slow fetch
+  // into a total refresh outage: observed 2026-09-01 at 287s/sweep with
+  // 1/22 sports quotable. Past the deadline we stop starting NEW sports,
+  // finish cleanly and release the latch, so the next tick gets a fresh
+  // sweep. Sports not reached this pass are picked up on the next one.
+  const sweepDeadlineAt = Date.now() + SWEEP_DEADLINE_MS;
+  let deadlineHit = 0;
+  const deadlineSkippedNow = [];
   _sweepCounter++;
-  for (const sport of sportsToRefresh) {
-    // Out-of-season sports cost a call and a slice of the frequency budget
-    // every sweep. Skip them, but re-probe periodically so a sport returning
-    // to season comes back on its own.
+
+  // FAIRNESS. The sport list is a fixed order, so a deadline that bites at the
+  // same point every sweep starves the same tail forever — and the warn line
+  // used to claim those sports were "first in line next sweep", which the code
+  // did not implement. Sports skipped last pass genuinely go first now.
+  const carried = _deadlineCarry.filter(sp => sportsToRefresh.includes(sp));
+  const sweepOrder = [...carried, ...sportsToRefresh.filter(sp => !carried.includes(sp))];
+
+  for (const sport of sweepOrder) {
+    // Out-of-season sports cost nothing; check BEFORE the deadline so a free
+    // skip is never recorded as a deadline casualty.
     if (_isColdSport(sport)) { results[sport] = { ok: true, skipped: 'cold' }; continue; }
+    // golf_matchups is served by DataGolf, not TOA — it costs none of the
+    // budget the deadline exists to protect, and it is the ONLY market with
+    // no other refresher, so a deadline hit would zero out golf lines.
+    const costsToa = sport !== 'golf_matchups';
+    if (costsToa && Date.now() > sweepDeadlineAt) {
+      deadlineHit++; deadlineSkippedNow.push(sport);
+      results[sport] = { ok: false, error: 'sweep deadline' };
+      continue;
+    }
     if (cooldownBudgetMs > 0) {
       cooldownBudgetMs -= await _awaitToaCooldown(cooldownBudgetMs);
     }
@@ -8960,6 +9157,15 @@ async function _refreshAllSportsInner() {
   // before anyone noticed, and nothing in the logs distinguished "quiet
   // sport" from "dead pipeline". log.error once per sport per 15 min so it
   // shows up in Railway logs / alerting without spamming.
+  _deadlineCarry = deadlineSkippedNow;
+  _refreshAllStats.lastDeadlineSkipped = deadlineHit;
+  _refreshAllStats.lastDeadlineSkippedSports = deadlineSkippedNow;
+  if (deadlineHit > 0) {
+    // Name them. A cap that reports only a COUNT reads as "everything
+    // refreshed" to anyone scanning /status.
+    log.warn('OddsFeed', `Sweep hit its ${SWEEP_DEADLINE_MS / 60000}min deadline — ${deadlineHit} sport(s) not refreshed: ${deadlineSkippedNow.join(', ')}. They run FIRST next sweep.`);
+  }
+
   _alertStaleSports();
 
   // Fire-and-forget alt-line pre-warm per sport — don't block the main refresh
@@ -11001,6 +11207,9 @@ module.exports = {
   _noteSportEventCount,
   _isColdSport,
   _countSupplementedMarkets,
+  _carryForwardSupplements,
+  _snapshotSupplementMarkets,
+  SUPPLEMENT_MARKET_KEYS,
   _resetToaFreqForTest,
   _singleFlight,
   _resetRefreshStatsForTest,
