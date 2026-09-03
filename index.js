@@ -6433,7 +6433,10 @@ function startStatusServer() {
       if (off.length) return res.status(400).json({ ok: false, error: 'off-ladder odds', details: off.slice(0, 25) });
       const bal = await pxs.fetchBalance();
       const cash = Number(bal.balance || 0);
-      const unmatched = Number(bal.unmatched_wager_balance || 0);
+      // CFTC rename tolerance: wager -> order. Reading only the legacy key
+      // would silently yield 0 unmatched under the new vocabulary, which makes
+      // headroom look MAXIMAL and breaks this cap OPEN.
+      const unmatched = Number(bal.unmatched_wager_balance ?? bal.unmatched_order_balance ?? 0);
       const totalStake = offers.reduce((s, o) => s + o.stake, 0);
       // Resting-volume cap multiplier. Default 50 (legacy). The CFTC merge
       // introduced an account-wide ~10x unmatched-stake cap — set
@@ -6446,8 +6449,16 @@ function startStatusServer() {
       // figure isn't freshly synced. A stale (lower) unmatched makes headroom
       // look too generous → an over-post PX would then cap/invalidate. Refuse
       // unless the unmatched balance is freshly synced.
-      if (bal.unmatched_wager_balance_status && bal.unmatched_wager_balance_status !== 'succeed') {
-        return res.status(409).json({ ok: false, error: `unmatched balance not fresh (status=${bal.unmatched_wager_balance_status}) — refusing to compute headroom`, balance: bal });
+      // Same rename, and FAIL CLOSED on absence. Previously a missing status
+      // key skipped the freshness guard entirely: under the CFTC vocabulary
+      // (or any shape change) `unmatched` reads 0, headroom reads maximal, and
+      // the one check that would have caught it is itself skipped.
+      const unmatchedStatus = bal.unmatched_wager_balance_status ?? bal.unmatched_order_balance_status;
+      if (unmatchedStatus == null) {
+        return res.status(409).json({ ok: false, error: 'unmatched balance status absent under BOTH legacy and CFTC keys — refusing to compute headroom', balance: bal });
+      }
+      if (unmatchedStatus !== 'succeed') {
+        return res.status(409).json({ ok: false, error: `unmatched balance not fresh (status=${unmatchedStatus}) — refusing to compute headroom`, balance: bal });
       }
       if (totalStake > headroom) return res.status(409).json({ ok: false, error: `total stake ${totalStake} exceeds headroom ${headroom}`, balance: { cash, unmatched, headroom } });
       if (dryRun) return res.json({ ok: true, dryRun: true, offers: offers.length, totalStake, balance: { cash, unmatched, headroom } });

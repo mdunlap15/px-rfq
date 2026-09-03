@@ -119,6 +119,104 @@ function invalidateToken() {
 // systemic backstop (the confirm-path lookup also has a tighter 800ms cap).
 // AbortController works with both global fetch and node-fetch.
 const PX_REQUEST_TIMEOUT_MS = parseInt(process.env.PX_REQUEST_TIMEOUT_MS) || 10000;
+// ---------------------------------------------------------------------------
+// CFTC TERMINOLOGY INGEST NORMALISER
+// ---------------------------------------------------------------------------
+// ProphetX is renaming its API vocabulary for CFTC alignment (Wager->Order,
+// Odds->Price, Stake->Quantity, Line->Strike, won/lost->profit/loss). Opt-in is
+// the `X-CFTC-Terminology: true` header on the partner/MM surface; the parlay
+// SP surface additionally exposes a CFTC-by-default tier at /parlay/sp/v2/*.
+//
+// MEASURED 2026-09-01 on live prod, same order, both tiers:
+//   /parlay/sp/orders/     -> confirmed_odds=-230  confirmed_stake=112.33
+//   /parlay/sp/v2/orders/  -> confirmed_price=-230 confirmed_quantity=112.33
+//   /parlay/sp/supported-lines 200 | /parlay/sp/v2/supported-lines 404
+//   /parlay/sp/v2/supported-strikes 200 -> { supported_strikes: [...] }
+//
+// STRATEGY: normalise NEW -> LEGACY once, here at the single ingest boundary
+// (pxFetch's resp.json()), instead of renaming ~40 read sites. Three reasons:
+//
+//  1. It dissolves the coupling hazard documented at services/leg-id.js:27.
+//     `strike_id` and `strike` can never arrive separately, so there is no
+//     window where a selection carries an id but a null line — the state that
+//     makes `undefined < 0` false and tags every spread side 'underdog'.
+//  2. Nothing downstream changes, so db.js STATUSES, px-ledger and every
+//     `settlement_status === 'won'` comparison keep working untouched, and no
+//     novel status string (`settled_profit`) can ever be constructed.
+//  3. It is symmetric: we tolerate EITHER vocabulary, so PX can flip a default
+//     under us without an outage, and we can move tiers without a rewrite.
+//
+// SAFETY RULES, deliberately narrow:
+//  - Only the keys we actually read are mapped. Generic terms like bare
+//    `price`/`quantity` are NOT remapped: they appear in unrelated contexts and
+//    a blind rename would corrupt real data.
+//  - A new key is only applied when the legacy key is ABSENT, so a payload
+//    carrying both is never clobbered.
+//  - Value-level enum mapping is confined to settlement/winning status fields.
+const CFTC_KEY_MAP = {
+  // line -> strike family (the coupled set; see leg-id.js:27)
+  strike_id: 'line_id',
+  strike: 'line',
+  origin_market_strike: 'origin_market_line',
+  market_strikes: 'market_lines',
+  supported_strikes: 'supported_lines',
+  display_strike: 'display_line',
+  // parlay order money fields (MEASURED on /parlay/sp/v2/orders/)
+  confirmed_price: 'confirmed_odds',
+  confirmed_quantity: 'confirmed_stake',
+  settled_price: 'settled_odds',
+  // partner/MM fields we read
+  unmatched_order_balance: 'unmatched_wager_balance',
+  unmatched_order_balance_status: 'unmatched_wager_balance_status',
+  order_id: 'wager_id',
+  fill_price: 'matched_odds',
+  filled_quantity: 'matched_stake',
+  open_quantity: 'unmatched_stake',
+};
+// winning/settlement enum: profit -> won, loss -> lost. push and the
+// passthrough values (draw, no_result, tbd, manually_*) are unchanged.
+const CFTC_STATUS_FIELDS = new Set(['settlement_status', 'winning_status']);
+const CFTC_STATUS_MAP = { profit: 'won', loss: 'lost' };
+
+let _cftcNormStats = { payloads: 0, keysRenamed: 0, statusesMapped: 0, lastAt: null };
+function getCftcNormalizerStats() { return { ..._cftcNormStats }; }
+
+function _normalizeCftcInPlace(node, depth) {
+  if (node == null || typeof node !== 'object' || depth > 12) return;
+  if (Array.isArray(node)) {
+    for (const v of node) _normalizeCftcInPlace(v, depth + 1);
+    return;
+  }
+  for (const [newKey, legacyKey] of Object.entries(CFTC_KEY_MAP)) {
+    // Only fill a GAP — never clobber a legacy key that is already present.
+    if (newKey in node && !(legacyKey in node)) {
+      node[legacyKey] = node[newKey];
+      _cftcNormStats.keysRenamed++;
+    }
+  }
+  for (const f of CFTC_STATUS_FIELDS) {
+    const v = node[f];
+    if (typeof v === 'string' && CFTC_STATUS_MAP[v] !== undefined) {
+      node[f] = CFTC_STATUS_MAP[v];
+      _cftcNormStats.statusesMapped++;
+    }
+  }
+  for (const v of Object.values(node)) _normalizeCftcInPlace(v, depth + 1);
+}
+
+// Returns the SAME object, mutated. Never throws: a normaliser that can fail
+// on the RFQ hot path is worse than one that no-ops.
+function normalizeCftcPayload(data) {
+  try {
+    _cftcNormStats.payloads++;
+    _cftcNormStats.lastAt = new Date().toISOString();
+    _normalizeCftcInPlace(data, 0);
+  } catch (err) {
+    log.warn('PX', `CFTC normaliser skipped a payload: ${err.message}`);
+  }
+  return data;
+}
+
 async function pxFetchWithTimeout(url, options) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), PX_REQUEST_TIMEOUT_MS);
@@ -185,7 +283,10 @@ async function pxFetch(endpoint, method = 'GET', body = null, useBaseUrl = true)
     throw new Error(`ProphetX API ${resp.status} on ${method} ${endpoint}: ${text}`);
   }
 
-  return resp.json();
+  // Single ingest boundary for EVERY PX REST response — see the normaliser
+  // above. Tolerating both vocabularies here is what lets PX flip a default,
+  // or us move tiers, without touching a single downstream reader.
+  return normalizeCftcPayload(await resp.json());
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +509,12 @@ async function getSupportedLines(maxLines = 100000) {
       log.warn('PX-Lines', `getSupportedLines pagination stopped at page ${i} (${all.length} fetched): ${e.message}`);
       break;
     }
-    const page = (data.data && data.data.supported_lines) || [];
+    // CFTC rename tolerance: line -> strike. MEASURED 2026-09-01 that the v2
+    // parlay tier serves `supported_strikes` (and /parlay/sp/v2/supported-lines
+    // 404s), so the noun really does change. Reading only the legacy key would
+    // return an EMPTY set, and an empty supported-line set reads as "prune
+    // everything" to the reconciler rather than as an error.
+    const page = (data.data && (data.data.supported_lines || data.data.supported_strikes)) || [];
     all.push(...page);
     const next = data.data && data.data.token;
     if (!page.length || !next || next === token) break; // last page / no cursor advance
@@ -1146,7 +1252,13 @@ function parseMarketSelections(market) {
 
           let selection = 'unknown';
           if (marketType === 'spread' || isF5Spread || isH1Spread || isH2Spread || isQuarterSpread) {
-            selection = sel.line < 0 ? 'favorite' : 'underdog';
+            // `undefined < 0` is FALSE, so a null/absent line silently tagged
+            // EVERY spread side 'underdog' — a wrong-side registration that
+            // produces a MISPRICED QUOTE rather than a clean decline, because
+            // line-manager returns true for a null line and the pricer skips
+            // the exact-line lookup. Measured 24/24 spread sides mis-tagged on
+            // a payload whose line field was absent. 'unknown' declines.
+            selection = Number.isFinite(Number(sel.line)) ? (Number(sel.line) < 0 ? 'favorite' : 'underdog') : 'unknown';
           } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets'
                      || isF5Total || isH1Total || isH2Total || isQuarterTotal) {
             const nameLC = (sel.name || sel.display_name || '').toLowerCase();
@@ -1187,7 +1299,8 @@ function parseMarketSelections(market) {
         const legLine = sel.line != null ? sel.line : topLine;
         let selection = 'unknown';
         if (marketType === 'spread' || isF5Spread) {
-          selection = (legLine != null && legLine < 0) ? 'favorite' : 'underdog';
+          // Same fail-open as above: a null legLine fell through to 'underdog'.
+          selection = Number.isFinite(Number(legLine)) ? (Number(legLine) < 0 ? 'favorite' : 'underdog') : 'unknown';
         } else if (marketType === 'total' || marketType === 'team_total' || marketType === 'total_sets' || isF5Total) {
           const nameLC = (sel.name || sel.display_name || '').toLowerCase();
           selection = nameLC.includes('over') ? 'over' : nameLC.includes('under') ? 'under' : 'unknown';
@@ -1295,6 +1408,10 @@ function clearCooldown() {
 }
 
 module.exports = {
+  normalizeCftcPayload,
+  getCftcNormalizerStats,
+  CFTC_KEY_MAP,
+  CFTC_STATUS_MAP,
   login,
   invalidateToken,
   clearCooldown,
