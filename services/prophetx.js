@@ -173,6 +173,30 @@ const CFTC_KEY_MAP = {
   filled_quantity: 'matched_stake',
   open_quantity: 'unmatched_stake',
 };
+// ENDPOINT-SCOPED maps. Two renames are correct on SOME routes and corrupting
+// on others, so they cannot live in the global map above:
+//
+//  - CONTAINER keys. /partner/v2/mm/get_wager_histories returns `wagers`, and
+//    under CFTC vocabulary `orders`. But the PARLAY surface returns `orders`
+//    natively and always has — mapping orders->wagers globally would stamp a
+//    bogus `wagers` alias onto every parlay response.
+//  - BARE `price`/`quantity`. On /v2/mm/get_markets selections these ARE the
+//    renames of `odds`/`stake`, but elsewhere they are unrelated fields, so a
+//    global rename would corrupt real data.
+//
+// MEASURED 2026-09-03 on the production account:
+//   /partner/mm/get_wager_histories    header IGNORED — byte-identical
+//   /partner/v2/mm/get_wager_histories header HONOURED — `orders`, and every
+//                                      legacy key REMOVED (a rename, not an alias)
+//   /partner/v4/mm/get_order_history   CFTC by default, no header needed
+// The v2 tier is therefore strictly closer to flipping than the unversioned
+// one, and it is where this app reads its wager history.
+const CFTC_ENDPOINT_MAPS = [
+  { match: /\/mm\/get_wager_histories|\/mm\/get_order_history/, keys: { orders: 'wagers' } },
+  { match: /\/mm\/get_matched_bets|\/mm\/get_trades/, keys: { trades: 'matched_bets' } },
+  { match: /\/mm\/get_markets|\/mm\/get_multiple_markets/, keys: { price: 'odds', quantity: 'stake' } },
+];
+
 // winning/settlement enum: profit -> won, loss -> lost. push and the
 // passthrough values (draw, no_result, tbd, manually_*) are unchanged.
 const CFTC_STATUS_FIELDS = new Set(['settlement_status', 'winning_status']);
@@ -181,11 +205,17 @@ const CFTC_STATUS_MAP = { profit: 'won', loss: 'lost' };
 let _cftcNormStats = { payloads: 0, keysRenamed: 0, statusesMapped: 0, lastAt: null };
 function getCftcNormalizerStats() { return { ..._cftcNormStats }; }
 
-function _normalizeCftcInPlace(node, depth) {
+function _normalizeCftcInPlace(node, depth, extraKeys) {
   if (node == null || typeof node !== 'object' || depth > 12) return;
   if (Array.isArray(node)) {
-    for (const v of node) _normalizeCftcInPlace(v, depth + 1);
+    for (const v of node) _normalizeCftcInPlace(v, depth + 1, extraKeys);
     return;
+  }
+  for (const [newKey, legacyKey] of Object.entries(extraKeys || {})) {
+    if (newKey in node && !(legacyKey in node)) {
+      node[legacyKey] = node[newKey];
+      _cftcNormStats.keysRenamed++;
+    }
   }
   for (const [newKey, legacyKey] of Object.entries(CFTC_KEY_MAP)) {
     // Only fill a GAP — never clobber a legacy key that is already present.
@@ -201,16 +231,22 @@ function _normalizeCftcInPlace(node, depth) {
       _cftcNormStats.statusesMapped++;
     }
   }
-  for (const v of Object.values(node)) _normalizeCftcInPlace(v, depth + 1);
+  for (const v of Object.values(node)) _normalizeCftcInPlace(v, depth + 1, extraKeys);
 }
 
 // Returns the SAME object, mutated. Never throws: a normaliser that can fail
 // on the RFQ hot path is worse than one that no-ops.
-function normalizeCftcPayload(data) {
+function normalizeCftcPayload(data, endpoint) {
   try {
     _cftcNormStats.payloads++;
     _cftcNormStats.lastAt = new Date().toISOString();
-    _normalizeCftcInPlace(data, 0);
+    let extra = null;
+    if (endpoint) {
+      for (const m of CFTC_ENDPOINT_MAPS) {
+        if (m.match.test(endpoint)) extra = Object.assign(extra || {}, m.keys);
+      }
+    }
+    _normalizeCftcInPlace(data, 0, extra);
   } catch (err) {
     log.warn('PX', `CFTC normaliser skipped a payload: ${err.message}`);
   }
@@ -286,7 +322,7 @@ async function pxFetch(endpoint, method = 'GET', body = null, useBaseUrl = true)
   // Single ingest boundary for EVERY PX REST response — see the normaliser
   // above. Tolerating both vocabularies here is what lets PX flip a default,
   // or us move tiers, without touching a single downstream reader.
-  return normalizeCftcPayload(await resp.json());
+  return normalizeCftcPayload(await resp.json(), endpoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1447,7 @@ module.exports = {
   normalizeCftcPayload,
   getCftcNormalizerStats,
   CFTC_KEY_MAP,
+  CFTC_ENDPOINT_MAPS,
   CFTC_STATUS_MAP,
   login,
   invalidateToken,

@@ -207,8 +207,70 @@ test('the normaliser is actually WIRED into the pxFetch ingest boundary', () => 
   // uses it. A mutation that unwired it from pxFetch passed every other test
   // in this file — the same "helper exists but nobody calls it" gap that took
   // three hot paths off the TOA rate gate.
-  assert.ok(/return normalizeCftcPayload\(await resp\.json\(\)\);/.test(PXSRC),
+  assert.ok(/return normalizeCftcPayload\(await resp\.json\(\)/.test(PXSRC),
     'pxFetch must normalise every response — a bare `return resp.json()` bypasses the whole migration layer');
   assert.ok(!/^\s*return resp\.json\(\);\s*$/m.test(PXSRC),
     'no un-normalised resp.json() return may remain in the PX client');
+});
+
+// -------------------------------------------- endpoint-scoped renames
+//
+// Two renames are correct on SOME routes and corrupting on others, so they
+// cannot live in the global map. Found by the 2026-09-03 cross-app audit,
+// which measured on the production account:
+//   /partner/mm/get_wager_histories     header IGNORED (byte-identical)
+//   /partner/v2/mm/get_wager_histories  header HONOURED — `orders`, legacy
+//                                       keys REMOVED (a rename, not an alias)
+//   /partner/v4/mm/get_order_history    CFTC by default, no header
+// The v2 tier is where this app reads wager history (index.js:4508), so it is
+// the one that matters.
+
+test('container key orders->wagers applies on the wager-history route', () => {
+  const p = { data: { orders: [{ wager_id: 'w1' }] } };
+  px.normalizeCftcPayload(p, '/partner/v2/mm/get_wager_histories');
+  assert.strictEqual(p.data.wagers.length, 1,
+    'index.js:4515 reads d.wagers — an unmapped container silently yields []');
+});
+
+test('orders->wagers must NOT apply on the parlay surface', () => {
+  // The parlay API returns `orders` NATIVELY and always has. A global
+  // container rename would stamp a bogus `wagers` alias on every parlay
+  // response.
+  const p = { data: { orders: [{ confirmed_price: -110 }] } };
+  px.normalizeCftcPayload(p, '/parlay/sp/v2/orders/');
+  assert.strictEqual('wagers' in p.data, false, 'no bogus alias on the parlay surface');
+  assert.strictEqual(p.data.orders[0].confirmed_odds, -110, 'but field mapping still applies');
+});
+
+test('bare price/quantity map ONLY on the markets routes', () => {
+  // On /v2/mm/get_markets selections these ARE the renames of odds/stake.
+  const mk = { data: { markets: [{ selections: [{ price: -150, quantity: 100 }] }] } };
+  px.normalizeCftcPayload(mk, '/partner/v2/mm/get_markets');
+  const sel = mk.data.markets[0].selections[0];
+  assert.strictEqual(sel.odds, -150);
+  assert.strictEqual(sel.stake, 100);
+
+  // Anywhere else they are unrelated fields and must be left alone.
+  const other = { data: { price: 5, quantity: 9 } };
+  px.normalizeCftcPayload(other, '/partner/mm/get_balance');
+  assert.strictEqual('odds' in other.data, false, 'a global bare rename would corrupt real data');
+  assert.strictEqual('stake' in other.data, false);
+});
+
+test('matched_bets container maps on the trades route', () => {
+  const p = { data: { trades: [{ bet_id: 'b1' }] } };
+  px.normalizeCftcPayload(p, '/partner/mm/get_matched_bets');
+  assert.strictEqual(p.data.matched_bets.length, 1);
+});
+
+test('the endpoint argument is threaded from pxFetch, not dropped', () => {
+  assert.ok(/normalizeCftcPayload\(await resp\.json\(\), endpoint\)/.test(PXSRC),
+    'pxFetch must pass its endpoint or every endpoint-scoped map is dead code');
+});
+
+test('no endpoint argument still applies the safe global map', () => {
+  const p = { strike_id: 'x', settlement_status: 'profit' };
+  px.normalizeCftcPayload(p);
+  assert.strictEqual(p.line_id, 'x');
+  assert.strictEqual(p.settlement_status, 'won');
 });
