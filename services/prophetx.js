@@ -192,7 +192,10 @@ const CFTC_KEY_MAP = {
 // The v2 tier is therefore strictly closer to flipping than the unversioned
 // one, and it is where this app reads its wager history.
 const CFTC_ENDPOINT_MAPS = [
-  { match: /\/mm\/get_wager_histories|\/mm\/get_order_history/, keys: { orders: 'wagers' } },
+  // Wager/order ROWS carry odds+stake, which become price+quantity — the same
+  // bare-name renames as on markets. Caught by simulating the flip against the
+  // poster fleet: without these a resting offer normalises with odds=undefined.
+  { match: /\/mm\/get_wager_histories|\/mm\/get_order_history/, keys: { orders: 'wagers', price: 'odds', quantity: 'stake' } },
   { match: /\/mm\/get_matched_bets|\/mm\/get_trades/, keys: { trades: 'matched_bets' } },
   { match: /\/mm\/get_markets|\/mm\/get_multiple_markets/, keys: { price: 'odds', quantity: 'stake' } },
 ];

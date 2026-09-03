@@ -274,3 +274,18 @@ test('no endpoint argument still applies the safe global map', () => {
   assert.strictEqual(p.line_id, 'x');
   assert.strictEqual(p.settlement_status, 'won');
 });
+
+test('wager ROWS get price->odds and quantity->stake, like markets', () => {
+  // Caught by simulating the flip against the laptop poster fleet: without
+  // this a resting offer normalises with odds undefined, and the relist
+  // prices off nothing.
+  const p = { data: { orders: [{ order_id: 'w1', price: -110, quantity: 550,
+    filled_quantity: 250, open_quantity: 300 }] } };
+  px.normalizeCftcPayload(p, '/partner/v2/mm/get_wager_histories');
+  const w = p.data.wagers[0];
+  assert.strictEqual(w.odds, -110, 'price -> odds on wager rows');
+  assert.strictEqual(w.stake, 550, 'quantity -> stake on wager rows');
+  assert.strictEqual(w.matched_stake, 250);
+  assert.strictEqual(w.unmatched_stake, 300);
+  assert.strictEqual(w.wager_id, 'w1');
+});
