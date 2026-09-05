@@ -8302,6 +8302,34 @@
     return opp || null;
   }
 
+  /**
+   * Display names for a leg's matchup, sport-aware. Returns { away, home }.
+   *
+   * Non-college keeps teamAbbr()'s compact last-word form ("Yankees"), which
+   * is the identifier in pro sports. College uses the SCHOOL, taken from PX's
+   * event name ("Clemson at LSU"), because the last word there is a shared
+   * mascot — "Tigers" belongs to Clemson, LSU, Auburn and Missouri alike, and
+   * "North Texas Mean Green" reduces to "Green".
+   *
+   * Falls back to the full team name for college when the event name is not
+   * the expected "AWAY at HOME" shape: long, but never ambiguous.
+   */
+  function matchupNames(leg) {
+    const rawAway = (leg && leg.awayTeam) || '';
+    const rawHome = (leg && leg.homeTeam) || '';
+    if (leg && /ncaa/i.test(leg.sport || '')) {
+      const parts = String(leg.pxEventName || '').split(/\s+at\s+/i);
+      if (parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+        return { away: parts[0].trim(), home: parts[1].trim() };
+      }
+      return { away: rawAway, home: rawHome };
+    }
+    return {
+      away: (typeof teamAbbr === 'function' && teamAbbr(rawAway)) || rawAway,
+      home: (typeof teamAbbr === 'function' && teamAbbr(rawHome)) || rawHome,
+    };
+  }
+
   function teamAbbr(name) {
     if (!name) return '?';
     const lower = name.toLowerCase().trim();
@@ -8331,7 +8359,7 @@
    * - Totals: "over (Los Angeles Dodgers @ Washington Nationals)" → "LAD @ WSH O 6.5"
    * - Spreads: "Chicago Cubs" with line -1.5 → "Chicago Cubs -1.5"
    */
-  function formatSelection(teamStr, market, line, selection) {
+  function formatSelection(teamStr, market, line, selection, leg) {
     if (!teamStr) return '?';
     const mkt = (market || '').toLowerCase();
 
@@ -8339,8 +8367,12 @@
     const totalMatch = teamStr.match(/^(over|under)\s*\((.+?)\s*@\s*(.+?)\)$/i);
     if (totalMatch) {
       const side = totalMatch[1].charAt(0).toUpperCase(); // O or U
-      const away = teamAbbr(totalMatch[2].trim());
-      const home = teamAbbr(totalMatch[3].trim());
+      // Prefer the leg's own matchup names when we have them: for college the
+      // teams parsed out of this string are mascot-laden ("LSU Tigers") and
+      // teamAbbr would reduce them to a shared mascot.
+      const mn = leg ? matchupNames(leg) : null;
+      const away = (mn && mn.away) || teamAbbr(totalMatch[2].trim());
+      const home = (mn && mn.home) || teamAbbr(totalMatch[3].trim());
       const lineStr = line != null ? ' ' + line : '';
       return `${away} @ ${home} ${side}${lineStr}`;
     }
@@ -8474,8 +8506,7 @@
         // — Over 0.5 (a run scores) = YRFI, Under 0.5 (no run) = NRFI — so the
         // cell shows which game without the long "(1st Inning Run)" label.
         if (String(mkt).toLowerCase() === 'run_first_inning' && (l.homeTeam || l.awayTeam)) {
-          const away = teamAbbr(l.awayTeam || '') || (l.awayTeam || '');
-          const home = teamAbbr(l.homeTeam || '') || (l.homeTeam || '');
+          const { away, home } = matchupNames(l);
           const ctx = (away && home) ? (away + ' @ ' + home + ' ') : '';
           const yn = (/over/i.test(String(name)) || String(l.selection).toLowerCase() === 'over') ? 'YRFI' : 'NRFI';
           return periodTag + ctx + yn;
@@ -8486,14 +8517,13 @@
         // identifies which game the total belongs to.
         const bareOU = /^(over|under)$/i.test(String(name).trim());
         if (bareOU && (l.homeTeam || l.awayTeam)) {
-          const away = teamAbbr(l.awayTeam || '') || (l.awayTeam || '');
-          const home = teamAbbr(l.homeTeam || '') || (l.homeTeam || '');
+          const { away, home } = matchupNames(l);
           const side = String(name).trim().charAt(0).toUpperCase();
           const lineStr = line != null ? ' ' + line : '';
           const ctx = (away && home) ? (away + ' @ ' + home + ' ') : '';
           return ctx + periodTag + side + lineStr;
         }
-        const _base = periodTag + formatSelection(name, mkt, line, l.selection);
+        const _base = periodTag + formatSelection(name, mkt, line, l.selection, l);
         if (opts.propMarket !== false) {
           const _isProp = /^player_|^run_first_inning/.test(String(mkt).toLowerCase()) || !!l.propType;
           if (_isProp) {
@@ -15287,7 +15317,7 @@
         // bare "No".
         teamLabel = ynLegLabel(l, _rawTeamForLabel.trim().toUpperCase());
       } else {
-        teamLabel = formatSelection(_rawTeamForLabel, mkt, l.line, l.selection);
+        teamLabel = formatSelection(_rawTeamForLabel, mkt, l.line, l.selection, l);
       }
       // For bare Over/Under selections (including first-half / first-5
       // variants), rebuild the leg's display name so it self-describes
@@ -15299,8 +15329,7 @@
       const rawTeam = (l.team || l.teamName || l.selection || '').toString().trim();
       const bareOU = /^(over|under)\b/i.test(rawTeam) && !/\(/.test(rawTeam);
       if (bareOU && (l.homeTeam || l.awayTeam)) {
-        const away = teamAbbr(l.awayTeam || '') || (l.awayTeam || '');
-        const home = teamAbbr(l.homeTeam || '') || (l.homeTeam || '');
+        const { away, home } = matchupNames(l);
         const ctx = (away && home) ? (away + ' @ ' + home) : (away || home);
         const isF5 = /first_5|first_five|_f5\b/i.test(mkt);
         const isH1 = /first_half|1st_half|_h1\b/i.test(mkt);
@@ -15451,8 +15480,8 @@
       else if (!bareOU
                && l.homeTeam && l.awayTeam
                && (l.propType || /^player_/.test(mkt) || _PROP_TYPE_BUCKETS.has(mkt))) {
-        const awayCtx = (typeof teamAbbr === 'function' && teamAbbr(l.awayTeam)) || l.awayTeam;
-        const homeCtx = (typeof teamAbbr === 'function' && teamAbbr(l.homeTeam)) || l.homeTeam;
+        const _mn = matchupNames(l);
+        const awayCtx = _mn.away, homeCtx = _mn.home;
         if (awayCtx && homeCtx) {
           teamLabel += ' <span style="color:var(--text3); font-size:10px;">· '
                     + escapeHtml(awayCtx) + ' @ ' + escapeHtml(homeCtx) + '</span>';
