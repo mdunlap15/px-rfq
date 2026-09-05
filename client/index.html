@@ -1403,14 +1403,42 @@
   let autoRefreshCountdown = 10;
   let countdownTimer = null;
 
-  // Track new confirmations for Orders tab notification badge.
-  // Uses a Set of parlayIds the user has already "seen" (any refresh that
-  // happened while the Orders tab was active). Count-based tracking was
-  // buggy: on service restart stats.totalConfirmations resets to 0 then
-  // jumps to the historical total via loadFromDb, producing phantom
-  // notifications for hundreds of already-seen parlays.
-  const seenConfirmedParlayIds = new Set();
-  let notificationInitialized = false;
+  // Portfolio badge = REAL fills confirmed since you last opened Portfolio.
+  //
+  // Two earlier designs both failed on the same thing — the size of /orders.
+  // It returns the whole history (12,145 rows, 12,045 of them confirmed or
+  // settled), so any scheme that decides "new" by diffing against a snapshot
+  // breaks whenever the first snapshot is smaller than the next one. That is
+  // routine: on a service restart the in-memory store is empty, the dashboard
+  // takes its baseline from that near-empty response, then loadFromDb
+  // backfills ~12k rows and every one of them looks brand new. That is how
+  // the badge reached 10,253 — roughly the entire settled history.
+  //
+  // A high-water TIMESTAMP has none of that failure mode. It does not care how
+  // many rows arrive, in what order, or how often the service restarts; it
+  // only asks "was this fill confirmed after the last time I looked?". It is
+  // O(1) state instead of an unbounded Set, and it is persisted so a page
+  // reload does not re-notify about fills you already saw.
+  const PORTFOLIO_SEEN_KEY = 'px.portfolioLastSeenAt';
+
+  function readPortfolioSeenAt() {
+    // localStorage can throw outright (private windows, blocked site data),
+    // so never let it break the dashboard.
+    try {
+      const v = window.localStorage.getItem(PORTFOLIO_SEEN_KEY);
+      const t = v ? Date.parse(v) : NaN;
+      return Number.isFinite(t) ? t : null;
+    } catch (_) { return null; }
+  }
+
+  function writePortfolioSeenAt(ms) {
+    portfolioSeenAt = ms;
+    try { window.localStorage.setItem(PORTFOLIO_SEEN_KEY, new Date(ms).toISOString()); } catch (_) {}
+  }
+
+  // null until the first badge update, which seeds it to "now" so a brand-new
+  // browser never gets notified about history it has not seen accumulate.
+  let portfolioSeenAt = readPortfolioSeenAt();
   let unseenConfirmations = 0;
 
   // Track expanded/collapsed state across refreshes (sub-sections + individual rows)
@@ -1604,12 +1632,19 @@
   // -----------------------------------------------------------------------
 
   /**
-   * Update the Orders tab notification badge + browser tab title based on
-   * newly-confirmed parlayIds in the /orders response. Tracks by parlayId
-   * (Set) so service restarts don't inject phantom counts. On first load
-   * (notificationInitialized=false), ALL currently-confirmed/settled IDs
-   * are marked as seen and the badge stays hidden. After that, the badge
-   * lights up for IDs that appear fresh.
+   * Update the Portfolio badge + browser tab title: how many REAL fills were
+   * confirmed since the operator last opened Portfolio.
+   *
+   * Counts against a persisted high-water timestamp, not a diff of the
+   * /orders payload. /orders returns the entire history (12k+ rows), so any
+   * snapshot-diff scheme miscounts the whole book as "new" whenever the first
+   * snapshot is smaller than the next — which happens on every restart, since
+   * the in-memory store is empty until loadFromDb backfills. That is how this
+   * badge reached 10,253.
+   *
+   * "Real fill" means orderUuid present and not isStalePhantom. status
+   * 'confirmed' alone is not enough — an odds tie used to be promoted to
+   * 'confirmed' without ever being ours.
    *
    * Must receive the /orders response (not /status) because /status has
    * no recentOrders field. This was the bug fixed after ab187a3 placed
@@ -1617,29 +1652,39 @@
    */
   function updateNotificationBadge(ordersData) {
     const currentOrders = ordersData?.recentOrders || [];
-    const confirmedIds = currentOrders
-      .filter(x => x && (x.status === 'confirmed' || (x.status && x.status.startsWith('settled_'))))
-      .map(x => x.parlayId)
-      .filter(Boolean);
-    if (!notificationInitialized) {
-      for (const id of confirmedIds) seenConfirmedParlayIds.add(id);
-      notificationInitialized = true;
+
+    // First ever load on this browser: start the clock now. Everything already
+    // in the book is history, not news.
+    if (portfolioSeenAt == null) writePortfolioSeenAt(Date.now());
+
+    // Sitting on Portfolio counts as seeing them, so keep the mark moving.
+    if (activeSection === 'portfolio') {
+      writePortfolioSeenAt(Date.now());
+      unseenConfirmations = 0;
     } else {
-      for (const id of confirmedIds) {
-        if (!seenConfirmedParlayIds.has(id)) {
-          if (activeSection === 'portfolio') {
-            seenConfirmedParlayIds.add(id); // viewing → auto-mark seen
-          } else {
-            unseenConfirmations++;
-            seenConfirmedParlayIds.add(id);
-          }
-        }
-      }
+      unseenConfirmations = currentOrders.reduce((n, x) => {
+        if (!x || !x.confirmedAt) return n;
+        // REAL fills only. status 'confirmed' is not sufficient: an odds TIE
+        // used to be promoted to 'confirmed' without ever being ours, and
+        // ~1,300 such rows are still in the book. orderUuid is the canonical
+        // "we actually own this" signal.
+        //
+        // Deliberately NOT also filtering on isStalePhantom: that flag is about
+        // age / exclusion from deployed risk, not validity, and it is true on
+        // 11,977 of 12,030 rows. Using it here under-counted 7 days of fills as
+        // 49 instead of 273.
+        if (!x.orderUuid) return n;
+        const t = Date.parse(x.confirmedAt);
+        return Number.isFinite(t) && t > portfolioSeenAt ? n + 1 : n;
+      }, 0);
     }
+
     const portfolioBadge = document.getElementById('portfolio-badge');
     if (portfolioBadge) {
       if (unseenConfirmations > 0 && activeSection !== 'portfolio') {
-        portfolioBadge.textContent = unseenConfirmations;
+        portfolioBadge.textContent = unseenConfirmations > 99 ? '99+' : unseenConfirmations;
+        portfolioBadge.title = unseenConfirmations + ' new fill(s) since '
+          + new Date(portfolioSeenAt).toLocaleString();
         portfolioBadge.style.display = 'inline';
       } else {
         portfolioBadge.style.display = 'none';
@@ -15720,6 +15765,9 @@
     // (badge tracks newly-confirmed parlays = new open positions, which
     // is what the Portfolio tab surfaces)
     if (section === 'portfolio') {
+      // Move the high-water mark. This is the ONLY thing that marks fills as
+      // seen, which is exactly what "new since I last clicked Portfolio" means.
+      writePortfolioSeenAt(Date.now());
       unseenConfirmations = 0;
       const badge = document.getElementById('portfolio-badge');
       if (badge) badge.style.display = 'none';
