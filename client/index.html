@@ -8272,6 +8272,36 @@
   const CLUB_SUFFIX_RE = /\s+(fc|sc|cf|afc|ac|uc|cd|rc|fk|sk|bk|united|city|club)$/i;
   const CLUB_PREFIX_RE = /^(fc|cf|afc|ac|uc|cd|rc|fk|sk|bk|real|inter|atletico|atlético|deportivo)\s+/i;
 
+  /**
+   * Opponent label for COLLEGE legs.
+   *
+   * teamAbbr() takes the last word of a team name, which is right for pro
+   * sports (the mascot is the identifier: "Yankees") and exactly wrong for
+   * college, where the SCHOOL is the identifier and the mascot is shared:
+   *
+   *   "LSU Tigers"             -> "Tigers"   (so does Clemson, Auburn, Missouri)
+   *   "California Golden Bears"-> "Bears"    (so does Baylor, Brown, Mercer)
+   *   "North Texas Mean Green" -> "Green"    (last word of the NICKNAME)
+   *   "Baylor Bears"           -> "BAY"      (via TEAM_ABBR; unclear to read)
+   *
+   * PX's own event name already carries the clean school names —
+   * "Clemson at LSU", "North Texas at Indiana" — so take the opponent from
+   * there instead of trying to strip mascots, which would need a per-school
+   * list of hundreds of nicknames.
+   *
+   * Returns null when the sport is not college or the event name is not the
+   * expected "AWAY at HOME" shape; the caller then falls back.
+   */
+  function collegeOpponentName(leg, pickedHome) {
+    if (!leg || !/ncaa/i.test(leg.sport || '')) return null;
+    const parts = String(leg.pxEventName || '').split(/\s+at\s+/i);
+    if (parts.length !== 2) return null;
+    const away = parts[0].trim();
+    const home = parts[1].trim();
+    const opp = pickedHome ? away : home;
+    return opp || null;
+  }
+
   function teamAbbr(name) {
     if (!name) return '?';
     const lower = name.toLowerCase().trim();
@@ -15395,7 +15425,13 @@
           || (l.homeTeam && (rawTeam.includes(l.homeTeam) || l.homeTeam.includes(rawTeam)));
         const opponentName = matchesHome ? l.awayTeam : l.homeTeam;
         const prep = matchesHome ? 'vs ' : '@ ';
-        const oppAbbr = (typeof teamAbbr === 'function' && teamAbbr(opponentName)) || opponentName;
+        // College: school name from the PX event name. Falls back to the FULL
+        // team name rather than teamAbbr's last word, which is ambiguous for
+        // college ("Tigers", "Bears") — long but never wrong.
+        const oppAbbr = collegeOpponentName(l, matchesHome)
+          || (/ncaa/i.test(l.sport || '')
+                ? opponentName
+                : ((typeof teamAbbr === 'function' && teamAbbr(opponentName)) || opponentName));
         if (oppAbbr) {
           teamLabel += ' <span style="color:var(--text3); font-size:10px;">· ' + prep + escapeHtml(oppAbbr) + '</span>';
         }
