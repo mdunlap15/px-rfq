@@ -169,9 +169,21 @@ const CFTC_KEY_MAP = {
   unmatched_order_balance: 'unmatched_wager_balance',
   unmatched_order_balance_status: 'unmatched_wager_balance_status',
   order_id: 'wager_id',
+  trade_id: 'bet_id',
   fill_price: 'matched_odds',
   filled_quantity: 'matched_stake',
   open_quantity: 'unmatched_stake',
+  total_filled_quantity: 'totally_matched_stake',
+  original_quantity: 'original_stake',
+  total_quantity: 'total_stake',
+  display_price: 'display_odds',
+  adjusted_price: 'adjusted_odds',
+  order_strategy: 'wager_strategy',
+  // Balance renames PX's published table omits — MEASURED against
+  // /v4/mm/get_balance. Reading only the legacy names here breaks the
+  // headroom cap OPEN (unmatched reads 0 -> headroom looks maximal).
+  matched_order_balance: 'matched_wager_balance',
+  unmatched_order_last_synced_at: 'unmatched_wager_last_synced_at',
 };
 // ENDPOINT-SCOPED maps. Two renames are correct on SOME routes and corrupting
 // on others, so they cannot live in the global map above:
@@ -196,14 +208,98 @@ const CFTC_ENDPOINT_MAPS = [
   // bare-name renames as on markets. Caught by simulating the flip against the
   // poster fleet: without these a resting offer normalises with odds=undefined.
   { match: /\/mm\/get_wager_histories|\/mm\/get_order_history/, keys: { orders: 'wagers', price: 'odds', quantity: 'stake' } },
-  { match: /\/mm\/get_matched_bets|\/mm\/get_trades/, keys: { trades: 'matched_bets' } },
+  // get_trades rows are NOT just a container rename. MEASURED 2026-09-03 side by side:
+  //   /mm/get_matched_bets -> id, line,   matched_at, ODD,   profit, stake,    status, wager_id
+  //   /v4/mm/get_trades    -> id, strike, matched_at, PRICE, profit, quantity, status, order_id
+  // `odd` is SINGULAR on this route, so the global odds/price pair does not cover it, and
+  // quantity->stake is scoped to the wager/markets routes rather than here. Without both, a
+  // caller on v4 reads price=null and stake=null on every matched bet.
+  { match: /\/mm\/get_matched_bets|\/mm\/get_trades/,
+    keys: { trades: 'matched_bets', price: 'odd', quantity: 'stake' } },
   { match: /\/mm\/get_markets|\/mm\/get_multiple_markets/, keys: { price: 'odds', quantity: 'stake' } },
+  // PLACEMENT responses. Caught by canary 2026-09-03: a $1 offer through
+  // /v4/mm/submit_multiple_orders came back with odds=null stake=null because no rule matched
+  // this route, so callers reading the returned rows saw nothing. PX confirmed the offer itself
+  // was correct (status=open, odds=+2000) — the defect was purely in our translation.
+  { match: /\/mm\/place_multiple_wagers|\/mm\/submit_multiple_orders|\/mm\/submit_order/,
+    keys: { price: 'odds', quantity: 'stake', orders: 'wagers',
+            succeed_orders: 'succeed_wagers', failed_orders: 'failed_wagers' } },
 ];
 
 // winning/settlement enum: profit -> won, loss -> lost. push and the
 // passthrough values (draw, no_result, tbd, manually_*) are unchanged.
 const CFTC_STATUS_FIELDS = new Set(['settlement_status', 'winning_status']);
 const CFTC_STATUS_MAP = { profit: 'won', loss: 'lost' };
+
+// `transaction_type: BET -> TRADE` from PX's table. Its own field with its own
+// map: a bare 'TRADE'/'BET' anywhere else is unrelated data, and a record-wide
+// value sweep would corrupt it. Nothing reads this today; implemented so the
+// 1:1 mapping matches the doc exactly.
+const CFTC_VALUE_FIELDS = { transaction_type: { TRADE: 'BET' } };
+
+// Routes that carry renameable rows but have NO entry in CFTC_ENDPOINT_MAPS.
+//
+// Four separate bugs of this exact shape have now shipped — wager rows, markets,
+// placement responses, and get_trades' singular `odd` — each one a route whose
+// field names the global map did not cover, returning null to every caller in
+// silence. The pattern is not "we forgot a key", it is "we had no way to notice".
+// So notice: any PX response on a /mm/ or /parlay/ route that matches no
+// endpoint rule is counted and named, once per route.
+// Sentinel keys that only mean something AFTER the rename. If one of these
+// survives normalisation with no legacy counterpart in the same object, we
+// received new vocabulary we did not translate — which is precisely what the
+// four shipped bugs looked like from the caller's side: a field reading null,
+// silently.
+//
+// Deliberately NOT "the route has no endpoint rule": most routes are fully
+// covered by the global map and would warn for no reason. A guard that fires on
+// healthy routes gets ignored, which is worse than no guard at all. (First cut
+// did exactly that — it flagged /v4/mm/get_balance, which works correctly.)
+// `odd` is deliberately absent: on get_trades it is the LEGACY name, not a new
+// one. Container keys are /mm/-only because the parlay surface returns `orders`
+// natively and always has — flagging that would be a permanent false positive.
+const CFTC_SENTINELS = { price: 'odds', quantity: 'stake' };
+const CFTC_SENTINELS_MM_ONLY = {
+  orders: 'wagers', trades: 'matched_bets',
+  succeed_orders: 'succeed_wagers', failed_orders: 'failed_wagers',
+};
+const _cftcUnmappedRoutes = {};
+
+function _scanUntranslated(node, found, depth, sentinels) {
+  if (node == null || typeof node !== 'object' || depth > 6 || found.size >= 6) return;
+  if (Array.isArray(node)) {
+    for (const v of node.slice(0, 5)) _scanUntranslated(v, found, depth + 1, sentinels);
+    return;
+  }
+  for (const [newKey, legacy] of Object.entries(sentinels)) {
+    if (newKey in node && !(legacy in node)) found.add(newKey + '->' + legacy);
+  }
+  for (const v of Object.values(node)) _scanUntranslated(v, found, depth + 1, sentinels);
+}
+
+function _noteUntranslated(endpoint, data, extra) {
+  const key = String(endpoint || '').split('?')[0];
+  if (!key) return;
+  // A sentinel the route's own map already handles is not a miss — it was
+  // translated to that route's legacy name (get_trades: price -> `odd`).
+  const sentinels = {};
+  const pool = /\/mm\//.test(key)
+    ? Object.assign({}, CFTC_SENTINELS, CFTC_SENTINELS_MM_ONLY)
+    : CFTC_SENTINELS;
+  for (const [k, v] of Object.entries(pool)) {
+    if (!extra || !(k in extra)) sentinels[k] = v;
+  }
+  if (!Object.keys(sentinels).length) return;
+  const found = new Set();
+  _scanUntranslated(data, found, 0, sentinels);
+  if (!found.size) return;
+  const sig = key + ' :: ' + [...found].sort().join(',');
+  if (_cftcUnmappedRoutes[sig]) { _cftcUnmappedRoutes[sig]++; return; }
+  _cftcUnmappedRoutes[sig] = 1;
+  log.warn('PX', `CFTC: ${key} returned untranslated new-vocabulary field(s) [${[...found].join(', ')}] `
+    + '— callers reading the legacy names will see null. Add or widen a CFTC_ENDPOINT_MAPS entry.');
+}
+function getCftcUnmappedRoutes() { return { ..._cftcUnmappedRoutes }; }
 
 let _cftcNormStats = { payloads: 0, keysRenamed: 0, statusesMapped: 0, lastAt: null };
 function getCftcNormalizerStats() { return { ..._cftcNormStats }; }
@@ -234,6 +330,13 @@ function _normalizeCftcInPlace(node, depth, extraKeys) {
       _cftcNormStats.statusesMapped++;
     }
   }
+  for (const [f, vmap] of Object.entries(CFTC_VALUE_FIELDS)) {
+    const v = node[f];
+    if (typeof v === 'string' && vmap[v] !== undefined) {
+      node[f] = vmap[v];
+      _cftcNormStats.statusesMapped++;
+    }
+  }
   for (const v of Object.values(node)) _normalizeCftcInPlace(v, depth + 1, extraKeys);
 }
 
@@ -250,6 +353,8 @@ function normalizeCftcPayload(data, endpoint) {
       }
     }
     _normalizeCftcInPlace(data, 0, extra);
+    // Post-walk: did anything new-vocabulary survive untranslated?
+    if (endpoint) _noteUntranslated(endpoint, data, extra);
   } catch (err) {
     log.warn('PX', `CFTC normaliser skipped a payload: ${err.message}`);
   }
@@ -1449,6 +1554,7 @@ function clearCooldown() {
 module.exports = {
   normalizeCftcPayload,
   getCftcNormalizerStats,
+  getCftcUnmappedRoutes,
   CFTC_KEY_MAP,
   CFTC_ENDPOINT_MAPS,
   CFTC_STATUS_MAP,

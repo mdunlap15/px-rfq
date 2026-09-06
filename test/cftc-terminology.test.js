@@ -289,3 +289,79 @@ test('wager ROWS get price->odds and quantity->stake, like markets', () => {
   assert.strictEqual(w.unmatched_stake, 300);
   assert.strictEqual(w.wager_id, 'w1');
 });
+
+// ------------------------------------------- ported from the Python normaliser
+//
+// px_cftc.py (the laptop poster fleet) found three things this map lacked.
+// Same vocabulary, same PX, so the JS side had the same holes.
+
+test('get_trades uses SINGULAR `odd`, not `odds`', () => {
+  // MEASURED 2026-09-03 side by side:
+  //   /mm/get_matched_bets -> id, line,   ODD,   stake,    wager_id
+  //   /v4/mm/get_trades    -> id, strike, PRICE, quantity, order_id
+  // The global odds/price pair does not cover `odd`, and quantity->stake is
+  // scoped to the wager/markets routes. Without both, a caller on v4 reads
+  // price=null and stake=null on every matched bet.
+  const p = { data: { trades: [{ order_id: 'o1', price: -150, quantity: 100, strike: -1.5 }] } };
+  px.normalizeCftcPayload(p, '/partner/v4/mm/get_trades');
+  const r = p.data.matched_bets[0];
+  assert.strictEqual(r.odd, -150, 'price -> odd (singular) on this route');
+  assert.strictEqual(r.stake, 100);
+  assert.strictEqual(r.wager_id, 'o1');
+  assert.strictEqual(r.line, -1.5);
+});
+
+test('balance renames PX omits from its published table', () => {
+  const p = { data: { matched_order_balance: 5, unmatched_order_balance: 7,
+    unmatched_order_last_synced_at: 'x' } };
+  px.normalizeCftcPayload(p, '/partner/v4/mm/get_balance');
+  assert.strictEqual(p.data.matched_wager_balance, 5);
+  assert.strictEqual(p.data.unmatched_wager_balance, 7);
+  assert.strictEqual(p.data.unmatched_wager_last_synced_at, 'x');
+});
+
+test('transaction_type TRADE->BET, scoped to its own field', () => {
+  const p = { transaction_type: 'TRADE', note: 'TRADE', kind: 'BET' };
+  px.normalizeCftcPayload(p);
+  assert.strictEqual(p.transaction_type, 'BET');
+  assert.strictEqual(p.note, 'TRADE', 'a bare TRADE elsewhere is unrelated data');
+  assert.strictEqual(p.kind, 'BET');
+});
+
+// ------------------------------------------------ untranslated-field guard
+//
+// Four bugs of one shape have shipped: wager rows, markets, placement
+// responses, and get_trades' singular `odd`. Each was a route whose field
+// names no rule covered, returning null to every caller in silence. The
+// pattern is not "we forgot a key", it is "we had no way to notice".
+
+test('the guard stays SILENT on healthy routes', () => {
+  // A guard that fires on working routes gets ignored, which is worse than no
+  // guard. The first cut flagged /v4/mm/get_balance, which is fully covered by
+  // the global map.
+  const before = Object.keys(px.getCftcUnmappedRoutes()).length;
+  px.normalizeCftcPayload({ data: { matched_order_balance: 5 } }, '/partner/v4/mm/get_balance');
+  px.normalizeCftcPayload({ data: { trades: [{ price: -150, quantity: 1 }] } }, '/partner/v4/mm/get_trades');
+  px.normalizeCftcPayload({ data: { orders: [{ price: -110 }] } }, '/partner/v2/mm/get_wager_histories');
+  px.normalizeCftcPayload({ data: { succeed_orders: [{ price: 1 }] } }, '/partner/v4/mm/submit_multiple_orders');
+  assert.strictEqual(Object.keys(px.getCftcUnmappedRoutes()).length, before,
+    'no healthy route may be flagged');
+});
+
+test('the parlay surface returning `orders` is NOT flagged', () => {
+  // /parlay/sp/* returns `orders` natively and always has — treating that as an
+  // untranslated rename would be a permanent false positive.
+  const before = Object.keys(px.getCftcUnmappedRoutes()).length;
+  px.normalizeCftcPayload({ data: { orders: [{ confirmed_price: -230 }] } }, '/parlay/sp/v2/orders/');
+  assert.strictEqual(Object.keys(px.getCftcUnmappedRoutes()).length, before);
+});
+
+test('the guard FIRES when a route returns untranslated new vocabulary', () => {
+  px.normalizeCftcPayload({ data: { orders: [{ price: -150, quantity: 100 }] } },
+    '/partner/v4/mm/a_route_with_no_rule');
+  const flagged = Object.keys(px.getCftcUnmappedRoutes());
+  const hit = flagged.find(k => k.includes('a_route_with_no_rule'));
+  assert.ok(hit, 'an unmapped route returning renamed rows must be reported');
+  assert.ok(/price->odds/.test(hit) && /quantity->stake/.test(hit),
+    'and must name the offending fields, not just the route');
+});
