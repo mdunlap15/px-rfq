@@ -23,6 +23,31 @@
 
 const log = require('./logger');
 const { config } = require('../config');
+// px-single has its OWN pxFetch, so it never went through prophetx.js's CFTC normaliser --
+// this file was invisible to the terminology audit until 2026-09-03 because that audit only
+// scanned Python. Reuse the same, already-tested normaliser rather than a second copy.
+const { normalizeCftcPayload } = require('./prophetx');
+
+// ---------------------------------------------------------------------------
+// CFTC v4 WRITE PATH (Mike 2026-09-03) — default OFF.
+//
+// PX_V4_WRITES=true routes every write on this surface to its v4 successor with the renamed
+// REQUEST fields (line_id->strike_id, odds->price, stake->quantity). Response-side translation
+// is handled by normalizeCftcPayload, which is why reads need no per-call work.
+//
+// V4_CANARY_PREFIX is the surgical override: a batch whose external_ids ALL carry that prefix
+// goes to v4 even while the flag is off. That is what makes it possible to prove the new
+// placement route with ONE $1 offer in production without switching the live book -- placement
+// is IP-gated, so it cannot be canaried from a laptop at all (CLAUDE.md 2).
+// ---------------------------------------------------------------------------
+const PX_V4_WRITES = String(process.env.PX_V4_WRITES || '').toLowerCase() === 'true';
+const V4_CANARY_PREFIX = 'claude_v4canary';
+
+function _useV4(orders) {
+  if (PX_V4_WRITES) return true;
+  return Array.isArray(orders) && orders.length > 0
+    && orders.every(o => String((o && o.external_id) || '').startsWith(V4_CANARY_PREFIX));
+}
 
 const BASE = config.px && config.px.baseUrl ? config.px.baseUrl : 'https://cash.api.prophetx.co';
 
@@ -130,7 +155,10 @@ async function pxFetch(endpoint, method = 'GET', body = null) {
     const text = await resp.text();
     throw new Error(`px-single ${method} ${endpoint} ${resp.status}: ${text.slice(0, 300)}`);
   }
-  return await resp.json();
+  // Translate CFTC vocabulary back to legacy so every reader below keeps working whichever
+  // tier answered. Endpoint-scoped, so `price`/`quantity` are only remapped where they really
+  // are renames of odds/stake.
+  return normalizeCftcPayload(await resp.json(), endpoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +176,10 @@ async function fetchMarkets(eventId) {
 }
 
 async function fetchBalance() {
-  const j = await pxFetch('/partner/mm/get_balance', 'GET');
+  // /v4/mm/get_balance renames matched_wager_balance -> matched_order_balance et al;
+  // normalizeCftcPayload maps them back.
+  const j = await pxFetch(PX_V4_WRITES ? '/partner/v4/mm/get_balance'
+                                       : '/partner/mm/get_balance', 'GET');
   return j.data || j;
 }
 
@@ -159,16 +190,27 @@ async function fetchBalance() {
 async function placeMultipleWagers(orders) {
   if (!Array.isArray(orders) || orders.length === 0) return { succeed_wagers: [], failed_wagers: [] };
   if (orders.length > 20) throw new Error('px-single.placeMultipleWagers: max 20 per call');
+  // v4 renames the REQUEST fields; normalizeCftcPayload is response-side only and cannot help
+  // here. Probed live: /partner/v4/mm/submit_multiple_orders EXISTS and returns byte-identical
+  // errors to place_multiple_wagers, so this is a swap, not a rewrite. (`submit_orders` is 404;
+  // the singular `submit_order` also exists but takes one order.)
+  const v4 = _useV4(orders);
   const payload = {
-    data: orders.map(o => ({
+    data: orders.map(o => (v4 ? {
+      strike_id: o.line_id,
+      price: o.odds,
+      quantity: o.stake,
+      external_id: o.external_id,
+    } : {
       line_id: o.line_id,
       odds: o.odds,
       stake: o.stake,
       external_id: o.external_id,
     })),
   };
-  log.info('PX-Single', `place_multiple_wagers request: ${JSON.stringify(payload.data)}`);
-  const j = await pxFetch('/partner/mm/place_multiple_wagers', 'POST', payload);
+  const route = v4 ? '/partner/v4/mm/submit_multiple_orders' : '/partner/mm/place_multiple_wagers';
+  log.info('PX-Single', `${v4 ? 'submit_multiple_orders(v4)' : 'place_multiple_wagers'} request: ${JSON.stringify(payload.data)}`);
+  const j = await pxFetch(route, 'POST', payload);
   // Log the RAW response so we can verify PX's actual shape — the parlay SP
   // doesn't use this endpoint, so its field names (succeed_wagers / wager_id /
   // status / external_id) are unverified against live PX. Diagnosing the
@@ -180,25 +222,35 @@ async function placeMultipleWagers(orders) {
   // Be liberal in what we accept: PX may nest these under j.data or return
   // them at the top level.
   const root = (j && j.data) ? j.data : (j || {});
+  // v4 nests its results under order-flavoured names; stay liberal in what we accept so the
+  // caller sees one shape whichever tier answered.
   return {
-    succeed_wagers: root.succeed_wagers || root.succeeded_wagers || root.wagers || [],
-    failed_wagers: root.failed_wagers || root.failures || [],
+    succeed_wagers: root.succeed_wagers || root.succeeded_wagers || root.wagers
+      || root.succeed_orders || root.succeeded_orders || root.orders || [],
+    failed_wagers: root.failed_wagers || root.failures || root.failed_orders || [],
     _raw: root,
   };
 }
 
+// Cancel contracts CANARIED on the production account 2026-09-03: cancel_order takes
+// {external_id, order_id}; the by-market route keeps `event_id` (`sport_event_id` is rejected
+// with invalid_event_id). Here only the id is available, so the order_id form is used.
 async function cancelWager(wagerId) {
-  return await pxFetch('/partner/mm/cancel_wager', 'POST', { wager_id: wagerId });
+  return PX_V4_WRITES
+    ? await pxFetch('/partner/v4/mm/cancel_order', 'POST', { order_id: wagerId })
+    : await pxFetch('/partner/mm/cancel_wager', 'POST', { wager_id: wagerId });
 }
 
 async function cancelWagersByEvent(eventId) {
-  return await pxFetch('/partner/mm/cancel_wagers_by_event', 'POST', { event_id: Number(eventId) });
+  const path = PX_V4_WRITES ? '/partner/v4/mm/cancel_orders_by_event'
+                            : '/partner/mm/cancel_wagers_by_event';
+  return await pxFetch(path, 'POST', { event_id: Number(eventId) });
 }
 
 async function cancelWagersByMarket(eventId, marketId) {
-  return await pxFetch('/partner/mm/cancel_wagers_by_market', 'POST', {
-    event_id: Number(eventId), market_id: Number(marketId),
-  });
+  const path = PX_V4_WRITES ? '/partner/v4/mm/cancel_orders_by_market'
+                            : '/partner/mm/cancel_wagers_by_market';
+  return await pxFetch(path, 'POST', { event_id: Number(eventId), market_id: Number(marketId) });
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +261,9 @@ async function fetchOddsLadder(force = false) {
   if (!force && oddsLadderCache.ladder && (Date.now() - oddsLadderCache.time) < LADDER_TTL_MS) {
     return oddsLadderCache.ladder;
   }
-  const j = await pxFetch('/partner/mm/get_odds_ladder', 'GET');
+  // v4 get_price_ladder returns the SAME list of bare integers (measured: 555 either way).
+  const j = await pxFetch(PX_V4_WRITES ? '/partner/v4/mm/get_price_ladder'
+                                       : '/partner/mm/get_odds_ladder', 'GET');
   let ladder = j.data || j;
   // Some shapes return { ladder: [...] }, others return [...] directly
   if (ladder && !Array.isArray(ladder) && Array.isArray(ladder.ladder)) ladder = ladder.ladder;
