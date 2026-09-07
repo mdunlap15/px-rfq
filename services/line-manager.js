@@ -680,7 +680,57 @@ function resolveDisplayTeamName(sel, matchedHome, matchedAway) {
  * Try to match a PX team name to an Odds API team name.
  * Strategies: exact, contains, override map.
  */
-function matchTeamName(pxName, oddsApiNames) {
+/**
+ * College team-name matching.
+ *
+ * PX names a college team by SCHOOL alone ("Oregon", "Texas"); The Odds API
+ * appends the mascot ("Oregon Ducks", "Texas Longhorns"). Plain substring
+ * containment then collides, because one school's name is a prefix of another's:
+ *
+ *   "Oregon"   -> Oregon Ducks | Oregon State Beavers          (2 candidates)
+ *   "Alabama"  -> Alabama Crimson Tide | South Alabama Jaguars (2)
+ *   "Texas"    -> Longhorns | A&M | State | Tech | North Texas (5)
+ *
+ * matchTeamName's ambiguity guard correctly refuses to guess, so the whole
+ * event goes dark. MEASURED 2026-09-06 against the live TOA board: 12 of 49 PX
+ * College Football events (24%) were unmatchable this way — Oklahoma at
+ * Michigan, Ohio State at Texas, Alabama at Kentucky among them — and that is
+ * the single largest cause of CFB decline volume (event_match_gap).
+ *
+ * Two rules fix it without weakening the guard:
+ *
+ *  1. ANCHORING. A candidate counts only if one name is a WORD-BOUNDED prefix
+ *     of the other. This is strictly stricter than containment and it closes a
+ *     real mispricing hole in the opposite direction: with the correct school
+ *     absent from the board, "Houston" was the sole substring match for
+ *     "Sam Houston State Bearkats" — one candidate, so the ambiguity guard
+ *     never fired, and we would have priced the wrong school's game.
+ *
+ *  2. SHORTEST REMAINDER. Among anchored candidates, the fewest leftover words
+ *     wins: "Oregon" -> "Oregon Ducks" (1 extra) over "Oregon State Beavers"
+ *     (2). A tie is still ambiguous and still fails closed.
+ *
+ * College only. Applying anchoring everywhere would break sports where PX
+ * supplies a bare mascot ("Cardinals" -> "Arizona Cardinals"), which is not a
+ * prefix and matches perfectly well today.
+ */
+function _collegeAnchoredMatch(norm, candidates, normalize) {
+  const anchored = [];
+  for (const name of candidates) {
+    const o = normalize(name);
+    if (o === norm) return name;
+    if (o.startsWith(norm + ' ') || norm.startsWith(o + ' ')) {
+      anchored.push({ name, extra: Math.abs(o.split(' ').length - norm.split(' ').length) });
+    }
+  }
+  if (!anchored.length) return null;
+  anchored.sort((a, b) => a.extra - b.extra);
+  // A tie on remainder length is genuinely ambiguous -> fail closed.
+  if (anchored.length > 1 && anchored[0].extra === anchored[1].extra) return null;
+  return anchored[0].name;
+}
+
+function matchTeamName(pxName, oddsApiNames, sportKey) {
   const norm = normalizeTeamName(pxName);
 
   // Check override map
@@ -711,6 +761,15 @@ function matchTeamName(pxName, oddsApiNames) {
       if (!subMatches.some(n => normalizeTeamName(n) === oaNorm)) subMatches.push(oaName);
     }
   }
+
+  // COLLEGE: resolve prefix collisions by anchoring + shortest remainder, and
+  // REJECT an unanchored lone candidate rather than accept it. See
+  // _collegeAnchoredMatch. This branch both recovers ~24% of the CFB board and
+  // closes the "Houston" -> "Sam Houston State" wrong-school hole.
+  if (/ncaa/i.test(sportKey || '')) {
+    return _collegeAnchoredMatch(norm, subMatches, normalizeTeamName);
+  }
+
   if (subMatches.length === 1) return subMatches[0];
 
   // Last N words match (e.g., "Red Sox" matches "Boston Red Sox")
@@ -763,7 +822,17 @@ function resolveHomeAwaySide(pxTeamName, matchedHome, matchedAway) {
   if (!pxTeamName || !matchedHome || !matchedAway) return null;
   // Degenerate feed data -- cannot attribute a side, so don't guess.
   if (normalizeTeamName(matchedHome) === normalizeTeamName(matchedAway)) return null;
-  const matched = matchTeamName(pxTeamName, [matchedHome, matchedAway]);
+  let matched = matchTeamName(pxTeamName, [matchedHome, matchedAway]);
+  // College prefix collisions defeat the generic matcher on rivalry games:
+  // "Oregon" against ["Oregon Ducks", "Oregon State Beavers"] is two substring
+  // hits, so the ambiguity guard returns null and the leg fails closed. Retry
+  // with the anchored matcher, which resolves a clean prefix winner and still
+  // returns null on a genuine tie ("New York" vs Yankees/Mets stays ambiguous).
+  // Fallback-only, so every currently-resolving case is untouched.
+  if (!matched) {
+    matched = _collegeAnchoredMatch(
+      normalizeTeamName(pxTeamName), [matchedHome, matchedAway], normalizeTeamName);
+  }
   if (!matched) return null;
   if (matched === matchedHome) return 'home';
   if (matched === matchedAway) return 'away';
@@ -1525,8 +1594,8 @@ async function seedAllLines() {
         .flatMap(e => [e.homeTeam, e.awayTeam]);
       const uniqueTeams = [...new Set(allOddsTeams)];
 
-      const tryHome = matchTeamName(homeComp.name, uniqueTeams);
-      const tryAway = matchTeamName(awayComp.name, uniqueTeams);
+      const tryHome = matchTeamName(homeComp.name, uniqueTeams, tryKey);
+      const tryAway = matchTeamName(awayComp.name, uniqueTeams, tryKey);
 
       if (tryHome && tryAway) {
         // Verify this pair exists — use scheduled time for back-to-back/doubleheader matching
@@ -1549,8 +1618,8 @@ async function seedAllLines() {
         const sharpEvents = oddsFeed.getSharpEvents(tryKey);
         if (!sharpEvents || sharpEvents.length === 0) continue;
         const sharpTeams = [...new Set(sharpEvents.flatMap(e => [e.homeTeam, e.awayTeam]))];
-        const tryHome = matchTeamName(homeComp.name, sharpTeams);
-        const tryAway = matchTeamName(awayComp.name, sharpTeams);
+        const tryHome = matchTeamName(homeComp.name, sharpTeams, tryKey);
+        const tryAway = matchTeamName(awayComp.name, sharpTeams, tryKey);
         if (tryHome && tryAway) {
           // Look up odds using SharpAPI's canonical team names
           const pxTime = event.scheduled || null;
@@ -1646,8 +1715,8 @@ async function seedAllLines() {
           // Report the RESOLVED NAME, not just ok/MISS. A bare 'ok' hid a
           // wrong-club resolution on 2026-08-22: 'RCD Espanyol de Barcelona'
           // matched BARCELONA and still reported ok, which reads as success.
-          const h = matchTeamName(homeComp.name, pool) || 'MISS';
-          const a = matchTeamName(awayComp.name, pool) || 'MISS';
+          const h = matchTeamName(homeComp.name, pool, tryKey) || 'MISS';
+          const a = matchTeamName(awayComp.name, pool, tryKey) || 'MISS';
           _diag.push(`${tryKey}(${pool.length} teams):home=${h},away=${a}`);
         }
         unmatchedEvents.push({
@@ -3526,8 +3595,8 @@ async function resolveUnknownLine(rfqLeg) {
   let matchedHome = null, matchedAway = null, sportKey = possibleSportKeys[0];
   for (const tryKey of possibleSportKeys) {
     const uniqueTeams = [...new Set(oddsApiEvents.filter(e => e.sport === tryKey).flatMap(e => [e.homeTeam, e.awayTeam]))];
-    const tryHome = matchTeamName(homeComp.name, uniqueTeams);
-    const tryAway = matchTeamName(awayComp.name, uniqueTeams);
+    const tryHome = matchTeamName(homeComp.name, uniqueTeams, tryKey);
+    const tryAway = matchTeamName(awayComp.name, uniqueTeams, tryKey);
     if (tryHome && tryAway) {
       const pxTime = event.scheduled || null;
       const oddsEvt = oddsFeed.getEventMarkets(tryKey, tryHome, tryAway, pxTime) || oddsFeed.getEventMarkets(tryKey, tryAway, tryHome, pxTime);
@@ -3553,8 +3622,8 @@ async function resolveUnknownLine(rfqLeg) {
     for (const tourKey of tennisTourKeys) {
       const uniqueTeams = [...new Set(oddsApiEvents.filter(e => e.sport === tourKey).flatMap(e => [e.homeTeam, e.awayTeam]))];
       if (uniqueTeams.length === 0) continue;
-      const tryHome = matchTeamName(homeComp.name, uniqueTeams);
-      const tryAway = matchTeamName(awayComp.name, uniqueTeams);
+      const tryHome = matchTeamName(homeComp.name, uniqueTeams, tryKey);
+      const tryAway = matchTeamName(awayComp.name, uniqueTeams, tryKey);
       if (!tryHome || !tryAway) continue;
       const pxTime = event.scheduled || null;
       const oddsEvt = oddsFeed.getEventMarkets(tourKey, tryHome, tryAway, pxTime)
@@ -3579,8 +3648,8 @@ async function resolveUnknownLine(rfqLeg) {
       const sharpEvents = oddsFeed.getSharpEvents(tryKey);
       if (!sharpEvents || sharpEvents.length === 0) continue;
       const sharpTeams = [...new Set(sharpEvents.flatMap(e => [e.homeTeam, e.awayTeam]))];
-      const tryHome = matchTeamName(homeComp.name, sharpTeams);
-      const tryAway = matchTeamName(awayComp.name, sharpTeams);
+      const tryHome = matchTeamName(homeComp.name, sharpTeams, tryKey);
+      const tryAway = matchTeamName(awayComp.name, sharpTeams, tryKey);
       if (tryHome && tryAway) {
         const pxTime = event.scheduled || null;
         const oddsEvt = oddsFeed.getEventMarkets(tryKey, tryHome, tryAway, pxTime)
