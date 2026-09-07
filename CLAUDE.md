@@ -48,6 +48,9 @@ client/
 | `DEFAULT_VIG` | No | Default: 0.015 (1.5% per leg) |
 | `VIG_BY_SPORT` | No | JSON map of per-sport base vig overriding `DEFAULT_VIG` (e.g. `{"soccer":0.03}`) |
 | `VIG_BY_SPORT_MARKET` | No | JSON map keyed `<sport>.<marketType>` (e.g. `{"baseball_mlb.total":0.010}`) overriding `VIG_BY_SPORT` for one market. **SCOPE: matches the POST-PARSE marketType**, so `baseball_mlb.total` is FULL-GAME only — F5/1H/2H/quarter/team/series/RFI totals carry their own suffixed types and are NOT covered — while ALT spreads/totals ARE covered (they retag back to plain `spread`/`total`). **Usually INERT on markets with Pinnacle/FD/DK coverage**: the per-leg consensus floor (`PRICE_FLOOR_VS_CONSENSUS_PP`, prod 1pp) sets the price there, measured 2026-08-14 — a −110/−110 MLB total quotes 51.381% at both 1.6% and 1.0% vig. It reaches a price mainly on legs with NO book consensus, which are the least-corroborated fairs, so narrow with care. Exists because sport-wide vig cannot express "absent from MLB totals, competitive on MLB moneyline" — measured 2026-08-14: we won 5.9% of MLB-total contests we entered and 3.2% of spreads, in the one family the audit proved calibrated. Moves the BASE vig only; favorite ramp, prop floor, MMA/golf minimums, SGP multiplier and the 20% ceiling all still apply, so an override can never push a leg below its own floor. Entries that are 0, negative, >0.25, or malformed are DROPPED (falls back to sport vig) rather than quoting at fair. |
+| `PROP_NET_EXPOSURE_BY_SPORT` | No | JSON per-sport cap on **league-wide NET player-prop exposure**. Default `{"americanfootball_ncaaf":500,"americanfootball_nfl":1500}` (operator directive 2026-09-07, on opening football props). A **new dimension** none of the existing caps can express: `MAX_EXPOSURE_PER_PLAYER_BY_SPORT` is per-PLAYER (twenty receivers in twenty games each sit under their own cap while the league book runs past $500), sgp-guard's prop game caps are per-GAME (blind to a whole Saturday slate), `MAX_RISK_PER_PARLAY_WITH_PROP` is per-TICKET. Computed by summing the EXISTING per-player accounting by sport — never a second set of books, so it cannot drift out of step. A sport ABSENT from the map is **uncapped on this dimension** (its other caps still apply), so add a league here when you open props for it. A `0` or negative entry means "not configured", NOT "block everything". |
+| `FOOTBALL_PROP_TMINUS_MINUTES` | No | Default: 120. Football props do not **REGISTER** until the game is inside this window — so outside it PX is never told we support the line and never sends the RFQ (same posture as the golf kill-switch). Mirrors the single-leg scheduler, operator verbatim: "I don't want football player props being listed until T-120 before game start times." **NFL inactives drop ~90 minutes before kickoff — i.e. INSIDE the window** — so a board built earlier is quoting players who will not take a snap, and a resting stale quote is a free option for whoever watches the market move. An **unparseable kickoff fails CLOSED**. |
+| `FOOTBALL_PROP_MIN_BOOKS` | No | Default: 3. Football props need MORE books than the global `PROP_MIN_BOOKS_WITH_BOTH_SIDES` (2). Below 3 "there is no independent cross-check and we are mirroring one book with nothing to audit it". ⚠ The football floor is **ABSOLUTE — the trusted-single-book bypass (`PROP_TRUSTED_SINGLE_BOOKS`) is disabled for football**, otherwise one DK quote would satisfy it and silently defeat the rule. Kept separate so raising the football bar never tightens MLB/NBA/NHL. |
 | `PROP_LAUNCH_ALLOWLIST` | No | Comma-separated `<sport>.<propType>` keys that may quote (e.g. `baseball_mlb.hitter_hr,soccer.goalscorer`). Props not listed never register. **Does NOT gate pitcher strikeouts** — those have their own dedicated seed/on-demand paths and their own kill-switch, `PITCHER_K_PROPS_ENABLED`. |
 | `PITCHER_K_PROPS_ENABLED` | No | Master kill-switch for quoting pitcher-strikeout props (`marketType='player_strikeouts'`). **Default: OFF** (2026-08-24). Must be the literal string `'true'` to re-enable. K-props register through a dedicated seed branch (line-manager K-prop seed, ~L1823) and an on-demand resolve path (~L3486) that **predate `PROP_LAUNCH_ALLOWLIST` and never consulted it** — so removing the allowlist entry never stopped them; this flag does. When off, both paths skip, no `player_strikeouts` line registers, and PX never sends a K-prop RFQ. |
 | `MAX_RISK_PER_PARLAY` | No | Default: 500 |
@@ -384,6 +387,50 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
   are INVISIBLE to this trader's exposure tracker — a parlay MoV quote on the same
   fight outcome stacks risk across the two books with no shared cap. PX also
   frequently lacks DEC markets that DK prices (10/10 skipped 2026-08-11).
+
+## Football Player Props (parlay legs)
+
+Opened 2026-09-07 (operator directive). Sourced under the SAME rules as the
+single-leg props scheduler (`~/cfb_props_cycle.py`), because those rules exist
+in response to being picked off on this exact market last season.
+
+- **TOA coverage is MEASURED, and the old comment claiming otherwise was wrong.**
+  Live 2026-09-07, us region, one NFL + one NCAAF event —
+  `player_pass_yds` NFL 6/6 two-sided, NCAAF 3/3; `player_pass_tds` 6/6, 3/3;
+  `player_reception_yds` 6/6, 3/3; `player_rush_yds` 6/6, NCAAF 2/2 (thin);
+  `player_receptions` NFL 6/5, NCAAF absent. The map had carried `anytime_td`
+  ALONE on the claim of "ZERO player_* keys for NCAAF".
+- ⚠ **The TD markets are ONE-SIDED at every book** — `player_anytime_td` 8 books
+  and not one prices the "no"; `player_1st_td` 6 books, same. They cannot be
+  2-way de-vigged, so anytime TD keeps the lineless YES-only book-mirror path.
+  **`first_td` is deliberately still unmapped**: it is a CLOSED field (exactly
+  one player scores first) and wants field normalisation like golf outright win.
+- **T-120 registration window** (`FOOTBALL_PROP_TMINUS_MINUTES`). Gates
+  REGISTRATION, not pricing. Unparseable kickoff fails closed.
+- **≥3 books, absolute** (`FOOTBALL_PROP_MIN_BOOKS`) — the trusted-single-book
+  bypass is disabled for football.
+- **ONE line per (player, market) — NO ALTS.** PX bundles every alt point for a
+  player into ONE market, so without pruning we would register the whole ladder.
+  Two reasons not to: an alt ladder on one player is a stack of near-nested
+  legs, and on the single-leg book alts filled **-3.1% vs -0.6% on mains** —
+  alts are where the pick-off happens, because they are the points with the
+  thinnest coverage. "Best-booked" = most books quoting BOTH sides at that
+  point; ties break toward the middle of the ladder, not an edge. If no point
+  clears the book gate, the whole market is skipped.
+- **League-wide net prop cap** (`PROP_NET_EXPOSURE_BY_SPORT`): CFB $500,
+  NFL $1500.
+- **Same-game football props remain BLOCKED** by the `football_sgp_blocked`
+  guard even with `FOOTBALL_SGP_ENABLED=true` — prop game-script coupling is an
+  order of magnitude larger than side+total and is NOT calibrated. Measured
+  demand supports this: CFB prop demand is **95% cross-game** (17,959 vs 1,004
+  legs on 2026-09-06). NFL is 52/48, so NFL same-game is real demand we are
+  deliberately declining until the coupling is measured.
+- Launch still gated by `PROP_LAUNCH_ALLOWLIST` — add e.g.
+  `americanfootball_ncaaf.passing_yards,americanfootball_nfl.receiving_yards`.
+- ⚠ **Decline volume is a MISLEADING proxy for football prop demand** — it is
+  not merely inflated, it is INVERTED. Saturday 2026-09-06: passing yards
+  17,236 declined legs → **$2,960** of network fills; rushing yards 551 declined
+  legs → **$7,892**. Rank markets by `matched_parlays`, never by declines.
 
 ## Football SGPs — side + total (NFL / CFB)
 

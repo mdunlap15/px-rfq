@@ -205,12 +205,35 @@ test('player-name extraction handles the TD phrasing', () => {
 // Prop plumbing constants + registration-safety assertion
 // ---------------------------------------------------------------------------
 
-test('football prop → TOA map carries anytime_td ONLY (nothing else has a source)', () => {
-  assert.deepEqual(lineManager._FOOTBALL_PROP_TO_TOA_MARKET, { anytime_td: 'player_anytime_td' });
+test('football prop → TOA map: the two-sided markets plus the one-sided anytime TD', () => {
+  // WAS "anytime_td ONLY (nothing else has a source)", on the claim that TOA
+  // served zero player_* keys for NCAAF. MEASURED 2026-09-07 against live TOA,
+  // us region, one NFL and one NCAAF event — that claim is false:
+  //   player_pass_yds       NFL 6/6 two-sided    NCAAF 3/3
+  //   player_pass_tds       NFL 6/6              NCAAF 3/3
+  //   player_reception_yds  NFL 6/6              NCAAF 3/3
+  //   player_rush_yds       NFL 6/6              NCAAF 2/2  (thin -> book gate)
+  //   player_receptions     NFL 6/5              NCAAF 0/0  (absent)
+  assert.deepEqual(lineManager._FOOTBALL_PROP_TO_TOA_MARKET, {
+    anytime_td: 'player_anytime_td',
+    passing_yards: 'player_pass_yds',
+    passing_tds: 'player_pass_tds',
+    rushing_yards: 'player_rush_yds',
+    receiving_yards: 'player_reception_yds',
+    receptions: 'player_receptions',
+  });
+  // ⚠ The TD markets are ONE-SIDED at every book (anytime 8 books / 0 two-sided,
+  // first_td 6 / 0), so they cannot be 2-way de-vigged and keep the lineless
+  // YES-only mirror. Everything else has a real point and no ctx.
   assert.deepEqual(lineManager._footballPropCtx('anytime_td'),
     { propType: 'anytime_td', line: 0.5, toaLine: null },
     'anytime = Over 0.5 registered, NULL TOA query line (outcomes carry no point)');
-  assert.equal(lineManager._footballPropCtx('passing_yards'), null, 'unmapped props fail closed');
+  assert.equal(lineManager._footballPropCtx('passing_yards'), null,
+    'two-sided props carry a real point and must NOT get lineless semantics');
+  // first_td stays unmapped on purpose: it is a CLOSED field (exactly one
+  // player scores first) and wants field normalisation like golf outright win.
+  assert.equal(lineManager._FOOTBALL_PROP_TO_TOA_MARKET.first_td, undefined);
+  assert.equal(lineManager._footballPropCtx('first_td'), null);
 });
 
 test('registration assertion: game marketTypes are forbidden for football props', () => {
@@ -237,7 +260,14 @@ test('registration assertion is ABSENCE-SAFE: missing prophetx helper fails clos
 // End-to-end seed scenarios (REAL seedAllLines / refreshLines, stubbed I/O)
 // ---------------------------------------------------------------------------
 
-const SCHED = new Date(Date.now() + 24 * 3600e3).toISOString();
+// INSIDE the football prop T-minus window (config.pricing.footballPropTMinusMinutes,
+// default 120). Football props do not REGISTER outside it — same rule as the
+// single-leg scheduler, where NFL inactives dropping ~90 minutes before kickoff
+// are the reason a board built earlier would be quoting players who never take a
+// snap. This used to be kickoff+24h, which the window now correctly refuses.
+const SCHED = new Date(Date.now() + 60 * 60e3).toISOString();
+// Same event, far enough out that the window must refuse it.
+const SCHED_FAR = new Date(Date.now() + 24 * 3600e3).toISOString();
 const grp = (arr) => [arr];
 
 const PX_EVENT = {
@@ -310,20 +340,21 @@ function pxMarketsFixture() {
 
 let _seededOnce = false;
 
-async function runSeed({ oddsMarkets, allowlist, propLookup, propOneSided, dropPxHelper } = {}) {
+async function runSeed({ oddsMarkets, allowlist, propLookup, propOneSided, dropPxHelper, eventOverrides } = {}) {
   const saved = [];
   const patch = (obj, key, val) => { saved.push([obj, key, obj[key]]); obj[key] = val; };
 
+  const pxEvent = Object.assign({}, PX_EVENT, eventOverrides || {});
   const oddsEvt = {
     homeTeam: 'Arizona Cardinals',
     awayTeam: 'Carolina Panthers',
-    commenceTime: SCHED,
+    commenceTime: pxEvent.scheduled,
     markets: oddsMarkets,
   };
 
   patch(db, 'loadAllRecentLineCache', async () => ({}));
   patch(db, 'saveLineCache', async () => {});
-  patch(px, 'fetchSportEvents', async () => [PX_EVENT]);
+  patch(px, 'fetchSportEvents', async () => [pxEvent]);
   patch(px, 'fetchMarkets', async () => pxMarketsFixture());
   patch(px, 'getSupportedLines', async () => []);
   patch(px, 'registerSupportedLines', async () => {});
@@ -491,4 +522,39 @@ test('ADVERSARIAL seed: prophetx marketType-safety helper missing → football p
   assert.ok(!idx['td-yes'] && !idx['td-no'],
     'with the assertion helper absent the router must refuse to register any football prop');
   assert.ok(idx['ml-ari'], 'game lines unaffected by the prop assertion');
+});
+
+
+// ---------------------------------------------------------------------------
+// Football prop T-minus window (operator directive 2026-09-07)
+// ---------------------------------------------------------------------------
+//
+// "I don't want football player props being listed until T-120 before game
+// start times" — the single-leg scheduler's rule, carried into the parlay
+// book. It gates REGISTRATION rather than pricing, so outside the window PX is
+// never told we support the line and never sends the RFQ.
+
+test('football props do NOT register outside the T-minus window', async () => {
+  const idx = await runSeed({
+    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    allowlist: new Set([SPORT + '.anytime_td']),
+    eventOverrides: { scheduled: SCHED_FAR },
+    propOneSided: async () => {
+      throw new Error('the window must short-circuit BEFORE any odds lookup');
+    },
+  });
+  const props = Object.values(idx).filter(li => /^player_/.test(li.marketType || ''));
+  assert.equal(props.length, 0,
+    'a game 24h out is outside T-120 — nothing may register');
+});
+
+test('an unparseable kickoff fails CLOSED (no window, no registration)', async () => {
+  const idx = await runSeed({
+    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    allowlist: new Set([SPORT + '.anytime_td']),
+    eventOverrides: { scheduled: 'not-a-date' },
+    propOneSided: async () => { throw new Error('must not reach the odds lookup'); },
+  });
+  const props = Object.values(idx).filter(li => /^player_/.test(li.marketType || ''));
+  assert.equal(props.length, 0, 'unknown kickoff must fail closed, not open');
 });

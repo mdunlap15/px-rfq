@@ -5414,6 +5414,33 @@ function shouldDecline(legs, parlayId) {
       };
     }
 
+    // LEAGUE-WIDE NET PROP EXPOSURE (operator directive 2026-09-07: CFB $500,
+    // NFL $1500). Checked alongside the per-player cap, not instead of it —
+    // they catch different shapes. The per-player cap sees one player across
+    // many tickets; this sees many players across one league, which is exactly
+    // what a full football slate produces and what neither the per-player nor
+    // the per-game cap can observe.
+    const leagueCheck = orderTracker.checkPropLeagueExposure(
+      resolvedLegs,
+      propParlayCap,
+      config.pricing.propNetExposureBySport || {},
+    );
+    if (leagueCheck && leagueCheck.exceeded) {
+      const pendingTxt = leagueCheck.pending ? ` + pending $${leagueCheck.pending}` : '';
+      log.info('Pricing', `Prop league exposure cap: ${leagueCheck.sport} would be $${leagueCheck.wouldBe} (max $${leagueCheck.max})`);
+      try {
+        const push = require('./push');
+        push.notifyCapHit('prop_league', { subject: leagueCheck.sport, limit: leagueCheck.max, current: leagueCheck.wouldBe });
+      } catch (_) {}
+      return {
+        declined: true,
+        reason: 'prop league exposure limit',
+        detail: `${leagueCheck.sport} player props: current $${leagueCheck.current}${pendingTxt} + this parlay $${propParlayCap} = $${leagueCheck.wouldBe} > net cap $${leagueCheck.max}`,
+        violations: [{ team: leagueCheck.sport, wouldBe: leagueCheck.wouldBe, limit: leagueCheck.max }],
+        estPayout: propParlayCap,
+      };
+    }
+
     // Script-aware prop game caps (SGP roadmap Stage 0 / attack 3B):
     // per-(game, side) and total-per-game prop risk. The per-player cap
     // above can't see N tickets on N different players long the same game

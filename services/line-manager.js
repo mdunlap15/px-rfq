@@ -102,9 +102,43 @@ const _SOCCER_PROP_TO_TOA_MARKET = {
 // keys for preseason/NCAAF, so everything else classifies for decline
 // visibility but never maps → never registers. Launch remains fully gated
 // by PROP_LAUNCH_ALLOWLIST (no americanfootball entries yet = dark).
+// MEASURED 2026-09-07 against live TOA, one NFL and one NCAAF event, us region:
+//
+//   market                    NFL books / two-sided   NCAAF books / two-sided
+//   player_pass_yds                  6 / 6                    3 / 3
+//   player_pass_tds                  6 / 6                    3 / 3
+//   player_reception_yds             6 / 6                    3 / 3
+//   player_rush_yds                  6 / 6                    2 / 2   (thin)
+//   player_receptions                6 / 5                    0 / 0   (none)
+//   player_anytime_td                8 / 0                    5 / 0   ⚠ ONE-SIDED
+//   player_1st_td                    6 / 0                    3 / 0   ⚠ ONE-SIDED
+//
+// This REPLACES the previous comment's claim of "ZERO player_* keys for
+// preseason/NCAAF", which is what kept the map at anytime_td alone. NCAAF
+// two-sided coverage is real, if thinner than NFL — the propMinBooksWithBothSides
+// gate (default 3) is what keeps a 2-book market like NCAAF rush yards out,
+// and it does so per-event rather than per-league, which is the right grain.
+//
+// ⚠ THE TD MARKETS ARE ONE-SIDED AT EVERY BOOK — 8 books on anytime_td and not
+// one of them prices the "no". They cannot be 2-way de-vigged, so they keep the
+// existing lineless YES-only book-mirror path (_footballPropCtx) and are NOT
+// listed as two-sided below. first_td is deliberately still unmapped: it is a
+// CLOSED field (exactly one player scores first) and wants field normalisation
+// like golf outright win, which is a separate build.
 const _FOOTBALL_PROP_TO_TOA_MARKET = {
   anytime_td: 'player_anytime_td',
+  passing_yards: 'player_pass_yds',
+  passing_tds: 'player_pass_tds',
+  rushing_yards: 'player_rush_yds',
+  receiving_yards: 'player_reception_yds',
+  receptions: 'player_receptions',
 };
+// The football props TOA prices on BOTH sides, i.e. the ones that go through the
+// ordinary two-sided de-vig rather than the one-sided YES mirror. Anything not
+// in here and not in _footballPropCtx never registers.
+const _FOOTBALL_PROP_TWO_SIDED = new Set([
+  'passing_yards', 'passing_tds', 'rushing_yards', 'receiving_yards', 'receptions',
+]);
 // Line semantics for lineless football YES/NO props (parallel to the
 // {line, toaLine} object _classifySoccerProp returns). Null for any
 // propType we don't price — callers must fail closed on null.
@@ -2523,8 +2557,47 @@ async function seedAllLines() {
       const propAllowlist = _propAllowlistSet();
       if (propAllowlist.size > 0 && (matchedHome && matchedAway)) {
         const ws = _getWsModule();
-        const minBooks = (config.pricing && config.pricing.propMinBooksWithBothSides) || 3;
-        const trustedSet = (config.pricing && config.pricing.propTrustedSingleBooks) || [];
+        // Football requires MORE books than the global prop floor (2): the
+        // single-leg scheduler's rule is >=3, because below that "there is no
+        // independent cross-check and we are mirroring one book with nothing
+        // to audit it". Scoped so the football bar never tightens MLB/NBA/NHL.
+        const minBooks = sportKey.startsWith('americanfootball')
+          ? ((config.pricing && config.pricing.footballPropMinBooks) || 3)
+          : ((config.pricing && config.pricing.propMinBooksWithBothSides) || 3);
+        // ⚠ The trusted-single-book bypass (pinnacle/fanduel/draftkings/betmgm/
+        // betrivers) lets ONE book satisfy the floor. For football that would
+        // silently defeat the >=3 rule above — DK alone would register the
+        // line. The scheduler's rationale is explicit that this is not
+        // acceptable here: below 3 books "there is no independent cross-check
+        // and we are mirroring one book with nothing to audit it". So the
+        // football book floor is ABSOLUTE, with no trusted-book escape.
+        const trustedSet = sportKey.startsWith('americanfootball')
+          ? []
+          : ((config.pricing && config.pricing.propTrustedSingleBooks) || []);
+        // ---- FOOTBALL PROP T-MINUS WINDOW ------------------------------
+        // Same rule as the single-leg props scheduler (cfb_props_cycle.py):
+        // nothing lists until the game is inside the window. Operator
+        // directive there, verbatim: "I don't want football player props
+        // being listed until T-120 before game start times."
+        //
+        // A prop mirror is only as good as the moment it was priced. Football
+        // boards move on news that lands hours out — and NFL INACTIVES drop
+        // ~90 minutes before kickoff, i.e. INSIDE this window, so a board
+        // built earlier would be quoting players who never take a snap. A
+        // resting stale quote is a free option for whoever is watching the
+        // market move; that is how last season's CFB prop book got picked off.
+        //
+        // This gates REGISTRATION, not pricing, so outside the window PX is
+        // never told we support the line and never sends the RFQ — the same
+        // posture as the golf outright kill-switch.
+        const fbPropWindowMin = (config.pricing && config.pricing.footballPropTMinusMinutes) || 120;
+        const _fbPropWindowOpen = (() => {
+          if (!sportKey.startsWith('americanfootball')) return true;
+          const ms = Date.parse(event.scheduled || '');
+          if (!Number.isFinite(ms)) return false;      // unknown kickoff: fail closed
+          const mins = (ms - Date.now()) / 60000;
+          return mins <= fbPropWindowMin;              // already started is handled downstream
+        })();
         for (const market of markets) {
           if (!market || !market.name) continue;
           let propType = null;
@@ -2560,11 +2633,19 @@ async function seedAllLines() {
               // props) if the websocket classifier hasn't landed.
               propType = (typeof ws._classifyFootballProp === 'function')
                 ? ws._classifyFootballProp(market.name) : null;
+              // _footballPropCtx is the LINELESS-market descriptor (anytime TD
+              // posts YES/NO with no point). It must NOT gate the TOA map any
+              // more: the two-sided yardage/reception markets have real points
+              // and therefore no ctx, so gating on it made every one of them
+              // resolve toaMarketKey=null and `continue` — which is why only
+              // anytime_td could ever register.
               footballProp = _footballPropCtx(propType);
-              toaMarketKey = footballProp ? _FOOTBALL_PROP_TO_TOA_MARKET[propType] : null;
+              toaMarketKey = (footballProp || _FOOTBALL_PROP_TWO_SIDED.has(propType))
+                ? _FOOTBALL_PROP_TO_TOA_MARKET[propType] : null;
             }
           }
           if (!propType || !toaMarketKey) continue;
+          if (sportKey.startsWith('americanfootball') && !_fbPropWindowOpen) continue;
           // Registration-safety assertion: a football prop line may never
           // carry a full-game marketType (fails closed, logged — see
           // _footballPropRegistrationSafe).
@@ -2622,6 +2703,52 @@ async function seedAllLines() {
             if (sel.line == null) continue;
             if (!byLine.has(sel.line)) byLine.set(sel.line, []);
             byLine.get(sel.line).push(sel);
+          }
+
+          // ---- FOOTBALL: ONE LINE PER (player, market), NO ALTS ----------
+          // The single-leg scheduler's rule, verbatim: "ONE LINE PER (player,
+          // market): the best-booked point, so we never stack a ladder of
+          // correlated alternates on one view."
+          //
+          // PX bundles every alt point for a player's prop into ONE market, so
+          // without this we would register the whole ladder. Two reasons not to:
+          // an alt ladder on one player is a stack of near-nested legs, and
+          // measured on the single-leg book alts filled -3.1% against -0.6% on
+          // mains — alts are where the pick-off happens, because they are the
+          // points with the thinnest book coverage.
+          //
+          // "Best-booked" = most books quoting BOTH sides at that point, which
+          // is also the point most likely to be PX's primary. Ties break to the
+          // point closest to the median of the candidates, i.e. the middle of
+          // the ladder rather than an edge. The per-line lookups below are
+          // cached per (sport, event, market), so this pre-pass costs de-vig
+          // passes, not HTTP.
+          if (sportKey.startsWith('americanfootball') && byLine.size > 1) {
+            const scored = [];
+            for (const cand of byLine.keys()) {
+              let n = 0;
+              try {
+                const probe = await oddsFeed.lookupTheOddsApiPlayerProp(
+                  sportKey, toaMarketKey,
+                  { homeTeam: matchedHome, awayTeam: matchedAway, startTime: event.scheduled || null },
+                  playerName, linelessProp ? linelessProp.toaLine : cand,
+                );
+                if (probe && probe.fairProbOver != null && probe.fairProbUnder != null) {
+                  n = probe.booksWithBothSides || 0;
+                }
+              } catch (_) { /* unreadable point scores 0 and loses */ }
+              scored.push({ line: cand, books: n });
+            }
+            const pts = scored.map(s => s.line).sort((a, b) => a - b);
+            const mid = pts[Math.floor(pts.length / 2)];
+            scored.sort((a, b) => (b.books - a.books) || (Math.abs(a.line - mid) - Math.abs(b.line - mid)));
+            const keep = scored[0];
+            if (!keep || !keep.books) {
+              log.debug('Lines', `Football prop ${playerName} ${propType}: no point cleared the book gate across ${byLine.size} alts — skipping market`);
+              continue;
+            }
+            for (const cand of [...byLine.keys()]) if (cand !== keep.line) byLine.delete(cand);
+            log.debug('Lines', `Football prop ${playerName} ${propType}: ${scored.length} alt points → kept ${keep.line} (${keep.books} two-sided books)`);
           }
 
           for (const [thisLine, sels] of byLine) {

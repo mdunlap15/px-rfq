@@ -1174,6 +1174,39 @@ const config = {
       }
     })(),
     maxExposurePerPlayerDefault: _capNum(process.env.MAX_EXPOSURE_PER_PLAYER_DEFAULT, 200),
+    // LEAGUE-WIDE NET PLAYER-PROP EXPOSURE (operator directive 2026-09-07,
+    // opening football props for parlays): CFB $500, NFL $1500. A genuinely
+    // new dimension — the per-player cap cannot see twenty different receivers
+    // in twenty different games, and the prop game caps cannot see a whole
+    // Saturday slate. Deliberately the tightest of the three on a market we
+    // have never quoted before. Keys are sport keys; a sport absent from the
+    // map is UNCAPPED on this dimension (its other caps still apply), so add
+    // a league here when you open props for it.
+    propNetExposureBySport: (() => {
+      const DEFAULT = { 'americanfootball_ncaaf': 500, 'americanfootball_nfl': 1500 };
+      if (!process.env.PROP_NET_EXPOSURE_BY_SPORT) return DEFAULT;
+      try {
+        const parsed = JSON.parse(process.env.PROP_NET_EXPOSURE_BY_SPORT);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        return DEFAULT;
+      } catch (e) {
+        return DEFAULT;
+      }
+    })(),
+    // Football props do not REGISTER until the game is inside this window.
+    // Mirrors the single-leg scheduler (cfb_props_cycle.py), where the
+    // operator's rule is verbatim "I don't want football player props being
+    // listed until T-120 before game start times" — NFL inactives drop ~90
+    // minutes out, i.e. inside the window, so a board built earlier is quoting
+    // players who will not take a snap.
+    footballPropTMinusMinutes: parseInt(process.env.FOOTBALL_PROP_TMINUS_MINUTES) || 120,
+    // Football props require MORE books than the global prop floor. The global
+    // propMinBooksWithBothSides is 2 (DK+FD is enough for a mature MLB/NBA
+    // market); the single-leg football scheduler requires 3, because below that
+    // "there is no independent cross-check and we are mirroring one book with
+    // nothing to audit it". Kept separate so raising the football bar never
+    // silently tightens MLB/NBA/NHL.
+    footballPropMinBooks: parseInt(process.env.FOOTBALL_PROP_MIN_BOOKS) || 3,
     // Minimum number of books with both sides required for a prop leg
     // to be quotable. Below this, decline the parlay (insufficient
     // de-vig confidence — single-book or near-single-book pricing is

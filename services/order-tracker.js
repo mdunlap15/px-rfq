@@ -4275,6 +4275,79 @@ function checkPlayerExposure(legs, additionalRisk, capBySport, defaultCap) {
 }
 
 /**
+ * LEAGUE-WIDE NET PROP EXPOSURE.
+ *
+ * Operator directive 2026-09-07, on opening football player props for parlays:
+ * "we should place lower limits on net exposure we'll take for player props …
+ * cap CFB player props net exposure at $500 and NFL player props net exposure
+ * at $1500."
+ *
+ * Why this cannot be expressed with the caps that already exist:
+ *   * maxExposurePerPlayerBySport is PER PLAYER. Twenty different receivers on
+ *     twenty different games each sit below their own cap while the league-wide
+ *     prop book runs far past $500.
+ *   * sgp-guard's prop game caps are PER GAME, so they cannot see the same
+ *     accumulation spread across a full Saturday slate.
+ *   * maxRiskPerParlayWithProp is PER TICKET and says nothing about the book.
+ * A league total is a genuinely new dimension, and it is the one the operator
+ * named. It is deliberately the LEAST generous of the three: a new market we
+ * have never quoted, on a board we have measured for two weeks.
+ *
+ * Reuses the existing per-player accounting rather than adding a second set of
+ * books — summing playerExposure by sport means this can never drift out of
+ * step with the per-player cap, and pending risk is counted the same way.
+ *
+ * @param {Array}  legs           resolved legs of the parlay being priced
+ * @param {number} additionalRisk worst-case risk this parlay would add
+ * @param {object} capBySport     e.g. { americanfootball_ncaaf: 500 }
+ */
+function checkPropLeagueExposure(legs, additionalRisk, capBySport) {
+  if (!Array.isArray(legs) || legs.length === 0) return null;
+  if (!(additionalRisk > 0)) return null;
+  if (!capBySport || typeof capBySport !== 'object') return null;
+
+  // Which leagues does THIS parlay add prop risk to? Only those are checked —
+  // an MLB prop leg must not be blocked by a full football book.
+  const sports = new Set();
+  for (const leg of legs) {
+    const li = leg.lineInfo || leg;
+    if (!li || !/^player_/.test(String(li.marketType || ''))) continue;
+    const sport = li.sport || li.oddsApiSport;
+    if (sport && capBySport[sport] != null) sports.add(sport);
+  }
+  if (!sports.size) return null;
+
+  for (const sport of sports) {
+    const cap = capBySport[sport];
+    if (!(cap > 0)) continue;
+    let current = 0, pending = 0;
+    for (const [key, v] of Object.entries(playerExposure)) {
+      if ((v && v.sport) !== sport) continue;
+      current += (v.risk || 0);
+      pending += getPendingPlayerRisk(key);
+    }
+    // Pending-only keys have no playerExposure row yet (quoted, not filled).
+    for (const [key, p] of pendingPlayerRiskByKey.entries()) {
+      if (playerExposure[key]) continue;                 // already counted above
+      if (String(key).split('|')[0] !== sport) continue;
+      pending += p;
+    }
+    const wouldBe = current + pending + additionalRisk;
+    if (wouldBe > cap) {
+      return {
+        exceeded: true,
+        sport,
+        current: Math.round(current * 100) / 100,
+        pending: Math.round(pending * 100) / 100,
+        wouldBe: Math.round(wouldBe * 100) / 100,
+        max: cap,
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * Snapshot of all live per-player exposure entries (Phase-2 props).
  * Used by /status and /player-exposure to surface concentration risk.
  */
@@ -7796,6 +7869,19 @@ module.exports = {
   checkPitcherExposure,
   getPitcherExposureSnapshot,
   checkPlayerExposure,
+  checkPropLeagueExposure,
+  // Test seam for test/prop-league-exposure.test.js. The league cap sums the
+  // LIVE per-player book, so the only honest way to test 'many players, each
+  // individually small' is to stand a book up. Returns a restore function.
+  __testSetPlayerExposure(entries) {
+    const prev = { ...playerExposure };
+    for (const k of Object.keys(playerExposure)) delete playerExposure[k];
+    Object.assign(playerExposure, entries || {});
+    return () => {
+      for (const k of Object.keys(playerExposure)) delete playerExposure[k];
+      Object.assign(playerExposure, prev);
+    };
+  },
   getPlayerExposureSnapshot,
   checkConcurrentMarketExposure,
   getConcurrentMarketExposureSnapshot,
