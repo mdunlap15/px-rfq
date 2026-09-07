@@ -7,6 +7,7 @@ const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
 const ufcMov = require('./ufc-mov');
 const nflConsensus = require('./nfl-consensus');
+const { footballSgpFactor } = require('./football-sgp-correlation');
 // UFC method-of-victory market types. PX posts them typed 'moneyline'; the
 // parser retags by market NAME (see prophetx.parseMarketSelections).
 const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
@@ -2161,6 +2162,38 @@ function priceParlay(legs, opts = {}) {
           combo = 'ml_total';
         }
         if (!combo) continue;
+        // FOOTBALL TAKES PRECEDENCE over every generic key above.
+        //
+        // byCombo is sport-agnostic and back-calculated from FanDuel MLB/NHL
+        // samples; football is MEASURED (7,245 NFL games 1999-2025, 7,676 CFB
+        // games 2006-2025 — see services/football-sgp-correlation.js). Letting
+        // a directional MLB-derived key like spread_fav_over win here would
+        // apply an MLB number to a football game, which is exactly the "guessed
+        // factor" the football block existed to prevent.
+        //
+        // Note this is keyed off the UN-directed combo: the measurement clamps
+        // at >= 1.00, so the negative directions (CFB fav+under at 0.934) map to
+        // 1.00 rather than making our quote cheaper than independent.
+        //
+        // The lookup depends on the SPREAD MAGNITUDE for CFB — 1.00 under 14.5,
+        // 1.17 at 14.5+ — so it must read the spread leg, not just the combo.
+        const fbSideLeg = spreadLeg || mlLeg;
+        if (fbSideLeg) {
+          const fbHit = footballSgpFactor({
+            sport: fbSideLeg.lineInfo.sport || fbSideLeg.lineInfo.oddsApiSport,
+            combo: spreadLeg ? 'spread_total' : 'ml_total',
+            spreadLine: spreadLeg ? Number(spreadLeg.lineInfo.line) : undefined,
+          });
+          if (fbHit) {
+            factor = fbHit.factor;
+            combo = spreadLeg ? 'spread_total' : 'ml_total';
+            log.debug('Pricing', `football SGP correlation ${fbHit.basis} → ${factor}`);
+            if (factor === 1) continue;   // measured independent — nothing to apply
+            detectedCombos.push(combo);
+            sgpCorrelationFactor *= factor;
+            continue;
+          }
+        }
         // Fall back to un-directed factor when no directional key matched.
         if (factor === 1) {
           if (byCombo[combo] != null) factor = byCombo[combo];
@@ -4068,6 +4101,54 @@ function _isFootballPeriodLeg(li) {
   return false;
 }
 
+// The ONE football same-game shape FOOTBALL_SGP_ENABLED releases: exactly two
+// full-game legs on one event, one side (spread or moneyline) + one game total,
+// on a league whose correlation we actually measured.
+//
+// Returns {combo, spreadLine} for the caller to price, or null to keep blocking.
+// Fails closed on every axis, because each rejected axis is a combo with NO
+// calibration behind it:
+//   * more or fewer than 2 legs        — 3+ same-game stacks are not measured
+//   * any player-prop leg              — prop game-script coupling is far larger
+//   * any period leg (1H/Q1/OT)        — measured on FULL-GAME closing lines only
+//   * team_total rather than the game total — a different quantity entirely
+//   * CFL or any other football league — footballSgpFactor returns null
+function _footballSideTotalPair(ls) {
+  if (!Array.isArray(ls) || ls.length !== 2) return null;
+  let sideLeg = null, totalLeg = null;
+  for (const li of ls) {
+    if (!_isFootballLine(li)) return null;
+    if (_isFootballPeriodLeg(li)) return null;
+    const mt = String(li.marketType || '');
+    if (/^player_/.test(mt)) return null;
+    // marketType ALONE is not trustworthy — PX types BTTS as 'moneyline' and
+    // "Second Half Total Points" as plain 'total' (both measured). A leg
+    // carrying a playerName is a PROP whatever its type says, and a prop
+    // sneaking in as the "game total" is precisely the uncalibrated coupling
+    // this guard exists to refuse. Belt-and-braces over the /^player_/ test,
+    // which only catches props that are honestly typed.
+    if (li.playerName) return null;
+    if (mt === 'spread' || mt === 'moneyline') {
+      if (sideLeg) return null;           // side+side is not a measured combo
+      sideLeg = li;
+    } else if (mt === 'total') {
+      if (totalLeg) return null;          // total+total (alt lines) is not either
+      totalLeg = li;
+    } else {
+      return null;                        // team_total, advance, anything else
+    }
+  }
+  if (!sideLeg || !totalLeg) return null;
+  const combo = sideLeg.marketType === 'spread' ? 'spread_total' : 'ml_total';
+  const hit = footballSgpFactor({
+    sport: sideLeg.sport || sideLeg.oddsApiSport,
+    combo,
+    spreadLine: sideLeg.marketType === 'spread' ? Number(sideLeg.line) : undefined,
+  });
+  if (!hit) return null;                  // uncalibrated league — stay blocked
+  return { combo, spreadLine: sideLeg.line, factor: hit.factor, basis: hit.basis };
+}
+
 const _FB_FUTURES_NAME_RE = /\bsuper[\s-]*bowl\b|\bafc\b|\bnfc\b|\bmvp\b|\bwin[\s-]*totals?\b|\bto\s+win\s+the\b|\bconference\b|\bdivision\b|\bheisman\b/i;
 
 // Futures-shaped = outright-marked, fully competitor-less, or half
@@ -4392,17 +4473,31 @@ function shouldDecline(legs, parlayId) {
       }
     }
 
-    // (3) SAME-GAME HARD BLOCK — every remaining same-pxEventId football
-    // combination. Released ONLY by config.pricing.footballSgpEnabled === true
-    // (env FOOTBALL_SGP_ENABLED; the config.js entry is owned elsewhere, so
-    // this read must be ABSENCE-SAFE: undefined = blocked, and a non-boolean
-    // truthy like the string 'true' = still blocked). Rationale: prod's
-    // sgpCorrelationByCombo factors are flat, sport-agnostic numbers
-    // back-calculated from 4 FanDuel MLB/NHL samples — football has the
-    // strongest game-script coupling we quote and the biggest book SGP
-    // discounts, so a guessed factor is worse than a block (the tennis
-    // precedent). Do NOT bypass by adding football keys to the combo grid.
-    if (((config.pricing || {}).footballSgpEnabled) !== true) {
+    // (3) SAME-GAME HARD BLOCK — every same-pxEventId football combination
+    // EXCEPT the two we have measured. Gated on config.pricing.footballSgpEnabled
+    // === true (env FOOTBALL_SGP_ENABLED; the config.js entry is owned
+    // elsewhere, so this read must be ABSENCE-SAFE: undefined = blocked, and a
+    // non-boolean truthy like the string 'true' = still blocked).
+    //
+    // The original rationale was that prod's sgpCorrelationByCombo factors are
+    // flat, sport-agnostic numbers back-calculated from 4 FanDuel MLB/NHL
+    // samples, so a guessed football factor is worse than a block (the tennis
+    // precedent). That still holds for everything except side+total, which is
+    // now MEASURED on 7,245 NFL games (1999-2025) and 7,676 CFB games
+    // (2006-2025) — see services/football-sgp-correlation.js for the tables,
+    // CIs and method.
+    //
+    // ⚠ THE RELEASE IS DELIBERATELY NARROW. Flipping the env flag opens ONLY:
+    //     * exactly 2 football legs on the event, and
+    //     * one side leg (spread or moneyline) + one game-total leg, and
+    //     * a league we actually measured (NFL / NCAAF — CFL returns null).
+    // Everything else on a shared football event stays blocked with the flag
+    // ON: player props (game-script coupling is an order of magnitude larger
+    // and is NOT calibrated), 3+ leg same-game stacks, team totals, side+side.
+    // Do NOT widen this by adding football keys to the combo grid — the grid is
+    // sport-agnostic and would silently reintroduce a guessed factor.
+    {
+      const fbEnabled = ((config.pricing || {}).footballSgpEnabled) === true;
       const fbByEvent = new Map();
       for (const li of legInfos) {
         if (!_isFootballLine(li) || !li.pxEventId) continue;
@@ -4413,10 +4508,19 @@ function shouldDecline(legs, parlayId) {
       for (const [eid, ls] of fbByEvent) {
         if (ls.length < 2) continue;
         const desc = ls.map(li => `${li.teamName || li.playerName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}`).join(' + ');
+        if (fbEnabled) {
+          const calibrated = _footballSideTotalPair(ls);
+          if (calibrated) continue;   // measured combo — let it through to pricing
+          return {
+            declined: true,
+            reason: 'football_sgp_blocked',
+            detail: `${ls.length} football legs on event ${eid} (${desc}) — FOOTBALL_SGP_ENABLED releases only a 2-leg side+total pair (spread|moneyline + game total) on NFL/NCAAF; this combination has no calibrated correlation factor`,
+          };
+        }
         return {
           declined: true,
           reason: 'football_sgp_blocked',
-          detail: `${ls.length} football legs on event ${eid} (${desc}) — football same-game parlays are blocked until FOOTBALL_SGP_ENABLED=true (no calibrated football correlation factors exist)`,
+          detail: `${ls.length} football legs on event ${eid} (${desc}) — football same-game parlays are blocked until FOOTBALL_SGP_ENABLED=true`,
         };
       }
     }
@@ -5507,6 +5611,10 @@ module.exports = {
   // Exported for test/vig-by-market.test.js — the single base-vig resolver
   // shared by the quoting path and the dashboard's single-leg display.
   resolveBaseVig,
+  // Exported for test/football-sgp-correlation.test.js — the narrow shape
+  // FOOTBALL_SGP_ENABLED releases. Tested directly because it is the whole
+  // safety boundary: everything it rejects has no calibrated factor behind it.
+  __footballSideTotalPair: _footballSideTotalPair,
   priceParlay,
   shouldDecline,
   validateForConfirmation,

@@ -77,7 +77,8 @@ client/
 | `BTTS_TTL_SECONDS` | No | Default: 240. TTL of the per-game BTTS consensus cache. |
 | `BTTS_FETCH_SPACING_MS` | No | Default: 250. Gap between per-event BTTS calls. Guards the TOA request-frequency limit — an unpaced burst 429s, and a 429 masquerades as "no BTTS for this game". |
 | `SGP_ALLOWED_COMBOS` | No | Comma-separated same-game combo keys that may quote. **Unset → legacy default `spread_total`. Explicitly empty (`""`) → ALL SGP combos blocked** — that distinction is load-bearing: setting `SGP_ALLOWED_COMBOS=""` on Railway must mean "block every SGP", not "fall back to spread_total", so the code distinguishes `undefined` from `''`. Keys: `spread_total` (moderate correlation), `ml_total` (strong, −37% ROI historically), `ml_spread` (blocked by correlation rules regardless). K-prop carve-outs (`kprop_ml`, `kprop_kprop`) are auto-included downstream regardless. Experimental classes (e.g. `prop_nested`) ALSO need an entry here to quote at all — experimental membership only adds tighter caps. ⚠ Adding a key here is what makes the MoV same-fight block's independence matter: `mov_sgp_blocked` is an unconditional pre-pass precisely so it survives any combo added here. |
-| `FOOTBALL_SGP_ENABLED` | No | Default: false (must be the literal `'true'`). Football same-game parlays are blocked because no calibrated football correlation factors exist. Enabling it can NEVER re-open period-vs-game combos — that guard is separate. |
+| `FOOTBALL_SGP_ENABLED` | No | Default: false (must be the literal `'true'`). Releases football same-game parlays — but **ONLY the one measured shape**: exactly 2 full-game legs on the event, one side (spread or moneyline) + one game total, on NFL or NCAAF. Everything else same-game football stays blocked with the flag ON — **player props above all** (game-script coupling is an order of magnitude larger and is NOT calibrated), plus 3+ leg stacks, team totals, side+side, alt-total pairs, and CFL (never measured). A leg carrying a `playerName` is refused whatever its `marketType` claims, because PX types markets misleadingly (BTTS arrives as `moneyline`). Enabling it can NEVER re-open period-vs-game combos — that guard is separate. |
+| `FOOTBALL_SGP_CORRELATION` | No | JSON override of the measured football side+total correlation table (`services/football-sgp-correlation.js`). **The defaults ARE the measurement** — an override is a deliberate departure from it, not tuning. Shape: `{"ncaaf":{"ml_total":1.02,"spreadBuckets":[{"minSpread":14.5,"factor":1.17},{"minSpread":0,"factor":1.0}]}}`. Factors are clamped at **≥ 1.00** — the negative directions are real (CFB fav+under measured 0.934) but honouring them would make our quote *cheaper* than independent, so they floor at 1.00. Malformed JSON logs a warning and falls back to the measurement. |
 | `TELEGRAM_ALERTS_ENABLED` | No | Master kill-switch for ALL Telegram alerts. **Default: OFF** (operator directive 2026-08-28). Must be the literal string `'true'` to re-enable. Gated inside `telegram.sendMessage` — the single function every alert funnels through — so no call site can bypass it, and read from `process.env` per call so flipping it back on needs no restart. Note the pre-existing no-op only covered MISSING `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`; this suppresses sends even when both are configured. |
 | `LOG_LEVEL` | No | Default: `info` |
 | `WS_CONFIRM_STALL_MINUTES` | No | Default: 30 (raised from 12 on 2026-08-18; prod sets 30 explicitly). Half of the confirm-stall watchdog: force a WebSocket reconnect only after this long with no `price.confirm.new` **event** AND `WS_CONFIRM_STALL_MIN_OFFERS` offers submitted. Resets on the EVENT, not on a fill, so rejecting confirms (blocked creators, reprice misses) never reads as a dead channel — meaning it targets ONE failure mode: PX silently stops delivering on the private channel. It would NOT have fired on the 2026-06-21 outage (confirms arrived, then failed closed); a separate detector covers that. |
@@ -383,6 +384,54 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
   are INVISIBLE to this trader's exposure tracker — a parlay MoV quote on the same
   fight outcome stacks risk across the two books with no shared cap. PX also
   frequently lacks DEC markets that DK prices (10/10 skipped 2026-08-11).
+
+## Football SGPs — side + total (NFL / CFB)
+
+Blocked until 2026-09-07 on the grounds that "no calibrated football correlation
+factors exist". They exist now, and they are **measured, not modelled** —
+and deliberately NOT reverse-engineered from a book's SGP price, which bakes in
+the book's own margin and would import it straight into our fair value.
+
+Method: for each historical game take the CLOSING consensus spread + total and
+the final score, then compute `M = P(A∩B) / (P(A)·P(B))` — exactly the quantity
+that multiplies our independent fair parlay probability. `M = 1.00` means
+independent pricing is already correct. 95% CIs bootstrapped, pushes excluded.
+**NFL** 7,245 games 1999-2025 (nflverse closing lines); **CFB** 7,676 games
+2006-2025 (cfbfastR multi-book median joined to final scores).
+
+- **NFL is INDEPENDENT.** fav-cover+over 1.004 [0.979, 1.028]; fav-ML+over 1.005
+  [0.988, 1.021]. Every NFL CI contains 1.000 across 27 seasons. The widely
+  repeated "favourite covers ⇒ over hits 52.5%" **does not replicate** on
+  closing lines — measured P(over | fav covered) = **49.7%**. Applying a
+  correlation discount to NFL side+total would be inventing one.
+- **CFB aggregate 1.067 is an ARTEFACT of aggregation — do not use it.**
+  Split by spread: 0-3.5 → 1.006, 3.5-7.5 → 1.030, 7.5-14.5 → 1.004 (all three
+  CIs contain 1.000), **14.5+ → 1.169 [1.131, 1.209]**. Below two touchdowns
+  there is no correlation; above it, blowout game script (garbage time, running
+  clock, backups) genuinely couples side to total. That bucket is **~32% of CFB
+  games**, so the single aggregate would simultaneously OVERprice the other 68%
+  and still UNDERprice this one. The spread split is load-bearing.
+- **CFB ml_total is only 1.02** (measured 1.015 [1.002, 1.028]) even at big
+  spreads — a huge favourite winning outright carries almost no information
+  (P = 93.8% at 14.5+). It must NOT inherit the 1.17.
+- **Clamped at ≥ 1.00, asymmetric on purpose.** The negative directions are real
+  (CFB fav+under 0.934, dog+over 0.935) but honouring them would price us
+  *cheaper* than independent. Clamping leaves us merely uncompetitive there
+  rather than exposed.
+- **An unreadable spread falls back to the WIDEST bucket** (1.17), not the
+  narrowest. The spread is the input that decides between 1.00 and 1.17; failing
+  toward 1.00 would underprice precisely the bucket that matters.
+- Football takes **precedence over `sgpCorrelationByCombo`**, including its
+  directional `spread_fav_over` keys. That grid is sport-agnostic and
+  back-calculated from a few FanDuel MLB/NHL samples; letting it win here would
+  apply an MLB number to a football game — the exact "guessed factor" the block
+  existed to prevent.
+- `spread_total` / `ml_total` must also be in `SGP_ALLOWED_COMBOS` (they already
+  are in prod). The football gate and the combo allowlist are independent.
+- Locked by `test/football-sgp-correlation.test.js`, including mutation checks:
+  collapsing CFB to the aggregate fails 5 tests, removing the ≥1.00 clamp fails
+  1, failing the unknown-spread fallback cheap fails 1, and dropping the
+  `playerName` guard fails 1.
 
 ## Key Gotchas
 
