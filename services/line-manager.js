@@ -446,6 +446,22 @@ const TEAM_NAME_OVERRIDES = {
   // and getEventMarkets requires BOTH names to resolve to one event, so this
   // maps the non-Pedro side of a single real fight, not a different bout.
   'rafael xavier': 'Rafael Alves',
+  // COLLEGE FOOTBALL. These four are genuine naming DIFFERENCES, not the
+  // prefix collisions _collegeAnchoredMatch handles — no substring or prefix
+  // relation exists in either direction, so no matching rule could ever
+  // resolve them. Verified 2026-09-06 against the live TOA ncaaf board: with
+  // anchoring in place these were the ONLY 4 unresolved names out of 96 across
+  // 48 PX events. NOTE the keys are normalizeTeamName() output, which STRIPS
+  // hyphens ("Louisiana-Monroe" -> "louisianamonroe") — the lookup is a raw
+  // map index, so a key written with the hyphen would silently never hit.
+  'connecticut': 'UConn Huskies',
+  'louisianamonroe': 'UL Monroe Warhawks',
+  'southern miss': 'Southern Mississippi Golden Eagles',
+  // ⚠ Louisiana-Lafayette is just "Louisiana" on TOA. Do NOT shorten the PX
+  // side to match: bare "Louisiana" would anchor-tie against "Louisiana Tech
+  // Bulldogs" (equal remainder) and fail closed, which is why this needs the
+  // exact-name override rather than a matching-rule change.
+  'louisianalafayette': 'Louisiana Ragin Cajuns',
   // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
   'british columbia lions': 'BC Lions',
   // CFL SPREAD SELECTION CODES. PX types CFL spreads 'sup_moneyline' with the

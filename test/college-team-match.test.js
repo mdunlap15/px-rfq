@@ -136,3 +136,31 @@ test('resolveHomeAwaySide handles a same-prefix rivalry', () => {
   assert.strictEqual(
     lm.resolveHomeAwaySide('New York', 'New York Yankees', 'New York Mets'), null);
 });
+
+// ------------------------------------------------------- override entries
+//
+// Four CFB schools are genuine naming DIFFERENCES with no substring or prefix
+// relation in either direction, so no matching RULE can reach them — they need
+// TEAM_NAME_OVERRIDES. With anchoring plus these, all 48 live PX College
+// Football events resolved both competitors (2026-09-06).
+
+test('the four unresolvable CFB schools resolve via override', () => {
+  const board = ['UConn Huskies', 'UL Monroe Warhawks',
+    'Southern Mississippi Golden Eagles', 'Louisiana Ragin Cajuns',
+    'Louisiana Tech Bulldogs'];
+  assert.strictEqual(M('Connecticut', board, NCAAF), 'UConn Huskies');
+  assert.strictEqual(M('Louisiana-Monroe', board, NCAAF), 'UL Monroe Warhawks');
+  assert.strictEqual(M('Southern Miss', board, NCAAF),
+    'Southern Mississippi Golden Eagles');
+  assert.strictEqual(M('Louisiana-Lafayette', board, NCAAF),
+    'Louisiana Ragin Cajuns');
+  // The reason Lafayette needs the override rather than a shorter PX name:
+  // bare "Louisiana" is an equal-remainder anchored tie against Louisiana Tech.
+  assert.strictEqual(M('Louisiana', board, NCAAF), null);
+});
+
+test('an override never fires when its target is absent from the board', () => {
+  // WNBA's Connecticut Sun must not be dragged to UConn.
+  assert.strictEqual(M('Connecticut', ['Connecticut Sun', 'Seattle Storm'],
+    'basketball_wnba'), 'Connecticut Sun');
+});
