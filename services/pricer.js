@@ -2210,10 +2210,19 @@ function priceParlay(legs, opts = {}) {
           const mlbTotalSel = totalLeg
             ? String(totalLeg.lineInfo.selection || totalLeg.lineInfo.oddsApiSelection || '').toLowerCase()
             : '';
+          // The ML leg's side comes from its FAIR prob, not from home/away —
+          // measured on the full 2024-25 sample, ml_total's structure is
+          // directional (fav+under 1.03, dog+over 1.05, the other two
+          // anti-correlated) and the grid's flat 1.15 charged most on the one
+          // direction that is actually anti-correlated. Unknown -> tightest.
+          const mlbMlSide = (!spreadLeg && mlLeg && Number.isFinite(Number(mlLeg.fairProb)))
+            ? (Number(mlLeg.fairProb) > 0.5 ? 'fav' : 'dog')
+            : undefined;
           const mlbHit = mlbSgpFactor({
             sport: mlbSport,
             combo: spreadLeg ? 'spread_total' : 'ml_total',
             spreadLine: spreadLeg ? Number(spreadLeg.lineInfo.line) : undefined,
+            mlSide: mlbMlSide,
             totalLine: totalLeg ? Number(totalLeg.lineInfo.line) : undefined,
             totalSelection: mlbTotalSel,
           });

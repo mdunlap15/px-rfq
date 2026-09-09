@@ -23,47 +23,52 @@
  * the exact quantity that multiplies our independent fair parlay probability.
  * 95% CIs bootstrapped (6,000 resamples); pushes on either leg excluded.
  *
- * SAMPLE: 3,284 games — the full 2024 season plus 2025 through May 27
- * (measured 2026-09-09; 30 unmatched, all opening-week overseas series). The
- * 2024-only run (2,073 games) gave the same shape; adding 2025 tightened every
- * CI and moved no conclusion. Re-measure with the rest of 2025 when convenient,
- * but nothing below is sitting on the edge of significance.
+ * SAMPLE: 4,911 games — the COMPLETE 2024 and 2025 regular seasons (measured
+ * 2026-09-09; 45 unmatched, opening-week overseas series and doubleheader
+ * edge cases). Three cuts were run as the data landed (2,073 → 3,284 → 4,911
+ * games); the run-line shape never moved, and the only conclusion that
+ * changed is that moneyline+total's small DIRECTIONAL structure cleared
+ * significance on the full sample (it was inside noise at 3,284).
  *
- * MLB moneyline + total (n=3,145)          M       95% CI
- *   fav ML + over                         0.980   [0.950, 1.010]
- *   fav ML + under                        1.018   [0.991, 1.046]
- *   dog ML + over                         1.030   [0.986, 1.076]
- *   dog ML + under                        0.972   [0.931, 1.014]
- * EVERY CI contains 1.000 — MLB moneyline+total is INDEPENDENT, like the NFL.
- * (If anything a favourite winning leans UNDER: favourites win pitchers'
- * duels 3-1. There is no favourite-over coupling to charge for.)
+ * MLB moneyline + total (n=4,703)          M       95% CI
+ *   fav ML + over                         0.968   [0.944, 0.992]  -> clamp
+ *   fav ML + under                        1.030   [1.008, 1.052]
+ *   dog ML + over                         1.047   [1.011, 1.083]
+ *   dog ML + under                        0.956   [0.924, 0.989]  -> clamp
+ * The structure is the OPPOSITE of the intuition the grid encodes: a
+ * favourite winning leans UNDER (they win pitchers' duels 3-1) and a dog
+ * winning leans OVER (upsets are shootouts). There is no favourite-over
+ * coupling to charge for — the grid's flat 1.15 was charging most on the one
+ * direction that is actually anti-correlated.
  *
- * MLB run line (±1.5) + total (n=3,132)    M       95% CI
- *   fav covers + over                     1.066   [1.024, 1.108]
- *   dog covers + under                    1.047   [1.017, 1.077]
- *   fav covers + under                    0.940   [0.902, 0.980]
- *   dog covers + over                     0.949   [0.916, 0.983]
+ * MLB run line (±1.5) + total (n=4,687)    M       95% CI
+ *   fav covers + over                     1.074   [1.039, 1.109]
+ *   dog covers + under                    1.051   [1.028, 1.075]
+ *   fav covers + under                    0.931   [0.898, 0.964]  -> clamp
+ *   dog covers + over                     0.945   [0.920, 0.971]  -> clamp
  *
  * fav covers + over, BY GAME TOTAL:
- *   total <= 7.5                          1.135   [1.059, 1.213]
- *   total 8-9                             1.062   [1.005, 1.118]
- *   total >= 9.5                          0.953   [0.854, 1.051]  -> clamp
+ *   total <= 7.5                          1.125   [1.056, 1.196]
+ *   total 8-9                             1.069   [1.023, 1.116]
+ *   total >= 9.5                          1.014   [0.937, 1.089]  -> clamp
  * Mechanically sensible: covering -1.5 in a 7-run game REQUIRES the over; in an
  * 11-run game it does not. A single spread_fav_over number is wrong in both
  * directions — too cheap at low totals, too rich at high ones.
  *
- * fav covers + over, BY FAVOURITE STRENGTH (ML): heavy 1.100, moderate 1.103,
- * slight 1.093 — flat. The TOTAL is the conditioning dimension, not the price
- * of the favourite, so the table does not split on it.
+ * fav covers + over, BY FAVOURITE STRENGTH (ML): heavy 1.103, moderate 1.147,
+ * slight 1.065 — non-monotonic, so not a usable conditioning dimension. The
+ * TOTAL is monotonic and mechanically motivated; the table splits on it only.
  *
  * DESIGN RULES (identical to the football module)
  * ----------------------------------------------
  *  * Clamped at >= 1.00. The negative directions are real but honouring them
  *    would make our quote cheaper than independent; clamping leaves us merely
  *    uncompetitive there rather than exposed.
+ *  * Factors are rounded UP from the point estimate (1.125 -> 1.13), never
+ *    down; a bucket whose CI contains 1.000 is 1.00, not its point estimate.
  *  * Returns null when not calibrated, so the caller can fall through.
- *  * An unreadable total or selection on a spread_total pair falls back to the
- *    WIDEST bucket (fail toward the expensive side).
+ *  * An unreadable total, side or selection falls back to the TIGHTEST
+ *    applicable entry (fail toward the expensive side).
  *  * Gated by MLB_SGP_CORRELATION_MEASURED='true' (config.pricing
  *    .mlbSgpCorrelationMeasured); when off, the generic grid keeps applying.
  *    The switch is explicit because it changes live MLB SGP prices.
@@ -74,18 +79,24 @@
 const log = require('./logger');
 
 const DEFAULTS = {
-  ml_total: 1.00,
-  // spread_total, keyed by bettor direction. fav_over is conditioned on the
-  // game total; buckets are consulted highest-minTotal first.
+  // moneyline + total, keyed <mlSide>_<totalSelection>
+  ml: {
+    fav_over: { factor: 1.00 },          // measured 0.968 [0.944, 0.992] -> clamp
+    fav_under: { factor: 1.03 },         // measured 1.030 [1.008, 1.052]
+    dog_over: { factor: 1.05 },          // measured 1.047 [1.011, 1.083]
+    dog_under: { factor: 1.00 },         // measured 0.956 [0.924, 0.989] -> clamp
+  },
+  // run line + total, keyed <rlSide>_<totalSelection>; fav_over is conditioned
+  // on the game total, buckets consulted lowest maxTotal first.
   spread: {
     fav_over: { buckets: [
-      { maxTotal: 7.5, factor: 1.14 },   // measured 1.135 [1.059, 1.213]
-      { maxTotal: 9.0, factor: 1.06 },   // measured 1.062 [1.005, 1.118]
-      { maxTotal: Infinity, factor: 1.00 }, // measured 0.953 [0.854, 1.051] -> clamp
+      { maxTotal: 7.5, factor: 1.13 },   // measured 1.125 [1.056, 1.196]
+      { maxTotal: 9.0, factor: 1.07 },   // measured 1.069 [1.023, 1.116]
+      { maxTotal: Infinity, factor: 1.00 }, // measured 1.014 [0.937, 1.089] -> CI contains 1
     ] },
-    dog_under: { factor: 1.05 },         // measured 1.047 [1.017, 1.077]
-    fav_under: { factor: 1.00 },         // measured 0.940 -> clamp
-    dog_over: { factor: 1.00 },          // measured 0.949 -> clamp
+    dog_under: { factor: 1.05 },         // measured 1.051 [1.028, 1.075]
+    fav_under: { factor: 1.00 },         // measured 0.931 -> clamp
+    dog_over: { factor: 1.00 },          // measured 0.945 -> clamp
   },
 };
 
@@ -99,7 +110,7 @@ function _table() {
       const p = JSON.parse(raw);
       if (p && typeof p === 'object') {
         _cache = {
-          ml_total: p.ml_total != null ? p.ml_total : DEFAULTS.ml_total,
+          ml: { ...DEFAULTS.ml, ...(p.ml || {}) },
           spread: { ...DEFAULTS.spread, ...(p.spread || {}) },
         };
         log.info('Pricing', 'MLB_SGP_CORRELATION override applied');
@@ -112,30 +123,40 @@ function _table() {
 }
 function _resetForTest() { _cache = undefined; }
 
+const _maxFactor = (group) => Math.max(...Object.values(group).map(e =>
+  Array.isArray(e.buckets) ? Math.max(...e.buckets.map(b => Number(b.factor) || 1)) : (Number(e.factor) || 1)));
+
 /**
  * @param {object}  a
  * @param {string}  a.sport           'baseball_mlb' (anything else -> null)
  * @param {string}  a.combo           'spread_total' | 'ml_total'
  * @param {number} [a.spreadLine]     bettor's run line; negative = took the favourite
+ * @param {string} [a.mlSide]         'fav' | 'dog' — the moneyline leg's side (ml_total only)
  * @param {number} [a.totalLine]      the game total
  * @param {string} [a.totalSelection] 'over' | 'under'
  * @returns {{factor:number, basis:string}|null}
  */
-function mlbSgpFactor({ sport, combo, spreadLine, totalLine, totalSelection } = {}) {
+function mlbSgpFactor({ sport, combo, spreadLine, mlSide, totalLine, totalSelection } = {}) {
   if (String(sport || '') !== 'baseball_mlb') return null;
   const t = _table();
+  const sel = String(totalSelection || '').toLowerCase();
+  const tot = sel === 'over' || sel === 'under' ? sel : null;
 
   if (combo === 'ml_total') {
-    const f = Number(t.ml_total);
-    return Number.isFinite(f) ? { factor: Math.max(1, f), basis: 'mlb.ml_total' } : null;
+    const side = mlSide === 'fav' || mlSide === 'dog' ? mlSide : null;
+    if (!side || !tot) {
+      // Unknown direction: the tightest entry in the group.
+      return { factor: Math.max(1, _maxFactor(t.ml)), basis: 'mlb.ml_total (direction unknown -> tightest)' };
+    }
+    const e = t.ml[`${side}_${tot}`];
+    const f = e ? Number(e.factor) : NaN;
+    return Number.isFinite(f) ? { factor: Math.max(1, f), basis: `mlb.ml_total ${side}_${tot}` } : null;
   }
+
   if (combo !== 'spread_total') return null;
 
   const sl = Number(spreadLine);
   const side = Number.isFinite(sl) && sl !== 0 ? (sl < 0 ? 'fav' : 'dog') : null;
-  const sel = String(totalSelection || '').toLowerCase();
-  const tot = sel === 'over' || sel === 'under' ? sel : null;
-
   // Unknown direction: fail toward the expensive side — the fav_over table.
   const key = side && tot ? `${side}_${tot}` : 'fav_over';
   const entry = t.spread[key];
