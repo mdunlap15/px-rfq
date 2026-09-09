@@ -8955,6 +8955,30 @@ function _resetToaFreqForTest() {
 // Ceiling on one full sweep. Must stay comfortably under the staleness
 // horizon or sports expire faster than the sweep can revisit them.
 const SWEEP_DEADLINE_MS = Number(process.env.SWEEP_DEADLINE_MINUTES || 4) * 60000;
+
+// Sports swept FIRST every cycle, never displaced by the deadline carry, and
+// exempt from the deadline. Default = the in-season, high-RFQ-volume set; a
+// sport listed here but absent from SUPPORTED_SPORTS is simply ignored. Read
+// per sweep (not at module load) so a Railway change takes effect on the next
+// cycle without a restart.
+const SWEEP_PRIORITY_DEFAULT = [
+  'baseball_mlb', 'americanfootball_nfl', 'americanfootball_ncaaf', 'tennis',
+  'basketball_nba', 'icehockey_nhl', 'basketball_wnba', 'mma_mixed_martial_arts',
+];
+function _sweepPrioritySet() {
+  const raw = process.env.SWEEP_PRIORITY_SPORTS;
+  if (raw == null || raw === '') return new Set(SWEEP_PRIORITY_DEFAULT);
+  // Explicitly "none" disables priority ordering (pure fairness rotation).
+  if (String(raw).trim().toLowerCase() === 'none') return new Set();
+  return new Set(String(raw).split(',').map(s => s.trim()).filter(Boolean));
+}
+// Pure: priority (in supported-list order) → carried non-priority → the rest.
+function _sweepOrder(supported, carried, prioritySet) {
+  const pri = supported.filter(sp => prioritySet.has(sp));
+  const car = carried.filter(sp => !prioritySet.has(sp) && supported.includes(sp));
+  const rest = supported.filter(sp => !prioritySet.has(sp) && !car.includes(sp));
+  return [...pri, ...car, ...rest];
+}
 // Sports the previous sweep could not reach before its deadline. They are
 // spliced to the FRONT of the next sweep so the tail of the list cannot starve.
 let _deadlineCarry = [];
@@ -9114,12 +9138,27 @@ async function _refreshAllSportsInner() {
   const deadlineSkippedNow = [];
   _sweepCounter++;
 
-  // FAIRNESS. The sport list is a fixed order, so a deadline that bites at the
-  // same point every sweep starves the same tail forever — and the warn line
-  // used to claim those sports were "first in line next sweep", which the code
-  // did not implement. Sports skipped last pass genuinely go first now.
-  const carried = _deadlineCarry.filter(sp => sportsToRefresh.includes(sp));
-  const sweepOrder = [...carried, ...sportsToRefresh.filter(sp => !carried.includes(sp))];
+  // SWEEP ORDER: priority sports FIRST, then the deadline carry, then the rest.
+  //
+  // FAIRNESS (original): the sport list is a fixed order, so a deadline that
+  // bites at the same point every sweep starves the same tail forever; sports
+  // skipped last pass go first next pass.
+  //
+  // PRIORITY (2026-09-09): fairness alone starved the sports that matter.
+  // MEASURED: $463K/wk of MLB network fills were declining as "stale odds" at
+  // a 3-minute threshold — 53% of them within 3 minutes past it — because the
+  // MLB cache was routinely 4-8 minutes old against a 2-minute refresh. The
+  // mechanism: this sweep walks all 26 SUPPORTED_SPORTS under a 4-minute
+  // deadline, waits out up to 120s of TOA 429 cooldown per sweep, and the
+  // carry put the deadline-skipped TAIL in front of MLB (5th in the list) —
+  // so MLB was pushed back, deadline-skipped, carried, and pushed back again
+  // by the next tail. Priority sports (SWEEP_PRIORITY_SPORTS) are swept first
+  // every cycle, are never displaced by the carry, and are exempt from the
+  // deadline: the deadline exists to stop a long tail eating the next cycle,
+  // and a priority sport IS the next cycle's most valuable content.
+  const prioritySet = _sweepPrioritySet();
+  const carried = _deadlineCarry.filter(sp => sportsToRefresh.includes(sp) && !prioritySet.has(sp));
+  const sweepOrder = _sweepOrder(sportsToRefresh, carried, prioritySet);
 
   for (const sport of sweepOrder) {
     // Out-of-season sports cost nothing; check BEFORE the deadline so a free
@@ -9129,7 +9168,8 @@ async function _refreshAllSportsInner() {
     // budget the deadline exists to protect, and it is the ONLY market with
     // no other refresher, so a deadline hit would zero out golf lines.
     const costsToa = sport !== 'golf_matchups';
-    if (costsToa && Date.now() > sweepDeadlineAt) {
+    const isPriority = prioritySet.has(sport);
+    if (costsToa && !isPriority && Date.now() > sweepDeadlineAt) {
       deadlineHit++; deadlineSkippedNow.push(sport);
       results[sport] = { ok: false, error: 'sweep deadline' };
       continue;
@@ -11212,6 +11252,11 @@ module.exports = {
   SUPPLEMENT_MARKET_KEYS,
   _resetToaFreqForTest,
   _singleFlight,
+  // Exported for test/toa-gate-and-deadline.test.js — the sweep ordering is a
+  // pure function so the priority/carry invariant is testable without a sweep.
+  _sweepOrder,
+  _sweepPrioritySet,
+  SWEEP_PRIORITY_DEFAULT,
   _resetRefreshStatsForTest,
   _noteToa429,
   _noteToaSuccess,

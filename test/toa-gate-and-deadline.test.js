@@ -168,7 +168,9 @@ test('the deadline carries skipped sports to the FRONT of the next sweep', () =>
   // claimed "first in line next sweep", a fairness property the code lacked.
   assert.ok(/let _deadlineCarry = \[\]/.test(SRC), 'must persist the skipped set');
   assert.ok(/const carried = _deadlineCarry\.filter/.test(SRC), 'must reuse it next sweep');
-  assert.ok(/const sweepOrder = \[\.\.\.carried,/.test(SRC), 'carried sports must go FIRST');
+  // Since 2026-09-09 PRIORITY sports go first and carried sports follow them —
+  // the carry is what was starving MLB (see the priority tests below).
+  assert.ok(/const sweepOrder = _sweepOrder\(sportsToRefresh, carried, prioritySet\)/.test(SRC), 'order must come from the pure helper');
   assert.ok(/for \(const sport of sweepOrder\)/.test(SRC), 'the loop must iterate the rotated order');
 });
 
@@ -177,12 +179,12 @@ test('golf_matchups is exempt from the deadline — it costs no TOA budget', () 
   // only market with no other refresher: a deadline hit would zero golf lines.
   assert.ok(/const costsToa = sport !== 'golf_matchups'/.test(SRC),
     'non-TOA sports must not be deadline casualties');
-  assert.ok(/if \(costsToa && Date\.now\(\) > sweepDeadlineAt\)/.test(SRC));
+  assert.ok(/if \(costsToa && !isPriority && Date\.now\(\) > sweepDeadlineAt\)/.test(SRC), 'deadline applies to TOA-costing, non-priority sports');
 });
 
 test('a free cold-skip is not miscounted as a deadline casualty', () => {
   const coldAt = SRC.indexOf("skipped: 'cold'");
-  const dlAt = SRC.indexOf('if (costsToa && Date.now() > sweepDeadlineAt)');
+  const dlAt = SRC.indexOf('if (costsToa && !isPriority && Date.now() > sweepDeadlineAt)');
   assert.ok(coldAt > -1 && dlAt > -1);
   assert.ok(coldAt < dlAt, 'the cold-sport check must run BEFORE the deadline check');
 });
@@ -190,4 +192,54 @@ test('a free cold-skip is not miscounted as a deadline casualty', () => {
 test('deadline skips name the sports, not just a count', () => {
   assert.ok(/lastDeadlineSkippedSports/.test(SRC), 'skipped sport names must be exposed');
   assert.ok(/deadlineSkippedNow\.join\(', '\)/.test(SRC), 'and logged by name');
+});
+
+
+// ---------------------------------------------------------------------------
+// SWEEP PRIORITY (2026-09-09). MEASURED: $463K/wk of MLB network fills were
+// declining as "stale odds" at a 3-minute threshold because the MLB cache ran
+// 4-8 minutes old: the deadline carry put the skipped TAIL in front of MLB
+// (5th in SUPPORTED_SPORTS), so MLB was pushed back, skipped, carried, and
+// pushed back again. Priority sports are swept first, never displaced by the
+// carry, and exempt from the deadline.
+// ---------------------------------------------------------------------------
+const oddsFeedMod = require('../services/odds-feed');
+
+test('priority sports are swept FIRST, ahead of the deadline carry', () => {
+  const supported = ['basketball_nba', 'soccer_epl', 'baseball_mlb', 'tennis', 'soccer_usa_mls', 'mma_mixed_martial_arts'];
+  const carried = ['soccer_epl', 'soccer_usa_mls'];              // last sweep's deadline casualties
+  const pri = new Set(['baseball_mlb', 'tennis']);
+  const order = oddsFeedMod._sweepOrder(supported, carried, pri);
+  assert.deepStrictEqual(order.slice(0, 2), ['baseball_mlb', 'tennis'], 'priority first, in supported-list order');
+  assert.deepStrictEqual(order.slice(2, 4), ['soccer_epl', 'soccer_usa_mls'], 'then the carry');
+  assert.deepStrictEqual(order.slice(4), ['basketball_nba', 'mma_mixed_martial_arts'], 'then the rest');
+  assert.strictEqual(new Set(order).size, supported.length, 'every supported sport exactly once');
+});
+
+test('a priority sport in the carry is NOT demoted behind non-priority carry', () => {
+  const supported = ['soccer_epl', 'baseball_mlb', 'tennis'];
+  const order = oddsFeedMod._sweepOrder(supported, ['soccer_epl', 'baseball_mlb'], new Set(['baseball_mlb']));
+  assert.deepStrictEqual(order, ['baseball_mlb', 'soccer_epl', 'tennis']);
+});
+
+test('the default priority set contains MLB and is read from SWEEP_PRIORITY_SPORTS when set', () => {
+  const prev = process.env.SWEEP_PRIORITY_SPORTS;
+  try {
+    delete process.env.SWEEP_PRIORITY_SPORTS;
+    assert.ok(oddsFeedMod._sweepPrioritySet().has('baseball_mlb'), 'MLB is in the default priority set');
+    assert.ok(oddsFeedMod.SWEEP_PRIORITY_DEFAULT.includes('americanfootball_nfl'));
+    process.env.SWEEP_PRIORITY_SPORTS = 'tennis, soccer_epl';
+    const s = oddsFeedMod._sweepPrioritySet();
+    assert.ok(s.has('tennis') && s.has('soccer_epl') && !s.has('baseball_mlb'), 'env overrides the default outright');
+    process.env.SWEEP_PRIORITY_SPORTS = 'none';
+    assert.strictEqual(oddsFeedMod._sweepPrioritySet().size, 0, '"none" restores the pure fairness rotation');
+  } finally {
+    if (prev === undefined) delete process.env.SWEEP_PRIORITY_SPORTS; else process.env.SWEEP_PRIORITY_SPORTS = prev;
+  }
+});
+
+test('priority sports are exempt from the deadline and excluded from the carry', () => {
+  assert.ok(/const isPriority = prioritySet\.has\(sport\);/.test(SRC), 'priority membership computed per sport');
+  assert.ok(/!isPriority && Date\.now\(\) > sweepDeadlineAt/.test(SRC), 'deadline skips non-priority only');
+  assert.ok(/_deadlineCarry\.filter\(sp => sportsToRefresh\.includes\(sp\) && !prioritySet\.has\(sp\)\)/.test(SRC), 'the carry never holds a priority sport');
 });
