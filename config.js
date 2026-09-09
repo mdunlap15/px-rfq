@@ -846,6 +846,15 @@ const config = {
       if (v > 100) return 100;
       return v;
     })(),
+    // ---- MLB MEASURED SGP CORRELATION (2026-09-09) ----
+    // When true, services/mlb-sgp-correlation.js takes precedence over the
+    // sport-agnostic SGP_CORRELATION_BY_COMBO grid for MLB ml_total and
+    // spread_total pairs. The grid's MLB numbers (ml_total 1.15,
+    // spread_fav_over 1.30) were back-calculated from 4 FanDuel samples;
+    // measured from 2 seasons of lines + scores, ml_total is 1.00 and
+    // spread_fav_over is 1.00-1.15 depending on the game total. Explicit
+    // switch because it changes live MLB SGP prices. Must be the literal 'true'.
+    mlbSgpCorrelationMeasured: process.env.MLB_SGP_CORRELATION_MEASURED === 'true',
     // ---- HR-PAIR MARGIN TRIM A/B (2026-09-09) ----
     // Scope: 2-leg MLB parlays where BOTH legs are player_hitter_hr on
     // DIFFERENT games. Measured over the last 7 days we lost $70K/wk of

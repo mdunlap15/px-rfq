@@ -48,6 +48,8 @@ client/
 | `DEFAULT_VIG` | No | Default: 0.015 (1.5% per leg) |
 | `VIG_BY_SPORT` | No | JSON map of per-sport base vig overriding `DEFAULT_VIG` (e.g. `{"soccer":0.03}`) |
 | `VIG_BY_SPORT_MARKET` | No | JSON map keyed `<sport>.<marketType>` (e.g. `{"baseball_mlb.total":0.010}`) overriding `VIG_BY_SPORT` for one market. **SCOPE: matches the POST-PARSE marketType**, so `baseball_mlb.total` is FULL-GAME only — F5/1H/2H/quarter/team/series/RFI totals carry their own suffixed types and are NOT covered — while ALT spreads/totals ARE covered (they retag back to plain `spread`/`total`). **Usually INERT on markets with Pinnacle/FD/DK coverage**: the per-leg consensus floor (`PRICE_FLOOR_VS_CONSENSUS_PP`, prod 1pp) sets the price there, measured 2026-08-14 — a −110/−110 MLB total quotes 51.381% at both 1.6% and 1.0% vig. It reaches a price mainly on legs with NO book consensus, which are the least-corroborated fairs, so narrow with care. Exists because sport-wide vig cannot express "absent from MLB totals, competitive on MLB moneyline" — measured 2026-08-14: we won 5.9% of MLB-total contests we entered and 3.2% of spreads, in the one family the audit proved calibrated. Moves the BASE vig only; favorite ramp, prop floor, MMA/golf minimums, SGP multiplier and the 20% ceiling all still apply, so an override can never push a leg below its own floor. Entries that are 0, negative, >0.25, or malformed are DROPPED (falls back to sport vig) rather than quoting at fair. |
+| `MLB_SGP_CORRELATION_MEASURED` | No | Default: off (must be the literal `'true'`). When on, `services/mlb-sgp-correlation.js` takes precedence over the sport-agnostic `SGP_CORRELATION_BY_COMBO` grid for MLB `ml_total` / `spread_total` pairs. The grid's MLB numbers (`ml_total` 1.15, `spread_fav_over` 1.30) were back-calculated from 4 FanDuel samples and never measured; measured from historical lines + Retrosheet scores, **`ml_total` is 1.00** (every CI contains 1.000) and **run-line fav+over is 1.00–1.15 depending on the game total**. Gated, unlike football, because MLB same-game is LIVE — flipping it reprices the $52K/wk of contested volume we currently lose at a 3.6–3.8pp median gap (0.13% / 0.02% of contests won). The 2× SGP vig multiplier is untouched; only the phantom correlation charge goes. |
+| `MLB_SGP_CORRELATION` | No | JSON override of the measured MLB table (`{"ml_total":1.0,"spread":{"fav_over":{"buckets":[{"maxTotal":7.5,"factor":1.14},...]},"dog_under":{"factor":1.05}}}`). Clamped at ≥ 1.00; malformed JSON falls back to the measurement. |
 | `HR_PAIR_TRIM_PERCENT` | No | Default: 0 (**dark**). A/B split (0-100) for the **HR-pair margin trim** on 2-leg MLB parlays where BOTH legs are `player_hitter_hr` on **different** games. Assignment is `md5('hr:'+parlayId) mod 100` — deterministic, same idiom as the v2 arm — and recorded in `meta.hrTrimArm` (`null` out of scope / dark, `'control'` / `'trim'` in scope) whether or not the trim fires, so the control arm is attributable. Why it exists (measured 2026-09-09, 7 days): we lost **$70K/wk** of network fills on this exact shape at a **median gap of 0.32pp, 100% within 1pp**, while our own HR-pair fills run **+4.7% ROI [3.5, 6.1]** — the one prop market the audit found calibrated. Same-game HR pairs are excluded (they carry the `prop_prop_xteam` multiplier, p50 1.90×, a different product). Confirm-time drift keys on `fairParlayProb`, which the trim never touches, so a trimmed quote confirms in the same arm. |
 | `HR_PAIR_TRIM_FRACTION` | No | Default: 0.4 (capped at 0.9). Fraction of the modelled margin `(offered − fair)` removed in the trim arm. ⚠ **A FRACTION, never a flat pp cut** — the median modelled margin on HR pairs is only **0.33pp (8.1% of fair)**, so a flat 0.30pp trim would put **37% of quotes at or below fair**. 0.4 turns an 8.1% relative edge into ~4.9%, closing ~0.13pp of the 0.32pp gap. `meta.hrTrimPreProb` keeps the untrimmed price so the counterfactual is recoverable from settled rows. |
 | `HR_PAIR_MIN_REL_EDGE_PCT` | No | Default: 4. Hard floor on relative edge AFTER the trim: `offered >= fair × (1 + this/100)`. A trimmed quote below it is **clamped up, never declined** — so even a mis-set fraction cannot quote below fair. Mutation-checked: removing the floor, switching to a flat pp cut, and admitting same-game pairs each fail the suite (`test/hr-pair-trim.test.js`). |
@@ -434,6 +436,34 @@ in response to being picked off on this exact market last season.
   not merely inflated, it is INVERTED. Saturday 2026-09-06: passing yards
   17,236 declined legs → **$2,960** of network fills; rushing yards 551 declined
   legs → **$7,892**. Rank markets by `matched_parlays`, never by declines.
+
+## MLB SGPs — side + total (measured, gated)
+
+Same method as football (`M = P(A∩B)/(P(A)·P(B))` on pre-game consensus lines
++ final scores, bootstrapped CIs): The Odds API **historical** snapshots at
+16:00Z and 22:30Z (our key has historical access — 30 credits/snapshot, later
+snapshot wins per game, median across ~10 US books) joined to Retrosheet game
+logs. See `services/mlb-sgp-correlation.js` for the tables.
+
+- **`ml_total` is INDEPENDENT** — every CI contains 1.000, same as the NFL. If
+  anything a favourite winning leans *under* (favourites win pitchers' duels
+  3-1). Production's 1.15 is a charge for a coupling that does not exist, and
+  it is the bucket where we lose **$40K/wk at a 3.6pp median gap, winning 0.13%
+  of contests** — the 40 fills we did win ran +34% ROI, which is what a phantom
+  correlation looks like from the inside.
+- **Run line + total is small (~1.05) and conditioned on the TOTAL**, the same
+  shape as the CFB spread split: fav covers −1.5 + over is ~1.14 at totals ≤7.5
+  (covering −1.5 in a 7-run game *requires* the over), ~1.06 at 8–9, and ≤1.00
+  at ≥9.5 (n=3,284 games: 2024 full + 2025 through May). A single `spread_fav_over` number is wrong in both directions.
+  Production's 1.30 is ~25 points too rich on the most-asked direction.
+- Clamped ≥1.00; unknown total or direction fails toward the **tightest**
+  bucket; non-MLB returns null so the grid still applies elsewhere.
+- **Gated by `MLB_SGP_CORRELATION_MEASURED`** because MLB same-game is live.
+  Mutation-checked (`test/mlb-sgp-correlation.test.js`): ignoring the switch
+  fails 2, collapsing the total buckets fails 4, removing the clamp fails 1.
+- ⚠ The **fetch shares the trader's TOA key** — four concurrent fetchers
+  stalled everything in `EXCEEDED_FREQ_LIMIT` backoff on 2026-09-09. One paced
+  process (2.6s cadence) is fine; never fan it out.
 
 ## Football SGPs — side + total (NFL / CFB)
 

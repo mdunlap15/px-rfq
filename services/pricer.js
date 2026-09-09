@@ -8,6 +8,7 @@ const dkScraper = require('./dk-scraper');
 const ufcMov = require('./ufc-mov');
 const nflConsensus = require('./nfl-consensus');
 const { footballSgpFactor } = require('./football-sgp-correlation');
+const { mlbSgpFactor } = require('./mlb-sgp-correlation');
 // UFC method-of-victory market types. PX posts them typed 'moneyline'; the
 // parser retags by market NAME (see prophetx.parseMarketSelections).
 const MOV_MARKET_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
@@ -2188,6 +2189,38 @@ function priceParlay(legs, opts = {}) {
             factor = fbHit.factor;
             combo = spreadLeg ? 'spread_total' : 'ml_total';
             log.debug('Pricing', `football SGP correlation ${fbHit.basis} → ${factor}`);
+            if (factor === 1) continue;   // measured independent — nothing to apply
+            detectedCombos.push(combo);
+            sgpCorrelationFactor *= factor;
+            continue;
+          }
+        }
+        // MLB MEASURED TABLE takes precedence over the grid when the explicit
+        // switch is on (MLB_SGP_CORRELATION_MEASURED). The grid's MLB numbers
+        // (ml_total 1.15, spread_fav_over 1.30) were back-calculated from 4
+        // FanDuel samples; measured from historical lines + scores, ml_total
+        // is 1.00 and spread_fav_over is 1.00-1.15 depending on the game total
+        // (services/mlb-sgp-correlation.js). Gated rather than unconditional
+        // like football because MLB same-game is LIVE today — flipping it
+        // changes prices on $52K/wk of contested volume, and that is the
+        // operator's call, not a side effect of a deploy.
+        const mlbSideLeg = spreadLeg || mlLeg;
+        if (mlbSideLeg && config.pricing.mlbSgpCorrelationMeasured === true) {
+          const mlbSport = mlbSideLeg.lineInfo.sport || mlbSideLeg.lineInfo.oddsApiSport;
+          const mlbTotalSel = totalLeg
+            ? String(totalLeg.lineInfo.selection || totalLeg.lineInfo.oddsApiSelection || '').toLowerCase()
+            : '';
+          const mlbHit = mlbSgpFactor({
+            sport: mlbSport,
+            combo: spreadLeg ? 'spread_total' : 'ml_total',
+            spreadLine: spreadLeg ? Number(spreadLeg.lineInfo.line) : undefined,
+            totalLine: totalLeg ? Number(totalLeg.lineInfo.line) : undefined,
+            totalSelection: mlbTotalSel,
+          });
+          if (mlbHit) {
+            factor = mlbHit.factor;
+            combo = spreadLeg ? 'spread_total' : 'ml_total';
+            log.debug('Pricing', `MLB SGP correlation ${mlbHit.basis} → ${factor}`);
             if (factor === 1) continue;   // measured independent — nothing to apply
             detectedCombos.push(combo);
             sgpCorrelationFactor *= factor;
