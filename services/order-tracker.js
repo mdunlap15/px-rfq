@@ -6486,6 +6486,80 @@ async function checkLegResults() {
         continue;
       }
 
+      // TENNIS: homeScore/awayScore are SETS WON (espn-scores counts
+      // linescores[].winner), but every tennis total/spread we register is
+      // priced in GAMES — line-manager's excludePatterns drop every set-unit
+      // market ("set spread", "set total", ...), so a registered tennis
+      // `total` is "Total Games" and a `spread` is the games handicap. The
+      // generic branches below would grade a 21.5-game total against a 2-1 set
+      // score, marking EVERY tennis Over "lost" and EVERY Under "won", and
+      // every games spread on the set margin. Operator caught it 2026-09-09:
+      // Gauff d. Andreeva 2-6 7-6 6-2 = 29 games, Over 21.5 WON, PX settled it
+      // won, and this path overrode that to "lost" — which also flips
+      // isParlayAlreadyDead() and skips exposure release, the same shape as
+      // the combat-sport bug above.
+      //
+      // Grade from GAMES when the ESPN parse carries them (homeGames/
+      // awayGames — null unless every set has a numeric value); otherwise
+      // fail CLOSED: clear any set-derived value so PX's settlementStatus
+      // shows through, and never fall into the sets-based branches.
+      // Moneyline is untouched — a set count is exactly a winner.
+      if (l.sport === 'tennis' && (market === 'total' || market === 'spread')) {
+        // null/undefined games must NOT coerce to 0 (Number(null) === 0 would
+        // grade every total as a 0-game match) — treat absent as unavailable.
+        const hg = result.homeGames == null ? NaN : Number(result.homeGames);
+        const ag = result.awayGames == null ? NaN : Number(result.awayGames);
+        const line = l.line != null ? Number(l.line) : null;
+        let tennisFresh = null;
+        if (Number.isFinite(hg) && Number.isFinite(ag) && line != null && Number.isFinite(line)) {
+          if (market === 'total') {
+            const games = hg + ag;
+            if (selection === 'over') tennisFresh = games > line ? 'won' : games < line ? 'lost' : 'push';
+            else if (selection === 'under') tennisFresh = games < line ? 'won' : games > line ? 'lost' : 'push';
+          } else {
+            // Games handicap: bettor's side + line vs the other side.
+            const margin = selection === 'home' ? (hg - ag) : selection === 'away' ? (ag - hg) : null;
+            if (margin != null) {
+              const adjusted = margin + line;
+              tennisFresh = adjusted > 0 ? 'won' : adjusted < 0 ? 'lost' : 'push';
+            }
+          }
+        }
+        if (tennisFresh == null) {
+          // No games available (TOA fallback, partial linescore, unknown
+          // side): a set-derived value is worse than none — clear it and
+          // defer to PX, exactly like the combat self-heal.
+          if (l.inferredResult != null && !l.gradedFromGames) {
+            log.warn('Results', `Clearing set-derived ${market} result for ${l.team} (tennis): stored=${l.inferredResult} graded from SETS ${result.homeScore}-${result.awayScore}, games unavailable — deferring to PX settlement`);
+            l.inferredResult = null;
+            if (o.legs) {
+              const ml = o.legs.find(ol => ol.lineId === l.lineId
+                || ((ol.team || ol.teamName) === (l.team || l.teamName) && (ol.market || ol.marketType) === market));
+              if (ml) ml.inferredResult = null;
+            }
+            db.saveOrder(o).catch(() => {});
+          }
+          continue;
+        }
+        checked++;
+        if (l.inferredResult && l.inferredResult !== tennisFresh) {
+          log.warn('Results', `Overriding inferredResult for ${l.team} ${market}: stored=${l.inferredResult} → fresh=${tennisFresh} (tennis GAMES ${hg}-${ag}, sets ${result.homeScore}-${result.awayScore}, startTime=${l.startTime})`);
+        }
+        if (l.inferredResult !== tennisFresh || !l.gradedFromGames) {
+          l.inferredResult = tennisFresh;
+          l.gradedFromGames = true;           // marks a games-based grade so the self-heal never clears it
+          if (o.legs) {
+            const ml = o.legs.find(ol => ol.lineId === l.lineId
+              || ((ol.team || ol.teamName) === (l.team || l.teamName) && (ol.market || ol.marketType) === market));
+            if (ml) { ml.inferredResult = tennisFresh; ml.gradedFromGames = true; }
+          }
+          resolved++;
+          db.saveOrder(o).catch(() => {});
+          log.info('Results', `Leg resolved: ${l.team} ${market} → ${tennisFresh} (tennis games ${hg}-${ag})`);
+        }
+        continue;
+      }
+
       checked++;
 
       // Compute the fresh result from this score-based lookup.

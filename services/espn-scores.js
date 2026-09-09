@@ -222,6 +222,27 @@ function _parseTennisMatches(event, leagueLabel) {
         const awayLinescores = Array.isArray(away.linescores) ? away.linescores : [];
         const homeSetsWon = homeLinescores.filter(s => s && s.winner === true).length;
         const awaySetsWon = awayLinescores.filter(s => s && s.winner === true).length;
+        // GAMES, per player. Every tennis total/spread we register is priced in
+        // GAMES ("Total Games", "Game Spread" — line-manager excludes every
+        // set-unit market), while homeScore/awayScore above are SETS. Grading a
+        // 21.5-game total against a 2-1 set score marks every Over "lost" and
+        // every Under "won" (Gauff d. Andreeva 2-6 7-6 6-2 = 29 games, Over 21.5
+        // WON — graded lost, 2026-09-09). linescores[].value is games per set
+        // (tiebreak points live in a separate field), so the sum is the match
+        // games total. Null unless EVERY set carries a numeric value, so a
+        // partial or malformed linescore can never grade a total.
+        const _sumGames = (ls) => {
+          if (!ls.length) return null;
+          let sum = 0;
+          for (const s of ls) {
+            const v = s && s.value != null ? Number(s.value) : NaN;
+            if (!Number.isFinite(v)) return null;
+            sum += v;
+          }
+          return sum;
+        };
+        const homeGames = _sumGames(homeLinescores);
+        const awayGames = _sumGames(awayLinescores);
         out.push({
           homeTeam: homeName,
           awayTeam: awayName,
@@ -237,6 +258,10 @@ function _parseTennisMatches(event, leagueLabel) {
           statusName: status?.name || status?.shortDetail || null,
           homeScore: homeSetsWon,
           awayScore: awaySetsWon,
+          // The unit tennis totals/spreads are actually settled in. The
+          // grader MUST use these (never homeScore+awayScore) for those markets.
+          homeGames,
+          awayGames,
           // Tennis has no innings/halves — leave linescores fields null so
           // the F5 / H1 paths short-circuit cleanly.
           homeLinescores: null,
@@ -651,4 +676,7 @@ module.exports = {
   isMatchLive,
   startPoller,
   __debugDump,
+  // Exported for test/tennis-games-grading.test.js — the tennis parse is
+  // where SETS (homeScore/awayScore) and GAMES (homeGames/awayGames) diverge.
+  _parseTennisMatches,
 };
