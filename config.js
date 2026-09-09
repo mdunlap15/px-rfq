@@ -846,6 +846,43 @@ const config = {
       if (v > 100) return 100;
       return v;
     })(),
+    // ---- HR-PAIR MARGIN TRIM A/B (2026-09-09) ----
+    // Scope: 2-leg MLB parlays where BOTH legs are player_hitter_hr on
+    // DIFFERENT games. Measured over the last 7 days we lost $70K/wk of
+    // network fills on this exact shape at a median gap of 0.32pp, 100% of
+    // them within 1pp — and our own HR-pair fills run +4.7% ROI [3.5, 6.1],
+    // the one prop market the audit found calibrated (the 0.93 HR multiplier).
+    //
+    // ⚠ The trim is a FRACTION of the modelled margin, NOT a flat pp cut. Our
+    // median modelled margin on HR pairs is only 0.33pp (8.1% of fair) — a
+    // flat 0.30pp trim would put 37% of quotes AT OR BELOW FAIR. Fractional
+    // keeps the same relative edge on every ticket and can never cross fair;
+    // the hard floor below guarantees it even if the fraction is mis-set.
+    //
+    // Assignment is deterministic by md5(parlayId), same idiom as the v2 arm,
+    // recorded in meta.hrTrimArm REGARDLESS of whether the trim fires, so the
+    // control arm is attributable. hrPairTrimPercent is the split (0 = dark).
+    hrPairTrimPercent: (() => {
+      const v = parseInt(process.env.HR_PAIR_TRIM_PERCENT);
+      if (!Number.isFinite(v) || v < 0) return 0;
+      if (v > 100) return 100;
+      return v;
+    })(),
+    // Fraction of (offered − fair) removed in the trim arm. 0.4 turns an 8.1%
+    // relative edge into ~4.9% — closes ~0.13pp of the 0.32pp gap, enough to
+    // flip the closer near-misses without giving the margin away.
+    hrPairTrimFraction: (() => {
+      const v = parseFloat(process.env.HR_PAIR_TRIM_FRACTION);
+      if (!Number.isFinite(v) || v <= 0) return 0.4;
+      return Math.min(v, 0.9);           // never more than 90% of the margin
+    })(),
+    // Hard floor on relative edge AFTER the trim: offered >= fair × (1 + this).
+    // A trimmed quote below this floor is clamped up to it, never declined.
+    hrPairMinRelEdgePct: (() => {
+      const v = parseFloat(process.env.HR_PAIR_MIN_REL_EDGE_PCT);
+      if (!Number.isFinite(v) || v < 0) return 4;
+      return v;
+    })(),
     // Safety net: decline any total leg where our de-vigged fair diverges
     // from the simple book consensus (mean of Pin/DK/FD implied probs) by
     // more than the threshold. Backstop for the getBookPairsForTotals fix

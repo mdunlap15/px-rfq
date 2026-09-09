@@ -3268,6 +3268,59 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // HR-PAIR MARGIN TRIM A/B (2026-09-09).
+  //
+  // Scope is deliberately narrow: exactly 2 legs, both MLB player_hitter_hr,
+  // on DIFFERENT games. Same-game HR pairs are excluded — they carry the
+  // prop_prop_xteam multiplier (p50 1.90x, measured 1.5x true coupling) and
+  // are a different product.
+  //
+  // Sits BEFORE the theo-edge gate on purpose, so the floor still audits the
+  // trimmed price. The trim removes a FRACTION of (offered − fair), never a
+  // flat pp amount: the median modelled margin here is 0.33pp, so a flat
+  // 0.30pp cut would put 37% of quotes at or below fair. A hard relative-edge
+  // floor clamps the result even if the fraction is mis-set — this path can
+  // never quote below fair × (1 + floor).
+  //
+  // Arm assignment is md5(parlayId) mod 100 — the same idiom as the v2 arm —
+  // and is recorded in meta.hrTrimArm whether or not the trim fires, so the
+  // control arm is attributable and the confirm-time reprice (which keys on
+  // fairParlayProb, not offered) lands in the same arm.
+  // -------------------------------------------------------------------
+  const _hrTrim = { arm: null, applied: false, preProb: null, fraction: null };
+  {
+    const _isHrPair = pricedLegs.length === 2
+      && pricedLegs.every(l => l.lineInfo
+        && l.lineInfo.sport === 'baseball_mlb'
+        && l.lineInfo.marketType === 'player_hitter_hr')
+      && pricedLegs[0].lineInfo.pxEventId != null
+      && String(pricedLegs[0].lineInfo.pxEventId) !== String(pricedLegs[1].lineInfo.pxEventId);
+    const _pct = config.pricing.hrPairTrimPercent || 0;
+    if (_isHrPair && opts.parlayId && _pct > 0) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('hr:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _hrTrim.arm = inArm ? 'trim' : 'control';
+      if (inArm && fairParlayProb > 0 && offeredImpliedProb > fairParlayProb) {
+        const frac = config.pricing.hrPairTrimFraction || 0.4;
+        const floorRel = (config.pricing.hrPairMinRelEdgePct != null ? config.pricing.hrPairMinRelEdgePct : 4) / 100;
+        const margin = offeredImpliedProb - fairParlayProb;
+        const trimmed = offeredImpliedProb - margin * frac;
+        const floored = Math.max(trimmed, fairParlayProb * (1 + floorRel));
+        if (floored < offeredImpliedProb) {
+          _hrTrim.preProb = offeredImpliedProb;
+          _hrTrim.applied = true;
+          _hrTrim.fraction = frac;
+          log.debug('Pricing', `HR-pair trim[${_hrTrim.arm}]: ${(offeredImpliedProb * 100).toFixed(3)}% → ${(floored * 100).toFixed(3)}% (fair ${(fairParlayProb * 100).toFixed(3)}%, frac ${frac}${floored > trimmed ? ', FLOORED' : ''})`);
+          offeredImpliedProb = floored;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
   //
   // After all pricing adjustments, edge = (offered − fair) / fair × 100.
@@ -3804,6 +3857,14 @@ function priceParlay(legs, opts = {}) {
       pinRawCompound: pinRawCompound != null ? Math.round(pinRawCompound * 100000) / 100000 : null,
       pinMatchTarget: pinMatchTarget != null ? Math.round(pinMatchTarget * 100000) / 100000 : null,
       offeredImpliedProb: Math.round(cappedProb * 100000) / 100000,
+      // HR-pair margin-trim A/B. hrTrimArm is null when the parlay is out of
+      // scope or the experiment is dark, 'control'/'trim' when in scope.
+      // hrTrimPreProb is the UNtrimmed offered prob, so the trim arm's
+      // counterfactual price is recoverable from settled rows.
+      hrTrimArm: _hrTrim.arm,
+      hrTrimApplied: _hrTrim.applied,
+      hrTrimPreProb: _hrTrim.preProb != null ? Math.round(_hrTrim.preProb * 100000) / 100000 : null,
+      hrTrimFraction: _hrTrim.fraction,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.
