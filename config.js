@@ -846,6 +846,19 @@ const config = {
       if (v > 100) return 100;
       return v;
     })(),
+    // ---- CLOSED-FIELD ONE-SIDED MARKETS (2026-09-10) ----
+    // TOA one-sided prop markets where EXACTLY ONE outcome occurs, so the whole
+    // field can be power-normalised to 1.0 instead of assuming a per-outcome
+    // overround (toaOneSidedPropOverround, 8%). First TD scorer: the YES prices
+    // sum to ~1.36 across the field (49ers@Rams, 33 outcomes incl. "No
+    // Touchdown"), so the 8% assumption left every first-TD fair ~25% high.
+    // Anytime TD is an OPEN field (sum ≈ 5.6 = expected scorers) and must NOT
+    // be listed here. Comma-separated TOA market keys; env overrides the default.
+    closedFieldOneSidedMarkets: (() => {
+      const raw = process.env.CLOSED_FIELD_ONE_SIDED_MARKETS;
+      if (raw == null || raw === '') return ['player_1st_td'];
+      return String(raw).split(',').map(s => s.trim()).filter(Boolean);
+    })(),
     // ---- PER-SPORT MARKET ALLOWLIST (2026-09-09) ----
     // sport key -> the ONLY post-parse marketTypes that may enter the line
     // index (and therefore register with PX). A sport with no entry is

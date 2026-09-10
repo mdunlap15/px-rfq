@@ -10729,9 +10729,27 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   const normParts = _normPlayerNameParts(playerName);
   const matched = []; // {book, side, point, price}  (exact requested line)
   const allRows = []; // {book, side, point, price}  (ALL of the player's lines — distribution fit)
+  // THE WHOLE FIELD, per book: every outcome's YES/Over implied prob for this
+  // market, BEFORE the player filter. Only lineless markets collect it (a
+  // pointful market's "field" is a ladder, not a field). Consumed by the
+  // one-sided path for CLOSED fields — first TD: exactly one of the ~33
+  // outcomes (incl. "No Touchdown") occurs, so the per-book sum IS the
+  // book's overround (measured 1.36 on 49ers@Rams) and the field can be
+  // normalised to 1, like golf outright win. Cheap: it is the response we
+  // already hold.
+  const fieldYesByBook = line == null ? {} : null;
   for (const bk of bookmakers) {
     const market = (bk.markets || []).find(m => m.key === marketKey);
     if (!market) continue;
+    if (fieldYesByBook) {
+      const probs = [];
+      for (const o of (market.outcomes || [])) {
+        if (!/^(yes|over)$/i.test(String(o.name || ''))) continue;
+        const p = americanToImpliedProb(o.price);
+        if (p != null && p > 0 && p < 1) probs.push(p);
+      }
+      if (probs.length) fieldYesByBook[bk.key] = probs;
+    }
     for (const o of (market.outcomes || [])) {
       if (!_playerNamesMatch(normParts, o.description)) continue;
       // Lineless (anytime) markets carry NO point on any outcome. Accepting
@@ -10802,6 +10820,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   if (allRows.length === 0) {
     return { error: 'no_player_or_line_match', stages, resolvedEventId: event.id,
              matchedRows: matched,
+    fieldYesByBook,
              fetchedAt: odds.fetchedAt || null,
              samplePlayers: [...new Set(
                bookmakers.flatMap(bk =>
@@ -10871,6 +10890,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
 
   return {
     matchedRows: matched,
+    fieldYesByBook,
     books,
     fairProbOver,
     fairProbUnder,
@@ -10904,6 +10924,46 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
  *     oneSidedSource: 'toa-one-sided', resolvedEventId, stages }
  * Or { error, stages, ... } on failure.
  */
+// CLOSED-FIELD NORMALISATION (2026-09-10). For a one-sided market where EXACTLY
+// ONE outcome occurs (first TD scorer, incl. "No Touchdown"), each book's sum
+// of YES implied probs IS that book's overround — measured 1.36 across 33
+// outcomes on 49ers@Rams — so the assumed per-outcome overround (8%) undershoots
+// the de-vig by ~25% and every first-TD fair lands a quarter too high. Power-
+// normalise each book's field to 1.0 (the golf outright-win method; proportional
+// underrates favourites on a longshot-heavy board), take the player's normalised
+// prob per book, and average across books whose field is COMPLETE: at least
+// CLOSED_FIELD_MIN_OUTCOMES outcomes and a sum inside [1.05, 2.0] — a partial
+// field (a book listing 6 players) would normalise to nonsense. Returns null
+// when no book qualifies so the caller falls back to the assumed-overround path.
+//
+// Pure: (fieldYesByBook: {book: [p...]}, playerRawByBook: {book: p}) -> {fair,
+// books, avgFieldSum} | null. Exported for test/first-td-field-normalization.
+const CLOSED_FIELD_MIN_OUTCOMES = 15;
+function _closedFieldNormalizedFair(fieldYesByBook, playerRawByBook) {
+  const { powerNormalize } = require('./futures-outrights');
+  const fairs = [], sums = [];
+  for (const [book, raw] of Object.entries(playerRawByBook || {})) {
+    const field = fieldYesByBook && fieldYesByBook[book];
+    if (!Array.isArray(field) || field.length < CLOSED_FIELD_MIN_OUTCOMES) continue;
+    if (!(raw > 0 && raw < 1)) continue;
+    const sum = field.reduce((a, b) => a + b, 0);
+    if (!(sum >= 1.05 && sum <= 2.0)) continue;         // not a complete closed field
+    // The player's own price must be part of the field it is normalised against.
+    if (!field.some(p => Math.abs(p - raw) < 1e-9)) continue;
+    const k = powerNormalize(field, 1.0);
+    if (!(k > 0)) continue;
+    const fair = Math.pow(raw, k);
+    if (!(fair > 0 && fair < 1)) continue;
+    fairs.push(fair); sums.push(sum);
+  }
+  if (!fairs.length) return null;
+  return {
+    fair: fairs.reduce((a, b) => a + b, 0) / fairs.length,
+    books: fairs.length,
+    avgFieldSum: sums.reduce((a, b) => a + b, 0) / sums.length,
+  };
+}
+
 async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo, playerName, line) {
   // Reuse the standard lookup to get the matched rows + per-book over
   // prices, then bypass the de-vig step and apply an assumed-overround
@@ -10951,9 +11011,19 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   // back out the assumed overround. Conservative estimate: under-shoot
   // vig (smaller haircut) → smaller fair → tighter offer.
   const avgImp = overImps.reduce((a, b) => a + b, 0) / overImps.length;
-  const fairProbOver = Math.max(0.005, Math.min(0.95, avgImp / (1 + assumedVig)));
-  const fairProbUnder = 1 - fairProbOver;
   const books = Object.keys(overByBook);
+  // Closed-field markets (config.pricing.closedFieldOneSidedMarkets, default
+  // player_1st_td) normalise the whole field instead of assuming a per-outcome
+  // overround — see _closedFieldNormalizedFair. The QUOTE stays a raw
+  // book-mirror; this corrects the FAIR that drives EV and risk.
+  const closedSet = new Set((cfg && cfg.pricing && cfg.pricing.closedFieldOneSidedMarkets) || []);
+  const cf = (closedSet.has(marketKey) && std.fieldYesByBook)
+    ? _closedFieldNormalizedFair(std.fieldYesByBook, overByBook)
+    : null;
+  const fairProbOver = cf
+    ? Math.max(0.005, Math.min(0.95, cf.fair))
+    : Math.max(0.005, Math.min(0.95, avgImp / (1 + assumedVig)));
+  const fairProbUnder = 1 - fairProbOver;
   return {
     matchedRows: std.matchedRows,
     books,
@@ -10963,7 +11033,10 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
     oneSidedSource: 'toa-one-sided',
     oneSidedBookCount: books.length,
     oneSidedRawAvgImplied: avgImp,
-    oneSidedAssumedVig: assumedVig,
+    oneSidedAssumedVig: cf ? null : assumedVig,
+    oneSidedFieldNormalized: !!cf,
+    oneSidedFieldSum: cf ? cf.avgFieldSum : null,
+    oneSidedFieldBooks: cf ? cf.books : 0,
     resolvedEventId: std.resolvedEventId,
     fetchedAt: std.fetchedAt || null,
     stages: (std.stages || []).concat(['one_sided_over_only:' + overImps.length + 'books']),
@@ -11255,6 +11328,7 @@ module.exports = {
   // Exported for test/toa-gate-and-deadline.test.js — the sweep ordering is a
   // pure function so the priority/carry invariant is testable without a sweep.
   _sweepOrder,
+  _closedFieldNormalizedFair,
   _sweepPrioritySet,
   SWEEP_PRIORITY_DEFAULT,
   _resetRefreshStatsForTest,
