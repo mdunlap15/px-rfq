@@ -174,7 +174,7 @@ test('MLB classifier: own-sport names unchanged', () => {
   assert.equal(ws._classifyMlbProp('Tarik Skubal Pitching Strikeouts'), 'pitcher_strikeouts');
   assert.equal(ws._classifyMlbProp('Aaron Judge Home Runs'), 'hitter_hr');
   assert.equal(ws._classifyMlbProp('Mookie Betts Total Bases'), 'hitter_total_bases');
-  assert.equal(ws._classifyMlbProp('Randy Arozarena Total Hits, Runs & RBIs'), 'hitter_other');
+  assert.equal(ws._classifyMlbProp('Randy Arozarena Total Hits, Runs & RBIs'), 'hitter_hits_runs_rbis'); // PX's live form (2026-09-10)
   assert.equal(ws._classifyMlbProp('Freddie Freeman Hits + Runs + RBIs'), 'hitter_hits_runs_rbis');
   // "To Score a Run" is a real MLB shape and keeps its old bucket
   assert.equal(ws._classifyMlbProp('Juan Soto Runs Scored'), 'hitter_rbi_runs');
@@ -585,4 +585,14 @@ test('an unparseable kickoff fails CLOSED (no window, no registration)', async (
   });
   const props = Object.values(idx).filter(li => /^player_/.test(li.marketType || ''));
   assert.equal(props.length, 0, 'unknown kickoff must fail closed, not open');
+});
+
+test('MLB "Total Hits, Runs & RBIs" classifies and extracts (PX comma+ampersand phrasing)', () => {
+  // $224K/wk of network fills were declining as unknown legs (2026-09-10):
+  // only the "+" form was recognised, the live PX form is "Hits, Runs & RBIs".
+  assert.equal(ws._classifyMlbProp('Cody Bellinger Total Hits, Runs & RBIs'), 'hitter_hits_runs_rbis');
+  assert.equal(ws._extractPlayerNameFromPropMarket('Cody Bellinger Total Hits, Runs & RBIs'), 'Cody Bellinger');
+  assert.equal(ws._classifyMlbProp('Cody Bellinger Hits + Runs + RBIs'), 'hitter_hits_runs_rbis');
+  assert.equal(ws._extractPlayerNameFromPropMarket('Cody Bellinger Hits + Runs + RBIs'), 'Cody Bellinger');
+  assert.equal(ws._classifyMlbProp('Cody Bellinger Total Hits'), 'hitter_hits');
 });

@@ -277,6 +277,28 @@ PX and odds APIs use different team names. Matching strategies (in order):
 3. Substring containment
 4. Last N words match (e.g., "Red Sox" matches "Boston Red Sox")
 
+**College (`/ncaa/` sport keys)** goes through `_collegeAnchoredMatch`: a bare PX
+school name ("Alabama") must be a word-anchored PREFIX of the candidate, the
+shortest remainder wins ("Oregon Ducks" over "Oregon State Beavers"), an
+unanchored lone substring is REFUSED ("Houston" ≠ "Sam Houston State"). **A tie on
+remainder length is resolved by QUALIFIER (2026-09-10)**: "Alabama" vs "Alabama
+Crimson Tide" AND "Alabama State Hornets" is +2/+2, and it used to fail closed —
+that single tie left East Carolina @ Alabama dark for **$116K of network fills on
+9/5**, with Illinois (Illinois State) and Louisiana (Louisiana Tech) failing the
+same way whenever the derivative school is on the week's board. The tie now goes
+to the ONE candidate whose remainder carries no qualifier token (`state`, `tech`,
+`a and m`, directional prefixes, `city`, `college`, …); two bare mascots (Carolina
+Panthers / Hurricanes) or two qualified names stay ambiguous → null. The
+shortest-remainder rule outside a tie is untouched. `test/college-team-match.test.js`.
+⚠ The event_match_gap on football was **$1.03M/wk** (9/3–9/9), almost all of it
+on 9/5–9/6 before the anchored matcher deployed; re-measure on Saturday 9/12.
+
+**MLB "Total Hits, Runs & RBIs"** (PX's live phrasing, comma + ampersand) was
+classified `hitter_other` and its player name came back mangled — **$224K/wk** of
+network fills declined as unknown legs although `baseball_mlb.hitter_hits_runs_rbis`
+was on the allowlist. Both the classifier and the extractor now accept `,`/`&`/`+`/
+`and` between the three stats.
+
 ## API Endpoints (Express)
 
 | Endpoint | Method | Description |
@@ -438,6 +460,18 @@ in response to being picked off on this exact market last season.
   `first touchdown`; a REGISTERED `player_first_td` / `player_anytime_td` leg is
   exempted by marketType (it prices off its own book market, not the parent
   game). An unregistered "First Touchdown" market still declines.
+- ⚠ **Until 2026-09-10 NO football prop except anytime TD had ever registered.**
+  `extractPlayerNameFromPropMarket` (websocket.js) had no football stat strips,
+  so "<Player> Passing Yards" / "Rushing Yards" / "Receiving Yards" / "Total
+  Receptions" / "Total Passing Touchdowns" / "To Score First Touchdown" /
+  "Interceptions Thrown" all returned a NULL player and the seed skipped them
+  at `if (!playerName) continue;` — silently, at debug level. Verified on the
+  49ers@Rams PX board (142 markets: 0/25 receptions, 0/30 first TD, 0/13
+  receiving yds named). The classifier also bucketed "Total Passing
+  Touchdowns" as `other_football_prop`, so `passing_tds` could never quote.
+  Fixed in 7589e23+; `test/football-lines.test.js` pins the live PX phrasing.
+  **When a prop family shows 0 lines, test the extractor on a real PX market
+  name before suspecting the window, the book gate or TOA.**
 - **T-120 registration window** (`FOOTBALL_PROP_TMINUS_MINUTES`). Gates
   REGISTRATION, not pricing. Unparseable kickoff fails closed.
 - **≥3 books, absolute** (`FOOTBALL_PROP_MIN_BOOKS`) — the trusted-single-book

@@ -95,6 +95,25 @@ test('a genuine tie on remainder length still fails closed', () => {
     'two anchored candidates with equal remainder are ambiguous');
 });
 
+test('a tie against a QUALIFIED derivative school resolves to the bare-mascot program', () => {
+  // Live NCAAF cache 2026-09-10: "Alabama" tied +2/+2 against Crimson Tide and
+  // Alabama State Hornets and failed closed — $116K of East Carolina @ Alabama
+  // network fills on 9/5 went unquoted for this alone.
+  const pool = ['Alabama Crimson Tide', 'Alabama State Hornets', 'Illinois Fighting Illini',
+    'Illinois State Redbirds', 'Louisiana Tech Bulldogs', 'Louisiana Ragin Cajuns',
+    'Texas A&M Aggies', 'Texas Longhorns', 'Texas State Bobcats'];
+  assert.strictEqual(M('Alabama', pool, NCAAF), 'Alabama Crimson Tide');
+  assert.strictEqual(M('Illinois', pool, NCAAF), 'Illinois Fighting Illini');
+  assert.strictEqual(M('Louisiana', pool, NCAAF), 'Louisiana Ragin Cajuns');
+  assert.strictEqual(M('Texas', pool, NCAAF), 'Texas Longhorns');
+  // the derivative still resolves to itself
+  assert.strictEqual(M('Alabama State', pool, NCAAF), 'Alabama State Hornets');
+  assert.strictEqual(M('Illinois State', pool, NCAAF), 'Illinois State Redbirds');
+  assert.strictEqual(M('Louisiana Tech', pool, NCAAF), 'Louisiana Tech Bulldogs');
+  // two qualified candidates and no bare mascot: still ambiguous
+  assert.strictEqual(M('Alabama', ['Alabama State Hornets', 'Alabama Tech Bulldogs'], NCAAF), null);
+});
+
 test('exact matches short-circuit regardless of sport', () => {
   assert.strictEqual(M('Oregon Ducks', BOARD, NCAAF), 'Oregon Ducks');
 });
@@ -154,9 +173,10 @@ test('the four unresolvable CFB schools resolve via override', () => {
     'Southern Mississippi Golden Eagles');
   assert.strictEqual(M('Louisiana-Lafayette', board, NCAAF),
     'Louisiana Ragin Cajuns');
-  // The reason Lafayette needs the override rather than a shorter PX name:
-  // bare "Louisiana" is an equal-remainder anchored tie against Louisiana Tech.
-  assert.strictEqual(M('Louisiana', board, NCAAF), null);
+  // Bare "Louisiana" used to be an equal-remainder anchored tie against
+  // Louisiana Tech; the qualifier tie-break (2026-09-10) now resolves it to
+  // the bare-mascot program, which is the school PX means by "Louisiana".
+  assert.strictEqual(M('Louisiana', board, NCAAF), 'Louisiana Ragin Cajuns');
 });
 
 test('an override never fires when its target is absent from the board', () => {

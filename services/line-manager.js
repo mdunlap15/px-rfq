@@ -828,10 +828,28 @@ function _collegeAnchoredMatch(norm, candidates, normalize) {
   }
   if (!anchored.length) return null;
   anchored.sort((a, b) => a.extra - b.extra);
-  // A tie on remainder length is genuinely ambiguous -> fail closed.
-  if (anchored.length > 1 && anchored[0].extra === anchored[1].extra) return null;
+  if (anchored.length > 1 && anchored[0].extra === anchored[1].extra) {
+    // A tie on remainder length: "Alabama" against "Alabama Crimson Tide" AND
+    // "Alabama State Hornets" (both +2 words). Measured 2026-09-10: this tie
+    // alone left East Carolina @ Alabama dark for $116K of network fills, and
+    // Illinois / Louisiana fail the same way whenever the derivative school is
+    // on the week's board. The remainder of the RIGHT program is a bare
+    // mascot; the remainder of the wrong one carries a QUALIFIER that makes
+    // it a different school (State, Tech, A&M, Southern, ...). Resolve the tie
+    // to the single candidate whose remainder has no qualifier; two bare
+    // mascots (Carolina Panthers / Carolina Hurricanes) stay ambiguous.
+    const tied = anchored.filter(a => a.extra === anchored[0].extra);
+    const bare = tied.filter(a => {
+      const rest = normalize(a.name).slice(norm.length).trim();
+      return !_COLLEGE_QUALIFIER_RE.test(rest);
+    });
+    return bare.length === 1 ? bare[0].name : null;
+  }
   return anchored[0].name;
 }
+// Tokens that turn "<School> <rest>" into a DIFFERENT school rather than a
+// mascot. Anchored at a word boundary on the remainder only.
+const _COLLEGE_QUALIFIER_RE = /\b(?:state|st|tech|am|a and m|southern|northern|eastern|western|central|international|christian|city|college|university|oh|fl|pa|ny)\b/i;
 
 function matchTeamName(pxName, oddsApiNames, sportKey) {
   const norm = normalizeTeamName(pxName);

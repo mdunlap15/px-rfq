@@ -34,6 +34,7 @@ function extractPlayerNameFromPropMarket(marketName) {
     /\s+(total\s+)?strike\s*outs?\s+(thrown|recorded)$/i,
     /\s+(total\s+)?strike\s*outs?$/i,
     /\s+total\s+bases$/i,
+    /\s+(total\s+)?hits?\s*(?:\+|,|&|and)\s*runs?\s*(?:\+|,|&|and)\s*rbis?$/i,
     /\s+(total\s+)?home\s+runs?$/i,
     /\s+(total\s+)?rbis?$/i,
     /\s+(total\s+)?hits?$/i,
@@ -262,7 +263,10 @@ function classifyMlbProp(marketName) {
   // Combo: Hits + Runs + RBIs. Matches multiple single-stat words, so detect it
   // BEFORE the >=2-category → hitter_other fallthrough below. Maps to TOA
   // batter_hits_runs_rbis (priced exact-line de-vig — correlated compound stat).
-  if (/hits?\s*\+\s*runs?\s*\+\s*rbis?|\bh\s*\+\s*r\s*\+\s*rbis?\b/.test(n)) return 'hitter_hits_runs_rbis';
+  // PX's live phrasing is "<Player> Total Hits, Runs & RBIs" (comma + ampersand)
+  // — measured 2026-09-10 as $224K/wk of network fills declining as an
+  // unknown-leg because only the "+" form was recognised.
+  if (/hits?\s*(?:\+|,|&|and)\s*runs?\s*(?:\+|,|&|and)\s*rbis?|\bh\s*\+\s*r\s*\+\s*rbis?\b/.test(n)) return 'hitter_hits_runs_rbis';
   const _hHr      = /home\s+run|\bhr\b/.test(n);
   const _hTb      = /total\s+bases|\btb\b/.test(n);
   const _hHits    = /\bhits?\b/.test(n);
