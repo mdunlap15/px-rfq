@@ -268,6 +268,35 @@ let _seedPrimaryTarget = null;
 // Seed-side line writer. Routes to staging during warm refresh, to live
 // otherwise. Returns the stored info so callers can chain
 // _trackPrimaryForIndex without re-reading.
+// PER-SPORT MARKET ALLOWLIST (2026-09-09). config.pricing.sportMarketAllowlist
+// maps a sport key to the ONLY marketTypes that may enter the line index; a
+// sport with no entry is unrestricted. Enforced at every path into the index
+// (seed, on-demand resolve, cache restore) so a disallowed market can never
+// register with PX and never gets an RFQ. First use: the Champions League
+// league phase (`soccer_uefa_champs_league`) is TOTALS-ONLY — operator
+// directive when it was added. Why: soccer totals are the one soccer market
+// measured calibrated (z≈0), while spreads (z=3.04, −$5.3K) and DNB
+// favourites (z=3.45) were the June leak, and the Champions League is where
+// favourites are heaviest. Matching is by the POST-PARSE marketType, so
+// 'total' admits full-game totals (incl. alt totals, which retag to 'total')
+// and excludes team_total / period totals / btts / spread / moneyline.
+const _sportMarketDeniedLogged = new Set();
+function _sportMarketAllowed(sport, marketType) {
+  const map = (config.pricing && config.pricing.sportMarketAllowlist) || null;
+  if (!map || !sport) return true;
+  const allowed = map[sport];
+  if (!Array.isArray(allowed)) return true;            // no entry → unrestricted
+  const ok = allowed.includes(String(marketType || ''));
+  if (!ok) {
+    const k = sport + '/' + marketType;
+    if (!_sportMarketDeniedLogged.has(k)) {
+      _sportMarketDeniedLogged.add(k);
+      log.info('Lines', `Market allowlist: ${sport} admits only [${allowed.join(', ')}] — not registering ${marketType} (logged once per sport/market)`);
+    }
+  }
+  return ok;
+}
+
 function _setSeedLine(lineId, info) {
   // Stamp the id ON the object (2026-08-13). legExposureKey(lineInfo) reads
   // li.lineId to build its 'L:<id>|<day>' key; registered infos never carried
@@ -278,6 +307,14 @@ function _setSeedLine(lineId, info) {
   // times in production and an $8.7K same-line stack (Shelton/Swiatek
   // doubles, 2026-08-12) sailed through a $1,500 cap.
   info.lineId = lineId;
+  // Per-sport market allowlist: a disallowed market is NOT inserted. The info
+  // is still returned (callers chain on it) but flagged, and
+  // _trackPrimaryForIndex refuses flagged infos so no primary is tracked for
+  // a line that isn't in the index.
+  if (!_sportMarketAllowed(info.sport || info.oddsApiSport, info.marketType)) {
+    info._marketDenied = true;
+    return info;
+  }
   (_seedIndexTarget || lineIndex)[lineId] = info;
   return info;
 }
@@ -295,6 +332,10 @@ function _setSeedLine(lineId, info) {
 const primaryByEvent = {};
 
 function _trackPrimaryForIndex(lineInfo) {
+  // A market the per-sport allowlist refused was never inserted — do not
+  // track a primary for it either (getPrimaryTotalLine/SpreadHomePoint would
+  // otherwise point at a line PX cannot ask us about).
+  if (lineInfo && lineInfo._marketDenied) return;
   if (!lineInfo) return;
   if (lineInfo.onDemand === true) return;
   const eid = lineInfo.pxEventId;
@@ -3567,6 +3608,10 @@ async function lookupLineAsync(lineId) {
   // Fall back to persistent cache
   const cached = await db.loadLineCacheEntry(lineId);
   if (cached) {
+    // Per-sport market allowlist — a cached line from before a restriction
+    // (or from a wider allowlist) must not resurrect a market the seed now
+    // refuses. Treat it as unknown, same as the seed and on-demand paths.
+    if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType)) return null;
     // Populate in-memory index so subsequent sync lookups hit
     cached.lineId = lineId; // legExposureKey needs it — see _setSeedLine
     lineIndex[lineId] = cached;
@@ -4776,6 +4821,13 @@ async function resolveUnknownLine(rfqLeg) {
         }
       }
 
+      // Per-sport market allowlist — same rule as the seed. An RFQ can carry
+      // a line the seed deliberately did not register; resolving it here
+      // would register it anyway, so refuse the same way.
+      if (!_sportMarketAllowed(sportKey, foundInfo.marketType)) {
+        _recordResolveFailure(lineId, { lineId, reason: 'market_not_allowed_for_sport', eventName: event.name, sport: sportKey, marketType: foundInfo.marketType });
+        return null;
+      }
       // Add to index locally
       foundInfo.lineId = lineId; // legExposureKey needs it — see _setSeedLine
       lineIndex[lineId] = foundInfo;
@@ -5100,6 +5152,10 @@ module.exports = {
   _isValidFullGameLine: isValidFullGameLine,
   _resolveTeamTotalSide: resolveTeamTotalSide,
   _FOOTBALL_PROP_TO_TOA_MARKET,
+  // Exported for test/sport-market-allowlist.test.js — the per-sport market
+  // gate and the seed insert it guards.
+  _sportMarketAllowed,
+  _setSeedLine,
   _footballPropCtx,
   _footballPropRegistrationSafe,
   _propMarketType,

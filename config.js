@@ -846,6 +846,29 @@ const config = {
       if (v > 100) return 100;
       return v;
     })(),
+    // ---- PER-SPORT MARKET ALLOWLIST (2026-09-09) ----
+    // sport key -> the ONLY post-parse marketTypes that may enter the line
+    // index (and therefore register with PX). A sport with no entry is
+    // unrestricted. Enforced by line-manager at every index entry point.
+    // Default: the Champions League league phase is TOTALS-ONLY — operator
+    // directive when the key was added. Soccer totals are the one soccer market
+    // measured calibrated; spreads and DNB favourites were the June leak, and
+    // the Champions League is where favourites are heaviest. Override with
+    // SPORT_MARKET_ALLOWLIST JSON, e.g. {"soccer_uefa_champs_league":["total","btts"]}.
+    sportMarketAllowlist: (() => {
+      const DEFAULT = { 'soccer_uefa_champs_league': ['total'] };
+      const raw = process.env.SPORT_MARKET_ALLOWLIST;
+      if (!raw) return DEFAULT;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const out = {};
+          for (const [k, v] of Object.entries(parsed)) if (Array.isArray(v)) out[k] = v.map(String);
+          return out;
+        }
+      } catch (e) { /* malformed → default */ }
+      return DEFAULT;
+    })(),
     // ---- MLB MEASURED SGP CORRELATION (2026-09-09) ----
     // When true, services/mlb-sgp-correlation.js takes precedence over the
     // sport-agnostic SGP_CORRELATION_BY_COMBO grid for MLB ml_total and
