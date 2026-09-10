@@ -72,6 +72,20 @@ function extractPlayerNameFromPropMarket(marketName) {
     // Full phrase, optionally with PX's trailing "?" — must run before any
     // bare single-stat pattern so only the player name survives.
     /\s+to\s+score\s+a\s+touchdown\s*\??$/i,
+    // PX phrasing verified on the 49ers@Rams board 2026-09-10 (142 markets):
+    // "<Player> Passing Yards", "<Player> Rushing Yards", "<Player> Receiving
+    // Yards", "<Player> Total Receptions", "<Player> Total Passing Touchdowns",
+    // "<Player> To Score First Touchdown", "<Player> Interceptions Thrown".
+    // NONE of these matched before, so every football yardage / reception /
+    // first-TD market returned a null player and was skipped at the seed's
+    // `if (!playerName) continue;` — zero football prop lines had ever
+    // registered apart from anytime TD.
+    /\s+(total\s+)?(passing|rushing|receiving)\s+yards?$/i,
+    /\s+(total\s+)?(passing|rushing|receiving)\s+touchdowns?$/i,
+    /\s+(total\s+)?receptions?$/i,
+    /\s+(player\s+)?to\s+score\s+(the\s+)?first\s+touchdown\s*\??$/i,
+    /\s+(total\s+)?interceptions?\s+thrown$/i,
+    /\s+to\s+throw\s+an?\s+interception\s*\??$/i,
     // Single stats
     /\s+(total\s+)?points?$/i,
     /\s+(total\s+)?rebounds?$/i,
@@ -165,6 +179,7 @@ function classifyFootballProp(marketName) {
   if (/\b(?:or|and)\b|[&/+,]/.test(n)) return null;
   if (/\bto\s+score\s+a\s+touchdown\s*\??$/.test(n)) return 'anytime_td';
   if (/\b(?:first|1st)\s+touchdown\b|to\s+score\s+the\s+first\s+touchdown/.test(n)) return 'first_td';
+  if (/passing\s+touchdowns?/.test(n)) return 'passing_tds';
   if (/passing\s+yards?/.test(n)) return 'passing_yards';
   if (/rushing\s+yards?/.test(n)) return 'rushing_yards';
   if (/receiving\s+yards?/.test(n)) return 'receiving_yards';

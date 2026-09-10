@@ -199,6 +199,30 @@ test('football classifier: anytime TD routes, composites and game markets do not
 test('player-name extraction handles the TD phrasing', () => {
   assert.equal(ws._extractPlayerNameFromPropMarket('Bijan Robinson To Score a Touchdown'), 'Bijan Robinson');
   assert.equal(ws._extractPlayerNameFromPropMarket('Jeremiah Love To Score A Touchdown?'), 'Jeremiah Love');
+  // 2026-09-10: every football yardage / reception / passing-TD / first-TD /
+  // INT market on PX returned a NULL player (no football strip existed), so
+  // the seed skipped them at `if (!playerName) continue;` and ZERO football
+  // prop lines beyond anytime TD had ever registered. Names verbatim from the
+  // 49ers@Rams PX board (142 markets).
+  const px = {
+    'Matthew Stafford Passing Yards': ['passing_yards', 'Matthew Stafford'],
+    'Matthew Stafford Rushing Yards': ['rushing_yards', 'Matthew Stafford'],
+    'Kyle Juszczyk Receiving Yards': ['receiving_yards', 'Kyle Juszczyk'],
+    'Kyle Juszczyk Total Receptions': ['receptions', 'Kyle Juszczyk'],
+    'Puka Nacua Receptions': ['receptions', 'Puka Nacua'],
+    'Matthew Stafford Total Passing Touchdowns': ['passing_tds', 'Matthew Stafford'],
+    'Matthew Stafford To Score First Touchdown': ['first_td', 'Matthew Stafford'],
+    'Christian McCaffrey Player To Score First Touchdown?': ['first_td', 'Christian McCaffrey'],
+    'Matthew Stafford Interceptions Thrown': ['interception_thrown', 'Matthew Stafford'],
+    'Eddy Piñeiro Total Field Goals Made': ['field_goals_made', 'Eddy Piñeiro'],
+  };
+  for (const [name, [type, player]] of Object.entries(px)) {
+    assert.equal(ws._classifyFootballProp(name), type, name);
+    assert.equal(ws._extractPlayerNameFromPropMarket(name), player, name);
+  }
+  // the football strips must not swallow other sports' names
+  assert.equal(ws._extractPlayerNameFromPropMarket('Luis Castillo Total Pitching Strikeouts'), 'Luis Castillo');
+  assert.equal(ws._extractPlayerNameFromPropMarket('Jayson Tatum Total Points'), 'Jayson Tatum');
 });
 
 // ---------------------------------------------------------------------------
