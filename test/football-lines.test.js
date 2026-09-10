@@ -216,6 +216,7 @@ test('football prop → TOA map: the two-sided markets plus the one-sided anytim
   //   player_receptions     NFL 6/5              NCAAF 0/0  (absent)
   assert.deepEqual(lineManager._FOOTBALL_PROP_TO_TOA_MARKET, {
     anytime_td: 'player_anytime_td',
+    first_td: 'player_1st_td',
     passing_yards: 'player_pass_yds',
     passing_tds: 'player_pass_tds',
     rushing_yards: 'player_rush_yds',
@@ -230,10 +231,13 @@ test('football prop → TOA map: the two-sided markets plus the one-sided anytim
     'anytime = Over 0.5 registered, NULL TOA query line (outcomes carry no point)');
   assert.equal(lineManager._footballPropCtx('passing_yards'), null,
     'two-sided props carry a real point and must NOT get lineless semantics');
-  // first_td stays unmapped on purpose: it is a CLOSED field (exactly one
-  // player scores first) and wants field normalisation like golf outright win.
-  assert.equal(lineManager._FOOTBALL_PROP_TO_TOA_MARKET.first_td, undefined);
-  assert.equal(lineManager._footballPropCtx('first_td'), null);
+  // first_td (2026-09-10, operator directive): quoted YES-only through the same
+  // lineless mirror as anytime TD. It is a CLOSED field whose YES prices sum to
+  // ~1.36 across the field; the one-sided path backs out only the default 8%,
+  // so our YES sits ~25% ABOVE fair — safe for a NO-layer. Field normalisation
+  // is the follow-up; see test/td-scorer-props.test.js.
+  assert.equal(lineManager._FOOTBALL_PROP_TO_TOA_MARKET.first_td, 'player_1st_td');
+  assert.deepEqual(lineManager._footballPropCtx('first_td'), { propType: 'first_td', line: 0.5, toaLine: null });
 });
 
 test('registration assertion: game marketTypes are forbidden for football props', () => {

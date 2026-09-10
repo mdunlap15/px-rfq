@@ -127,6 +127,17 @@ const _SOCCER_PROP_TO_TOA_MARKET = {
 // like golf outright win, which is a separate build.
 const _FOOTBALL_PROP_TO_TOA_MARKET = {
   anytime_td: 'player_anytime_td',
+  // FIRST TD (2026-09-10, operator: "we should be quoting these; fine if we
+  // only offer the YES side — we get NO"). Same lineless YES-only mirror as
+  // anytime TD. MEASURED live on 49ers@Rams: 7 books, outcomes name:"Yes" +
+  // description:<player>, plus a "No Touchdown" outcome at +15000 the player
+  // matcher ignores. ⚠ First TD is a CLOSED field — the YES prices sum to 1.36
+  // across the field (36% overround) while the one-sided path backs out only
+  // toaOneSidedPropOverround (8%). That leaves our YES ~25% ABOVE fair: safe
+  // for a NO-layer (uncompetitive, never exposed). Field normalisation (divide
+  // by the field sum, like golf outright win) is the follow-up that would
+  // make it competitive.
+  first_td: 'player_1st_td',
   passing_yards: 'player_pass_yds',
   passing_tds: 'player_pass_tds',
   rushing_yards: 'player_rush_yds',
@@ -144,6 +155,7 @@ const _FOOTBALL_PROP_TWO_SIDED = new Set([
 // propType we don't price — callers must fail closed on null.
 function _footballPropCtx(propType) {
   if (propType === 'anytime_td') return { propType, line: 0.5, toaLine: null };
+  if (propType === 'first_td') return { propType, line: 0.5, toaLine: null };
   return null;
 }
 // Registration-safety assertion for football player props (the BTTS/MoV/
@@ -2879,7 +2891,7 @@ async function seedAllLines() {
               // Football anytime-TD is Yes-only at every book (measured:
               // player_anytime_td, 2 books, no under anywhere) — the
               // two-sided path can never satisfy booksWithBothSides.
-              || (!!footballProp && propType === 'anytime_td');
+              || (!!footballProp && (propType === 'anytime_td' || propType === 'first_td'));
             let oneSidedHit = null;       // { source, impliedOver, books[], fetchedAt }
             if (oneSidedEligible) {
               const lookupHasDk = lookup && Array.isArray(lookup.books)

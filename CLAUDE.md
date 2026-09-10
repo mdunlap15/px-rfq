@@ -412,10 +412,28 @@ in response to being picked off on this exact market last season.
   `player_receptions` NFL 6/5, NCAAF absent. The map had carried `anytime_td`
   ALONE on the claim of "ZERO player_* keys for NCAAF".
 - ⚠ **The TD markets are ONE-SIDED at every book** — `player_anytime_td` 8 books
-  and not one prices the "no"; `player_1st_td` 6 books, same. They cannot be
-  2-way de-vigged, so anytime TD keeps the lineless YES-only book-mirror path.
-  **`first_td` is deliberately still unmapped**: it is a CLOSED field (exactly
-  one player scores first) and wants field normalisation like golf outright win.
+  and not one prices the "no"; `player_1st_td` 7 books, same. They cannot be
+  2-way de-vigged, so BOTH take the lineless YES-only book-mirror path (we offer
+  YES, we get NO — operator directive 2026-09-10). Allowlist keys:
+  `americanfootball_{nfl,ncaaf}.anytime_td` / `.first_td`. TOA outcomes are
+  `name:"Yes"` + `description:<player>`; first TD also carries a "No Touchdown"
+  outcome (+15000) the player matcher ignores.
+  ⚠ **First TD is a CLOSED field**: its YES prices sum to **1.36** across the
+  field (49ers@Rams, 7 books) while the one-sided path backs out only
+  `toaOneSidedPropOverround` (8%). Our YES therefore sits **~25% ABOVE fair** —
+  safe for a NO-layer (uncompetitive, never exposed). Field normalisation
+  (divide by the field sum, like golf outright win) is the follow-up that would
+  make it competitive. Anytime TD is an OPEN field (sum 5.64 ≈ expected TD
+  scorers), so the per-outcome 8% is about right there.
+  **Correlation:** a TD leg is a player prop with a `playerName`, so the football
+  same-game guard refuses it against ANY other leg on the same game — spread,
+  total, moneyline, team total, another scorer, the same player's first+anytime —
+  even with `FOOTBALL_SGP_ENABLED=true` (`test/td-scorer-props.test.js`).
+  Cross-game TD legs are independent.
+  **Novelty guard carve-out:** the `novelty_market` pattern contains
+  `first touchdown`; a REGISTERED `player_first_td` / `player_anytime_td` leg is
+  exempted by marketType (it prices off its own book market, not the parent
+  game). An unregistered "First Touchdown" market still declines.
 - **T-120 registration window** (`FOOTBALL_PROP_TMINUS_MINUTES`). Gates
   REGISTRATION, not pricing. Unparseable kickoff fails closed.
 - **≥3 books, absolute** (`FOOTBALL_PROP_MIN_BOOKS`) — the trusted-single-book
