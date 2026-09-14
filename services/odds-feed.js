@@ -8917,8 +8917,8 @@ function getSharpEvents(sport) {
 // exponential and capped; any success clears it. Callers already treat a
 // throw as "skip this sport this cycle", so a cooldown costs one cycle, never
 // a wedge.
-const TOA_BACKOFF_BASE_MS = 5000;
-const TOA_BACKOFF_MAX_MS = 120000;
+const TOA_BACKOFF_BASE_MS = Number(process.env.TOA_BACKOFF_BASE_MS) > 0 ? Number(process.env.TOA_BACKOFF_BASE_MS) : 1000; // was 5000: shared-key 429s kept the trader in cooldown and every prop lookup failed fast (NFL props dark 2026-09-14)
+const TOA_BACKOFF_MAX_MS = Number(process.env.TOA_BACKOFF_MAX_MS) > 0 ? Number(process.env.TOA_BACKOFF_MAX_MS) : 8000;
 const _toaFreq = {
   cooldownUntil: 0,
   consecutive429: 0,
