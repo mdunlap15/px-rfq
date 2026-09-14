@@ -57,7 +57,7 @@ test('the on-demand and cache-restore paths consult the same gate', () => {
   assert.ok(onDemand > -1 && onDemandInsert > -1 && onDemand < onDemandInsert, 'on-demand refuses BEFORE inserting');
   // lookupLineAsync: refuse a cached (pre-restriction) line before restoring it
   const restore = SRC.indexOf('lineIndex[lineId] = cached;');
-  const restoreGate = SRC.lastIndexOf('_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType)', restore);
+  const restoreGate = SRC.lastIndexOf('_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType', restore);
   assert.ok(restore > -1 && restoreGate > -1 && restoreGate < restore, 'cache restore refuses BEFORE inserting');
   // primaries: a denied info never becomes a primary
   assert.ok(/function _trackPrimaryForIndex\(lineInfo\) \{\n[^\n]*\n[^\n]*\n[^\n]*\n\s*if \(lineInfo && lineInfo\._marketDenied\) return;/.test(SRC), '_trackPrimaryForIndex ignores denied infos');

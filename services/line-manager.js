@@ -293,7 +293,17 @@ let _seedPrimaryTarget = null;
 // 'total' admits full-game totals (incl. alt totals, which retag to 'total')
 // and excludes team_total / period totals / btts / spread / moneyline.
 const _sportMarketDeniedLogged = new Set();
-function _sportMarketAllowed(sport, marketType) {
+function _sportMarketAllowed(sport, marketType, eventId) {
+  // PER-SPORT EVENT ALLOWLIST (2026-09-14). config.pricing.sportEventAllowlist
+  // maps a sport key to the ONLY PX event ids that may enter the line index.
+  // Operator directive: NFL/CFB were switched off until Tuesday 10am ET, but
+  // Monday Night Football (Broncos @ Chiefs, PX event 19456) had to quote —
+  // "do not load any other NFL games than that". A sport with no entry is
+  // unrestricted. An entry with an unknown event id fails CLOSED.
+  const evMap = (config.pricing && config.pricing.sportEventAllowlist) || null;
+  if (evMap && sport && Array.isArray(evMap[sport])) {
+    if (eventId == null || !evMap[sport].includes(String(eventId))) return false;
+  }
   const map = (config.pricing && config.pricing.sportMarketAllowlist) || null;
   if (!map || !sport) return true;
   const allowed = map[sport];
@@ -323,7 +333,7 @@ function _setSeedLine(lineId, info) {
   // is still returned (callers chain on it) but flagged, and
   // _trackPrimaryForIndex refuses flagged infos so no primary is tracked for
   // a line that isn't in the index.
-  if (!_sportMarketAllowed(info.sport || info.oddsApiSport, info.marketType)) {
+  if (!_sportMarketAllowed(info.sport || info.oddsApiSport, info.marketType, info.pxEventId)) {
     info._marketDenied = true;
     return info;
   }
@@ -3647,7 +3657,7 @@ async function lookupLineAsync(lineId) {
     // Per-sport market allowlist — a cached line from before a restriction
     // (or from a wider allowlist) must not resurrect a market the seed now
     // refuses. Treat it as unknown, same as the seed and on-demand paths.
-    if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType)) return null;
+    if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType, cached.pxEventId)) return null;
     // Populate in-memory index so subsequent sync lookups hit
     cached.lineId = lineId; // legExposureKey needs it — see _setSeedLine
     lineIndex[lineId] = cached;
@@ -4860,7 +4870,7 @@ async function resolveUnknownLine(rfqLeg) {
       // Per-sport market allowlist — same rule as the seed. An RFQ can carry
       // a line the seed deliberately did not register; resolving it here
       // would register it anyway, so refuse the same way.
-      if (!_sportMarketAllowed(sportKey, foundInfo.marketType)) {
+      if (!_sportMarketAllowed(sportKey, foundInfo.marketType, foundInfo.pxEventId != null ? foundInfo.pxEventId : eventId)) {
         _recordResolveFailure(lineId, { lineId, reason: 'market_not_allowed_for_sport', eventName: event.name, sport: sportKey, marketType: foundInfo.marketType });
         return null;
       }

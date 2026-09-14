@@ -868,6 +868,22 @@ const config = {
     // measured calibrated; spreads and DNB favourites were the June leak, and
     // the Champions League is where favourites are heaviest. Override with
     // SPORT_MARKET_ALLOWLIST JSON, e.g. {"soccer_uefa_champs_league":["total","btts"]}.
+    // SPORT_EVENT_ALLOWLIST JSON {"americanfootball_nfl":["19456"]}: a sport
+    // with an entry registers ONLY those PX event ids (all markets on them,
+    // still subject to sportMarketAllowlist). No entry → unrestricted.
+    sportEventAllowlist: (() => {
+      const raw = process.env.SPORT_EVENT_ALLOWLIST;
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const out = {};
+          for (const [k, v] of Object.entries(parsed)) if (Array.isArray(v)) out[k] = v.map(String);
+          return out;
+        }
+      } catch (e) { /* malformed → unrestricted is WRONG for a gate; fail closed below */ }
+      return { __malformed: true };
+    })(),
     sportMarketAllowlist: (() => {
       const DEFAULT = { 'soccer_uefa_champs_league': ['total'] };
       const raw = process.env.SPORT_MARKET_ALLOWLIST;
