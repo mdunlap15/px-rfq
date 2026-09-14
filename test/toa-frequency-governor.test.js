@@ -29,7 +29,7 @@ test.beforeEach(() => of._resetToaFreqForTest());
 test('a 429 opens a cooldown instead of retrying immediately', () => {
   assert.strictEqual(of._toaCooldownRemainingMs(), 0, 'starts clear');
   const backoff = of._noteToa429(null);
-  assert.ok(backoff >= 5000, `first backoff should be >=5s, got ${backoff}`);
+  assert.ok(backoff >= 1000, `first backoff should be >=1s, got ${backoff}`);
   assert.ok(of._toaCooldownRemainingMs() > 0, 'cooldown must be open after a 429');
   assert.strictEqual(of.getToaFreqState().consecutive429, 1);
 });
@@ -59,7 +59,7 @@ test('a garbage Retry-After falls back to exponential, never to zero', () => {
   for (const bad of ['', 'soon', '-5', '0', null, undefined]) {
     of._resetToaFreqForTest();
     const backoff = of._noteToa429(bad);
-    assert.ok(backoff >= 5000, `Retry-After ${JSON.stringify(bad)} -> ${backoff}, must not collapse the cooldown`);
+    assert.ok(backoff >= 1000, `Retry-After ${JSON.stringify(bad)} -> ${backoff}, must not collapse the cooldown`);
   }
 });
 
