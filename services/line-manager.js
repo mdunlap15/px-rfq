@@ -549,6 +549,12 @@ const TEAM_NAME_OVERRIDES = {
   // Bulldogs" (equal remainder) and fail closed, which is why this needs the
   // exact-name override rather than a matching-rule change.
   'louisianalafayette': 'Louisiana Ragin Cajuns',
+  // PX's NEW DATA PROVIDER (2026-09-13) renamed three schools; none has a prefix relation to TOA's name, so
+  // RFQ legs on these games could not resolve. Measured on the live board: the ONLY 3 of 114 new-provider CFB
+  // team names matchTeamName could not resolve.
+  'miami florida': 'Miami Hurricanes',
+  'miami ohio': 'Miami (OH) RedHawks',
+  'north carolina state': 'NC State Wolfpack',
   // CFL: PX spells the club out, TOA abbreviates (verified 2026-07-24).
   'british columbia lions': 'BC Lions',
   // CFL SPREAD SELECTION CODES. PX types CFL spreads 'sup_moneyline' with the

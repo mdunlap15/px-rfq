@@ -184,3 +184,24 @@ test('an override never fires when its target is absent from the board', () => {
   assert.strictEqual(M('Connecticut', ['Connecticut Sun', 'Seattle Storm'],
     'basketball_wnba'), 'Connecticut Sun');
 });
+
+test('PX new data provider (2026-09-13): renamed schools resolve by override, and stay absent when absent', () => {
+  const pool = ['Miami Hurricanes', 'Miami (OH) RedHawks', 'NC State Wolfpack', 'North Carolina Tar Heels',
+    'Wake Forest Demon Deacons', 'Cincinnati Bearcats', 'Vanderbilt Commodores', 'UConn Huskies'];
+  assert.strictEqual(M('Miami Florida', pool, NCAAF), 'Miami Hurricanes');
+  assert.strictEqual(M('Miami Ohio', pool, NCAAF), 'Miami (OH) RedHawks');
+  assert.strictEqual(M('North Carolina State', pool, NCAAF), 'NC State Wolfpack');
+  assert.strictEqual(M('North Carolina', pool, NCAAF), 'North Carolina Tar Heels', 'the override must not capture UNC');
+  assert.strictEqual(M('Connecticut', pool, NCAAF), 'UConn Huskies');
+  // the override never invents a team: with the true school absent it must not bind to the other Miami
+  assert.strictEqual(M('Miami Florida', ['Miami (OH) RedHawks', 'Cincinnati Bearcats'], NCAAF), null);
+  assert.strictEqual(M('Miami Ohio', ['Miami Hurricanes', 'Wake Forest Demon Deacons'], NCAAF), null);
+});
+
+test('alt-line resolver alias map carries the new-provider schools (structural: the resolver is not exported)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'odds-feed.js'), 'utf8');
+  for (const [k, v] of [['miami florida', 'miami hurricanes'], ['miami ohio', 'miami oh redhawks'],
+    ['north carolina state', 'nc state wolfpack'], ['connecticut', 'uconn huskies']]) {
+    assert.ok(src.includes(`'${k}': '${v}'`), `ODDS_API_TEAM_ALIASES must map ${k} -> ${v}`);
+  }
+});

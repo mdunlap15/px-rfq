@@ -898,7 +898,27 @@ async function fetchOddsForSport(sport, opts) {
         return words[words.length - 1]; // last word e.g. "sox", "jays"
       };
 
+      // ⛔ DISTINCTIVENESS INDEX (2026-09-12, after the Portland State loss in the
+      // single-leg book). A bare LAST-WORD match is not evidence: getLastWord("Portland
+      // State") === getLastWord("North Dakota State") is "state" === "state", so two
+      // completely different games satisfied homeMatch && awayMatch and the FIRST one won
+      // (`break`). Count how many distinct main-event team names contain each word: "state"
+      // names dozens and proves nothing, "padres" names exactly one and proves everything.
+      const _mainNames = new Set();
+      for (const mid of mainEvents) {
+        _mainNames.add(normalizeTeamName(eventMap[mid].homeTeam));
+        _mainNames.add(normalizeTeamName(eventMap[mid].awayTeam));
+      }
+      const _df = Object.create(null);
+      for (const nm of _mainNames) {
+        for (const w of new Set(String(nm).split(/\s+/).filter(Boolean))) {
+          _df[w] = (_df[w] || 0) + 1;
+        }
+      }
+      const _distinctive = (w) => !!w && (_df[w] || 0) <= 1;
+
       let mergedOrphans = 0;
+      let ambiguousOrphans = 0;
       for (const orphanId of orphanEvents) {
         const orphan = eventMap[orphanId];
         const orphanDate = orphan.commenceTime ? new Date(orphan.commenceTime).toISOString().substring(0, 10) : '';
@@ -907,8 +927,8 @@ async function fetchOddsForSport(sport, opts) {
         const oHomeSingle = getLastWord(orphan.homeTeam);
         const oAwaySingle = getLastWord(orphan.awayTeam);
 
-        let bestMatch = null;
-        let bestMatchSwapped = false;
+        // Score EVERY candidate, then require a UNIQUE winner. Never first-match-wins.
+        const cands = [];
         for (const mainId of mainEvents) {
           const main = eventMap[mainId];
           const mainDate = main.commenceTime ? new Date(main.commenceTime).toISOString().substring(0, 10) : '';
@@ -920,40 +940,43 @@ async function fetchOddsForSport(sport, opts) {
           const mHomeSingle = getLastWord(main.homeTeam);
           const mAwaySingle = getLastWord(main.awayTeam);
 
-          // Try exact normalized match first
           const exactMatch = normalizeEventKey(orphan.homeTeam, orphan.awayTeam) ===
                              normalizeEventKey(main.homeTeam, main.awayTeam);
-          // Try last-2-words match (handles "Chicago White Sox" vs "Chicago WS" where WS doesn't match)
-          // Try last-word match (handles "Athletics" vs "A's" — both have last word issues)
-          // Try containment (handles "san francisco giants" contains "giants")
-          const homeMatch = exactMatch ||
-            mHomeLast === oHomeLast ||
-            mHomeSingle === oHomeSingle ||
-            normalizeTeamName(main.homeTeam).includes(normalizeTeamName(orphan.homeTeam)) ||
-            normalizeTeamName(orphan.homeTeam).includes(normalizeTeamName(main.homeTeam));
-          const awayMatch = exactMatch ||
-            mAwayLast === oAwayLast ||
-            mAwaySingle === oAwaySingle ||
-            normalizeTeamName(main.awayTeam).includes(normalizeTeamName(orphan.awayTeam)) ||
-            normalizeTeamName(orphan.awayTeam).includes(normalizeTeamName(main.awayTeam));
-          // Also try swapped home/away (Kalshi sometimes flips them)
-          const homeMatchSwap = mHomeLast === oAwayLast || mHomeSingle === oAwaySingle ||
-            normalizeTeamName(main.homeTeam).includes(normalizeTeamName(orphan.awayTeam)) ||
-            normalizeTeamName(orphan.awayTeam).includes(normalizeTeamName(main.homeTeam));
-          const awayMatchSwap = mAwayLast === oHomeLast || mAwaySingle === oHomeSingle ||
-            normalizeTeamName(main.awayTeam).includes(normalizeTeamName(orphan.homeTeam)) ||
-            normalizeTeamName(orphan.homeTeam).includes(normalizeTeamName(main.awayTeam));
 
-          if (homeMatch && awayMatch) {
-            bestMatch = mainId;
-            bestMatchSwapped = false;
-            break;
-          }
-          if (homeMatchSwap && awayMatchSwap) {
-            bestMatch = mainId;
-            bestMatchSwapped = true;
-            break;
-          }
+          // Per-side strength, highest wins: 3 = exact event key, 2 = full-name containment,
+          // 1 = last-TWO-words equality ("white sox"), 0.5 = a single last word that is
+          // DISTINCTIVE in this feed, 0 = no evidence. A generic single last word scores 0 --
+          // that is the "state"/"sox" bridge, and it must not be able to carry a merge.
+          const sideScore = (mFull, oFull, mLast2, oLast2, mOne, oOne) => {
+            const mn = normalizeTeamName(mFull), on = normalizeTeamName(oFull);
+            if (mn && on && mn === on) return 3;
+            if (mn && on && (mn.includes(on) || on.includes(mn))) return 2;
+            if (mLast2 && mLast2 === oLast2) return 1;
+            if (mOne && mOne === oOne && _distinctive(mOne)) return 0.5;
+            return 0;
+          };
+
+          const hS = exactMatch ? 3 : sideScore(main.homeTeam, orphan.homeTeam, mHomeLast, oHomeLast, mHomeSingle, oHomeSingle);
+          const aS = exactMatch ? 3 : sideScore(main.awayTeam, orphan.awayTeam, mAwayLast, oAwayLast, mAwaySingle, oAwaySingle);
+          if (hS > 0 && aS > 0) { cands.push({ id: mainId, score: hS + aS, swapped: false }); continue; }
+
+          // Swapped orientation (Kalshi sometimes flips home/away)
+          const hW = sideScore(main.homeTeam, orphan.awayTeam, mHomeLast, oAwayLast, mHomeSingle, oAwaySingle);
+          const aW = sideScore(main.awayTeam, orphan.homeTeam, mAwayLast, oHomeLast, mAwaySingle, oHomeSingle);
+          if (hW > 0 && aW > 0) cands.push({ id: mainId, score: hW + aW, swapped: true });
+        }
+
+        cands.sort((x, y) => y.score - x.score);
+        let bestMatch = null;
+        let bestMatchSwapped = false;
+        if (cands.length === 1 || (cands.length > 1 && cands[0].score > cands[1].score)) {
+          bestMatch = cands[0].id;
+          bestMatchSwapped = cands[0].swapped;
+        } else if (cands.length > 1) {
+          // A tie is ambiguous -> DECLINE. Leaving the orphan unmerged costs one book's
+          // odds; merging the wrong game corrupts the consensus the parlay prices off.
+          ambiguousOrphans++;
+          log.warn('OddsFeed', `orphan merge ambiguous for "${orphan.awayTeam} @ ${orphan.homeTeam}" (${cands.length} equal candidates) - left unmerged`);
         }
 
         if (bestMatch) {
@@ -987,6 +1010,10 @@ async function fetchOddsForSport(sport, opts) {
             log.info('OddsFeed', `Merged swapped orphan ${orphan.homeTeam}/${orphan.awayTeam} → main ${eventMap[bestMatch].homeTeam}/${eventMap[bestMatch].awayTeam} (flipped selection_type)`);
           }
         }
+      }
+      if (ambiguousOrphans > 0) {
+        // A decline that prints nothing is invisible in a way a merge is not.
+        log.info('OddsFeed', `${ambiguousOrphans} orphan event(s) left unmerged as ambiguous for ${mapping.value}`);
       }
       if (mergedOrphans > 0) {
         log.info('OddsFeed', `Merged ${mergedOrphans} single-book events into main events for ${mapping.value}`);
@@ -4175,6 +4202,13 @@ const ODDS_API_TEAM_ALIASES = {
   'nj devils': 'new jersey devils',
   'sj sharks': 'san jose sharks',
   'la kings': 'los angeles kings',
+  // COLLEGE FOOTBALL -- PX's NEW DATA PROVIDER (2026-09-13) spells these schools out; TOA uses the short form.
+  // No substring or last-word relation exists, so the alt-line warm-up counted every one as no-match
+  // (replayed on the live board: 4 of 57 new-provider CFB games). Values are normalizeTeamName(TOA name).
+  'miami florida': 'miami hurricanes',
+  'miami ohio': 'miami oh redhawks',
+  'north carolina state': 'nc state wolfpack',
+  'connecticut': 'uconn huskies',
 };
 
 function applyTeamAlias(normalizedName) {
@@ -5996,10 +6030,32 @@ async function backfillMissingH2h(sport) {
       }
       if (mlPairs.length === 0) continue;
 
-      // Align apiEvent home/away to OUR event's home/away orientation —
+      // Align apiEvent home/away to OUR event's home/away orientation --
       // the odds-api sometimes swaps sides vs SharpAPI. If swapped, flip.
-      const apiHomeMatchesOurHome = apiEvent.home_team.toLowerCase().includes(ev.homeTeam.toLowerCase().split(' ').pop())
-                                  || ev.homeTeam.toLowerCase().includes(apiEvent.home_team.toLowerCase().split(' ').pop());
+      //
+      // ⛔ THIS WAS DECIDED BY A BARE LAST WORD (2026-09-12). On a same-last-word game --
+      // "Michigan State" vs "Ohio State", "Manchester City" vs "Manchester United" -- the test
+      // `apiEvent.home_team.includes(lastWordOf(ourHome))` is TRUE whichever way round the feed
+      // has the teams, so a genuinely swapped payload read as aligned and the de-vigged HOME and
+      // AWAY fairs were assigned to the wrong sides. That is a real mispricing, not lost
+      // coverage, and it is the same collision class as the Portland State event bridge.
+      //
+      // CURRENT: score BOTH orientations on full-name equality/containment, take the stronger,
+      // and DECLINE (skip the event) on a tie rather than guessing. A skipped event simply keeps
+      // no h2h supplement; a guessed orientation prices the wrong team.
+      const _sideMatch = (a, b) => {
+        const x = normalizeTeamName(a), y = normalizeTeamName(b);
+        if (!x || !y) return 0;
+        if (x === y) return 2;
+        return (x.includes(y) || y.includes(x)) ? 1 : 0;
+      };
+      const _aligned = _sideMatch(apiEvent.home_team, ev.homeTeam) + _sideMatch(apiEvent.away_team, ev.awayTeam);
+      const _swapped = _sideMatch(apiEvent.home_team, ev.awayTeam) + _sideMatch(apiEvent.away_team, ev.homeTeam);
+      if (_aligned === _swapped) {
+        log.warn('OddsFeed', `h2h supplement: cannot orient "${ev.awayTeam} @ ${ev.homeTeam}" against "${apiEvent.away_team} @ ${apiEvent.home_team}" - skipped`);
+        continue;
+      }
+      const apiHomeMatchesOurHome = _aligned > _swapped;
       const getOur = (pairSide) => apiHomeMatchesOurHome ? pairSide : (pairSide === 'home' ? 'away' : 'home');
 
       const fairHome = [], fairAway = [];
