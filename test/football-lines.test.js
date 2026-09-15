@@ -215,6 +215,11 @@ test('player-name extraction handles the TD phrasing', () => {
     'Christian McCaffrey Player To Score First Touchdown?': ['first_td', 'Christian McCaffrey'],
     'Matthew Stafford Interceptions Thrown': ['interception_thrown', 'Matthew Stafford'],
     'Eddy Piñeiro Total Field Goals Made': ['field_goals_made', 'Eddy Piñeiro'],
+    // Broncos @ Chiefs PX board, 2026-09-14
+    'Travis Kelce Longest Reception': ['longest_reception', 'Travis Kelce'],
+    'Patrick Mahomes Total Pass Completions': ['pass_completions', 'Patrick Mahomes'],
+    'Wil Lutz Total Field Goals Made': ['field_goals_made', 'Wil Lutz'],
+    'Patrick Mahomes Interceptions Thrown': ['interception_thrown', 'Patrick Mahomes'],
   };
   for (const [name, [type, player]] of Object.entries(px)) {
     assert.equal(ws._classifyFootballProp(name), type, name);
@@ -246,6 +251,10 @@ test('football prop → TOA map: the two-sided markets plus the one-sided anytim
     rushing_yards: 'player_rush_yds',
     receiving_yards: 'player_reception_yds',
     receptions: 'player_receptions',
+    interception_thrown: 'player_pass_interceptions',
+    field_goals_made: 'player_field_goals',
+    pass_completions: 'player_pass_completions',
+    longest_reception: 'player_reception_longest',
   });
   // ⚠ The TD markets are ONE-SIDED at every book (anytime 8 books / 0 two-sided,
   // first_td 6 / 0), so they cannot be 2-way de-vigged and keep the lineless

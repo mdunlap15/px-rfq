@@ -472,6 +472,29 @@ in response to being picked off on this exact market last season.
   Fixed in 7589e23+; `test/football-lines.test.js` pins the live PX phrasing.
   **When a prop family shows 0 lines, test the extractor on a real PX market
   name before suspecting the window, the book gate or TOA.**
+- **Also mapped (2026-09-14):** interceptions thrown (`player_pass_interceptions`),
+  field goals made (`player_field_goals`), pass completions
+  (`player_pass_completions`) and longest reception (`player_reception_longest`),
+  all two-sided and measured live on Broncos @ Chiefs (5 / 3 / 6 / 4 books).
+  "Longest Reception" must classify BEFORE receptions or it buckets as a count prop.
+- **Shared TOA key (2026-09-14).** The single-leg posters use the same key, so the
+  trader sees a steady trickle of frequency 429s. Broncos @ Chiefs props stayed dark
+  ~40 min because (1) the per-event prop fetchers gave up on the first 429 with no
+  retry and never told the governor, and (2) the governor paused all TOA calls 5s
+  doubling to 120s per 429. Now: prop fetches retry a 429 twice with jittered
+  backoff (`TOA_PROP_429_RETRIES`, default 2) and report to the governor; the
+  governor base is 1s capped at 8s (`TOA_BACKOFF_BASE_MS` / `TOA_BACKOFF_MAX_MS`).
+  Football prop skips (no player name, no fair, too few books) log at INFO.
+  The quota is not the constraint (20.9M remaining); request FREQUENCY is.
+- **Player-name suffixes (2026-09-14).** Roman-numeral suffixes compare STRICTLY in the
+  TOA matcher (Michael Carter and Michael Carter II are different Jets players), so PX
+  writing "Kenneth Walker" on yardage/receptions while every book wrote "Kenneth Walker
+  III" left three of his markets dark. The fix is anchored in PX's own board for the
+  game, never the book board: an unsuffixed non-TD football market inherits a suffix
+  only when every PX TD market for that base name carries that same suffix
+  (`_footballTdGensByBase` / `_applyFootballTdSuffix`, seed path). An unsuffixed TD
+  market (Carter the RB) or no TD market blocks the rename. A book-board fallback was
+  tried first and REJECTED: it priced "Michael Carter" off "Michael Carter II".
 - **T-120 registration window** (`FOOTBALL_PROP_TMINUS_MINUTES`). Gates
   REGISTRATION, not pricing. Unparseable kickoff fails closed.
 - **≥3 books, absolute** (`FOOTBALL_PROP_MIN_BOOKS`) — the trusted-single-book

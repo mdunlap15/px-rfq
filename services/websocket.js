@@ -83,6 +83,8 @@ function extractPlayerNameFromPropMarket(marketName) {
     // registered apart from anytime TD.
     /\s+(total\s+)?(passing|rushing|receiving)\s+yards?$/i,
     /\s+(total\s+)?(passing|rushing|receiving)\s+touchdowns?$/i,
+    /\s+(total\s+)?longest\s+receptions?$/i,
+    /\s+(total\s+)?pass(?:ing)?\s+completions?$/i,
     /\s+(total\s+)?receptions?$/i,
     /\s+(player\s+)?to\s+score\s+(the\s+)?first\s+touchdown\s*\??$/i,
     /\s+(total\s+)?interceptions?\s+thrown$/i,
@@ -184,6 +186,10 @@ function classifyFootballProp(marketName) {
   if (/passing\s+yards?/.test(n)) return 'passing_yards';
   if (/rushing\s+yards?/.test(n)) return 'rushing_yards';
   if (/receiving\s+yards?/.test(n)) return 'receiving_yards';
+  // Before receptions: "Travis Kelce Longest Reception" also contains the word
+  // reception and would otherwise bucket as a receptions COUNT prop.
+  if (/longest\s+receptions?/.test(n)) return 'longest_reception';
+  if (/pass(?:ing)?\s+completions?/.test(n)) return 'pass_completions';
   if (/\breceptions?\b/.test(n)) return 'receptions';
   if (/to\s+throw\s+an?\s+interception|interceptions?\s+thrown/.test(n)) return 'interception_thrown';
   if (/field\s+goals?\s+made/.test(n)) return 'field_goals_made';

@@ -143,16 +143,61 @@ const _FOOTBALL_PROP_TO_TOA_MARKET = {
   rushing_yards: 'player_rush_yds',
   receiving_yards: 'player_reception_yds',
   receptions: 'player_receptions',
+  // 2026-09-14 (operator: enable these). Measured live on Broncos @ Chiefs, us
+  // region, every one two-sided Over/Under: player_pass_interceptions 5 books,
+  // player_field_goals 3, player_pass_completions 6, player_reception_longest 4.
+  interception_thrown: 'player_pass_interceptions',
+  field_goals_made: 'player_field_goals',
+  pass_completions: 'player_pass_completions',
+  longest_reception: 'player_reception_longest',
 };
 // The football props TOA prices on BOTH sides, i.e. the ones that go through the
 // ordinary two-sided de-vig rather than the one-sided YES mirror. Anything not
 // in here and not in _footballPropCtx never registers.
 const _FOOTBALL_PROP_TWO_SIDED = new Set([
   'passing_yards', 'passing_tds', 'rushing_yards', 'receiving_yards', 'receptions',
+  'interception_thrown', 'field_goals_made', 'pass_completions', 'longest_reception',
 ]);
 // Line semantics for lineless football YES/NO props (parallel to the
 // {line, toaLine} object _classifySoccerProp returns). Null for any
 // propType we don't price — callers must fail closed on null.
+// FOOTBALL NAME SUFFIX FROM PX'S OWN TD MARKETS (2026-09-14).
+// PX wrote "Kenneth Walker" on his yardage/receptions markets but "Kenneth
+// Walker III" on his TD markets, and every book writes "III". The TOA matcher
+// compares roman-numeral suffixes STRICTLY on purpose (Michael Carter and
+// Michael Carter II are different players on the SAME team), so three Walker
+// markets matched zero books and never listed on Broncos @ Chiefs.
+// The fix is anchored in PX's board for that one game, never in the book
+// board: an unsuffixed non-TD market inherits a suffix only when every TD
+// market PX posts for that base name carries that SAME suffix. Offensive
+// stat props belong to players who have TD markets, so:
+//   - Walker: TD markets only "Kenneth Walker III" -> yardage becomes III.
+//   - Carter: RB has an unsuffixed TD market -> gens {'', 'ii'} or {''} -> no rename.
+//   - No TD market for the base name -> no rename (fail closed to strict).
+function _footballTdGensByBase(markets, ws, normParts) {
+  const map = new Map();
+  if (!ws || typeof ws._classifyFootballProp !== 'function' || typeof normParts !== 'function') return map;
+  for (const m of (markets || [])) {
+    const t = ws._classifyFootballProp(m && m.name);
+    if (t !== 'anytime_td' && t !== 'first_td') continue;
+    const nm = ws._extractPlayerNameFromPropMarket(m.name);
+    const pp = nm ? normParts(nm) : null;
+    if (!pp) continue;
+    if (!map.has(pp.base)) map.set(pp.base, new Set());
+    map.get(pp.base).add(pp.gen);
+  }
+  return map;
+}
+function _applyFootballTdSuffix(playerName, propType, gensByBase, normParts) {
+  if (!playerName || propType === 'anytime_td' || propType === 'first_td') return playerName;
+  if (typeof normParts !== 'function') return playerName;
+  const pp = normParts(playerName);
+  if (!pp || pp.gen !== '') return playerName;
+  const gens = gensByBase && gensByBase.get(pp.base);
+  if (!gens || gens.size !== 1) return playerName;
+  const g = [...gens][0];
+  return g ? `${playerName} ${g.toUpperCase()}` : playerName;
+}
 function _footballPropCtx(propType) {
   if (propType === 'anytime_td') return { propType, line: 0.5, toaLine: null };
   if (propType === 'first_td') return { propType, line: 0.5, toaLine: null };
@@ -2685,6 +2730,10 @@ async function seedAllLines() {
           const mins = (ms - Date.now()) / 60000;
           return mins <= fbPropWindowMin;              // already started is handled downstream
         })();
+        // PX-anchored name suffixes for this game's football props (see
+        // _footballTdGensByBase). Built once per event from PX's TD markets.
+        const _fbTdGens = sportKey.startsWith('americanfootball')
+          ? _footballTdGensByBase(markets, ws, oddsFeed._normPlayerNameParts) : null;
         for (const market of markets) {
           if (!market || !market.name) continue;
           let propType = null;
@@ -2742,8 +2791,20 @@ async function seedAllLines() {
             continue;
           }
           if (!propAllowlist.has(sportKey + '.' + propType)) continue;
-          const playerName = ws ? ws._extractPlayerNameFromPropMarket(market.name) : null;
-          if (!playerName) continue;
+          let playerName = ws ? ws._extractPlayerNameFromPropMarket(market.name) : null;
+          if (!playerName) {
+            // INFO, not debug: a null player silently darkened every football
+            // prop but anytime TD until 2026-09-10 and nobody could see it.
+            if (sportKey.startsWith('americanfootball')) log.info('Lines', `Football prop skipped: no player name parsed from "${market.name}" (${event.name})`);
+            continue;
+          }
+          if (_fbTdGens) {
+            const _suffixed = _applyFootballTdSuffix(playerName, propType, _fbTdGens, oddsFeed._normPlayerNameParts);
+            if (_suffixed !== playerName) {
+              log.info('Lines', `Football prop name: "${playerName}" -> "${_suffixed}" from PX TD markets (${market.name}, ${event.name})`);
+              playerName = _suffixed;
+            }
+          }
 
           // Parse PX selections (over + under for this player at the line).
           let parsedProp = [];
@@ -2831,7 +2892,7 @@ async function seedAllLines() {
             scored.sort((a, b) => (b.books - a.books) || (Math.abs(a.line - mid) - Math.abs(b.line - mid)));
             const keep = scored[0];
             if (!keep || !keep.books) {
-              log.debug('Lines', `Football prop ${playerName} ${propType}: no point cleared the book gate across ${byLine.size} alts — skipping market`);
+              log.info('Lines', `Football prop skipped: ${playerName} ${propType}: no point cleared the book gate across ${byLine.size} alts — skipping market`);
               continue;
             }
             for (const cand of [...byLine.keys()]) if (cand !== keep.line) byLine.delete(cand);
@@ -3063,10 +3124,16 @@ async function seedAllLines() {
               continue; // skip the standard two-sided registration path below
             }
 
-            if (!lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null) continue;
+            if (!lookup || lookup.fairProbOver == null || lookup.fairProbUnder == null) {
+              if (sportKey.startsWith('americanfootball')) log.info('Lines', `Football prop skipped: ${playerName} ${propType} ${thisLine} (no two-sided fair: ${(lookup && lookup.error) || 'no lookup'}) (${event.name})`);
+              continue;
+            }
             const both = lookup.booksWithBothSides || 0;
             const trustedAlone = both === 1 && (lookup.books || []).some(b => trustedSet.includes(String(b).toLowerCase()));
-            if (both < minBooks && !trustedAlone) continue;
+            if (both < minBooks && !trustedAlone) {
+              if (sportKey.startsWith('americanfootball')) log.info('Lines', `Football prop skipped: ${playerName} ${propType} ${thisLine} (${both} two-sided books < ${minBooks}) (${event.name})`);
+              continue;
+            }
 
             // Register BOTH sides at THIS line — bettors will RFQ either
             // over or under and both lineIds need to be in the index ahead
@@ -5203,6 +5270,8 @@ module.exports = {
   _sportMarketAllowed,
   _setSeedLine,
   _footballPropCtx,
+  _footballTdGensByBase,
+  _applyFootballTdSuffix,
   _footballPropRegistrationSafe,
   _propMarketType,
   // Manual disable controls

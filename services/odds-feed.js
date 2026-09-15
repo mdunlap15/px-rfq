@@ -10522,11 +10522,43 @@ const TOA_SPORT_KEYS = {
 // Internal: do the actual TOA events fetch + cache write. Used by both
 // the synchronous cache-miss block path and the background refresh-ahead
 // path inside _getTheOddsApiEvents.
+// 429-AWARE GET for the per-event PROP path (events list + per-event prop odds).
+// 2026-09-14: NFL props on Broncos @ Chiefs stayed dark for ~40 minutes. The
+// key had 20.9M requests of quota and 5 of 6 probe calls succeeded, but the
+// single-leg posters share it, so a steady trickle of frequency 429s landed on
+// the trader. These two fetchers treated ANY 429 as a plain failure with no
+// retry and never told the governor, so the seed's prop lookups died on the
+// first collision and nothing registered. A frequency limit is transient at
+// the ~1s scale: retry a bounded number of times with jittered backoff, and
+// report both outcomes to the governor so the sweep sees the same state.
+// Bounded on purpose (default 2 retries, ~0.4s then ~1s): these also run on
+// the on-demand RFQ path, where a long wait is worse than a decline.
+const TOA_PROP_429_RETRIES = (() => {
+  const v = parseInt(process.env.TOA_PROP_429_RETRIES, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 2;
+})();
+async function _toaGetRetrying429(url, timeoutMs, deps = {}) {
+  const fetchFn = deps.fetchFn || abortableFetch;
+  const sleep = deps.sleep || (ms => new Promise(r => setTimeout(r, ms)));
+  const retries = deps.retries != null ? deps.retries : TOA_PROP_429_RETRIES;
+  for (let attempt = 0; ; attempt++) {
+    const resp = await fetchFn(url, undefined, timeoutMs);
+    if (resp.status !== 429) {
+      if (resp.ok) _noteToaSuccess();
+      return resp;
+    }
+    _noteToa429(resp.headers && typeof resp.headers.get === 'function' ? resp.headers.get('retry-after') : null);
+    if (attempt >= retries) return resp;
+    const jitter = deps.noJitter ? 1 : (0.75 + Math.random() * 0.5);
+    await sleep(Math.round(400 * Math.pow(2.5, attempt) * jitter));
+  }
+}
+
 async function _refreshTheOddsApiEvents(sportKey) {
   const apiKey = process.env.THE_ODDS_API_KEY;
   const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/events?apiKey=${apiKey}`;
   try {
-    const resp = await abortableFetch(url);
+    const resp = await _toaGetRetrying429(url);
     if (!resp.ok) {
       log.warn('OddsFeed', `TOA events fetch failed: ${resp.status}`);
       if (toaEventsCache[sportKey]) toaEventsCache[sportKey].refreshing = false;
@@ -10604,7 +10636,7 @@ async function _refreshTheOddsApiPropOdds(sport, eventId, marketKey) {
   const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/events/${eventId}/odds`
     + `?apiKey=${apiKey}&regions=${_TOA_PROP_REGIONS}&markets=${marketKey}&oddsFormat=american`;
   try {
-    const resp = await abortableFetch(url);
+    const resp = await _toaGetRetrying429(url);
     if (!resp.ok) {
       log.warn('OddsFeed', `TOA per-event odds failed (${eventId}/${marketKey}): ${resp.status}`);
       if (toaPropOddsCache[cacheKey]) toaPropOddsCache[cacheKey].refreshing = false;
@@ -11490,6 +11522,7 @@ module.exports = {
   supplementH1Markets,
   _normPlayerNameParts,
   _playerNamesMatch,
+  _toaGetRetrying429,
   __H1_SUPPLEMENT_SPORTS: H1_SUPPLEMENT_SPORTS,
   __ODDS_API_FALLBACK: ODDS_API_FALLBACK,
   _bttsBooksFor,
