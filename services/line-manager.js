@@ -3199,17 +3199,24 @@ async function seedAllLines() {
     if (config.rfi && config.rfi.enabled && sportKey === 'baseball_mlb' && matchedHome && matchedAway) {
       try {
         const rfiMarket = markets.find(m => m && /1st\s*inning\s*total\s*runs/i.test(m.name || ''));
-        if (rfiMarket && Array.isArray(rfiMarket.selections)) {
-          // One stable line_id per side; PX repeats each side across order-book
-          // depth entries that share a line_id. Read the side from the name.
+        if (rfiMarket) {
+          // Parse via px.parseMarketSelections, NOT rfiMarket.selections.
+          // 2026-09-17: PX moved the rows under market_lines[].selections and
+          // dropped the top-level `selections` array, so the old
+          // `Array.isArray(rfiMarket.selections)` guard was silently false and
+          // RFI went dark from ~2026-09-10 (0 lines registered) while demand
+          // grew. parseMarketSelections already handles the market_lines shape
+          // (it's what the prop pre-seed uses). PX now also bundles a 1.5 line
+          // in the same market, so filter to the 0.5 line — RFI is strictly
+          // "did >=1 run score in the 1st" = Over/Under 0.5.
           let overLineId = null, underLineId = null;
-          for (const group of rfiMarket.selections) {
-            for (const sel of (Array.isArray(group) ? group : [group])) {
-              if (!sel || !sel.line_id) continue;
-              const nm = String(sel.name || sel.display_name || '').toLowerCase();
-              if (/^over/.test(nm) && !overLineId) overLineId = sel.line_id;
-              else if (/^under/.test(nm) && !underLineId) underLineId = sel.line_id;
-            }
+          let parsedRfi = [];
+          try { parsedRfi = px.parseMarketSelections(rfiMarket) || []; } catch { parsedRfi = []; }
+          for (const sel of parsedRfi) {
+            if (!sel || !sel.lineId) continue;
+            if (sel.line != null && Math.abs(sel.line - 0.5) > 0.01) continue;
+            if (sel.selection === 'over' && !overLineId) overLineId = sel.lineId;
+            else if (sel.selection === 'under' && !underLineId) underLineId = sel.lineId;
           }
           if (overLineId && underLineId) {
             const rfi = await oddsFeed.getRfiFair('baseball_mlb', matchedHome, matchedAway, event.scheduled || null);
