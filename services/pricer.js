@@ -3363,6 +3363,51 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // MLB MONEYLINE-PAIR MARGIN TRIM A/B (2026-09-17).
+  //
+  // Same scope shape as the HR-pair trim, different market: exactly 2 legs,
+  // both MLB moneyline, on DIFFERENT games (same-game two-of-a-kind is blocked
+  // upstream anyway). Measured 2026-09-10: $253K/wk lost at a 0.69pp median
+  // gap, 35% within 0.5pp, on a family our own fills show calibrated (z=-1.08).
+  // Ships DARK. Fractional-not-flat with a hard relative-edge floor, so it can
+  // never quote below fair * (1 + floor). Arm = md5('ml:'+parlayId) mod 100,
+  // recorded in meta.mlTrimArm whether or not it fires. Distinct 'ml:' salt so
+  // a parlay's ML-arm and HR-arm are independent.
+  // -------------------------------------------------------------------
+  const _mlTrim = { arm: null, applied: false, preProb: null, fraction: null };
+  {
+    const _isMlPair = pricedLegs.length === 2
+      && pricedLegs.every(l => l.lineInfo
+        && l.lineInfo.sport === 'baseball_mlb'
+        && l.lineInfo.marketType === 'moneyline')
+      && pricedLegs[0].lineInfo.pxEventId != null
+      && String(pricedLegs[0].lineInfo.pxEventId) !== String(pricedLegs[1].lineInfo.pxEventId);
+    const _pct = config.pricing.mlPairTrimPercent || 0;
+    if (_isMlPair && opts.parlayId && _pct > 0) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('ml:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _mlTrim.arm = inArm ? 'trim' : 'control';
+      if (inArm && fairParlayProb > 0 && offeredImpliedProb > fairParlayProb) {
+        const frac = config.pricing.mlPairTrimFraction || 0.4;
+        const floorRel = (config.pricing.mlPairMinRelEdgePct != null ? config.pricing.mlPairMinRelEdgePct : 4) / 100;
+        const margin = offeredImpliedProb - fairParlayProb;
+        const trimmed = offeredImpliedProb - margin * frac;
+        const floored = Math.max(trimmed, fairParlayProb * (1 + floorRel));
+        if (floored < offeredImpliedProb) {
+          _mlTrim.preProb = offeredImpliedProb;
+          _mlTrim.applied = true;
+          _mlTrim.fraction = frac;
+          log.debug('Pricing', `ML-pair trim[${_mlTrim.arm}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(floored * 100).toFixed(3)}% (fair ${(fairParlayProb * 100).toFixed(3)}%, frac ${frac}${floored > trimmed ? ', FLOORED' : ''})`);
+          offeredImpliedProb = floored;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
   //
   // After all pricing adjustments, edge = (offered − fair) / fair × 100.
@@ -3907,6 +3952,11 @@ function priceParlay(legs, opts = {}) {
       hrTrimApplied: _hrTrim.applied,
       hrTrimPreProb: _hrTrim.preProb != null ? Math.round(_hrTrim.preProb * 100000) / 100000 : null,
       hrTrimFraction: _hrTrim.fraction,
+      // MLB moneyline-pair margin-trim A/B (parallel to hrTrim).
+      mlTrimArm: _mlTrim.arm,
+      mlTrimApplied: _mlTrim.applied,
+      mlTrimPreProb: _mlTrim.preProb != null ? Math.round(_mlTrim.preProb * 100000) / 100000 : null,
+      mlTrimFraction: _mlTrim.fraction,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.

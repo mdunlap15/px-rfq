@@ -944,6 +944,31 @@ const config = {
       if (!Number.isFinite(v) || v < 0) return 4;
       return v;
     })(),
+    // MLB MONEYLINE-PAIR MARGIN TRIM A/B (2026-09-17). Exact shape of the HR
+    // trim, different market. Measured 2026-09-10 (14d): we lose $253K/wk of
+    // 2-leg cross-game MLB moneyline network fills at a 0.69pp median gap, 35%
+    // within 0.5pp, while our own 2-leg MLB moneyline runs z=-1.08 -- i.e. NOT
+    // mispriced, just uncompetitive by a hair. Ships DARK (percent 0). Same
+    // fractional-not-flat design and hard relative-edge floor as the HR trim,
+    // so it can never quote below fair * (1 + floor). meta.mlTrimArm attributes
+    // control vs trim; the confirm reprice keys on fairParlayProb (untouched)
+    // so a trimmed quote confirms in the same arm.
+    mlPairTrimPercent: (() => {
+      const v = parseInt(process.env.ML_PAIR_TRIM_PERCENT);
+      if (!Number.isFinite(v) || v < 0) return 0;
+      if (v > 100) return 100;
+      return v;
+    })(),
+    mlPairTrimFraction: (() => {
+      const v = parseFloat(process.env.ML_PAIR_TRIM_FRACTION);
+      if (!Number.isFinite(v) || v <= 0) return 0.4;
+      return Math.min(v, 0.9);
+    })(),
+    mlPairMinRelEdgePct: (() => {
+      const v = parseFloat(process.env.ML_PAIR_MIN_REL_EDGE_PCT);
+      if (!Number.isFinite(v) || v < 0) return 4;
+      return v;
+    })(),
     // Safety net: decline any total leg where our de-vigged fair diverges
     // from the simple book consensus (mean of Pin/DK/FD implied probs) by
     // more than the threshold. Backstop for the getBookPairsForTotals fix
