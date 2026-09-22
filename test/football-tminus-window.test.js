@@ -44,6 +44,24 @@ test('the ON-DEMAND resolve applies the same window (keyed on event.sportName)',
   assert.ok(/reason: 'football_beyond_tminus'/.test(SRC), 'records a distinct decline reason');
 });
 
+test('the cache-restore path (lookupLineAsync) applies the window too — the third entry point', () => {
+  // The seed filter and on-demand both gated it, but the Supabase cache-restore
+  // did NOT — so between seeds the RFQ path re-registered every far-out football
+  // line the seed had just dropped (10,185 NFL+CFB lines observed live 2026-09-22).
+  const at = SRC.indexOf('async function lookupLineAsync(');
+  assert.ok(at > -1, 'lookupLineAsync present');
+  const body = SRC.slice(at, at + 2400);
+  assert.ok(/String\(cached\.sport \|\| ''\)\.startsWith\('americanfootball'\) && cached\.startTime/.test(body),
+    'cache-restore keys the football check on the cached sportKey + startTime');
+  assert.ok(/_st > Date\.now\(\) \+ FOOTBALL_TMINUS_HOURS \* 3600000\) return null/.test(body),
+    'cache-restore refuses a far-out football line');
+  // and it sits AFTER the market-allowlist gate, BEFORE the index insert
+  const allow = body.indexOf('_sportMarketAllowed(cached');
+  const fb = body.indexOf("startsWith('americanfootball') && cached.startTime");
+  const ins = body.indexOf('lineIndex[lineId] = cached;');
+  assert.ok(allow > -1 && fb > allow && ins > fb, 'gate order: allowlist, football window, then insert');
+});
+
 test('it is a FORWARD gate only — it never touches past/in-progress events', () => {
   // both sites compare start > now + window (strictly forward); no lower bound
   const seedGate = SRC.indexOf("e.sport_name === 'American Football'");

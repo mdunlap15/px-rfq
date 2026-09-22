@@ -3756,6 +3756,17 @@ async function lookupLineAsync(lineId) {
     // (or from a wider allowlist) must not resurrect a market the seed now
     // refuses. Treat it as unknown, same as the seed and on-demand paths.
     if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType, cached.pxEventId)) return null;
+    // Football 48h near-window — the THIRD index entry point (2026-09-22). The
+    // seed filter and on-demand resolve both gate this, but the Supabase
+    // cache-restore did not, so between seeds the RFQ path re-registered every
+    // far-out football line the seed had just dropped (10,185 NFL+CFB lines
+    // observed live right after the 48h gate shipped). Same predicate, keyed on
+    // the cached sportKey + startTime; missing/unparseable start fails OPEN, as
+    // the seed filter does when e.scheduled is absent.
+    if (String(cached.sport || '').startsWith('americanfootball') && cached.startTime) {
+      const _st = Date.parse(cached.startTime);
+      if (Number.isFinite(_st) && _st > Date.now() + FOOTBALL_TMINUS_HOURS * 3600000) return null;
+    }
     // Populate in-memory index so subsequent sync lookups hit
     cached.lineId = lineId; // legExposureKey needs it — see _setSeedLine
     lineIndex[lineId] = cached;
