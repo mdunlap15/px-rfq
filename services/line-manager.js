@@ -665,6 +665,22 @@ const MAX_DAYS_AHEAD = (() => {
   const v = parseFloat(process.env.MAX_DAYS_AHEAD);
   return Number.isFinite(v) && v > 0 ? v : 6;
 })();
+// FOOTBALL NEAR-WINDOW (operator directive 2026-09-21): "I do not want to quote
+// NFL and CFB parlays until 48 hours out of each." A football EVENT does not
+// register until within this many hours of kickoff — gating the WHOLE event
+// (game lines AND props), tighter than MAX_DAYS_AHEAD. Enforced at every index
+// entry point (seed filter + on-demand resolve) so an RFQ cannot re-register a
+// far-out football line the seed skipped. All PX football shares sport_name
+// 'American Football' (NFL/CFB/CFL/preseason); the floor applies to all of them,
+// the same conservative direction as MAX_DAYS_AHEAD (never hold far-out football
+// risk where our fair moves more than the price does). The football PROP window
+// (FOOTBALL_PROP_TMINUS_MINUTES, prod 24h) is TIGHTER and still applies on top,
+// so props open at 24h even though the event registers at 48h. Env in hours;
+// 0/blank falls back to 48. Set very large to disable.
+const FOOTBALL_TMINUS_HOURS = (() => {
+  const v = parseFloat(process.env.FOOTBALL_TMINUS_HOURS);
+  return Number.isFinite(v) && v > 0 ? v : 48;
+})();
 
 function normalizeTeamName(name) {
   // Strip diacritics first (Godínez → Godinez, São Paulo → Sao Paulo) so
@@ -1537,6 +1553,7 @@ async function seedAllLines() {
   const nowMs = Date.now();
   let droppedAsStale = 0;
   let droppedAsTooFar = 0;
+  let droppedFootballFar = 0;
   const events = allEvents.filter(e => {
     if (!pxSportNames.includes(e.sport_name)) return false;
     if (e.status && e.status === 'settled') return false;
@@ -1569,10 +1586,17 @@ async function seedAllLines() {
         droppedAsTooFar++;
         return false;
       }
+      // Football 48h near-window (see FOOTBALL_TMINUS_HOURS). Applies to all
+      // 'American Football' (NFL/CFB/CFL/preseason share the sport_name).
+      if (e.sport_name === 'American Football' && Number.isFinite(startMs)
+          && startMs > nowMs + FOOTBALL_TMINUS_HOURS * 3600000) {
+        droppedFootballFar++;
+        return false;
+      }
     }
     return true;
   });
-  log.info('Lines', `Found ${events.length} supported sport events (of ${allEvents.length} total; dropped ${droppedAsStale} past per-sport stale cutoff, ${droppedAsTooFar} beyond ${MAX_DAYS_AHEAD}d ahead)`);
+  log.info('Lines', `Found ${events.length} supported sport events (of ${allEvents.length} total; dropped ${droppedAsStale} past per-sport stale cutoff, ${droppedAsTooFar} beyond ${MAX_DAYS_AHEAD}d ahead, ${droppedFootballFar} football beyond ${FOOTBALL_TMINUS_HOURS}h)`);
 
   // Get all Odds API cached events for matching
   const oddsApiEvents = oddsFeed.getAllCachedEvents();
@@ -3874,6 +3898,14 @@ async function resolveUnknownLine(rfqLeg) {
     if (Number.isFinite(_st) && _st > Date.now() + MAX_DAYS_AHEAD * 86400000) {
       _recordResolveFailure(lineId, { lineId, reason: 'beyond_max_days_ahead', eventId,
         detail: `starts ${event.scheduled}, cap ${MAX_DAYS_AHEAD}d` });
+      return null;
+    }
+    // Football 48h near-window, on-demand half (see FOOTBALL_TMINUS_HOURS).
+    // eventIndex stores the PX sport_name as event.sportName.
+    if (event.sportName === 'American Football' && Number.isFinite(_st)
+        && _st > Date.now() + FOOTBALL_TMINUS_HOURS * 3600000) {
+      _recordResolveFailure(lineId, { lineId, reason: 'football_beyond_tminus', eventId,
+        detail: `starts ${event.scheduled}, football window ${FOOTBALL_TMINUS_HOURS}h` });
       return null;
     }
   }
