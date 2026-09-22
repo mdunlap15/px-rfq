@@ -5,6 +5,107 @@ const { config } = require('../config');
 const log = require('./logger');
 const bovadaAltScraper = require('./bovada-alt-scraper');
 
+// ---------------------------------------------------------------------------
+// TOA ATTRIBUTION (2026-09-20, Mike: "do the attribution logging")
+// ---------------------------------------------------------------------------
+// The Odds API key is SHARED with the Order Book fleet, and nothing has ever said which
+// caller burns what: only the key's cumulative counter was ever read. Every TOA response
+// carries `x-requests-last` (that call's credit cost) and `x-requests-used` (the key's
+// cumulative counter). This wraps the process-global fetch for the-odds-api.com URLs ONLY
+// -- it calls the original fetch, reads two headers off the response, and returns it
+// untouched, so it cannot change behaviour, latency shape or error handling of any caller.
+// Wrapping at the global catches every caller in the process (index.js, nfl-consensus,
+// futures-outrights, toa-tennis-sets and the 16 direct fetch() sites here that bypass
+// abortableFetch), not just the gate. A digest line is logged every TOA_ATTR_LOG_MIN
+// minutes; the Python fleet writes the same shape from toa_gate.py, so the two logs read
+// side by side. TOA_ATTR_ENABLED=0 disables the wrapper.
+const _toaAttr = { calls: 0, credits: 0, r429: 0, errs: 0, used: null, by: new Map(), status: new Map(), since: Date.now() };
+function toaShape(url) {
+  try {
+    const u = String(url);
+    const q = {};
+    const qi = u.indexOf('?');
+    if (qi >= 0) for (const kv of u.slice(qi + 1).split('&')) {
+      const i = kv.indexOf('='); if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1));
+    }
+    let m;
+    if ((m = u.match(/\/v4\/sports\/([^/?]+)\/events\/[^/?]+\/odds/))) return `${m[1]}|event-odds|${q.regions || ''}|${q.markets || ''}`;
+    if ((m = u.match(/\/v4\/sports\/([^/?]+)\/odds/)))               return `${m[1]}|odds|${q.regions || ''}|${q.markets || ''}`;
+    if ((m = u.match(/\/v4\/sports\/([^/?]+)\/scores/)))             return `${m[1]}|scores||`;
+    if ((m = u.match(/\/v4\/sports\/([^/?]+)\/events/)))             return `${m[1]}|events||`;
+    if (u.includes('/v4/sports')) return '-|sports||';
+    return '-|other||';
+  } catch (e) { return '-|unparsed||'; }
+}
+function toaRecord(url, resp) {
+  try {
+    const s = toaShape(url);
+    const row = _toaAttr.by.get(s) || [0, 0, 0, 0];      // calls, credits, 429s, other errors
+    row[0]++; _toaAttr.calls++;
+    const status = resp && resp.status;
+    _toaAttr.status.set(String(status), (_toaAttr.status.get(String(status)) || 0) + 1);
+    if (status === 429) { row[2]++; _toaAttr.r429++; }
+    else if (status && status >= 200 && status < 300) {
+      const last = parseInt(resp.headers && resp.headers.get && resp.headers.get('x-requests-last')) || 0;
+      row[1] += last; _toaAttr.credits += last;
+    } else { row[3] = (row[3] || 0) + 1; _toaAttr.errs++; }
+    const used = resp && resp.headers && resp.headers.get && resp.headers.get('x-requests-used');
+    if (used != null && used !== '') { const n = parseInt(used); if (!isNaN(n)) _toaAttr.used = n; }
+    _toaAttr.by.set(s, row);
+  } catch (e) { /* attribution must never break a call */ }
+}
+function toaAttrSnapshot() {
+  const by = [..._toaAttr.by.entries()].sort((a, b) => b[1][1] - a[1][1]);
+  const byCalls = [..._toaAttr.by.entries()].sort((a, b) => b[1][0] - a[1][0]);
+  const status = [..._toaAttr.status.entries()].sort((a, b) => b[1] - a[1]);
+  return { calls: _toaAttr.calls, credits: _toaAttr.credits, r429: _toaAttr.r429, errs: _toaAttr.errs,
+           used: _toaAttr.used, since: _toaAttr.since, by, byCalls, status };
+}
+function toaAttrReset() { _toaAttr.calls = 0; _toaAttr.credits = 0; _toaAttr.r429 = 0; _toaAttr.errs = 0; _toaAttr.by.clear(); _toaAttr.status.clear(); _toaAttr.since = Date.now(); }
+if (process.env.TOA_ATTR_ENABLED !== '0' && typeof globalThis.fetch === 'function' && !globalThis.fetch._toaAttr) {
+  const _origFetch = globalThis.fetch;
+  const wrapped = async function (input, init) {
+    const u = typeof input === 'string' ? input : (input && input.url) || '';
+    if (!u.includes('the-odds-api.com')) return _origFetch(input, init);
+    const resp = await _origFetch(input, init);
+    toaRecord(u, resp);
+    return resp;
+  };
+  wrapped._toaAttr = true;
+  globalThis.fetch = wrapped;
+  const everyMin = parseInt(process.env.TOA_ATTR_LOG_MIN) || 10;
+  const t = setInterval(() => {
+    try {
+      const s = toaAttrSnapshot();
+      if (!s.calls) return;
+      const mins = Math.max(1, Math.round((Date.now() - s.since) / 60000));
+      log.info('TOA ATTR', `px-rfq last ${mins}m: ${s.calls} calls | ${s.credits} credits (~${Math.round(s.credits * 60 / mins)}/hr) | ${s.r429} x429 | ${s.errs} errs | key used=${s.used}`);
+      log.info('TOA ATTR', `  by status: ${s.status.map(([k, n]) => `${k}=${n}`).join(' ')}`);
+      for (const [shape, v] of s.by.slice(0, 10)) log.info('TOA ATTR', `  by credits: ${shape} -> ${v[0]} calls ${v[1]} credits ${v[2]} x429 ${v[3] || 0} errs`);
+      for (const [shape, v] of s.byCalls.slice(0, 10)) log.info('TOA ATTR', `  by calls:   ${shape} -> ${v[0]} calls ${v[1]} credits ${v[2]} x429 ${v[3] || 0} errs`);
+      // Also publish to kv px_toa_attr[pxrfq], beside the Python fleet's [cloud]/[laptop] entries:
+      // this log runs ~1,000 lines/min and Railway history caps at 500 per query, so the log line
+      // alone is unreachable after the fact. Lazy require: db.js must not be loaded at module init.
+      (async () => {
+        try {
+          const db = require('./db');
+          const cur = (await db.loadKV('px_toa_attr')) || {};
+          cur.pxrfq = { host: 'pxrfq', ts: Math.floor(Date.now() / 1000), window_min: mins,
+                        calls: s.calls, credits: s.credits, r429: s.r429, errs: s.errs, key_used_last: s.used,
+                        status: Object.fromEntries(s.status),
+                        // 60 shapes each (was 15): Mike's week-long deep-dive needs the TAIL by sport and
+                        // market set, not just the head (2026-09-21).
+                        by_credits: Object.fromEntries(s.by.slice(0, 60)),
+                        by_calls: Object.fromEntries(s.byCalls.slice(0, 60)) };
+          await db.saveKV('px_toa_attr', cur);
+        } catch (e) { /* attribution publish must never throw */ }
+      })();
+      toaAttrReset();
+    } catch (e) { /* never throw from a timer */ }
+  }, everyMin * 60 * 1000);
+  if (t.unref) t.unref();
+}
+
 // AbortController is a Node.js global — used by abortableFetch below to cancel
 // slow Odds API calls instead of just ignoring the promise. This actually
 // frees the underlying socket so keep-alive doesn't reuse a hung connection.
@@ -9881,6 +9982,7 @@ function getPitcherSide(sport, homeTeam, awayTeam, commenceTime, playerName) {
 // ---------------------------------------------------------------------------
 
 const scoresCache = {}; // { sport: { fetchedAt, games: [{ homeTeam, awayTeam, commenceTime, completed, homeScore, awayScore }] } }
+const SCORES_NEG_404_MS = 10 * 60 * 1000; // a 404'd sport key is not retried for 10 min (2026-09-21)
 const SCORES_TTL_MS = 30 * 1000; // 30s cache — pairs with checkLegResults running every 30s. Bounds TOA hit rate while keeping completion latency low.
 
 // Cache of active sport keys discovered from The Odds API's /v4/sports/.
@@ -9931,6 +10033,16 @@ async function fetchScores(sport) {
   const cached = scoresCache[sport];
   if (cached && (Date.now() - cached.fetchedAt) < SCORES_TTL_MS) {
     return cached.games;
+  }
+
+  // 'golf_matchups' is served by DataGolf; The Odds API has no such sport key and its
+  // /scores endpoint 404s. Measured 2026-09-21 (TOA ATTR): 12,306 requests in TEN MINUTES to
+  // golf_matchups/scores -- 9,563 x 404 and 2,743 x 429 -- because a failed fetch was never
+  // cached, so every 30-second leg check on every golf leg re-fetched it. That was ~20 req/s of
+  // the account's 30 req/s limit, earning nothing and drawing 429s onto every other caller.
+  if (sport === 'golf_matchups') {
+    scoresCache[sport] = { fetchedAt: Date.now() + SCORES_NEG_404_MS, games: cached?.games || [] };
+    return cached?.games || [];
   }
 
   // Generic 'soccer' has no Odds API scores endpoint — only league-
@@ -10006,6 +10118,12 @@ async function fetchScores(sport) {
     const resp = await fetch(url);
     if (!resp.ok) {
       log.debug('Scores', `Failed to fetch scores for ${sport}: ${resp.status}`);
+      // NEGATIVE CACHE. A failure used to return without touching scoresCache, so the next call
+      // re-fetched immediately (see the golf_matchups note above). A 404 means the sport key does
+      // not exist on TOA and will not exist 30s later: remember it for SCORES_NEG_404_MS. Any other
+      // failure is remembered for the ordinary TTL so a retry costs at most one request per 30s.
+      const extra = resp.status === 404 ? SCORES_NEG_404_MS : 0;
+      scoresCache[sport] = { fetchedAt: Date.now() + extra, games: cached?.games || [] };
       return cached?.games || [];
     }
 
@@ -10015,6 +10133,7 @@ async function fetchScores(sport) {
     return games;
   } catch (err) {
     log.error('Scores', `Error fetching scores for ${sport}: ${err.message}`);
+    scoresCache[sport] = { fetchedAt: Date.now(), games: cached?.games || [] };   // negative cache, one TTL
     return cached?.games || [];
   }
 }
@@ -11396,6 +11515,7 @@ function getPropRowsCacheStatus() {
 }
 
 module.exports = {
+  toaShape, toaRecord, toaAttrSnapshot, toaAttrReset,
   fetchOddsForSport,
   refreshAllSports,
   getToaFreqState,
