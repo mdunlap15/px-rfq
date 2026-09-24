@@ -4516,7 +4516,14 @@ function startStatusServer() {
     try {
       const status = String(req.query.status || '').replace(/[^a-z_]/gi, '');
       const limit = Math.min(parseInt(req.query.limit, 10) || 250, 1000);
-      const q = `/partner/mm/get_wager_histories?limit=${limit}${status ? `&status=${status}` : ''}`;
+      // Forward `page`. PX caps a response at 1000 rows and sorts it created_at DESC,
+      // so without paging a caller can only ever see the newest 1000 wagers of a
+      // status — for the portfolio-tracker's OPEN pull that window slid to ~12 hours
+      // and silently dropped every older open position (2026-09-24: a $1,000 golf
+      // matchup placed the previous night vanished from the dashboard). PX honours
+      // `page` and reports has_next/total_page; only this passthrough dropped it.
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const q = `/partner/mm/get_wager_histories?limit=${limit}${status ? `&status=${status}` : ''}${page > 1 ? `&page=${page}` : ''}`;
       res.json(await px.pxFetch(q));
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
