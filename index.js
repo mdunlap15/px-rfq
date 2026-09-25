@@ -4401,8 +4401,26 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // FULL-HISTORY /orders CACHE (2026-09-25). With no ?settled cap this endpoint
+  // serializes the whole in-memory order book (~12K rows, ~60MB, measured 12.7s)
+  // and the dashboard re-requests it every poll (~10s) for every open Analytics
+  // tab, so requests overlapped. Only the uncapped call is cached; the live
+  // poll (?settled=400) is never cached, so open-position live state stays fresh.
+  // ORDERS_FULL_CACHE_MS (default 60000; 0 disables). This endpoint reads the
+  // in-memory order book, not Supabase.
+  const _ordersFullCache = { at: 0, key: null, body: null };
+  const _ordersFullCacheMs = (() => {
+    const v = parseInt(process.env.ORDERS_FULL_CACHE_MS, 10);
+    return Number.isFinite(v) && v >= 0 ? v : 60000;
+  })();
   app.get('/orders', (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
+    const _cacheable = req.query.settled == null && _ordersFullCacheMs > 0;
+    if (_cacheable && _ordersFullCache.body && _ordersFullCache.key === limit
+        && Date.now() - _ordersFullCache.at < _ordersFullCacheMs) {
+      res.set('X-Orders-Cache', 'hit');
+      return res.type('application/json').send(_ordersFullCache.body);
+    }
     // Stamp each order with isStalePhantom computed server-side so the
     // client has a single truth-flag for "is this a real open position?"
     // Previously the client only checked meta.phantom, which misses
@@ -4441,7 +4459,7 @@ function startStatusServer() {
       }
       return out;
     };
-    res.json({
+    const _payload = {
       stats: orderTracker.getStats(),
       pnlBySport: orderTracker.getPnLBySport(),
       // ?settled=N caps settled rows on the wire (open orders never capped).
@@ -4451,7 +4469,14 @@ function startStatusServer() {
       recentOrders: orderTracker.getRecentOrders(limit, {
         settledLimit: req.query.settled != null ? parseInt(req.query.settled, 10) : null,
       }).map(stamp),
-    });
+    };
+    if (_cacheable) {
+      const body = JSON.stringify(_payload);
+      _ordersFullCache.at = Date.now(); _ordersFullCache.key = limit; _ordersFullCache.body = body;
+      res.set('X-Orders-Cache', 'miss');
+      return res.type('application/json').send(body);
+    }
+    res.json(_payload);
   });
 
   // --- Straight (single-leg) wager passthroughs (READ-ONLY) ----------------
