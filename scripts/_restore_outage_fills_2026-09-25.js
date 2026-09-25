@@ -51,7 +51,10 @@ const { createClient } = require('@supabase/supabase-js');
       offered_odds: -Number(o.confirmed_odds),
       confirmed_at: new Date(o.updated_at * 1000).toISOString(),
       legs,
-      meta: { reconstructed: true, restoredFrom: 'px-outage-2026-09-25', creatorId: o.creator_id, legs },
+      quoted_at: new Date(o.updated_at * 1000).toISOString(),
+      // pxBackfill, NOT reconstructed: these are fills we quoted. 'reconstructed'
+      // without quotedAt is hidden by the dashboard and skipped by the settled loader.
+      meta: { pxBackfill: true, restoredFrom: 'px-outage-2026-09-25', creatorId: o.creator_id, legs },
     });
   }
   console.log(`missing ${missing.length} | restorable ${rows.length} | risk $${rows.reduce((a, r) => a + r.confirmed_stake, 0).toFixed(0)}`);
