@@ -7341,7 +7341,15 @@ function startStatusServer() {
           offeredOdds: tracked?.offeredOdds ?? null,
           fairParlayProb: tracked?.fairParlayProb ?? null,
           maxRisk: tracked?.maxRisk ?? null,
-          confirmedAt: tracked?.confirmedAt || po.created_at || po.updated_at || null,
+          // PX timestamps are epoch SECONDS; the dashboard parses ms, so a raw
+          // value rendered as 1/21/1970 (2026-09-25). Normalize to ISO.
+          confirmedAt: tracked?.confirmedAt || (() => {
+            const t = po.created_at ?? po.updated_at;
+            if (t == null) return null;
+            const n = Number(t);
+            if (!Number.isFinite(n)) return t;
+            return new Date(n < 1e12 ? n * 1000 : n).toISOString();
+          })(),
           quotedAt: tracked?.quotedAt || null,
           legs: tracked?.legs || tracked?.meta?.legs || [],
           meta: tracked?.meta || {},
