@@ -4671,6 +4671,24 @@ function shouldDecline(legs, parlayId) {
         const desc = ls.map(li => `${li.teamName || li.playerName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}`).join(' + ');
         if (fbEnabled) {
           const calibrated = _footballSideTotalPair(ls);
+          // CFB EXTREME-SPREAD SGP CAP (2026-09-25). The measured CFB table's top
+          // bucket (14.5+ -> 1.17) is an AVERAGE; a 42.5-point spread got the same
+          // 1.17 as a 15-point one. Rutgers -42.5 + O56.5 quoted +233 vs FanDuel's
+          // actual SGP +151. Until finer high-spread buckets are measured, refuse
+          // CFB spread+total SGPs at or above FOOTBALL_SGP_MAX_SPREAD_NCAAF
+          // (default 28; 0 disables).
+          if (calibrated && calibrated.combo === 'spread_total'
+              && String(calibrated.basis || '').startsWith('ncaaf.')) {
+            const cap = Number(config.pricing.footballSgpMaxSpreadNcaaf);
+            const mag = Math.abs(Number(calibrated.spreadLine));
+            if (cap > 0 && Number.isFinite(mag) && mag >= cap) {
+              return {
+                declined: true,
+                reason: 'football_sgp_spread_too_large',
+                detail: `CFB spread+total SGP on event ${eid} (${desc}) — spread ${mag} >= ${cap}: correlation above the measured 14.5+ bucket is not calibrated`,
+              };
+            }
+          }
           if (calibrated) continue;   // measured combo — let it through to pricing
           return {
             declined: true,

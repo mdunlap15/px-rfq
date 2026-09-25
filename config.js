@@ -953,6 +953,12 @@ const config = {
     // so it can never quote below fair * (1 + floor). meta.mlTrimArm attributes
     // control vs trim; the confirm reprice keys on fairParlayProb (untouched)
     // so a trimmed quote confirms in the same arm.
+    // CFB spread+total SGPs at |spread| >= this decline (football_sgp_spread_too_large).
+    // 0 disables. Interim guard until the 14.5+ bucket is re-measured finer.
+    footballSgpMaxSpreadNcaaf: (() => {
+      const v = parseFloat(process.env.FOOTBALL_SGP_MAX_SPREAD_NCAAF);
+      return Number.isFinite(v) && v >= 0 ? v : 28;
+    })(),
     mlPairTrimPercent: (() => {
       const v = parseInt(process.env.ML_PAIR_TRIM_PERCENT);
       if (!Number.isFinite(v) || v < 0) return 0;

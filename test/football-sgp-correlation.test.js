@@ -47,20 +47,32 @@ test('NFL side+total is measured INDEPENDENT at every spread', () => {
   assert.strictEqual(F({ sport: NFL, combo: 'ml_total' }).factor, 1);
 });
 
-test('CFB spread+total is 1.00 below 14.5 and 1.17 at or above it', () => {
-  for (const spread of [-1.5, -3, -7, -10, -14, 13.5]) {
-    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: spread }).factor, 1,
-      `CFB spread ${spread} is in a bucket whose CI contains 1.000`);
-  }
-  for (const spread of [-14.5, -17, -21, -35, 24.5]) {
-    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: spread }).factor, 1.17,
-      `CFB spread ${spread} is the measured 1.169 blowout bucket`);
+test('CFB spread+total follows the re-measured spread buckets (2026-09-25)', () => {
+  // 9,465 games; the coupling rises with the spread. 0-7.5 CIs contain 1 (or
+  // are negative and clamp), 7.5+ is measured positive and climbs to ~1.25.
+  const want = [
+    [-1.5, 1], [-3, 1], [-7, 1], [7, 1],
+    [-7.5, 1.05], [-10, 1.05], [-14, 1.05],
+    [-14.5, 1.11], [-17, 1.11], [20.5, 1.11],
+    [-21, 1.17], [-24.5, 1.17],
+    [-28, 1.24], [-31.5, 1.24],
+    [-35, 1.25], [-42.5, 1.25], [-50, 1.25],
+  ];
+  for (const [spread, f] of want) {
+    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: spread }).factor, f, `CFB spread ${spread}`);
   }
 });
 
-test('the bucket boundary is inclusive at 14.5', () => {
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14 }).factor, 1);
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14.5 }).factor, 1.17);
+test('bucket boundaries are inclusive', () => {
+  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14 }).factor, 1.05);
+  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14.5 }).factor, 1.11);
+  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -27.5 }).factor, 1.17);
+  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -28 }).factor, 1.24);
+  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -35 }).factor, 1.25);
+});
+
+test('the extreme tail is no longer charged the 14.5+ average (Rutgers -42.5)', () => {
+  assert.ok(F({ sport: CFB, combo: 'spread_total', spreadLine: -42.5 }).factor > 1.17);
 });
 
 test('CFB ml_total carries only the small measured uplift', () => {
@@ -72,8 +84,8 @@ test('CFB ml_total carries only the small measured uplift', () => {
 test('an unreadable spread falls back to the WIDEST bucket, not the narrowest', () => {
   // Failing toward 1.00 would underprice exactly the bucket that matters.
   for (const bad of [undefined, null, NaN, 0, 'x']) {
-    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: bad }).factor, 1.17,
-      `spread ${String(bad)} must fail toward the expensive side`);
+    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: bad }).factor, 1.25,
+      `spread ${String(bad)} must fail toward the expensive side (widest bucket)`);
   }
 });
 

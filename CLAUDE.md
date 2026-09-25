@@ -88,6 +88,7 @@ client/
 | `BTTS_FETCH_SPACING_MS` | No | Default: 250. Gap between per-event BTTS calls. Guards the TOA request-frequency limit — an unpaced burst 429s, and a 429 masquerades as "no BTTS for this game". |
 | `SGP_ALLOWED_COMBOS` | No | Comma-separated same-game combo keys that may quote. **Unset → legacy default `spread_total`. Explicitly empty (`""`) → ALL SGP combos blocked** — that distinction is load-bearing: setting `SGP_ALLOWED_COMBOS=""` on Railway must mean "block every SGP", not "fall back to spread_total", so the code distinguishes `undefined` from `''`. Keys: `spread_total` (moderate correlation), `ml_total` (strong, −37% ROI historically), `ml_spread` (blocked by correlation rules regardless). K-prop carve-outs (`kprop_ml`, `kprop_kprop`) are auto-included downstream regardless. Experimental classes (e.g. `prop_nested`) ALSO need an entry here to quote at all — experimental membership only adds tighter caps. ⚠ Adding a key here is what makes the MoV same-fight block's independence matter: `mov_sgp_blocked` is an unconditional pre-pass precisely so it survives any combo added here. |
 | `FOOTBALL_SGP_ENABLED` | No | Default: false (must be the literal `'true'`). Releases football same-game parlays — but **ONLY the one measured shape**: exactly 2 full-game legs on the event, one side (spread or moneyline) + one game total, on NFL or NCAAF. Everything else same-game football stays blocked with the flag ON — **player props above all** (game-script coupling is an order of magnitude larger and is NOT calibrated), plus 3+ leg stacks, team totals, side+side, alt-total pairs, and CFL (never measured). A leg carrying a `playerName` is refused whatever its `marketType` claims, because PX types markets misleadingly (BTTS arrives as `moneyline`). Enabling it can NEVER re-open period-vs-game combos — that guard is separate. |
+| `FOOTBALL_SGP_MAX_SPREAD_NCAAF` | No | Default: 28. CFB spread+total same-game parlays with |spread| at or above this DECLINE (`football_sgp_spread_too_large`). 0 disables. Added 2026-09-25 after Rutgers −42.5 + O56.5 quoted +233 vs FanDuel's SGP +151; the table has since been re-measured to 1.24 (28–35) / 1.25 (35+), so this is a safety cap, not a calibration gap. `test/cfb-sgp-spread-cap.test.js`. |
 | `FOOTBALL_SGP_CORRELATION` | No | JSON override of the measured football side+total correlation table (`services/football-sgp-correlation.js`). **The defaults ARE the measurement** — an override is a deliberate departure from it, not tuning. Shape: `{"ncaaf":{"ml_total":1.02,"spreadBuckets":[{"minSpread":14.5,"factor":1.17},{"minSpread":0,"factor":1.0}]}}`. Factors are clamped at **≥ 1.00** — the negative directions are real (CFB fav+under measured 0.934) but honouring them would make our quote *cheaper* than independent, so they floor at 1.00. Malformed JSON logs a warning and falls back to the measurement. |
 | `TELEGRAM_ALERTS_ENABLED` | No | Master kill-switch for ALL Telegram alerts. **Default: OFF** (operator directive 2026-08-28). Must be the literal string `'true'` to re-enable. Gated inside `telegram.sendMessage` — the single function every alert funnels through — so no call site can bypass it, and read from `process.env` per call so flipping it back on needs no restart. Note the pre-existing no-op only covered MISSING `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`; this suppresses sends even when both are configured. |
 | `LOG_LEVEL` | No | Default: `info` |
@@ -575,6 +576,17 @@ independent pricing is already correct. 95% CIs bootstrapped, pushes excluded.
   repeated "favourite covers ⇒ over hits 52.5%" **does not replicate** on
   closing lines — measured P(over | fav covered) = **49.7%**. Applying a
   correlation discount to NFL side+total would be inventing one.
+- ⚠ **RE-MEASURED 2026-09-25 — finer tail buckets.** The single 14.5+ → 1.17
+  bucket was an average: Rutgers −42.5 + O56.5 quoted **+233** while FanDuel's real
+  SGP was **+151**. On 9,465 games (`scripts/_cfb_sgp_bucket_measure.py`, reproduces
+  the old 14.5+ aggregate at 1.167): 7.5–14.5 **1.05**, 14.5–21 **1.11**, 21–28
+  **1.17**, 28–35 **1.24**, 35+ **1.25** (40+ 1.265). The coupling climbs with the
+  spread. Interim guard: CFB spread+total SGPs with |spread| ≥
+  `FOOTBALL_SGP_MAX_SPREAD_NCAAF` (default 28, 0 disables) DECLINE as
+  `football_sgp_spread_too_large` (`test/cfb-sgp-spread-cap.test.js`).
+  ⚠ The dashboard's FanDuel/DK/Pinnacle **parlay** columns multiply each book's
+  legs INDEPENDENTLY — on an SGP they are NOT the book's SGP price (+252 shown vs
+  FD's actual +151). Never read them as "the book pays X" for same-game parlays.
 - **CFB aggregate 1.067 is an ARTEFACT of aggregation — do not use it.**
   Split by spread: 0-3.5 → 1.006, 3.5-7.5 → 1.030, 7.5-14.5 → 1.004 (all three
   CIs contain 1.000), **14.5+ → 1.169 [1.131, 1.209]**. Below two touchdowns

@@ -48,10 +48,22 @@
  * !! THE HEADLINE CFB NUMBER IS AN ARTEFACT OF AGGREGATION. Split by spread:
  *
  * CFB spread+total, by spread size          M       95% CI
+ *   (ORIGINAL 7,676-game measurement; superseded 2026-09-25, see spreadBuckets)
  *    0   - 3.5                            1.006   [0.952, 1.058]
  *    3.5 - 7.5                            1.030   [0.981, 1.083]
  *    7.5 - 14.5                           1.004   [0.955, 1.053]
  *   14.5 +                                1.169   [1.131, 1.209]
+ *
+ * RE-MEASURED 2026-09-25, 9,465 games, finer split of the tail:
+ *    0   - 3.5                            0.942   [0.892, 0.996]  (clamped to 1)
+ *    3.5 - 7.5                            1.021   [0.975, 1.067]
+ *    7.5 - 14.5                           1.050   [1.008, 1.091]
+ *   14.5 - 21                             1.112   [1.061, 1.164]
+ *   21   - 28                             1.165   [1.104, 1.229]
+ *   28   - 35                             1.239   [1.156, 1.329]
+ *   35 +                                  1.251   [1.171, 1.338]
+ * The coupling rises steadily with the spread; one 14.5+ number over-charged
+ * 14.5-21 and under-charged 28+ by ~7%.
  *
  * Below two touchdowns there is NO correlation. Above it the joint probability
  * runs ~17% above the independent product — blowout game script (garbage-time
@@ -100,9 +112,17 @@ const DEFAULTS = {
   ncaaf: {
     spread_total: 1.00,   // used only if the bucket lookup somehow misses
     ml_total: 1.02,       // measured 1.015 CI [1.002, 1.028], rounded up
+    // RE-MEASURED 2026-09-25 on 9,465 games (cfbfastR multi-book median closing
+    // lines joined to final scores; reproduces the old 14.5+ aggregate: 1.167 vs
+    // 1.169). The old single 14.5+ bucket (1.17) was an AVERAGE that under-charged
+    // the tail: Rutgers -42.5 + O56.5 quoted +233 vs FanDuel's real SGP +151.
     spreadBuckets: [
-      { minSpread: 14.5, factor: 1.17 },  // measured 1.169 CI [1.131, 1.209]
-      { minSpread: 0, factor: 1.00 },     // 0-14.5: three buckets, all CIs contain 1
+      { minSpread: 35, factor: 1.25 },    // 1.251 [1.171, 1.338] n=501 (40+: 1.265 [1.152, 1.391])
+      { minSpread: 28, factor: 1.24 },    // 1.239 [1.156, 1.329] n=574
+      { minSpread: 21, factor: 1.17 },    // 1.165 [1.104, 1.229] n=946
+      { minSpread: 14.5, factor: 1.11 },  // 1.112 [1.061, 1.164] n=1432
+      { minSpread: 7.5, factor: 1.05 },   // 1.050 [1.008, 1.091] n=2362 (was 1.004, CI contained 1)
+      { minSpread: 0, factor: 1.00 },     // 0-3.5 0.942 (clamped), 3.5-7.5 1.021 [0.975, 1.067]
     ],
   },
 };
