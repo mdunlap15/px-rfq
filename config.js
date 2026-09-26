@@ -1312,7 +1312,9 @@ const config = {
     // map is UNCAPPED on this dimension (its other caps still apply), so add
     // a league here when you open props for it.
     propNetExposureBySport: (() => {
-      const DEFAULT = { 'americanfootball_ncaaf': 500, 'americanfootball_nfl': 1500 };
+      // Operator 2026-09-26: no league-wide limit by sport. Empty = uncapped;
+      // per-player, per-game and per-ticket caps still apply.
+      const DEFAULT = {};
       if (!process.env.PROP_NET_EXPOSURE_BY_SPORT) return DEFAULT;
       try {
         const parsed = JSON.parse(process.env.PROP_NET_EXPOSURE_BY_SPORT);

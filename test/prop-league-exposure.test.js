@@ -45,8 +45,7 @@ function withExposure(entries, fn) {
 
 test('the defaults are the operator-specified caps', () => {
   const { config } = require('../config');
-  assert.strictEqual(config.pricing.propNetExposureBySport[CFB], 500);
-  assert.strictEqual(config.pricing.propNetExposureBySport[NFL], 1500);
+  assert.deepStrictEqual(config.pricing.propNetExposureBySport, {}, 'operator 2026-09-26: no league cap by default');
 });
 
 test('an empty book allows a parlay under the cap', () => {
