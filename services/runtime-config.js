@@ -132,7 +132,8 @@ const REGISTRY = [
   { key: 'largeParlayFreezeSize', path: 'largeParlayFreezeSize', type: 'number', min: 0, max: 20, group: 'risk', danger: true, env: 'LARGE_PARLAY_FREEZE_SIZE', label: 'Large-parlay freeze size' },
   { key: 'largeParlayFreezeSeconds', path: 'largeParlayFreezeSeconds', type: 'number', min: 0, max: 86400, group: 'risk', danger: true, env: 'LARGE_PARLAY_FREEZE_SECONDS', label: 'Large-parlay freeze seconds' },
   { key: 'teamCooldownSeconds', path: 'teamCooldownSeconds', type: 'number', min: 0, max: 86400, group: 'risk', env: 'TEAM_COOLDOWN_SECONDS', label: 'Team cooldown seconds' },
-  { key: 'pendingReservationDiscount', path: 'pendingReservationDiscount', type: 'number', min: 0, max: 1, group: 'risk', env: 'PENDING_RESERVATION_DISCOUNT', label: 'Pending reservation discount' },
+  { key: 'pendingReservationDiscount', path: 'pendingReservationDiscount', type: 'number', min: 0, max: 1, group: 'risk', env: 'PENDING_RESERVATION_DISCOUNT', label: 'Pending reservation discount (INERT)',
+    help: 'INERT since 2026-09-26: team/game caps read confirmed + in-flight confirms only, and confirms are charged at 100%. Changing this does nothing.' },
 
   // ---------------- GATING ----------------
   { key: 'sgpAllowedCombos', path: 'sgpAllowedCombos', type: 'strList', group: 'gating', danger: true, env: 'SGP_ALLOWED_COMBOS',
@@ -155,6 +156,8 @@ const REGISTRY = [
   // Stale price minutes (10), i.e. LOOSER. Always send the full map.
   { key: 'stalePriceMinutesBySport', path: 'stalePriceMinutesBySport', type: 'numMap', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES_BY_SPORT',
     label: 'Stale price minutes by sport', help: 'Per-sport stale threshold (minutes). Edit the FULL map — a sport you drop falls back to Stale price minutes (looser).' },
+  { key: 'dedupMaxRequotes', path: 'dedupMaxRequotes', type: 'number', min: 0, max: 10, group: 'gating', env: 'DEDUP_MAX_REQUOTES',
+    label: 'Dedup max re-quotes', help: 'Identical re-sends re-priced per leg-set inside the 5s window (preview then place). 0 = decline every repeat (pre-2026-09-26 behaviour).' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
 
   // Registered 2026-09-26 (same reason as the stale map). {} = no league cap.

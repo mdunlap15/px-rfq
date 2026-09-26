@@ -865,12 +865,51 @@ function getRampDecision(legs, opts = {}) {
  *
  * Returns { block: bool, reason: string|null, sinceMs: number|null }.
  */
+// IN-FLIGHT CONFIRM LANE (2026-09-26). The cooldown below reads
+// confirmations[], which recordConfirmation only writes after the confirm's
+// reprice + accept round-trip. Two confirms of the SAME signature arriving
+// together (both offers live — e.g. a preview and its re-send, now that dedup
+// re-quotes) would both pass. handleConfirm reserves the signature here
+// synchronously right after the cooldown passes and releases it on exit.
+const CONFIRMING_SIG_TTL_MS = 120 * 1000;
+const _confirmingSigs = new Map(); // sig -> [{parlayId, at}]
+function _liveConfirmingSigs(sig, now) {
+  const list = (_confirmingSigs.get(sig) || []).filter(e => now - e.at < CONFIRMING_SIG_TTL_MS);
+  if (list.length) _confirmingSigs.set(sig, list); else _confirmingSigs.delete(sig);
+  return list;
+}
+function reserveConfirmingSignature(legs, parlayId, nowMs = null) {
+  if (!ENABLED || !parlayId) return;
+  const sig = canonicalSignature(legs);
+  if (!sig) return;
+  const now = nowMs || Date.now();
+  const list = _liveConfirmingSigs(sig, now).filter(e => e.parlayId !== parlayId);
+  list.push({ parlayId, at: now });
+  _confirmingSigs.set(sig, list);
+}
+function releaseConfirmingSignature(parlayId) {
+  if (!parlayId) return;
+  for (const [sig, list] of _confirmingSigs) {
+    const kept = list.filter(e => e.parlayId !== parlayId);
+    if (kept.length) _confirmingSigs.set(sig, kept); else _confirmingSigs.delete(sig);
+  }
+}
+
 function checkConfirmCooldown(legs, parlayId, nowMs = null) {
   if (!ENABLED) return { block: false, reason: null, sinceMs: null };
   const cooldownSec = config.pricing.templateRampCooldownSeconds;
   if (!cooldownSec || cooldownSec <= 0) return { block: false, reason: null, sinceMs: null };
   const sig = canonicalSignature(legs);
   if (!sig) return { block: false, reason: null, sinceMs: null };
+  const inflight = _liveConfirmingSigs(sig, nowMs || Date.now()).filter(e => e.parlayId !== parlayId);
+  if (inflight.length > 0) {
+    _stats.confirmHits.template_cooldown++;
+    return {
+      block: true,
+      reason: `template_inflight_at_confirm: same parlay is already being confirmed (${inflight[0].parlayId.slice(0, 8)})`,
+      sinceMs: 0,
+    };
+  }
   const entry = _exposure[sig];
   if (!entry || !entry.confirmations || entry.confirmations.length === 0) {
     return { block: false, reason: null, sinceMs: null };
@@ -1004,6 +1043,8 @@ module.exports = {
   recordConfirmation,
   reservePending,
   releasePending,
+  reserveConfirmingSignature,
+  releaseConfirmingSignature,
   getExposure,
   getRampDecision,
   checkConfirmCooldown,

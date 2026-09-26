@@ -336,14 +336,25 @@ const playerExposure = {};
 const pendingExposure = {};
 
 // ---------------------------------------------------------------------------
-// RECENT LEG SIGNATURES — dedup identical parlay structures from the same
-// bettor pool within a short window. Bettors can farm a correlated parlay
-// by re-submitting it faster than our exposure state updates; we just say
-// no on the second one.
-// Shape: { [sigKey]: lastSeenMs }
+// RECENT LEG SIGNATURES — identical leg-sets inside a short window.
+//
+// 2026-09-26 rework. The window used to DECLINE every identical re-send, on
+// the theory that bettors farm a parlay by re-submitting faster than our
+// exposure updates. Measured that day, the re-send is the REAL ORDER: bettors
+// preview (RFQ #1) then place (RFQ #2, median ~2.7s later). Over 704 same-leg-set
+// pairs the first RFQ filled 3 times and the second 128 times — the dedup took
+// us out of the placement RFQ, not a farming re-submit. The farming race it
+// guarded is now closed at CONFIRM (exact team/game/line caps with in-flight
+// confirm reservations, plus the template confirm cooldown that rejects a
+// second confirm of the same signature), so a re-send is re-priced instead.
+// The superseded preview quote's quote-time reservations are released so our
+// own preview can't push the real order into the template ramp.
+// Flood guard: at most DEDUP_MAX_REQUOTES re-quotes per signature per window
+// (default 1: preview + place). 0 restores the old decline-every-repeat.
+// Shape: { [sigKey]: { ts, parlayId, creatorId, requotes } }
 // ---------------------------------------------------------------------------
 const recentParlaySignatures = {};
-const DEDUP_WINDOW_MS = 5 * 1000; // 5s: catch rapid re-submits only; pending exposure handles race window
+const DEDUP_WINDOW_MS = 5 * 1000; // 5s: the preview→place gap is ~2.7s median
 
 function parlayLegSignature(legs) {
   if (!legs || legs.length === 0) return null;
@@ -353,24 +364,48 @@ function parlayLegSignature(legs) {
   return ids.join('|');
 }
 
+// Pure read. Returns null when this leg-set was not quoted inside the window,
+// else { ageMs, priorParlayId, requotes } where requotes = re-quotes already
+// made for it inside the window (0 after the first quote).
 function checkRecentDuplicate(legs) {
   const sig = parlayLegSignature(legs);
   if (!sig) return null;
   const now = Date.now();
   // Opportunistic cleanup
-  for (const [k, ts] of Object.entries(recentParlaySignatures)) {
-    if (now - ts > DEDUP_WINDOW_MS) delete recentParlaySignatures[k];
+  for (const [k, v] of Object.entries(recentParlaySignatures)) {
+    if (now - v.ts > DEDUP_WINDOW_MS) delete recentParlaySignatures[k];
   }
   const last = recentParlaySignatures[sig];
-  if (last && now - last < DEDUP_WINDOW_MS) {
-    return { ageMs: now - last };
+  if (last && now - last.ts < DEDUP_WINDOW_MS) {
+    return { ageMs: now - last.ts, priorParlayId: last.parlayId || null, priorCreatorId: last.creatorId || null, requotes: last.requotes || 0 };
   }
   return null;
 }
 
-function recordParlaySignature(legs) {
+function recordParlaySignature(legs, parlayId = null, creatorId = null) {
   const sig = parlayLegSignature(legs);
-  if (sig) recentParlaySignatures[sig] = Date.now();
+  if (!sig) return;
+  const now = Date.now();
+  const prev = recentParlaySignatures[sig];
+  const inWindow = prev && now - prev.ts < DEDUP_WINDOW_MS;
+  recentParlaySignatures[sig] = {
+    ts: now,
+    parlayId: parlayId || null,
+    creatorId: creatorId || null,
+    requotes: inWindow ? (prev.requotes || 0) + 1 : 0,
+  };
+}
+
+// Release a quote's quote-time reservations (exposure pending + template ramp
+// slot). Used when its RFQ is superseded by an identical re-send, and when
+// another SP fills it — in both cases the offer can no longer turn into OUR
+// fill through this RFQ, so holding its slots only throttles live quotes. If
+// it somehow still confirms, the confirm path's exact caps and the template
+// confirm cooldown are the guard (neither reads these reservations).
+function releaseQuoteReservations(parlayId) {
+  if (!parlayId) return;
+  try { releasePending(parlayId); } catch (_) { /* best-effort */ }
+  try { templateExposure.releasePending(parlayId); } catch (_) { /* best-effort */ }
 }
 
 // Running stats
@@ -659,21 +694,17 @@ function _pruneDeclineSnapshots(now) {
   while (declineSnapshots.length > DECLINE_SNAPSHOT_LIMIT) declineSnapshots.shift();
 }
 
-function _captureGameDeclineSnapshot(gameKey, gameName, currentNet, pendingNetRaw, newRiskRaw, maxPerGame) {
+function _captureGameDeclineSnapshot(gameKey, gameName, currentNet, confirmingRisk, newRiskRaw, maxPerGame, mode = 'quote', excludeParlayId = null) {
   const now = Date.now();
-  const captured = [];
-  for (const [parlayId, res] of Object.entries(pendingExposure)) {
-    if (!res || !res.expiresAt || res.expiresAt < now) continue;
-    for (const gk of res.gameKeys || []) {
-      if (gk.key !== gameKey) continue;
-      captured.push({
-        parlayId,
-        weightedRiskRaw: gk.risk,
-        expiresAtAtCapture: res.expiresAt,
-      });
-    }
-  }
+  // Since 2026-09-26 the game cap reads confirmed + in-flight CONFIRMS, not
+  // quote reservations — so the contributors worth showing are the confirms.
+  const captured = _liveConfirming(confirmingGameRisk, gameKey)
+    .filter(e => !excludeParlayId || e.parlayId !== excludeParlayId)
+    .filter(e => !_confirmingLanded(e.parlayId))
+    .map(e => ({ parlayId: e.parlayId, weightedRiskRaw: e.weighted, reservedAt: e.at }));
+  const pendingNetRaw = confirmingRisk; // legacy field name kept for the /debug endpoint
   declineSnapshots.push({
+    mode,
     declinedAt: now,
     gameKey,
     gameName,
@@ -1264,6 +1295,12 @@ function importPxBookedOrder(parlayId, orderUuid, confirmedStake, confirmedOdds)
 
   // Release any pending reservation left over from when we'd quoted it.
   try { releasePending(parlayId); } catch (_) { /* best-effort */ }
+  // ...and the in-flight CONFIRM reservations an acceptUnknown hold kept: the
+  // risk lands in exposure/gameExposure/the open-leg map just below, so keeping
+  // them would count this ticket twice until the 120s TTL (review 2026-09-26).
+  try { releaseConfirmingExposure(parlayId); } catch (_) { /* best-effort */ }
+  try { releaseConfirmingLegRisk(parlayId); } catch (_) { /* best-effort */ }
+  try { templateExposure.releaseConfirmingSignature(parlayId); } catch (_) { /* best-effort */ }
 
   // Team/game exposure. Wrap in try so a single bad order doesn't
   // break the repair loop — we'd rather have the status flipped and
@@ -1862,6 +1899,10 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
       outcome = 'other_sp';
       marketStats.otherSpMatched = (marketStats.otherSpMatched || 0) + 1;
       if (ourQuote.status === 'quoted') {
+        // Another SP filled this RFQ, so our offer on it is dead — free its
+        // quote-time reservations instead of letting them throttle live
+        // quotes until the 60s/5min expiry (2026-09-26).
+        releaseQuoteReservations(parlayId);
         ourQuote.meta = ourQuote.meta || {};
         ourQuote.meta.matchedByOtherSp = {
           observedAt: new Date().toISOString(),
@@ -1953,7 +1994,7 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
           }
           // Team cap
           if (!exposureOverride) {
-            const teamCheck = checkExposureLimits(legsForCheck, spRisk, cfg.pricing.maxExposurePerTeam);
+            const teamCheck = checkExposureLimits(legsForCheck, spRisk, cfg.pricing.maxExposurePerTeam, { mode: 'confirm', excludeParlayId: parlayId });
             if (!teamCheck.allowed) {
               exposureOverride = { reason: teamCheck.reason || 'team exposure limit', detail: teamCheck.reason, violations: teamCheck.violations || [] };
             }
@@ -2041,7 +2082,11 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
         };
       }
 
-      if (exposureOverride) {
+      if (exposureOverride && !hasCanonicalWin) {
+        // Tie at our price: most likely ANOTHER SP's fill, and the check now
+        // runs exact (confirm mode) on its stake — alerting would be false.
+        log.info('Orders', `order.matched tie for ${parlayId} would exceed a cap if it were ours (${exposureOverride.reason}) — no override flagged; handleConfirm enforces it if it is.`);
+      } else if (exposureOverride) {
         ourQuote.meta = ourQuote.meta || {};
         ourQuote.meta.exposureOverrideOnMatch = {
           reason: exposureOverride.reason,
@@ -4729,66 +4774,174 @@ function checkSeriesExposure(legs, additionalRisk, maxPerSeries) {
 /**
  * Check if adding a new parlay would exceed per-game NET exposure limits.
  */
-function checkGameExposure(legs, estPayout, maxPerGame) {
+function checkGameExposure(legs, estPayout, maxPerGame, opts = {}) {
   if (!maxPerGame || maxPerGame <= 0) return { allowed: true };
-  // Same fill-fraction discount as checkExposureLimits — scales quote-time
-  // projections only. Real confirmed exposure stays raw.
-  let discount = 1.0;
-  try {
-    const { config } = require('../config');
-    const d = config?.pricing?.pendingReservationDiscount;
-    if (Number.isFinite(d) && d > 0 && d <= 1) discount = d;
-  } catch { /* ignore */ }
+  // Two modes, same semantics as checkLegExposure (2026-09-26):
+  //  - QUOTE (default): confirmed + in-flight CONFIRMS at their actual stakes,
+  //    no increment — a full game stops quoting (>=). Quote-time reservations
+  //    are NOT counted: each one carried the generic max-risk estimate, and at
+  //    the 0.1 discount ~10 open quotes darked a game with ~$0 real exposure.
+  //    Ticket size is bounded instead by the headroom-capped max_risk we offer
+  //    (getExposureHeadroom, applied in priceParlay).
+  //  - CONFIRM (opts.mode='confirm'): exact — confirmed + other in-flight
+  //    confirms + this ticket's actual weighted risk, no discount (>).
+  const mode = opts.mode === 'confirm' ? 'confirm' : 'quote';
+  const excludeParlayId = opts.excludeParlayId || null;
+  const charges = _gameCharges(legs, mode === 'confirm' ? (Number(estPayout) || 0) : 0);
 
-  for (let i = 0; i < legs.length; i++) {
-    const leg = legs[i];
-    const li = leg.lineInfo || leg;
-    const eventId = li.pxEventId || leg.pxEventId;
-    const gameDate = li.startTime ? new Date(li.startTime).toISOString().substring(0, 10) : '';
-    // Build game key matching addExposure logic — include date to separate same eventId across days
-    let gameKey = eventId ? (eventId + '|' + gameDate) : null;
-    if (!gameKey) {
-      const opp = normalizeExposureKey((li.homeTeam || '') + (li.awayTeam || ''));
-      gameKey = 'syn_' + (opp || '') + '|' + (gameDate || 'noevent');
-    }
-
-    let otherProb = 1;
-    for (let j = 0; j < legs.length; j++) {
-      if (j === i) continue;
-      otherProb *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
-    }
-    const newWeightedRiskRaw = estPayout * otherProb;
-    const newWeightedRiskEff = newWeightedRiskRaw * discount;
-
-    // Current net exposure for this game (real confirmations) + pending quotes
+  for (const [gameKey, newWeightedRisk] of charges) {
     const currentNet = gameExposure[gameKey]?.netExposure || 0;
-    const pendingNetRaw = getPendingGameRisk(gameKey);
-    const pendingNetEff = pendingNetRaw * discount;
+    const confirming = _confirmingGameFor(gameKey, excludeParlayId);
+    const wouldBe = currentNet + confirming + newWeightedRisk;
+    const capHit = mode === 'quote' ? wouldBe >= maxPerGame : wouldBe > maxPerGame;
 
-    // Conservative: add full weighted risk (worst case is no offsetting)
-    if (currentNet + pendingNetEff + newWeightedRiskEff > maxPerGame) {
+    if (capHit) {
       const gameName = gameExposure[gameKey]?.name || gameKey;
-      const wouldBe = currentNet + pendingNetEff + newWeightedRiskEff;
-      const discTag = discount < 1 ? ` (discount ${Math.round(discount * 100)}%)` : '';
-      // Snapshot the contributing pending reservations so /debug/pending-game-legs
-      // can surface them up to 30 min after the live ones have expired.
       try {
-        _captureGameDeclineSnapshot(gameKey, gameName, currentNet, pendingNetRaw, newWeightedRiskRaw, maxPerGame);
+        _captureGameDeclineSnapshot(gameKey, gameName, currentNet, confirming, newWeightedRisk, maxPerGame, mode, excludeParlayId);
       } catch (_) { /* never break the decline path on diagnostic capture */ }
       return {
         allowed: false,
-        reason: `Game "${gameName}" net $${Math.round(currentNet)} + pending $${Math.round(pendingNetEff)} + new $${Math.round(newWeightedRiskEff)} > max $${Math.round(maxPerGame)}${discTag}`,
+        reason: `Game "${gameName}" net $${Math.round(currentNet)}${confirming ? ' + confirming $' + Math.round(confirming) : ''}${newWeightedRisk ? ' + new $' + Math.round(newWeightedRisk) : ''} ${mode === 'quote' ? '>=' : '>'} max $${Math.round(maxPerGame)} [${mode}]`,
         wouldBe,
         limit: maxPerGame,
-        pendingRaw: Math.round(pendingNetRaw * 100) / 100,
-        pendingEffective: Math.round(pendingNetEff * 100) / 100,
-        newRiskRaw: Math.round(newWeightedRiskRaw * 100) / 100,
-        newRiskEffective: Math.round(newWeightedRiskEff * 100) / 100,
-        reservationDiscount: discount,
+        confirmingRisk: Math.round(confirming * 100) / 100,
+        newRiskRaw: Math.round(newWeightedRisk * 100) / 100,
+        mode,
       };
     }
   }
   return { allowed: true };
+}
+
+// ---------------------------------------------------------------------------
+// TEAM / GAME exposure keys + in-flight CONFIRM reservations (2026-09-26).
+// Same pattern as confirmingLegRisk below: reserved synchronously when a
+// confirm passes the team/game checks, released on every handler exit (the
+// accept path lands the risk in `exposure`/`gameExposure` via addExposure), with
+// a 120s TTL as backstop. This — not quote-time reservations — is what closes
+// the race where two confirms on one team both read pre-fill exposure.
+// ---------------------------------------------------------------------------
+function _eventSuffixForLeg(leg) {
+  const li = leg.lineInfo || leg;
+  const eventId = li.pxEventId || leg.pxEventId;
+  const gameDate = li.startTime ? new Date(li.startTime).toISOString().substring(0, 10) : '';
+  if (eventId) return { eventId, gameDate, suffix: eventId + '|' + gameDate };
+  const opp = normalizeExposureKey((li.homeTeam || '') + (li.awayTeam || ''));
+  return { eventId: null, gameDate, suffix: (opp || '') + '|' + (gameDate || 'noevent') };
+}
+// Must match addExposure's team key and the one checkExposureLimits has
+// always used (leg.team first, then teamName, then lineInfo.teamName).
+function _teamKeyForLeg(leg) {
+  const name = leg.team || leg.teamName || leg.lineInfo?.teamName || 'unknown';
+  const teamKey = normalizeExposureKey(name);
+  if (!teamKey) return null;
+  return { name, teamKey, key: teamKey + '|' + _eventSuffixForLeg(leg).suffix };
+}
+function _gameKeyForLeg(leg) {
+  const ev = _eventSuffixForLeg(leg);
+  return ev.eventId ? ev.suffix : ('syn_' + ev.suffix);
+}
+
+// This ticket's charge to each game it touches, in the units recalcNetExposure
+// books: per game key, the MAX over (market:selection) buckets of the SUM of
+// risk × P(other legs) for the ticket's legs in that bucket. Two same-game legs
+// on one bucket (two players' hits overs) land as a SUM, so charging the max
+// single leg under-counted them ~2x (review 2026-09-26). risk=1 gives the
+// per-dollar coefficient the headroom divides by.
+function _legBucket(leg) {
+  const li = leg.lineInfo || leg;
+  const market = leg.market || li.market || li.marketType || '';
+  const sel = li.oddsApiSelection != null ? li.oddsApiSelection
+    : (li.selection != null ? li.selection : (leg.selection != null ? leg.selection : ''));
+  return market + ':' + sel;
+}
+function _gameCharges(legs, risk) {
+  const byGame = new Map(); // gk -> Map(bucket -> sum)
+  for (let i = 0; i < legs.length; i++) {
+    let other = 1;
+    for (let j = 0; j < legs.length; j++) {
+      if (j === i) continue;
+      other *= (legs[j].lineInfo?.fairProb || legs[j].fairProb || 0.5);
+    }
+    const gk = _gameKeyForLeg(legs[i]);
+    const b = _legBucket(legs[i]);
+    if (!byGame.has(gk)) byGame.set(gk, new Map());
+    const m = byGame.get(gk);
+    m.set(b, (m.get(b) || 0) + risk * other);
+  }
+  const out = new Map();
+  for (const [gk, m] of byGame) out.set(gk, Math.max(...m.values()));
+  return out;
+}
+
+const CONFIRMING_EXPOSURE_TTL_MS = 120000;
+const confirmingTeamRisk = new Map(); // key -> [{parlayId, raw, weighted, at}]
+const confirmingGameRisk = new Map(); // key -> [{parlayId, weighted, at}]
+function _liveConfirming(map, key) {
+  const now = Date.now();
+  const list = (map.get(key) || []).filter(e => now - e.at < CONFIRMING_EXPOSURE_TTL_MS);
+  if (list.length) map.set(key, list); else map.delete(key);
+  return list;
+}
+// A confirm reservation whose order has LANDED in the exposure accumulator
+// (confirmed + orderUuid — the rule rebuildAllExposure uses) must stop counting,
+// or the ticket is charged twice until the 120s TTL: e.g. an acceptUnknown hold
+// whose order verifyAcceptUnknown later imports (review 2026-09-26).
+function _confirmingLanded(parlayId) {
+  const o = orders[parlayId];
+  return !!(o && o.status === 'confirmed' && o.orderUuid);
+}
+function _confirmingTeamFor(key, excludeParlayId = null) {
+  let raw = 0, weighted = 0;
+  for (const e of _liveConfirming(confirmingTeamRisk, key)) {
+    if (excludeParlayId && e.parlayId === excludeParlayId) continue;
+    if (_confirmingLanded(e.parlayId)) continue;
+    raw += e.raw; weighted += e.weighted;
+  }
+  return { raw, weighted };
+}
+function _confirmingGameFor(key, excludeParlayId = null) {
+  let w = 0;
+  for (const e of _liveConfirming(confirmingGameRisk, key)) {
+    if (excludeParlayId && e.parlayId === excludeParlayId) continue;
+    if (_confirmingLanded(e.parlayId)) continue;
+    w += e.weighted;
+  }
+  return w;
+}
+// Charges exactly what the confirm-mode checks charged this ticket: per team
+// key raw risk + risk × otherProb; per game key _gameCharges (bucket sums).
+function reserveConfirmingExposure(parlayId, legs, risk) {
+  if (!parlayId || !Array.isArray(legs) || !(risk > 0)) return;
+  releaseConfirmingExposure(parlayId); // idempotent re-reserve
+  const now = Date.now();
+  for (let i = 0; i < legs.length; i++) {
+    let otherTeam = 1;
+    for (let j = 0; j < legs.length; j++) {
+      if (j === i) continue;
+      otherTeam *= (legs[j].fairProb || legs[j].lineInfo?.fairProb || 0.5);
+    }
+    const tk = _teamKeyForLeg(legs[i]);
+    if (tk) {
+      const list = confirmingTeamRisk.get(tk.key) || [];
+      list.push({ parlayId, raw: risk, weighted: risk * otherTeam, at: now });
+      confirmingTeamRisk.set(tk.key, list);
+    }
+  }
+  for (const [gk, w] of _gameCharges(legs, risk)) {
+    const list = confirmingGameRisk.get(gk) || [];
+    list.push({ parlayId, weighted: w, at: now });
+    confirmingGameRisk.set(gk, list);
+  }
+}
+function releaseConfirmingExposure(parlayId) {
+  for (const map of [confirmingTeamRisk, confirmingGameRisk]) {
+    for (const [key, list] of map) {
+      const kept = list.filter(e => e.parlayId !== parlayId);
+      if (kept.length) map.set(key, kept); else map.delete(key);
+    }
+  }
 }
 
 /**
@@ -4978,174 +5131,120 @@ function checkLegExposure(legs, estPayout, maxPerLeg, opts = {}) {
  * Lets you tighten exposure on a few specific fighters/teams without
  * lowering the cap for everyone else.
  */
-function checkExposureLimits(legs, payout, maxNetExposure) {
+// Team-cap config shared by checkExposureLimits and getExposureHeadroom.
+function _teamCapConfig() {
+  const out = { useRawTeam: false, rawHardCap: 0, overridesByKey: {}, rawOverridesByKey: {} };
+  try {
+    const { config } = require('../config');
+    if (config?.pricing?.useRawPerTeamExposure === true) out.useRawTeam = true;
+    const rhc = config?.pricing?.maxRawExposurePerTeam;
+    if (Number.isFinite(rhc) && rhc > 0) out.rawHardCap = rhc;
+    // Pre-normalize override keys with the SAME function the exposure map
+    // uses — without this, "Islam Makhachev" in env wouldn't match legs that
+    // arrive with whitespace/case variations.
+    for (const [name, cap] of Object.entries(config?.pricing?.exposureOverridesPerTeam || {})) {
+      const k = normalizeExposureKey(name);
+      if (k && Number.isFinite(cap) && cap > 0) out.overridesByKey[k] = cap;
+    }
+    for (const [name, cap] of Object.entries(config?.pricing?.rawExposureOverridesPerTeam || {})) {
+      const k = normalizeExposureKey(name);
+      if (k && Number.isFinite(cap) && cap > 0) out.rawOverridesByKey[k] = cap;
+    }
+  } catch { /* ignore — caps fall back to the passed global */ }
+  return out;
+}
+
+/**
+ * Per-team caps: the PRIMARY cap (weighted by default, raw when
+ * useRawPerTeamExposure) and the independent RAW HARD CAP.
+ *
+ * Two modes (2026-09-26), mirroring checkLegExposure:
+ *  - QUOTE (default): confirmed + in-flight CONFIRMS (actual stakes), no
+ *    increment, >= — a team that is already full stops quoting. Quote-time
+ *    reservations are NOT counted. Measured 2026-09-26: every open quote
+ *    reserved the full $6,000 max risk at the 0.1 discount, so ~10 open
+ *    quotes in 60s darked a team with ~$0 real exposure — Texas dark
+ *    13:25–16:00Z (202 network parlays, $38.1K) at <= $240 confirmed. The
+ *    ticket's SIZE is bounded instead by the headroom-capped max_risk we
+ *    offer (getExposureHeadroom → priceParlay).
+ *  - CONFIRM (opts.mode='confirm'): exact — confirmed + other in-flight
+ *    confirms + this ticket's actual risk, no discount, >. The old path
+ *    discounted the confirming ticket ×0.1 too, so the "hard" cap was soft:
+ *    23 team-event keys ended above $6K confirmed raw in the 45 days to 9/26.
+ */
+function checkExposureLimits(legs, payout, maxNetExposure, opts = {}) {
   if (!maxNetExposure || maxNetExposure <= 0) {
     return { allowed: true, reason: null, violations: [] };
   }
-  // Lazy-require config so this module stays decoupled from circular import
-  // risk during bootstrap. Default to 1.0 (no discount) if config is missing.
-  let discount = 1.0;
-  let overridesByKey = {};
-  // Raw-vs-weighted measurement toggle (default FALSE = weighted, 2026-05-14).
-  // True: each parlay's contribution to the per-team bucket is its FULL
-  //       payout, compared against exposure[key].rawRisk + pending raw.
-  // False (default): legacy weighted path (payout × otherProb vs netExposure).
-  let useRawTeam = false;
-  // Independent raw HARD-CAP — applied IN ADDITION to the primary check.
-  // 0 disables. When set, the parlay must also pass:
-  //   confirmed raw + pending raw × discount + new payout × discount ≤ cap
-  let rawHardCap = 0;
-  let rawOverridesByKey = {};
-  try {
-    const { config } = require('../config');
-    const d = config?.pricing?.pendingReservationDiscount;
-    if (Number.isFinite(d) && d > 0 && d <= 1) discount = d;
-    if (config?.pricing?.useRawPerTeamExposure === true) useRawTeam = true;
-    const rhc = config?.pricing?.maxRawExposurePerTeam;
-    if (Number.isFinite(rhc) && rhc > 0) rawHardCap = rhc;
-    // Pre-normalize override keys with the SAME function the exposure
-    // map uses — without this, "Islam Makhachev" in env wouldn't match
-    // legs that arrive with whitespace/case variations.
-    const ovs = config?.pricing?.exposureOverridesPerTeam || {};
-    for (const [name, cap] of Object.entries(ovs)) {
-      const k = normalizeExposureKey(name);
-      if (k && Number.isFinite(cap) && cap > 0) overridesByKey[k] = cap;
-    }
-    const rOvs = config?.pricing?.rawExposureOverridesPerTeam || {};
-    for (const [name, cap] of Object.entries(rOvs)) {
-      const k = normalizeExposureKey(name);
-      if (k && Number.isFinite(cap) && cap > 0) rawOverridesByKey[k] = cap;
-    }
-  } catch { /* ignore */ }
+  const mode = opts.mode === 'confirm' ? 'confirm' : 'quote';
+  const excludeParlayId = opts.excludeParlayId || null;
+  const { useRawTeam, rawHardCap, overridesByKey, rawOverridesByKey } = _teamCapConfig();
+  const over = (v, lim) => (mode === 'quote' ? v >= lim : v > lim);
 
   const violations = [];
   for (let i = 0; i < legs.length; i++) {
-    const leg = legs[i];
-    const name = leg.team || leg.teamName || leg.lineInfo?.teamName || 'unknown';
-    const teamKey = normalizeExposureKey(name);
-    if (!teamKey) continue;
-    const eventId = leg.lineInfo?.pxEventId || leg.pxEventId;
-    const li = leg.lineInfo || leg;
-    const gameDate = li.startTime ? new Date(li.startTime).toISOString().substring(0, 10) : '';
-    // Must match the key logic in addExposure
-    let eventSuffix = eventId ? (eventId + '|' + gameDate) : null;
-    if (!eventSuffix) {
-      const opp = normalizeExposureKey((li.homeTeam || '') + (li.awayTeam || ''));
-      eventSuffix = (opp || '') + '|' + (gameDate || 'noevent');
-    }
-    const key = teamKey + '|' + eventSuffix;
+    const tk = _teamKeyForLeg(legs[i]);
+    if (!tk) continue;
+    const { name, teamKey, key } = tk;
 
     let otherProb = 1;
     for (let j = 0; j < legs.length; j++) {
       if (j === i) continue;
       otherProb *= (legs[j].fairProb || legs[j].lineInfo?.fairProb || 0.5);
     }
+    const confirming = _confirmingTeamFor(key, excludeParlayId);
 
-    // Resolve effective cap: per-team override wins over global default.
-    const effectiveLimit = overridesByKey[teamKey] != null
-      ? overridesByKey[teamKey]
-      : maxNetExposure;
+    // PRIMARY cap — per-team override wins over the global default.
+    const effectiveLimit = overridesByKey[teamKey] != null ? overridesByKey[teamKey] : maxNetExposure;
     const overrideApplied = overridesByKey[teamKey] != null;
-
-    // PRIMARY cap (weighted by default, raw if useRawTeam=true).
-    // RAW path (useRawTeam=true): newRiskRaw = full payout; compare to
-    //   exposure[key].rawRisk + pending raw. Caps act as "max parlays × payout"
-    //   per team.
-    // WEIGHTED path (default): newRiskRaw = payout × otherProb; compare to
-    //   exposure[key].netExposure (which nets opposing stakes). Lets long
-    //   parlays accumulate more raw dollars before the cap binds.
-    const newRiskRaw = useRawTeam ? payout : payout * otherProb;
-    const newRiskEff = newRiskRaw * discount;
-    const currentNet = useRawTeam
-      ? (exposure[key]?.rawRisk || 0)
-      : (exposure[key]?.netExposure || 0);
-    // Pending = in-flight reservations from quotes not yet confirmed.
-    // Closes the race window where N concurrent RFQs all pass because none
-    // has been confirmed yet. getPendingTeamRisk returns the WEIGHTED total;
-    // getPendingTeamRawRisk returns RAW. Pick whichever matches the primary
-    // path so the units line up with currentNet + newRiskRaw.
-    const pendingNetRaw = useRawTeam
-      ? getPendingTeamRawRisk(key)
-      : getPendingTeamRisk(key);
-    const pendingNetEff = pendingNetRaw * discount;
-    const afterAdd = currentNet + pendingNetEff + newRiskEff;
-
-    if (afterAdd > effectiveLimit) {
+    const newRisk = mode === 'confirm' ? (useRawTeam ? payout : payout * otherProb) : 0;
+    const currentNet = useRawTeam ? (exposure[key]?.rawRisk || 0) : (exposure[key]?.netExposure || 0);
+    const pendingNet = useRawTeam ? confirming.raw : confirming.weighted;
+    const afterAdd = currentNet + pendingNet + newRisk;
+    if (over(afterAdd, effectiveLimit)) {
       if (overrideApplied) {
         log.info('Exposure', `Per-team override BLOCKED ${name}: would-be $${Math.round(afterAdd*100)/100} > override $${effectiveLimit} (global $${maxNetExposure})`);
       }
       violations.push({
         team: name,
         currentExposure: Math.round(currentNet * 100) / 100,
-        pendingExposure: Math.round(pendingNetRaw * 100) / 100,
-        pendingEffective: Math.round(pendingNetEff * 100) / 100,
-        newRisk: Math.round(newRiskRaw * 100) / 100,
-        newRiskEffective: Math.round(newRiskEff * 100) / 100,
+        pendingExposure: Math.round(pendingNet * 100) / 100,
+        newRisk: Math.round(newRisk * 100) / 100,
         wouldBe: Math.round(afterAdd * 100) / 100,
         limit: effectiveLimit,
         globalLimit: maxNetExposure,
         overrideApplied,
-        reservationDiscount: discount,
         capType: 'weighted',
+        mode,
       });
       continue; // primary cap already failing — don't double-flag with hard-cap
     }
 
-    // RAW HARD CAP — runs independently of the primary cap. Always uses
-    // full `payout` and rawRisk regardless of the primary measurement mode.
-    // Skips when disabled (rawHardCap=0).
-    //
-    // FAST PATH (added 2026-05-15): if confirmed raw + new payout is well
-    // under the cap, skip the pending-raw Map lookup + arithmetic
-    // entirely. Pending is heavily discounted (typically × 0.1) so a
-    // team with abundant headroom can never violate the cap from pending
-    // alone — even N pending reservations stacking can't exceed
-    // (cap − current − new). The 0.5 multiplier below is conservative:
-    // with discount 0.1 and per-reservation cost = newRiskRawAbs × 0.1,
-    // we'd need 5× the per-RFQ cost in pending to push past the
-    // remaining headroom, which is impossible inside the 60s pending TTL.
-    //
-    // Eliminates the Map lookup + multiplication on the common case
-    // (most teams have 0 confirmed raw exposure when an RFQ arrives),
-    // which was contributing ~0.2-0.5ms per multi-leg RFQ to p50.
-    // Resolve effective raw cap: per-team override wins over global default.
-    // Override activates the gate even if the global rawHardCap is disabled (0).
+    // RAW HARD CAP — independent of the primary cap; full payout, no weighting.
+    // A per-team raw override activates the gate even if the global is 0.
     const rawOverride = rawOverridesByKey[teamKey];
-    const effectiveRawCap = (Number.isFinite(rawOverride) && rawOverride > 0)
-      ? rawOverride
-      : rawHardCap;
     const rawOverrideApplied = Number.isFinite(rawOverride) && rawOverride > 0;
+    const effectiveRawCap = rawOverrideApplied ? rawOverride : rawHardCap;
     if (effectiveRawCap > 0) {
-      const newRiskRawAbs = payout;
       const currentRaw = exposure[key]?.rawRisk || 0;
-      const fastPathHeadroom = effectiveRawCap * 0.5;
-      if (currentRaw + newRiskRawAbs < fastPathHeadroom) {
-        // Safe — headroom large enough that pending stacking can't
-        // realistically violate. Skip pending lookup + math.
-      } else {
-        const newRiskRawEff = newRiskRawAbs * discount;
-        const pendingRawAbs = getPendingTeamRawRisk(key);
-        const pendingRawEff = pendingRawAbs * discount;
-        const afterAddRaw = currentRaw + pendingRawEff + newRiskRawEff;
-        if (afterAddRaw > effectiveRawCap) {
-          if (rawOverrideApplied) {
-            log.info('Exposure', `Per-team RAW override BLOCKED ${name}: would-be $${Math.round(afterAddRaw*100)/100} > override $${effectiveRawCap} (global $${rawHardCap})`);
-          }
-          violations.push({
-            team: name,
-            currentExposure: Math.round(currentRaw * 100) / 100,
-            pendingExposure: Math.round(pendingRawAbs * 100) / 100,
-            pendingEffective: Math.round(pendingRawEff * 100) / 100,
-            newRisk: Math.round(newRiskRawAbs * 100) / 100,
-            newRiskEffective: Math.round(newRiskRawEff * 100) / 100,
-            wouldBe: Math.round(afterAddRaw * 100) / 100,
-            limit: effectiveRawCap,
-            globalLimit: rawHardCap,
-            overrideApplied: rawOverrideApplied,
-            reservationDiscount: discount,
-            capType: 'raw_hard',
-          });
+      const newRaw = mode === 'confirm' ? payout : 0;
+      const afterAddRaw = currentRaw + confirming.raw + newRaw;
+      if (over(afterAddRaw, effectiveRawCap)) {
+        if (rawOverrideApplied) {
+          log.info('Exposure', `Per-team RAW override BLOCKED ${name}: would-be $${Math.round(afterAddRaw*100)/100} > override $${effectiveRawCap} (global $${rawHardCap})`);
         }
+        violations.push({
+          team: name,
+          currentExposure: Math.round(currentRaw * 100) / 100,
+          pendingExposure: Math.round(confirming.raw * 100) / 100,
+          newRisk: Math.round(newRaw * 100) / 100,
+          wouldBe: Math.round(afterAddRaw * 100) / 100,
+          limit: effectiveRawCap,
+          globalLimit: rawHardCap,
+          overrideApplied: rawOverrideApplied,
+          capType: 'raw_hard',
+          mode,
+        });
       }
     }
   }
@@ -5160,13 +5259,56 @@ function checkExposureLimits(legs, payout, maxNetExposure) {
     let label = 'Net exposure limit exceeded';
     if (anyHard && !anyWeighted) label = 'Raw hard-cap exceeded';
     else if (anyHard && anyWeighted) label = 'Exposure limit exceeded (weighted + raw)';
-    return {
-      allowed: false,
-      reason: `${label}: ${names}`,
-      violations,
-    };
+    return { allowed: false, reason: `${label}: ${names}`, violations };
   }
   return { allowed: true, reason: null, violations: [] };
+}
+
+/**
+ * Largest OUR-risk a new ticket on these legs can carry without breaching the
+ * per-team (primary + raw hard) and per-game caps, given confirmed exposure
+ * plus in-flight confirms. priceParlay pushes it into the offer's max_risk so
+ * PX cannot fill past the cap — the quote-time half of the 2026-09-26 rework
+ * (the confirm check is exact now, so without this a large fill on a nearly
+ * full team would be rejected instead of simply sized down).
+ * Returns { maxRisk: Infinity|number>=0, binding, subject }.
+ */
+function getExposureHeadroom(legs, caps = {}) {
+  const maxPerTeam = Number(caps.maxPerTeam) || 0;
+  const maxPerGame = Number(caps.maxPerGame) || 0;
+  const { useRawTeam, rawHardCap, overridesByKey, rawOverridesByKey } = _teamCapConfig();
+  let best = { maxRisk: Infinity, binding: null, subject: null };
+  const take = (v, binding, subject) => {
+    const m = Math.max(0, v);
+    if (m < best.maxRisk) best = { maxRisk: m, binding, subject };
+  };
+  for (let i = 0; i < (legs || []).length; i++) {
+    let otherTeam = 1;
+    for (let j = 0; j < legs.length; j++) {
+      if (j === i) continue;
+      otherTeam *= (legs[j].fairProb || legs[j].lineInfo?.fairProb || 0.5);
+    }
+    const tk = _teamKeyForLeg(legs[i]);
+    if (tk) {
+      const conf = _confirmingTeamFor(tk.key);
+      const lim = overridesByKey[tk.teamKey] != null ? overridesByKey[tk.teamKey] : maxPerTeam;
+      if (lim > 0) {
+        if (useRawTeam) take(lim - (exposure[tk.key]?.rawRisk || 0) - conf.raw, 'team', tk.name);
+        else if (otherTeam > 0) take((lim - (exposure[tk.key]?.netExposure || 0) - conf.weighted) / otherTeam, 'team', tk.name);
+      }
+      const rawOv = rawOverridesByKey[tk.teamKey];
+      const rawLim = (Number.isFinite(rawOv) && rawOv > 0) ? rawOv : rawHardCap;
+      if (rawLim > 0) take(rawLim - (exposure[tk.key]?.rawRisk || 0) - conf.raw, 'raw_hard', tk.name);
+    }
+  }
+  if (maxPerGame > 0) {
+    for (const [gk, coeff] of _gameCharges(legs || [], 1)) {
+      if (!(coeff > 0)) continue;
+      take((maxPerGame - (gameExposure[gk]?.netExposure || 0) - _confirmingGameFor(gk)) / coeff,
+        'game', gameExposure[gk]?.name || gk);
+    }
+  }
+  return best;
 }
 
 function getExposureForTeam(teamName) {
@@ -7947,6 +8089,9 @@ module.exports = {
   checkLegExposure,
   reserveConfirmingLegRisk,
   releaseConfirmingLegRisk,
+  reserveConfirmingExposure,
+  releaseConfirmingExposure,
+  getExposureHeadroom,
   legExposureKey,
   buildOpenLegRiskMap,
   getPendingLegRisk,
@@ -7998,6 +8143,7 @@ module.exports = {
   getRecentDeclineSnapshotsForGame,
   checkRecentDuplicate,
   recordParlaySignature,
+  releaseQuoteReservations,
   recordMatchedParlay,
   getMatchedParlays: () => matchedParlays,
   recordDecline,

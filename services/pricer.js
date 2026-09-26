@@ -834,6 +834,23 @@ function computeSingleLegQuote(fairProb, sport, marketType, consensusImplied = n
   };
 }
 
+// The team label a leg is booked under in the exposure maps. addExposure keys
+// team exposure on meta.legs[].team, which priceParlay rewrites for full-game
+// totals to "Over (Away @ Home)". Every team-cap READER must build the same
+// label, or it reads a key nothing writes: headroom and the quote screen read
+// "over|evt" while the book held "over away  home|evt", so a full totals bucket
+// never capped its max_risk (review 2026-09-26). A null teamName (virtual alt
+// totals) deliberately renders "null (Away @ Home)" — the stored meta label.
+function exposureTeamLabel(li) {
+  if (!li) return li;
+  let team = li.teamName;
+  if (team) team = team.charAt(0).toUpperCase() + team.slice(1);
+  if (li.marketType === 'total' && li.homeTeam && li.awayTeam) {
+    team = `${team} (${li.awayTeam} @ ${li.homeTeam})`;
+  }
+  return team;
+}
+
 // ---------------------------------------------------------------------------
 // PRICING ENGINE
 // ---------------------------------------------------------------------------
@@ -3523,6 +3540,36 @@ function priceParlay(legs, opts = {}) {
     // Small-test cap while the sign convention is unproven in production.
     candidateCaps.push(config.pricing.negOddsMaxRisk || 25);
   }
+  // EXPOSURE HEADROOM (2026-09-26). The team/game caps no longer charge a
+  // speculative max-risk reservation per open quote; instead the offer's
+  // max_risk is capped at what the team and game caps can still absorb, so PX
+  // cannot fill past them and a large fill on a nearly-full team is sized down
+  // rather than rejected at the (now exact) confirm check. Skipped on the
+  // confirm-time reprice (skipTemplateRamp): that path only checks fair-value
+  // drift, and failing it closed on a cap re-read is the 2026-06-21 outage.
+  let exposureHeadroom = null;
+  if (!opts.skipTemplateRamp) {
+    try {
+      const hr = orderTracker.getExposureHeadroom(
+        pricedLegs.map(l => ({ team: exposureTeamLabel(l.lineInfo), fairProb: l.fairProb, lineInfo: l.lineInfo })),
+        { maxPerTeam: config.pricing.maxExposurePerTeam, maxPerGame: config.pricing.maxExposurePerGame },
+      );
+      if (hr && Number.isFinite(hr.maxRisk)) {
+        exposureHeadroom = hr;
+        if (hr.maxRisk < 1) {
+          priceParlay._lastFailure = {
+            reason: hr.binding === 'game' ? 'game exposure limit' : 'team exposure limit',
+            detail: `no headroom: ${hr.binding} cap on ${hr.subject} is full`,
+            blockerLeg: null,
+          };
+          return null;
+        }
+        candidateCaps.push(hr.maxRisk);
+      }
+    } catch (err) {
+      log.warn('Pricing', `exposure headroom failed (${err.message}) — using configured caps only`);
+    }
+  }
   const maxRisk = Math.min(...candidateCaps);
 
   const americanOdds = decimalToAmerican(decimalOdds);
@@ -3624,7 +3671,6 @@ function priceParlay(legs, opts = {}) {
   // payout*(decimal-1) — at +400 that is 4x our intended liability.
   const _offeredP = Math.min(0.999999, Math.max(1e-6, cappedProb));
   const _rawStakeCap = maxRisk * _offeredP / (1 - _offeredP);
-  const maxRiskStake = Math.max(1, Math.round(_rawStakeCap));
 
   // UNFILLABLE-WITHIN-CAP GATE (2026-08-13). The Math.max(1, ...) floor above
   // means that whenever the true stake cap rounds below PX's minimum stake,
@@ -3777,6 +3823,22 @@ function priceParlay(legs, opts = {}) {
     log.info('V2Pricing', `live[${abArm}]: v1=${americanOdds} → v2=${finalAmericanOdds} (Δ ${finalAmericanOdds - americanOdds})`);
   }
 
+  // Requester stake cap from the odds we actually PUBLISH, FLOORED (review
+  // 2026-09-26). It used to be Math.round(maxRisk·p/(1−p)) off the pre-v2
+  // prob, so a max-stake fill could land up to half a stake-dollar × odds
+  // over maxRisk — invisible while the confirm check discounted the ticket,
+  // but the team/game checks are exact now and would reject it.
+  const _payoutPerStake = finalAmericanOdds > 0 ? finalAmericanOdds / 100 : 100 / Math.abs(finalAmericanOdds);
+  const maxRiskStake = Math.floor(maxRisk / _payoutPerStake + 1e-9);
+  if (maxRisk > 0 && maxRiskStake < _minStake) {
+    priceParlay._lastFailure = {
+      reason: 'unfillable within risk cap',
+      detail: `risk cap $${Math.round(maxRisk)} at ${finalAmericanOdds} floors to a $${maxRiskStake} stake cap < PX min $${_minStake}`,
+      blockerLeg: null,
+    };
+    return null;
+  }
+
   return {
     offer: {
       valid_until: validUntil,
@@ -3805,13 +3867,10 @@ function priceParlay(legs, opts = {}) {
       } : null,
       legs: pricedLegs.map(l => {
         // For totals/spreads, build a descriptive label: "Over 6.5 (NYM vs CHC)"
-        let team = l.lineInfo.teamName;
-        // Capitalize first letter (PX sends "over"/"under" lowercase for totals)
-        if (team) team = team.charAt(0).toUpperCase() + team.slice(1);
+        // Capitalized; full-game totals get "(Away @ Home)" — exposureTeamLabel
+        // is also what every team-cap reader keys on, so they must stay one function.
+        const team = exposureTeamLabel(l.lineInfo);
         const event = l.lineInfo.pxEventName || '';
-        if (l.lineInfo.marketType === 'total' && l.lineInfo.homeTeam && l.lineInfo.awayTeam) {
-          team = `${team} (${l.lineInfo.awayTeam} @ ${l.lineInfo.homeTeam})`;
-        }
         // TRUE per-leg offered implied prob — stored so the Single-Leg
         // Pricing chart can plot our ACTUAL curve. The chart used to
         // reconstruct "My Offer" from legVig via the payout-vig formula
@@ -3889,6 +3948,8 @@ function priceParlay(legs, opts = {}) {
       // so /market-intel can split win rate by mode for A/B analysis.
       vigMode,
       vigRateUsed: Math.round((vigRateUsed || 0) * 10000) / 10000,
+      exposureHeadroom: exposureHeadroom ? Math.round(exposureHeadroom.maxRisk * 100) / 100 : null,
+      exposureHeadroomBinding: exposureHeadroom ? exposureHeadroom.binding : null,
       // Additional vig added by longshot ramp (parlay-level, applied when
       // parlay fair prob < vigLongshotThreshold). 0 when not triggered.
       // Exposed so dashboard can flag which quotes used the ramp and we
@@ -4380,15 +4441,18 @@ function shouldDecline(legs, parlayId) {
     return { declined: true, reason: 'too many legs', detail: `${legs.length} legs > max ${config.pricing.maxLegs}` };
   }
 
-  // Dedup: decline if we just quoted this exact leg-set within the window.
-  // Bettors can submit the same parlay repeatedly faster than our exposure
-  // state updates (race between quote and confirm). Say no on the repeats.
+  // Dedup flood guard (2026-09-26). An identical re-send inside the 5s window
+  // is usually the bettor's REAL order after a preview, so it is re-priced
+  // (websocket.js supersedes the preview's reservations first). Only re-sends
+  // beyond DEDUP_MAX_REQUOTES per window decline. See order-tracker.js
+  // RECENT LEG SIGNATURES for the measurement.
   const dup = orderTracker.checkRecentDuplicate(legs);
-  if (dup) {
+  const maxRequotes = Number.isFinite(config.pricing.dedupMaxRequotes) ? config.pricing.dedupMaxRequotes : 1;
+  if (dup && dup.requotes >= maxRequotes) {
     return {
       declined: true,
       reason: 'duplicate parlay',
-      detail: `identical leg-set quoted ${Math.round(dup.ageMs / 1000)}s ago (60s dedup window)`,
+      detail: `identical leg-set quoted ${Math.round(dup.ageMs / 1000)}s ago (${dup.requotes + 1} quotes in the 5s window, max re-quotes ${maxRequotes})`,
     };
   }
 
@@ -5457,7 +5521,7 @@ function shouldDecline(legs, parlayId) {
       l.lineInfo.line != null ? Math.abs(l.lineInfo.line) : null, l.lineInfo.startTime
     );
     return {
-      team: l.lineInfo.teamName,
+      team: exposureTeamLabel(l.lineInfo), // must match the booked key (see exposureTeamLabel)
       fairProb: fp || 0.5,
       lineInfo: l.lineInfo,           // exposure-key builders read pxEventId, startTime, homeTeam, awayTeam from here
       pxEventId: l.lineInfo.pxEventId, // explicit fallback fields if a checker reads them at top level
@@ -5467,7 +5531,7 @@ function shouldDecline(legs, parlayId) {
     };
   });
   const exposureCheck = orderTracker.checkExposureLimits(
-    legsWithProb, estPayout, config.pricing.maxExposurePerTeam
+    legsWithProb, estPayout, config.pricing.maxExposurePerTeam, { mode: 'quote' }
   );
   if (!exposureCheck.allowed) {
     log.info('Pricing', `Exposure limit: ${exposureCheck.reason}`);
@@ -5511,7 +5575,7 @@ function shouldDecline(legs, parlayId) {
 
   const gameCheck = orderTracker.checkGameExposure(
     legsWithProb, estPayout, config.pricing.maxExposurePerGame
-  );
+  , { mode: 'quote' });
   if (!gameCheck.allowed) {
     log.info('Pricing', `Game exposure limit: ${gameCheck.reason}`);
     try {

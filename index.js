@@ -8016,9 +8016,10 @@ function startStatusServer() {
           examples: ['?game=spurs', '?game=spurs%20%40%20wolves', '?game=10077857|2026-05-09'],
         });
       }
-      const discount = (config && config.pricing && config.pricing.pendingReservationDiscount > 0
-        && config.pricing.pendingReservationDiscount <= 1)
-        ? config.pricing.pendingReservationDiscount : 1.0;
+      // Since 2026-09-26 the game cap charges nothing for open QUOTES (the "live"
+      // list below is diagnostic only) and counts in-flight CONFIRMS at 100%;
+      // decline snapshots list those confirms. No discount applies any more.
+      const discount = 1.0;
 
       // Live section
       const liveReservations = orderTracker.getPendingReservationsForGame(game);

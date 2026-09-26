@@ -1631,6 +1631,21 @@ async function handleRFQ(data) {
     // requires it. Branching on `.then` avoids the V8 microtask cost of
     // awaiting on the sync path (~0.32ms p50 saved measured Apr 26).
     const priceCallMs = performance.now();
+    // Identical re-send inside the dedup window (the bettor's real order after
+    // a preview): release the preview quote's reservations BEFORE pricing, or
+    // our own preview pushes this quote into the next template-ramp tier.
+    try {
+      const dupPrior = orderTracker.checkRecentDuplicate(legs);
+      // Same bettor's preview → supersede. A KNOWN different creator is a
+      // copy-trade, not a preview: leave that bettor's live reservations alone
+      // (review 2026-09-26). PX often omits creator_id on live RFQs, so an
+      // unknown on either side still supersedes; the in-flight confirm lane
+      // (template-exposure) stops both copies from filling.
+      const sameOrUnknown = !creatorId || !dupPrior?.priorCreatorId || dupPrior.priorCreatorId === creatorId;
+      if (dupPrior && dupPrior.priorParlayId && dupPrior.priorParlayId !== parlayId && sameOrUnknown) {
+        orderTracker.releaseQuoteReservations(dupPrior.priorParlayId);
+      }
+    } catch (_) { /* never block pricing on the supersede bookkeeping */ }
     const resultMaybe = pricer.priceParlay(legs, {
       resolvedLineInfos: declineCheck.resolvedLineInfos,
       sgpCombo: declineCheck.sgpCombo || null,
@@ -1814,10 +1829,15 @@ async function handleRFQ(data) {
       log.warn('RFQ', `No callback URL for parlay ${parlayId}`);
     }
 
-    // Bookkeeping AFTER submission — reserve pending exposure so concurrent
-    // RFQs on the same teams see this risk in shouldDecline. Also record
-    // leg signature for the 5s dedup window.
-    const worstCaseRisk = config.pricing.maxRiskPerParlay || 500;
+    // Bookkeeping AFTER submission — record the quote reservation and the leg
+    // signature for the dedup window. Since 2026-09-26 NO gating cap reads quote
+    // reservations (team/game caps read confirmed + in-flight confirms, the line
+    // cap reads open + confirming); they remain for the /debug diagnostics and
+    // are released on supersede / another SP's fill. Sized at the max_risk
+    // actually OFFERED.
+    const worstCaseRisk = (Number.isFinite(result.meta.maxRisk) && result.meta.maxRisk > 0)
+      ? result.meta.maxRisk
+      : (config.pricing.maxRiskPerParlay || 500);
     const legsWithInfo = result.meta.legs.map(l => ({
       ...l,
       lineInfo: l,
@@ -1827,7 +1847,7 @@ async function handleRFQ(data) {
       legsWithInfo, worstCaseRisk, config.pricing.offerValidSeconds
     );
     orderTracker.reservePending(parlayId, reservation);
-    orderTracker.recordParlaySignature(result.meta.legs);
+    orderTracker.recordParlaySignature(result.meta.legs, parlayId, creatorId);
   } catch (err) {
     const pid = typeof parlayId !== 'undefined' ? parlayId : 'unknown';
     log.error('RFQ', `Error handling RFQ for ${pid}: ${err.message}`);
@@ -2080,6 +2100,9 @@ async function handleConfirm(data) {
         }
         return;
       }
+      // Synchronously after the cooldown passed (no await in between): a second
+      // confirm of this signature now sees us as in flight and is rejected.
+      templateExposure.reserveConfirmingSignature(legsForTemplate, parlayId);
     } catch (err) {
       // Don't break the confirm path on template-exposure errors —
       // log and continue. Worst case: rapid-duplicate squeaks through.
@@ -2092,7 +2115,8 @@ async function handleConfirm(data) {
     // passed shouldDecline and all 5 confirmed, blowing through the per-team
     // limit. Use ourRisk (the actual stake PX is confirming) not a guess.
     const teamCheck = orderTracker.checkExposureLimits(
-      legsForCheck, ourRisk, config.pricing.maxExposurePerTeam
+      legsForCheck, ourRisk, config.pricing.maxExposurePerTeam,
+      { mode: 'confirm', excludeParlayId: parlayId }
     );
     if (!teamCheck.allowed) {
       log.warn('Confirm', `Rejecting: ${teamCheck.reason}`);
@@ -2109,7 +2133,8 @@ async function handleConfirm(data) {
     // event stacking the per-team cap can't see. Particularly relevant
     // as alt-spread coverage expands (more breakpoints per game).
     const gameCheck = orderTracker.checkGameExposure(
-      legsForCheck, ourRisk, config.pricing.maxExposurePerGame
+      legsForCheck, ourRisk, config.pricing.maxExposurePerGame,
+      { mode: 'confirm', excludeParlayId: parlayId }
     );
     if (!gameCheck.allowed) {
       log.warn('Confirm', `Rejecting: ${gameCheck.reason}`);
@@ -2150,6 +2175,9 @@ async function handleConfirm(data) {
       return;
     }
     orderTracker.reserveConfirmingLegRisk(parlayId, legsForCheck, ourRisk);
+    // Same race closure for the team + game caps (2026-09-26): a second confirm
+    // on this team/game landing before recordConfirmation sees this stake.
+    orderTracker.reserveConfirmingExposure(parlayId, legsForCheck, ourRisk);
 
     // Script-aware prop game caps + experimental-combo tier re-check (SGP
     // roadmap Stage 0). Quote-time checks ran against worst-case risk;
@@ -2355,6 +2383,8 @@ async function handleConfirm(data) {
     // reserved for this parlayId.
     if (!holdLegReservation) {
       try { orderTracker.releaseConfirmingLegRisk(parlayId); } catch (_) { /* never block the handler exit */ }
+      try { orderTracker.releaseConfirmingExposure(parlayId); } catch (_) { /* never block the handler exit */ }
+      try { require('./template-exposure').releaseConfirmingSignature(parlayId); } catch (_) { /* never block the handler exit */ }
     }
   }
 }

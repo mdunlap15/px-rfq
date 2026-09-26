@@ -1134,6 +1134,12 @@ const config = {
     // Confirmation-time re-price drift threshold. If current fair prob drifts
     // by more than this fraction from the original quote, reject the confirm.
     confirmationDriftThreshold: parseFloat(process.env.CONFIRMATION_DRIFT_THRESHOLD) || 0.03,
+    // Identical re-sends allowed per leg-set inside the 5s dedup window
+    // (2026-09-26). Default 1 = preview + place; 0 restores decline-every-repeat.
+    dedupMaxRequotes: (() => {
+      const v = parseInt(process.env.DEDUP_MAX_REQUOTES, 10);
+      return Number.isFinite(v) && v >= 0 ? v : 1;
+    })(),
     offerValidSeconds: parseInt(process.env.OFFER_VALID_SECONDS) || 60,
     // Prop-containing parlays get a shorter offer validity: prop prices move
     // on lineup/usage news faster than team lines, and 60s of free option

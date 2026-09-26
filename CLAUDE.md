@@ -64,6 +64,9 @@ client/
 | `MAX_RISK_PER_PARLAY_WITH_PROP` | No | Default: 50. Cap on **OUR max risk** (payout liability) for any parlay containing a player-prop leg. Prod: 3000 (2026-08-13). |
 | `PX_MIN_STAKE` | No | Default: 1. PX's minimum bookable stake. A per-parlay RISK cap is sent to PX as a *bettor stake* cap (Rule 3: `stake = risk × p/(1−p)`) floored at $1 — so when a cap converts to a sub-$1 stake cap, the smallest fill PX can book already breaches it and we are certain to reject at confirm. `priceParlay` declines those at quote time (`unfillable within risk cap`). Bites only where a small cap meets long odds: at the ordinary $500 `MAX_RISK_PER_PARLAY` the crossover is ~**+50000** (relevant to deep MoV tails, which are otherwise exempt from `MAX_ODDS`), at the $15 experimental-SGP cap ~+1500, and at the $3,000 prop cap beyond +300000. |
 | `MAX_EXPOSURE_PER_TEAM` | No | Default: 50 |
+| `MAX_RAW_EXPOSURE_PER_TEAM` | No | The per-team RAW hard cap (prod $6,000; runtime key `maxRawExposurePerTeam`). **Since 2026-09-26 it is genuinely hard** — see "Team / game caps" below. Distinct from `MAX_EXPOSURE_PER_TEAM` (weighted, prod runtime $8,500): raising one does not raise the other. |
+| `DEDUP_MAX_REQUOTES` | No | Default: 1 (runtime key `dedupMaxRequotes`). Identical leg-set re-sends RE-PRICED per 5s window; beyond it they decline `duplicate parlay`. 0 restores decline-every-repeat. Why: bettors preview then place ~2.7s later and the PLACEMENT fills (128/704 vs 3/704 for the preview) — the old dedup declined the real order. |
+| `PENDING_RESERVATION_DISCOUNT` | No | **INERT since 2026-09-26** — no gating cap reads quote-time reservations any more. Kept only so old env/runtime values do not error. |
 | `MAX_LEGS` | No | Default: 8 |
 | `STALE_PRICE_MINUTES` | No | Default: 15 |
 | `REFRESH_INTERVAL_MINUTES` | No | Default: 10 (code default — production Railway sets 2) |
@@ -119,6 +122,19 @@ Three roles via HTTP Basic Auth (browser-native login dialog):
 If a username appears in both lists, `AUTH_VIEWERS` wins (more restrictive); a warning logs at boot. Don't reuse usernames between the admin slot and the viewer pools either — collisions are skipped with a warning.
 
 **Sign-out:** HTTP Basic Auth credentials are cached by the browser until the tab/process closes. There is no clean server-side logout.
+
+## Team / game caps (2026-09-26 rework)
+
+- **The bug:** every open QUOTE reserved the full `maxRiskPerParlay` ($6,000) against its team and game keys for 60s, counted ×0.1, so ~10 open quotes darked a team with ~$0 real exposure (Texas dark 13:25–16:00Z on 9/26: 202 network parlays, $38.1K, at <= $240 confirmed). The confirm check ALSO discounted the confirming ticket ×0.1, so the raw "hard" cap was soft (23 team-event keys ended above $6K confirmed in 45 days).
+- **QUOTE mode** (`checkExposureLimits` / `checkGameExposure` default): confirmed exposure + in-flight CONFIRM reservations at actual stakes, NO increment, `>=` — a full team/game stops quoting. Quote reservations are not read by any gating cap.
+- **Ticket size** is bounded instead by `getExposureHeadroom` → pushed into `priceParlay` candidate caps → the offer's `max_risk` (floored from the PUBLISHED odds, never rounded up). Skipped on the confirm reprice (`skipTemplateRamp`), which must never fail closed on a cap (2026-06-21 outage).
+- **CONFIRM mode** (`opts.mode='confirm'`): EXACT — confirmed + other in-flight confirms + the actual ticket, no discount, `>`. `reserveConfirmingExposure` / `releaseConfirmingExposure` mirror the per-line `reserveConfirmingLegRisk`; a reservation stops counting once its order has landed (confirmed + orderUuid) so an acceptUnknown hold never double counts.
+- **Game charge** mirrors `recalcNetExposure`: per game, MAX over market:selection buckets of the SUM of risk × P(other legs) — two same-game legs on one bucket land as a sum.
+- **Team key** for every reader comes from `exposureTeamLabel` (pricer.js) — full-game totals book as "Over (Away @ Home)"; reading `lineInfo.teamName` ("over") hits a key nothing writes.
+- **Double-fill guard for re-quotes:** `template-exposure` has an in-flight confirm lane — a second confirm of the same signature while the first is mid-confirm is rejected (`template_inflight_at_confirm`).
+- **Supersede:** a re-send releases the preview quote's exposure + template slots before pricing (same creator, or either creator unknown — PX often omits creator_id). Another SP's fill (`order.matched` other_sp) releases them too. The matched-path loud `[EXPOSURE OVERRIDE]` fires only on a canonical win, not a tie.
+- `/debug/pending-game-legs` "live" quote reservations are diagnostic only; decline snapshots now list the in-flight CONFIRMS that filled the game. Locked by `test/team-cap-reservations.test.js` (11 mutants, all killed).
+- ⚠ **Scratch/subagent scripts that require these services write to PRODUCTION Supabase** unless run under `node --test` or `NODE_ENV=test` (config.js loads `.env` by absolute path). A review run on 9/26 wrote a fake `tie-pid` order and a runtime override.
 
 ## RFQ Flow
 
