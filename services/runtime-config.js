@@ -103,6 +103,10 @@ const REGISTRY = [
   { key: 'vigHeavyFavThreshold', path: 'vigHeavyFavThreshold', type: 'number', min: 0, max: 1, group: 'pricing', env: 'VIG_HEAVY_FAV_THRESHOLD', label: 'Heavy-fav threshold' },
   { key: 'vigHeavyFavFairMarkup', path: 'vigHeavyFavFairMarkup', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'VIG_HEAVY_FAV_FAIR_MARKUP', label: 'Heavy-fav fair markup' },
   { key: 'vigChalkStackSurcharge', path: 'vigChalkStackSurcharge', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'VIG_CHALK_STACK_SURCHARGE', label: 'Chalk-stack surcharge' },
+  { key: 'parlaySurchargeExemptSports', path: 'parlaySurchargeExemptSports', type: 'strList', group: 'pricing', env: 'PARLAY_SURCHARGE_EXEMPT_SPORTS',
+    label: 'Surcharge-exempt sports', help: 'Sport keys whose all-sport parlays (up to the max legs below) skip the heavy-fav markup, chalk-stack surcharge and leg-count multiplier. Default americanfootball_ncaaf (calibrated, +6.1% ROI 45d). Empty = none exempt.' },
+  { key: 'parlaySurchargeExemptMaxLegs', path: 'parlaySurchargeExemptMaxLegs', type: 'number', min: 2, max: 12, group: 'pricing', env: 'PARLAY_SURCHARGE_EXEMPT_MAX_LEGS',
+    label: 'Surcharge exemption max legs', help: 'Exempt parlays above this many legs keep every surcharge. Default 4.' },
   { key: 'priceFloorVsConsensusPp', path: 'priceFloorVsConsensusPp', type: 'number', min: 0, max: 1, group: 'pricing', env: 'PRICE_FLOOR_VS_CONSENSUS_PP',
     label: 'Price floor vs consensus (pp)', help: 'Clamp: never quote more than this far below consensus.' },
   { key: 'devigFavMaxShare', path: 'devigFavMaxShare', type: 'number', min: 0, max: 1, group: 'pricing', env: 'DEVIG_FAV_MAX_SHARE', label: 'De-vig favourite max share' },
@@ -149,7 +153,16 @@ const REGISTRY = [
     label: 'Tennis sets min books', help: 'Minimum books quoting a tennis SET market (1st-set ML / total sets / win-a-set) before it prices. Set boards are the thinnest we quote — alternate_set_totals is often a single book.' },
   { key: 'stalePriceMinutes', path: 'stalePriceMinutes', type: 'number', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES',
     label: 'Stale price minutes', help: 'Decline if the odds cache is older than this. Raising it quotes off staler prices.' },
+  // Registered 2026-09-26 so a per-sport stale threshold can be changed without
+  // a Railway edit — that edit restarted the trader at peak CFB Saturday.
+  // A runtime edit REPLACES the whole map; sports left out fall back to Stale price minutes.
+  { key: 'stalePriceMinutesBySport', path: 'stalePriceMinutesBySport', type: 'numMap', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES_BY_SPORT',
+    label: 'Stale price minutes by sport', help: 'Per-sport stale threshold (minutes). Edit the FULL map — a sport you drop falls back to Stale price minutes.' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
+
+  // Registered 2026-09-26 (same reason as the stale map). {} = no league cap.
+  { key: 'propNetExposureBySport', path: 'propNetExposureBySport', type: 'numMap', min: 0, max: 1000000, group: 'risk', danger: true, env: 'PROP_NET_EXPOSURE_BY_SPORT',
+    label: 'Prop net exposure by sport', help: 'League-wide net player-prop cap per sport key. {} = no cap. Each new ticket is charged its FULL per-ticket prop cap, so a value below a few multiples of Max risk per parlay (props) declines everything.' },
 
   { key: 'golfOutrightsParlayEnabled', path: 'golfOutrightsParlayEnabled', type: 'bool', group: 'gating', danger: true, env: 'GOLF_OUTRIGHTS_PARLAY_ENABLED',
     label: 'Golf outrights in parlays', help: 'Register golf outright (win/top 5/10/20) legs so PX can send outright RFQs. Needs a loaded DK ties-included board (POST /golf-outrights/paste) or top-N legs fail closed.' },

@@ -834,6 +834,18 @@ function computeSingleLegQuote(fairProb, sport, marketType, consensusImplied = n
   };
 }
 
+// True when every vig leg is in config.pricing.parlaySurchargeExemptSports and
+// the parlay has 2..parlaySurchargeExemptMaxLegs legs. Read per call so a
+// runtime edit takes effect on the next RFQ without a restart.
+function isParlaySurchargeExempt(vigLegs) {
+  const raw = config.pricing.parlaySurchargeExemptSports;
+  const sports = raw instanceof Set ? raw : new Set(Array.isArray(raw) ? raw : []);
+  if (!sports.size || !Array.isArray(vigLegs) || vigLegs.length < 2) return false;
+  const maxLegs = Number(config.pricing.parlaySurchargeExemptMaxLegs) || 4;
+  if (vigLegs.length > maxLegs) return false;
+  return vigLegs.every(l => l && l.lineInfo && sports.has(l.lineInfo.sport));
+}
+
 // ---------------------------------------------------------------------------
 // PRICING ENGINE
 // ---------------------------------------------------------------------------
@@ -2621,6 +2633,10 @@ function priceParlay(legs, opts = {}) {
   const overrideLegs = pricedLegs.filter(l => l.bookPriceOverride != null);
   const vigLegs = pricedLegs.filter(l => l.bookPriceOverride == null);
   const overrideProduct = overrideLegs.reduce((p, l) => p * l.bookPriceOverride, 1);
+  // Parlay-surcharge exemption (see config.parlaySurchargeExemptSports):
+  // every vig leg in an exempt sport and at most N legs -> skip the
+  // heavy-fav markup, chalk-stack surcharge and leg-count multiplier below.
+  const surchargeExempt = isParlaySurchargeExempt(vigLegs);
 
   // Parlay fair prob over vig legs — reused by both modes and by the
   // longshot ramp below.
@@ -2847,7 +2863,7 @@ function priceParlay(legs, opts = {}) {
       // favorite and a markup risks a PX reject — is left alone.
       const dnbApplies = leg.lineInfo.isDNB && dnbFavMarkup > 0
         && fp > dnbFavThreshold && fp < dnbFavCap;
-      const heavyApplies = heavyFavMarkup > 0 && !isProp
+      const heavyApplies = heavyFavMarkup > 0 && !isProp && !surchargeExempt
         && fp > heavyFavThreshold && fp < heavyFavCap;
       const mmaApplies = mmaFavAdd > 0 && mt === 'moneyline'
         && leg.lineInfo.sport === 'mma_mixed_martial_arts'
@@ -2887,7 +2903,7 @@ function priceParlay(legs, opts = {}) {
   const chalkSurcharge = config.pricing.vigChalkStackSurcharge || 0;
   const chalkLegThresh = config.pricing.vigChalkStackLegThreshold || 0.60;
   const chalkParlayThresh = config.pricing.vigChalkStackParlayThreshold || 0.25;
-  if (chalkSurcharge > 0
+  if (chalkSurcharge > 0 && !surchargeExempt
       && vigLegs.length >= 2
       && vigFair > chalkParlayThresh
       && vigLegs.every(l => l.fairProb > chalkLegThresh)) {
@@ -2928,7 +2944,7 @@ function priceParlay(legs, opts = {}) {
   const legCountMult = legCountMultMap[vigLegs.length]
     || (vigLegs.length > _lcMax ? legCountMultMap[_lcMax] : 1.0)
     || 1.0;
-  if (legCountMult > 1.0 && offeredImpliedProb > vigFair && vigFair > 0) {
+  if (legCountMult > 1.0 && !surchargeExempt && offeredImpliedProb > vigFair && vigFair > 0) {
     const currentVigFraction = offeredImpliedProb / vigFair - 1;
     const scaledOffered = vigFair * (1 + currentVigFraction * legCountMult);
     if (scaledOffered > offeredImpliedProb) {
@@ -3889,6 +3905,7 @@ function priceParlay(legs, opts = {}) {
       // so /market-intel can split win rate by mode for A/B analysis.
       vigMode,
       vigRateUsed: Math.round((vigRateUsed || 0) * 10000) / 10000,
+      surchargeExempt,
       // Additional vig added by longshot ramp (parlay-level, applied when
       // parlay fair prob < vigLongshotThreshold). 0 when not triggered.
       // Exposed so dashboard can flag which quotes used the ramp and we
