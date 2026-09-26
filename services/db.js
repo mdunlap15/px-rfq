@@ -515,13 +515,61 @@ async function saveDecline(entry) {
       is_limit: !!entry.isLimit,
       declined_at: entry.declinedAt || new Date().toISOString(),
     };
-    const { error } = await db.from('declines').insert(row);
-    if (error) {
-      _reportSaveDeclineError(error.message, "(run the SQL migration to create 'declines' table / add missing column)");
+    // BATCHED (2026-09-25). One HTTP insert per decline was ~330 requests/min
+    // into a ~140M-row table during the outage that left Supabase 522ing.
+    // Rows are buffered and flushed as one multi-row insert every
+    // DECLINE_FLUSH_MS (default 10s) or once DECLINE_FLUSH_MAX rows queue.
+    _declineBuf.push(row);
+    if (_declineBuf.length > _DECLINE_BUF_CAP) {
+      // Supabase unreachable: drop the OLDEST rather than grow without bound.
+      _declineDropped += _declineBuf.length - _DECLINE_BUF_CAP;
+      _declineBuf.splice(0, _declineBuf.length - _DECLINE_BUF_CAP);
     }
+    if (_declineBuf.length >= _DECLINE_FLUSH_MAX) flushDeclines().catch(() => {});
+    else _ensureDeclineTimer();
   } catch (err) {
     _reportSaveDeclineError(err.message, '');
   }
+}
+
+const _declineBuf = [];
+let _declineDropped = 0;
+let _declineFlushing = false;
+let _declineTimer = null;
+const _DECLINE_FLUSH_MS = Number(process.env.DECLINE_FLUSH_MS) > 0 ? Number(process.env.DECLINE_FLUSH_MS) : 10000;
+const _DECLINE_FLUSH_MAX = Number(process.env.DECLINE_FLUSH_MAX) > 0 ? Number(process.env.DECLINE_FLUSH_MAX) : 500;
+const _DECLINE_BUF_CAP = 20000;
+function _ensureDeclineTimer() {
+  if (_declineTimer) return;
+  _declineTimer = setTimeout(() => { _declineTimer = null; flushDeclines().catch(() => {}); }, _DECLINE_FLUSH_MS);
+  if (_declineTimer.unref) _declineTimer.unref();
+}
+async function flushDeclines() {
+  const db = getClient();
+  if (!db || _declineFlushing || !_declineBuf.length) return 0;
+  _declineFlushing = true;
+  let written = 0;
+  try {
+    while (_declineBuf.length) {
+      const batch = _declineBuf.splice(0, _DECLINE_FLUSH_MAX);
+      const { error } = await db.from('declines').insert(batch);
+      if (error) {
+        _reportSaveDeclineError(error.message, "(run the SQL migration to create 'declines' table / add missing column)");
+        _declineDropped += batch.length;   // fire-and-forget semantics, as before: never retry-storm
+        break;
+      }
+      written += batch.length;
+    }
+  } catch (err) {
+    _reportSaveDeclineError(err.message, '');
+  } finally {
+    _declineFlushing = false;
+    if (_declineBuf.length) _ensureDeclineTimer();
+  }
+  return written;
+}
+function getDeclineWriteStats() {
+  return { buffered: _declineBuf.length, dropped: _declineDropped, flushMs: _DECLINE_FLUSH_MS, flushMax: _DECLINE_FLUSH_MAX };
 }
 
 // Schema errors (missing table/column) are permanent for the process lifetime,
@@ -1670,6 +1718,8 @@ module.exports = {
   loadMatchedParlays,
   loadMatchedParlaysSince,
   saveDecline,
+  flushDeclines,
+  getDeclineWriteStats,
   loadDeclines,
   loadDeclinesSince,
   getDeclinesRollup7d,

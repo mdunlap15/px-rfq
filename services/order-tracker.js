@@ -2223,6 +2223,14 @@ function decToAm(dec) {
  * @param {string} reason - 'unknown legs', 'no fair value', 'exposure/limit'
  * @param {object} detail - { legs, knownLegs, unknownLegs, parlayId }
  */
+let _declineSkipCache = null;
+function _declineSkipReasons() {
+  if (_declineSkipCache) return _declineSkipCache;
+  const raw = process.env.DECLINE_PERSIST_SKIP_REASONS;
+  const list = raw == null ? ['blocked creator'] : String(raw).split(',').map(x => x.trim()).filter(Boolean);
+  _declineSkipCache = new Set(list);
+  return _declineSkipCache;
+}
 function recordDecline(reason, detail) {
   declineStats.total++;
   const bucket = reason || 'unknown';
@@ -2286,7 +2294,11 @@ function recordDecline(reason, detail) {
     }
   }
 
-  // Persist to Supabase (fire-and-forget)
+  // Persist to Supabase (fire-and-forget, batched in db.js). Reasons in
+  // DECLINE_PERSIST_SKIP_REASONS (default 'blocked creator') are counted in
+  // memory above but never written: quote-bot noise that was over half of
+  // the ~330 rows/min hitting the declines table (2026-09-25).
+  if (_declineSkipReasons().has(bucket)) return;
   db.saveDecline({
     parlayId: detail?.parlayId || null,
     reason: bucket,
