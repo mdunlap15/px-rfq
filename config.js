@@ -617,25 +617,6 @@ const config = {
     vigChalkStackSurcharge: parseFloat(process.env.VIG_CHALK_STACK_SURCHARGE) || 0,
     vigChalkStackLegThreshold: parseFloat(process.env.VIG_CHALK_STACK_LEG_THRESHOLD) || 0.60,
     vigChalkStackParlayThreshold: parseFloat(process.env.VIG_CHALK_STACK_PARLAY_THRESHOLD) || 0.25,
-    // PARLAY-SURCHARGE EXEMPTION (operator 2026-09-26, peak CFB Saturday).
-    // A parlay whose EVERY vig leg is in one of these sports, with at most
-    // parlaySurchargeExemptMaxLegs legs, skips three parlay-level surcharges:
-    // the heavy-favourite fair markup, the chalk-stack surcharge and the
-    // leg-count multiplier. Per-leg vig, the longshot add, the template ramp,
-    // SGP pricing and the near-lock surcharge all still apply.
-    // Why CFB: 45d to 2026-09-26, 244 settled CFB fills, $116K risk, +6.1% ROI,
-    // bettor wins 44 vs 48.6 expected (z=-0.77, calibrated); 2-4 leg n=211. On
-    // 9/26 our CFB margin over fair ran ~11% vs the winning SP ~1-3%; replaying
-    // the tickets we lost on price since the 15:46Z vig cut, dropping these
-    // surcharges wins 57 of 246 ($12.6K) at ~2.4% margin, 45 of them at <=4 legs.
-    // 5+ legs keep every surcharge (n=33, -4.3% ROI: too thin to loosen).
-    // Unset -> CFB. Explicitly empty ("") -> no sport exempt. Runtime-editable.
-    parlaySurchargeExemptSports: (() => {
-      const raw = process.env.PARLAY_SURCHARGE_EXEMPT_SPORTS;
-      if (raw == null) return ['americanfootball_ncaaf'];
-      return String(raw).split(',').map(x => x.trim()).filter(Boolean);
-    })(),
-    parlaySurchargeExemptMaxLegs: parseInt(process.env.PARLAY_SURCHARGE_EXEMPT_MAX_LEGS, 10) || 4,
     // Per-leg-count vig multiplier. Applied parlay-level AFTER all per-leg
     // and chalk-stack adds, multiplying the effective vig (offered/fair − 1)
     // by a leg-count scaling factor. Closes the structural underpricing on
