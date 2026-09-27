@@ -1357,24 +1357,41 @@ const config = {
     // HR-over legs (box-score ground truth): our fair 21.2% vs realised 16.3%,
     // ratio 1.30, z=-3.62 — we overprice the over and lose on it.
     //
-    // Map key = "<propType>.<side>" (e.g. "hitter_hr.over"), value = a
-    // multiplier on the leg's fairProb BEFORE it enters the parlay product.
+    // Value = a multiplier on the leg's fairProb BEFORE it enters the parlay
+    // product (pricer.js, skipped for bookPriceOverride legs).
     // 0.80 shades HR-over fair down ~20%, a partial (not full) correction of
     // the measured 1.30 to avoid over-fitting in-sample. Applies to that side
     // only; the thin under book is left alone.
     //
-    // DEFAULT EMPTY = OFF. This ships the mechanism, not a price change — enable
-    // deliberately after reviewing /calibration. Recommended first value:
-    // {"hitter_hr.over":0.82}. Bounds each multiplier to [0.5, 1.5].
+    // Keys are the FULL post-parse marketType + side ("player_hitter_hr.over",
+    // "player_strikeouts.under") — a bare propType never matches. Bounds each
+    // multiplier to [0.5, 1.5].
+    //
+    // CODE DEFAULTS are merged UNDER the env: the env REPLACED the whole map
+    // before, and prod sets PROP_FAIR_CALIBRATION (player_hitter_hr.over), so a
+    // default that did not merge would be silently dropped in prod. The env
+    // wins PER KEY; set a key to 1 to switch its default off. Malformed env JSON
+    // keeps the defaults (it used to fall to an empty map).
+    // ⚠ PROD (verified from /status 2026-09-27) sets PROP_FAIR_CALIBRATION =
+    // {player_hitter_hr.over:0.93, player_strikeouts.under:1.15} — the 1.15 was
+    // an interim set on 8/24 when K props went off, so prod resolves K-under to
+    // 1.15, NOT the 1.19 default below, until that env key is removed or set.
+    //   player_strikeouts.under 1.19 (2026-09-27 audit): K-under legs priced
+    //   off the strikeout-count distribution fair won 146 vs 122.3 expected
+    //   over 219 unique legs (7/8–8/24), ratio 1.19 [95% CI 1.08, 1.31], z=3.3;
+    //   they were calibrated (0.98) on exact-line de-vig before 7/8. Measured
+    //   on the pre-floor under (1 − distOver), so where odds-feed's exact-line
+    //   floor also binds the combined lift is larger than measured — the
+    //   conservative side. Inert while PITCHER_K_PROPS_ENABLED is off.
     propFairCalibration: (() => {
-      const out = {};
+      const out = { 'player_strikeouts.under': 1.19 };
       try {
         const raw = JSON.parse(process.env.PROP_FAIR_CALIBRATION || '{}');
         for (const [k, v] of Object.entries(raw)) {
           const m = parseFloat(v);
           if (/^[a-z0-9_]+\.(over|under|yes|no|home|away)$/i.test(k) && Number.isFinite(m) && m >= 0.5 && m <= 1.5) out[k] = m;
         }
-      } catch { /* bad JSON -> empty (off) */ }
+      } catch { /* bad JSON -> code defaults only */ }
       return out;
     })(),
     // ---- Quote-fisher detection (services/creator-activity.js) ----
@@ -1767,23 +1784,35 @@ const config = {
     //   spread_dog_under      Weak positive correlation (close low-margin
     //                         games tend low-total too): observed 1.02
     //   spread_fav_under      Negative correlation (fav blows out usually
-    //                         scores high) — bettor edge here, set 0.95
+    //                         scores high) — was 0.95, now 1.00 (below)
     //   spread_dog_over       Negative correlation (dog upset rare and
-    //                         not necessarily high-scoring): set 0.95
+    //                         not necessarily high-scoring) — was 0.95, now 1.00
     //   ml_spread             Not listed; correlation rules already block
     //                         this combo (anti-arb) regardless of pricing
     //   3+leg combos          Handled separately via
     //                         sgpCorrelation3PlusByCombo
     //
     // All overridable via SGP_CORRELATION_BY_COMBO env JSON map.
+    //
+    // FLOOR AT 1.00 (2026-09-27 audit). The two negative directions defaulted
+    // to 0.95, i.e. priced the same-game parlay CHEAPER than independent. Prod
+    // env sets both to 1.08, so the 0.95s were dormant — but the env JSON is
+    // MERGED onto these defaults, so any partial replacement of it (or a
+    // "flatten the grid" edit that drops the two keys) silently reverted them
+    // to 0.95 and quoted below the independent price. They are now 1.00, and
+    // pricer.js floors EVERY grid-sourced factor at 1.00 at the point of use,
+    // so an env / runtime value below 1 can never reach a price either. Same
+    // asymmetric clamp as the measured football and MLB tables: honouring a
+    // negative correlation (these two were never even FD-sampled) prices us
+    // cheaper than independent; clamping leaves us merely uncompetitive there.
     sgpCorrelationByCombo: (() => {
       const defaults = {
         spread_total: 1.15,
         ml_total: 1.15,
         spread_fav_over: 1.30,
         spread_dog_under: 1.02,
-        spread_fav_under: 0.95,
-        spread_dog_over: 0.95,
+        spread_fav_under: 1.00,
+        spread_dog_over: 1.00,
       };
       const raw = process.env.SGP_CORRELATION_BY_COMBO;
       if (!raw || !raw.trim()) return defaults;

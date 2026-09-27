@@ -2189,18 +2189,23 @@ function priceParlay(legs, opts = {}) {
         // apply an MLB number to a football game, which is exactly the "guessed
         // factor" the football block existed to prevent.
         //
-        // Note this is keyed off the UN-directed combo: the measurement clamps
-        // at >= 1.00, so the negative directions (CFB fav+under at 0.934) map to
-        // 1.00 rather than making our quote cheaper than independent.
-        //
-        // The lookup depends on the SPREAD MAGNITUDE for CFB — 1.00 under 14.5,
-        // 1.17 at 14.5+ — so it must read the spread leg, not just the combo.
+        // CFB spread+total depends on the spread MAGNITUDE *and* the DIRECTION
+        // (2026-09-27): fav covers + over / dog covers + under pay the spread
+        // bucket (1.00 under 7.5, 1.05-1.25 above), while fav+under / dog+over
+        // measure 0.66-0.96 at 7.5+ and clamp to 1.00 — they are NOT charged
+        // the bucket — and measure 1.06 at 0-3.5, where the same direction is
+        // 1.00. So the lookup must read the spread leg's SIGNED line (negative =
+        // bettor took the favourite) and the total leg's over/under, not just
+        // the combo. Either unreadable -> the dearer direction of the bucket.
         const fbSideLeg = spreadLeg || mlLeg;
         if (fbSideLeg) {
           const fbHit = footballSgpFactor({
             sport: fbSideLeg.lineInfo.sport || fbSideLeg.lineInfo.oddsApiSport,
             combo: spreadLeg ? 'spread_total' : 'ml_total',
             spreadLine: spreadLeg ? Number(spreadLeg.lineInfo.line) : undefined,
+            totalSelection: totalLeg
+              ? String(totalLeg.lineInfo.selection || totalLeg.lineInfo.oddsApiSelection || '').toLowerCase()
+              : undefined,
           });
           if (fbHit) {
             factor = fbHit.factor;
@@ -2273,6 +2278,20 @@ function priceParlay(legs, opts = {}) {
         continue; // 1 leg per event isn't an SGP component
       }
 
+      // FLOOR AT 1.00 (2026-09-27 audit). Every factor reaching this line came
+      // from the sport-agnostic GRID — a directional or un-directed
+      // sgpCorrelationByCombo key, the legacy sgpCorrelationPositive, or
+      // sgpCorrelation3PlusByCombo. (Football and MLB `continue` above with
+      // their own measured tables, which already clamp at >= 1.00.) Below 1 a
+      // grid factor prices the same-game parlay CHEAPER than independent. The
+      // grid is merged env-onto-defaults and runtime-editable down to 0.1, so a
+      // partial JSON replacement or a mistyped edit could otherwise put a 0.95
+      // straight onto live quotes. Floored here, at the point of use, so no
+      // config path can bypass it. NaN is left alone (downstream guards own it).
+      if (factor < 1) {
+        log.debug('Pricing', `SGP grid factor ${factor} for '${combo}' floored to 1.00 — the grid never prices below independent`);
+        factor = 1;
+      }
       if (factor === 1) continue;
       detectedCombos.push(combo);
       sgpCorrelationFactor *= factor;
@@ -4358,6 +4377,8 @@ function _footballSideTotalPair(ls) {
     sport: sideLeg.sport || sideLeg.oddsApiSport,
     combo,
     spreadLine: sideLeg.marketType === 'spread' ? Number(sideLeg.line) : undefined,
+    // Same read as priceParlay's, so factor/basis here match what prices.
+    totalSelection: String(totalLeg.selection || totalLeg.oddsApiSelection || '').toLowerCase(),
   });
   if (!hit) return null;                  // uncalibrated league — stay blocked
   return { combo, spreadLine: sideLeg.line, factor: hit.factor, basis: hit.basis };
@@ -4735,12 +4756,14 @@ function shouldDecline(legs, parlayId) {
         const desc = ls.map(li => `${li.teamName || li.playerName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}`).join(' + ');
         if (fbEnabled) {
           const calibrated = _footballSideTotalPair(ls);
-          // CFB EXTREME-SPREAD SGP CAP (2026-09-25). The measured CFB table's top
-          // bucket (14.5+ -> 1.17) is an AVERAGE; a 42.5-point spread got the same
-          // 1.17 as a 15-point one. Rutgers -42.5 + O56.5 quoted +233 vs FanDuel's
-          // actual SGP +151. Until finer high-spread buckets are measured, refuse
+          // CFB EXTREME-SPREAD SGP CAP (2026-09-25). Added when the top bucket was
+          // a single 14.5+ -> 1.17 AVERAGE: Rutgers -42.5 + O56.5 quoted +233 vs
+          // FanDuel's actual SGP +151. The tail has since been measured (28-35
+          // 1.24, 35+ 1.25), but the cap STAYS: the flow that fills there is FCS /
+          // weak dogs expected to score under a touchdown, which runs ~1.3-1.55,
+          // and dog+under at 35+ measures 1.31 against the 1.25 bucket. Refuses
           // CFB spread+total SGPs at or above FOOTBALL_SGP_MAX_SPREAD_NCAAF
-          // (default 28; 0 disables).
+          // (default 28; 0 disables) in EITHER direction.
           if (calibrated && calibrated.combo === 'spread_total'
               && String(calibrated.basis || '').startsWith('ncaaf.')) {
             const cap = Number(config.pricing.footballSgpMaxSpreadNcaaf);
@@ -4749,7 +4772,7 @@ function shouldDecline(legs, parlayId) {
               return {
                 declined: true,
                 reason: 'football_sgp_spread_too_large',
-                detail: `CFB spread+total SGP on event ${eid} (${desc}) — spread ${mag} >= ${cap}: correlation above the measured 14.5+ bucket is not calibrated`,
+                detail: `CFB spread+total SGP on event ${eid} (${desc}) — spread ${mag} >= ${cap} (FOOTBALL_SGP_MAX_SPREAD_NCAAF): the measured 28+ buckets (1.24/1.25) under-charge the weak-dog blowout flow that fills there`,
               };
             }
           }

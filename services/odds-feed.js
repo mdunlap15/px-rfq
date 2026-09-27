@@ -314,12 +314,15 @@ const LINEUP_GRACE_MS = 3 * 60 * 1000; // decline for 3 minutes after a change
 const LINEUP_SAME_GAME_MS = 2 * 60 * 60 * 1000;
 const LINEUP_PRUNE_MS = 48 * 60 * 60 * 1000; // forget games that started >48h ago
 
-// Closing line snapshots. Keyed by normalized event key (home|away). Captured
-// once per event when the event's commenceTime crosses into the past. Stores
-// the final Pinnacle + consensus per-market fair probs as a snapshot for CLV
-// analysis. Persisted only in memory — lost on restart.
+// Closing line snapshots. Keyed `sport|home|away|<odds-feed eventId>` (the
+// same string db.saveClosingLine writes as cache_key). Captured once per event
+// when the event's commenceTime crosses into the past. Stores the final
+// Pinnacle + consensus per-market fair probs as a snapshot for CLV analysis.
+// Written through to closing_lines but never read back — lost on restart.
+// ONE TEAM PAIR HOLDS SEVERAL GAMES (MLB series, doubleheaders): look them up
+// with getClosingLineSnapshot, which resolves by start time, never by prefix.
 // {
-//   [eventKey]: {
+//   [cacheKey]: {
 //     sport, homeTeam, awayTeam, commenceTime, capturedAt,
 //     markets: {
 //       h2h:     { home, away },  // implied probs
@@ -9587,21 +9590,52 @@ function captureClosingLines() {
   return { captured, total: Object.keys(closingLinesCache).length };
 }
 
+// Furthest a snapshot's commenceTime may sit from the leg's start and still be
+// the SAME game. Mirrors espn-scores' 12h gate: past any cross-source start
+// jitter (tennis order-of-play drifts by hours), well short of the ~17-24h
+// between consecutive games of a series. Beyond it: no close, not a wrong one.
+const CLOSING_SAME_GAME_MS = 12 * 60 * 60 * 1000;
+// Baseball plays doubleheaders: same pair, same day, >= 3h apart. With 12h, a
+// DH game whose own close was never captured (a miss, or a restart wiping the
+// in-memory cache) would read its SIBLING's close. PX start drift within one
+// MLB event is <= 1h, so 90 minutes keeps the real match and rejects the other
+// game (review 2026-09-27).
+const CLOSING_SAME_GAME_MS_BASEBALL = 90 * 60 * 1000;
+function _closingSameGameMs(sport) {
+  return /baseball/i.test(String(sport || '')) ? CLOSING_SAME_GAME_MS_BASEBALL : CLOSING_SAME_GAME_MS;
+}
+
 /**
- * Look up a closing line snapshot by event key. Tries primary key first,
- * then falls back to any matching sport + event key.
+ * Closing-line snapshot for ONE game, or null.
+ *
+ * `eventId` is the ODDS-FEED event id the snapshot is keyed on. A PX event id
+ * never equals it (separate id spaces) — the settlement path passed pxEventId
+ * here until 2026-09-27, the exact match never hit, and the old prefix scan
+ * then returned the FIRST snapshot for the team pair: MLB series games 2-4 and
+ * doubleheader game 2 all read game 1's close (~37% of unique legs), which
+ * contaminated every clvDelta and /clv-report.
+ *
+ * Without a matching id, the game is resolved by start time: of this pair's
+ * snapshots, the one whose commenceTime is closest to `startTime`, and only
+ * within CLOSING_SAME_GAME_MS. No parseable startTime → null. Keys are
+ * unchanged, so snapshots captured before this fix resolve the same way.
  */
-function getClosingLineSnapshot(sport, homeTeam, awayTeam, pxEventId) {
-  const key = normalizeEventKey(homeTeam, awayTeam);
-  // Try exact match first
-  const exactKey = sport + '|' + key + '|' + (pxEventId || '');
-  if (closingLinesCache[exactKey]) return closingLinesCache[exactKey];
-  // Fallback: any snapshot matching sport + team key
-  const prefix = sport + '|' + key + '|';
+function getClosingLineSnapshot(sport, homeTeam, awayTeam, eventId, startTime) {
+  const prefix = sport + '|' + normalizeEventKey(homeTeam, awayTeam) + '|';
+  if (eventId && closingLinesCache[prefix + eventId]) return closingLinesCache[prefix + eventId];
+  const targetMs = startTime ? new Date(startTime).getTime() : NaN;
+  if (isNaN(targetMs)) return null;
+  let best = null;
+  let bestDiff = Infinity;
   for (const k of Object.keys(closingLinesCache)) {
-    if (k.startsWith(prefix)) return closingLinesCache[k];
+    if (!k.startsWith(prefix)) continue;
+    const snap = closingLinesCache[k];
+    const snapMs = snap && snap.commenceTime ? new Date(snap.commenceTime).getTime() : NaN;
+    if (isNaN(snapMs)) continue;
+    const diff = Math.abs(snapMs - targetMs);
+    if (diff < bestDiff) { bestDiff = diff; best = snap; }
   }
-  return null;
+  return bestDiff <= _closingSameGameMs(sport) ? best : null;
 }
 
 function getClosingLinesStatus() {
@@ -11070,6 +11104,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     avg(viggedProbsOver), avg(viggedProbsUnder)
   );
   const exactLineFairOver = fairProbOver;
+  const exactLineFairUnder = fairProbUnder;
   let method = 'exact_line_devig';
   let impliedMean = null;
   let distBooks = 0;
@@ -11088,6 +11123,14 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
       const floored = _applyPropHeavyFavFloor(dist.fairOver, 1 - dist.fairOver, avg(viggedProbsOver), avg(viggedProbsUnder));
       fairProbOver = floored.fairProbOver;
       fairProbUnder = floored.fairProbUnder;
+      // Strikeouts only (the one count market with a measured under leak — see
+      // _strikeoutUnderFair): never price the under below the exact-line under.
+      // Mirrors the dedicated K bridge so an allowlist-registered K line cannot
+      // bypass the fix.
+      if (marketKey === 'pitcher_strikeouts' && exactLineFairUnder > 0 && exactLineFairUnder < 1
+          && fairProbUnder != null && exactLineFairUnder > fairProbUnder) {
+        fairProbUnder = exactLineFairUnder;
+      }
       method = 'count_dist';
       impliedMean = dist.muAgg;
       distBooks = dist.muBooks;
@@ -11356,6 +11399,22 @@ function _countDistFairOver(quotes, requestedLine, phi) {
   return { fairOver, muAgg, muBooks };
 }
 
+// Pitcher-strikeout UNDER fair (2026-09-27 pricing audit). The distribution
+// fit above OVERSTATES P(over) on the lines that fill, and the under used to be
+// `1 − distOver`, so it inherited the whole error: K-under legs won 0.98× fair
+// on exact-line de-vig before the fit shipped (7/8), then 1.11× (7/8–8/5) and
+// 1.32× (8/6–8/24) — 146 wins vs 122.3 expected over 219 unique legs, z=3.3.
+// The under is never cheaper than the books' own de-vigged under at PX's line:
+// max(1 − distOver, 1 − exactOver). The over keeps the distribution fair (the
+// off-consensus-line underprice fix) — do not apply this to the over. With no
+// book at PX's exact line there is nothing to floor against. Pure.
+function _strikeoutUnderFair(fairProbOver, exactFairOver) {
+  if (fairProbOver == null) return null;
+  const underFromOver = 1 - fairProbOver;
+  if (!(exactFairOver > 0 && exactFairOver < 1)) return underFromOver;
+  return Math.max(underFromOver, 1 - exactFairOver);
+}
+
 // TOA equivalent of lookupPlayerStrikeoutProp. Returns the same shape
 // so the websocket caller can swap them transparently. Async because
 // TOA requires HTTP calls (cached, but not pre-warmed).
@@ -11474,7 +11533,10 @@ async function lookupPlayerStrikeoutPropFromTheOddsApi(sport, pxEventInfo, playe
   const useDist = (config.pricing && config.pricing.countPropDistFair !== false)
     && distFairOver != null && distFairOver > 0 && distFairOver < 1;
   const fairProbOver = useDist ? distFairOver : exactFairOver;
-  const fairProbUnder = fairProbOver != null ? 1 - fairProbOver : null;
+  // UNDER is floored at the exact-line under (see _strikeoutUnderFair) — the
+  // distribution fit overstates P(over), and 1 − distOver handed that error to
+  // the under. The OVER keeps the distribution fair (the off-line fix).
+  const fairProbUnder = _strikeoutUnderFair(fairProbOver, exactFairOver);
 
   return {
     matchedRows: allRows,
@@ -11632,6 +11694,7 @@ module.exports = {
   // Phase 1 player-prop shadow pricing
   lookupPlayerStrikeoutProp,
   lookupPlayerStrikeoutPropFromTheOddsApi,
+  _strikeoutUnderFair, // test seam (test/k-under-fair.test.js)
   lookupTheOddsApiPlayerProp,
   lookupTheOddsApiPlayerPropOneSided,
   lookupPlayerPointsProp,

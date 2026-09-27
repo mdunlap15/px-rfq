@@ -1,6 +1,7 @@
 const log = require('./logger');
 const db = require('./db');
 const templateExposure = require('./template-exposure');
+const parlaySettlement = require('./parlay-settlement');
 
 // ---------------------------------------------------------------------------
 // IN-MEMORY ORDER STORE (backed by Supabase for persistence)
@@ -1476,7 +1477,19 @@ function recordFinalized(parlayId, orderUuid, payload) {
 /**
  * Record individual leg settlement.
  */
-function recordLegSettlement(orderUuid, legPayload) {
+// When recordSettlement declines to settle (e.g. its defensive recheck), the leg
+// statuses written with persist:false would otherwise never reach Supabase.
+function _persistIfNotSettled(order) {
+  if (order && !String(order.status || '').startsWith('settled_')) {
+    db.saveOrder(order).catch(() => {});
+  }
+}
+
+// opts.persist=false: the caller settles the order right after and that single
+// settled save persists these legs too. Saving here as well fired an unawaited
+// 'confirmed'-status upsert that could land AFTER the settled one and revert the
+// row in Supabase (review 2026-09-27).
+function recordLegSettlement(orderUuid, legPayload, opts = {}) {
   const parlayId = ordersByUuid[orderUuid];
   const order = parlayId ? orders[parlayId] : null;
   if (!order) return;
@@ -1508,7 +1521,7 @@ function recordLegSettlement(orderUuid, legPayload) {
     }
   }
 
-  db.saveOrder(order).catch(() => {});
+  if (opts.persist !== false) db.saveOrder(order).catch(() => {});
 }
 
 /**
@@ -1616,6 +1629,10 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
     // Stored on the order for later reference.
     const pxProfit = (payout != null && payout !== 0) ? Number(payout) : null;
     if (pxProfit != null) order.pxProfit = pxProfit;
+    // Only the void-reduced estimate branch below may stamp pnlSource; a
+    // re-settlement (poll reset, full reconcile, revert-then-resettle) must not
+    // carry a stale estimate label onto PX's own number (review 2026-09-27).
+    if (order.meta) delete order.meta.pnlSource;
 
     if (result === 'won') {
       // SP won — bettor's parlay lost, we keep their wager
@@ -1623,12 +1640,55 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
       stats.totalWins++;
     } else if (result === 'lost') {
       // SP lost — bettor's parlay won, we pay out the actual reduced payout.
-      // Prefer PX's profit field (negative) when provided; fall back to -stake
-      // for cases where PX didn't include profit.
-      order.pnl = pxProfit != null && pxProfit < 0 ? pxProfit : -(order.confirmedStake || 0);
+      // Prefer PX's profit field (negative) when provided. Without it, a void/
+      // push leg means PX paid REDUCED odds (services/parlay-settlement.js rule
+      // 4), so -stake overstated the loss — by a median 2.9x on the 140 post-6/26
+      // won-with-a-push tickets (019f43af booked -$747 for a ~-$229 payout).
+      // The estimate reproduces PX to the cent on 81% of them; the settlement
+      // poll still overwrites it with PX's own profit whenever PX reports one.
+      if (pxProfit != null && pxProfit < 0) {
+        order.pnl = pxProfit;
+      } else {
+        const est = parlaySettlement.reducedPayoutLoss({
+          legs: order.legs || order.meta?.legs || [],
+          confirmedOdds: order.confirmedOdds,
+          confirmedStake: order.confirmedStake,
+        });
+        if (est && est.voidLegs > 0) {
+          order.pnl = -est.loss;
+          order.meta = order.meta || {};
+          order.meta.pnlSource = `derived_void_reduced:${est.method}`;
+        } else {
+          order.pnl = -(order.confirmedStake || 0);
+        }
+      }
       stats.totalLosses++;
     } else if (result === 'push' || result === 'void') {
+      // Includes a WON-with-a-push parlay that contains a same-game group: PX
+      // VOIDS the whole parlay (rule 3) and refunds, so $0 is the real cash
+      // outcome — never "correct" it into a reduced-odds loss.
       order.pnl = 0;
+    }
+
+    // Stamp PX's grading basis (same_game_void / void_reduced / ...) so a
+    // won-with-a-push row explains itself, and flag — never override — a PX
+    // result that breaks the measured rule. PX leg statuses only: our scraped
+    // inferredResult must not raise a false alarm.
+    try {
+      const exp = parlaySettlement.expectedPxSettlement(order.legs || order.meta?.legs || [], { pxOnly: true });
+      if (exp.result) {
+        order.meta = order.meta || {};
+        order.meta.settlementBasis = exp.basis;
+        const got = result === 'void' ? 'push' : result;
+        if (exp.result !== got) {
+          order.meta.pxSettlementRuleMismatch = { expected: exp.result, basis: exp.basis, got: result };
+          log.warn('Settle', `PX settled ${order.parlayId} as ${result} but the measured PX rule predicts ${exp.result} (${exp.basis}) — recorded as PX says; review`);
+        } else if (order.meta.pxSettlementRuleMismatch) {
+          delete order.meta.pxSettlementRuleMismatch;
+        }
+      }
+    } catch (err) {
+      log.debug('Settle', `settlement-basis stamp failed for ${order.parlayId}: ${err.message}`);
     }
 
     if (order.pnl != null) {
@@ -1650,8 +1710,12 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
       let closingParlayImplied = 1;
       let allLegsHaveClose = true;
       for (const leg of legs) {
+        // Resolve by team pair + the leg's OWN start time. The 4th argument is
+        // the odds-feed event id snapshots are keyed on; legs do not carry it,
+        // and the pxEventId passed here until 2026-09-27 never matched, so
+        // every leg read the pair's FIRST snapshot (series game 1's close).
         const snap = oddsFeed.getClosingLineSnapshot(
-          leg.sport, leg.homeTeam, leg.awayTeam, leg.pxEventId
+          leg.sport, leg.homeTeam, leg.awayTeam, null, leg.startTime || leg.start_time
         );
         if (!snap) { allLegsHaveClose = false; continue; }
         let closeImpl = null;
@@ -6031,7 +6095,14 @@ async function pollOrderSettlements(px) {
           stats.runningPnL -= order.pnl;
           order.pnl = pxProfit;
           order.pxProfit = pxProfit;
+          if (order.meta) delete order.meta.pnlSource; // PX's number supersedes any estimate
           stats.runningPnL += pxProfit;
+          db.saveOrder(order).catch(() => {});
+        } else if (pxProfit != null && pxProfit !== 0 && order.meta && order.meta.pnlSource) {
+          // PX confirmed our estimate to the cent: the P&L is now PX's own
+          // number, so the estimate label must go (review 2026-09-27).
+          delete order.meta.pnlSource;
+          order.pxProfit = pxProfit;
           db.saveOrder(order).catch(() => {});
         }
         continue;
@@ -6123,21 +6194,24 @@ async function pollOrderSettlements(px) {
         }
       }
 
+      // Update per-leg settlement from PX response BEFORE settling (was after):
+      // recordSettlement reads the leg statuses to stamp PX's grading basis
+      // and, when PX sends no profit, to size a void-reduced payout.
+      if (pxOrder.legs && Array.isArray(pxOrder.legs)) {
+        for (const pxLeg of pxOrder.legs) {
+          if (pxLeg.line_id && pxLeg.settlement_status) {
+            recordLegSettlement(uuid, pxLeg, { persist: false });
+          }
+        }
+      }
+
       // PX REST API settlement_status is SP-perspective — use directly.
       // Pass trusted:true because we already validated the settlement via
       // pxOrder.legs above; recordSettlement should not re-apply its own
       // defensive 4-hour startTime recheck.
-      recordSettlement(uuid, settlementStatus, pxOrder.profit || 0, { trusted: true });
+      const settledOrder = recordSettlement(uuid, settlementStatus, pxOrder.profit || 0, { trusted: true });
+      _persistIfNotSettled(settledOrder || orders[ordersByUuid[uuid]]);
       settled++;
-
-      // Update per-leg settlement from PX response
-      if (pxOrder.legs && Array.isArray(pxOrder.legs)) {
-        for (const pxLeg of pxOrder.legs) {
-          if (pxLeg.line_id && pxLeg.settlement_status) {
-            recordLegSettlement(uuid, pxLeg);
-          }
-        }
-      }
     }
 
     log.info('Poll', `Settlement poll: checked ${pxOrders.length} PX orders, settled ${settled}`);
@@ -6265,10 +6339,12 @@ function reconcileSettlements() {
     if (legStatuses.length === 0) continue; // no leg data to reconcile against
 
     // Derive correct SP result from legs (bettor-perspective leg data).
-    // Only derive when the leg pattern is unambiguous. PX has inconsistent
-    // handling of won+push mixed parlays (sometimes 'lost', sometimes 'push')
-    // so we don't try to guess — leave those to pollOrderSettlements which
-    // fetches PX's authoritative order-level decision directly.
+    // Only derive when the leg pattern is unambiguous. Won+push mixed parlays
+    // are NOT inconsistent (as this comment used to say) — PX voids the whole
+    // parlay ('push', $0) when it contains a same-game group and pays reduced
+    // odds ('lost', smaller loss) otherwise; see services/parlay-settlement.js.
+    // They are still left to pollOrderSettlements: the reduced-odds amount is
+    // PX's number, and a leg-derived -stake here would overwrite it.
     //   - Any leg LOST → bettor's parlay busted → SP WON (always, even
     //     with other legs missing status — one loss is enough to kill)
     //   - ALL legs have status AND all WON (no pushes) → bettor hit
@@ -6312,6 +6388,7 @@ function reconcileSettlements() {
     // Apply corrected result
     o.status = `settled_${derivedResult}`;
     o.settlementResult = derivedResult;
+    if (o.meta) delete o.meta.pnlSource; // this path rewrites pnl without recordSettlement
     const bettorWager = americanOddsToProfit(o.confirmedOdds, o.confirmedStake);
     if (derivedResult === 'won') {
       o.pnl = bettorWager;
@@ -7034,10 +7111,12 @@ async function fullPxReconcile(px) {
     // Backfill leg settlement data from PX before calling recordSettlement
     // so loadFromDb's revert heuristic (which looks at leg statuses) has
     // complete data and won't re-revert on next reload.
+    let _legsBackfilled = false;
     if (pxOrder.legs && Array.isArray(pxOrder.legs)) {
       for (const pxLeg of pxOrder.legs) {
         if (pxLeg.line_id && pxLeg.settlement_status) {
-          recordLegSettlement(uuid, pxLeg);
+          recordLegSettlement(uuid, pxLeg, { persist: false });
+          _legsBackfilled = true;
         }
       }
     }
@@ -7045,12 +7124,17 @@ async function fullPxReconcile(px) {
     // If already marked settled with matching status, fix pnl if PX disagrees
     if (order.status === `settled_${pxStatus}`) {
       const pxProfit = pxOrder.profit != null ? Number(pxOrder.profit) : null;
-      if (pxProfit != null && order.pnl != null && Math.abs(pxProfit - order.pnl) > 0.01) {
+      const pnlStale = pxProfit != null && order.pnl != null && Math.abs(pxProfit - order.pnl) > 0.01;
+      if (pnlStale) {
         log.info('Reconcile', `Fixing stale pnl for ${pxParlayId}: was ${order.pnl}, PX says ${pxProfit}`);
         order.pnl = pxProfit;
         order.pxProfit = pxProfit;
-        db.saveOrder(order).catch(() => {});
       }
+      // PX's number (matching or corrected) supersedes any estimate label.
+      const hadEstimate = !!(order.meta && order.meta.pnlSource && pxProfit != null && pxProfit !== 0);
+      if (hadEstimate) delete order.meta.pnlSource;
+      // One save carries the backfilled legs (status is already settled here).
+      if (pnlStale || hadEstimate || _legsBackfilled) db.saveOrder(order).catch(() => {});
       continue;
     }
 
@@ -7061,8 +7145,9 @@ async function fullPxReconcile(px) {
     }
 
     // Record the settlement. recordSettlement will update status, pnl,
-    // stats counters, and persist to DB.
-    recordSettlement(uuid, pxStatus, pxOrder.profit || 0);
+    // stats counters, and persist to DB (legs included — they were applied
+    // above with persist:false). If it declines to settle, persist the legs.
+    _persistIfNotSettled(recordSettlement(uuid, pxStatus, pxOrder.profit || 0) || order);
     settled++;
   }
 
@@ -7682,7 +7767,12 @@ async function reconcileGhostConfirmed(px) {
           const result = pxSettlement === 'push' ? 'push' : pxSettlement;
           const pxProfit = px.profit != null ? Number(px.profit) : 0;
           log.info('GhostReconcile', `PX settled ${order.parlayId.substring(0,8)} as ${result} (profit=${pxProfit}) — promoting tracker status`);
-          recordSettlement(order.orderUuid, result, pxProfit);
+          // Leg statuses first: recordSettlement reads them (grading basis,
+          // void-reduced payout when PX sends no profit).
+          for (const pxLeg of (Array.isArray(px.legs) ? px.legs : [])) {
+            if (pxLeg.line_id && pxLeg.settlement_status) recordLegSettlement(order.orderUuid, pxLeg, { persist: false });
+          }
+          _persistIfNotSettled(recordSettlement(order.orderUuid, result, pxProfit) || order);
           settledFound++;
         } else if (pxStatus === 'rejected' || pxStatus === 'failed') {
           // Not a real fill on PX — scrub our confirmed status so it stops
@@ -7844,7 +7934,10 @@ async function reconcileGhostConfirmed(px) {
       // If PX has it settled too, record the settlement so P&L is captured.
       if (pxSettlement === 'won' || pxSettlement === 'lost' || pxSettlement === 'push') {
         const profit = pxMatch.profit != null ? Number(pxMatch.profit) : 0;
-        recordSettlement(uuid, pxSettlement, profit);
+        for (const pxLeg of (Array.isArray(pxMatch.legs) ? pxMatch.legs : [])) {
+          if (pxLeg.line_id && pxLeg.settlement_status) recordLegSettlement(uuid, pxLeg, { persist: false });
+        }
+        _persistIfNotSettled(recordSettlement(uuid, pxSettlement, profit) || orders[ordersByUuid[uuid]]);
       }
     }
   }
@@ -8225,10 +8318,28 @@ async function backfillSgpCorrelation({ dryRun = false } = {}) {
       if (s && t) combo = 'spread_total';
       else if (m && t) combo = 'ml_total';
       if (!combo) continue;
+      // Football: the MEASURED direction-aware table wins, exactly as in
+      // priceParlay — including 1.00. Without this, a CFB opposite-direction or
+      // NFL ticket stored at 1.00 was re-priced off the generic grid (1.15) by a
+      // manual backfill run (review 2026-09-27).
+      const sideLeg = s || m;
+      const fb = require('./football-sgp-correlation').footballSgpFactor({
+        sport: sideLeg.sport || sideLeg.lineInfo?.sport,
+        combo,
+        spreadLine: s ? Number(s.line ?? s.lineInfo?.line) : undefined,
+        totalSelection: String(t.selection || t.lineInfo?.oddsApiSelection || t.lineInfo?.selection || '').toLowerCase(),
+      });
+      if (fb) {
+        if (fb.factor !== 1) { combos.push(combo); factor *= fb.factor; }
+        continue;
+      }
       combos.push(combo);
       let f = 1;
       if (byCombo[combo] != null) f = byCombo[combo];
       else if (combo === 'spread_total') f = sgpPosLegacy;
+      // Same >= 1.00 floor as the pricer's grid lookup (2026-09-27): a grid
+      // factor below 1 must never lower a stored fair below independent.
+      if (f < 1) f = 1;
       factor *= f;
     }
     return { factor, combos };

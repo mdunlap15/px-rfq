@@ -23,7 +23,17 @@ let supabase = null;
 // "no credentials configured" path (`const db = getClient(); if (!db) return;`),
 // which every function in this file already handles. Tests get a hermetic
 // no-op DB instead of the production one.
-const IS_TEST_RUN = !!process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test';
+// 2026-09-27: `node --test --test-isolation=none` runs every test file in the
+// PARENT process, where NODE_TEST_CONTEXT is NOT set — a review run that way
+// wrote 14 fake parlay_orders rows (9 'confirmed') to production. The parent's
+// execArgv still carries '--test' (exact match: `node --watch` children inherit
+// other '--test-*' flags, so a prefix match would disable the DB in dev). A
+// plain `node test/foo.test.js` is caught by the entry-file name.
+const _entry = (require.main && require.main.filename) || process.argv[1] || '';
+const IS_TEST_RUN = !!process.env.NODE_TEST_CONTEXT
+  || process.env.NODE_ENV === 'test'
+  || process.execArgv.includes('--test')
+  || /[\\/]test[\\/][^\\/]+\.test\.js$/i.test(_entry);
 let _warnedTestRun = false;
 
 function getClient() {

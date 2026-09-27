@@ -65,6 +65,30 @@
  * The coupling rises steadily with the spread; one 14.5+ number over-charged
  * 14.5-21 and under-charged 28+ by ~7%.
  *
+ * !! THOSE NUMBERS ARE ONE DIRECTION. Every bucket above is fav covers + over.
+ * The OPPOSITE pairs — fav covers + under, dog covers + over — are a different
+ * cell of the same 2x2 table and run the other way. RE-MEASURED 2026-09-27 on
+ * the same 9,465 games (scripts/_cfb_sgp_bucket_measure.py; 4,000 resamples):
+ *
+ * CFB spread+total     dog+under (same dir)    fav+under (opp)         dog+over (opp)
+ *    0   - 3.5          0.947 [0.898, 0.997]   1.057 [1.003, 1.110]   1.054 [1.003, 1.104]
+ *    3.5 - 7.5          1.018 [0.978, 1.059]   0.981 [0.938, 1.024]   0.980 [0.937, 1.024]
+ *    7.5 - 14.5         1.045 [1.005, 1.084]   0.956 [0.918, 0.995]   0.949 [0.906, 0.994]
+ *   14.5 - 21           1.116 [1.065, 1.170]   0.892 [0.841, 0.940]   0.880 [0.823, 0.932]
+ *   21   - 28           1.177 [1.111, 1.244]   0.831 [0.766, 0.894]   0.827 [0.760, 0.891]
+ *   28   - 35           1.234 [1.149, 1.320]   0.766 [0.683, 0.852]   0.761 [0.675, 0.844]
+ *   35 +                1.310 [1.210, 1.414]   0.663 [0.558, 0.770]   0.769 [0.691, 0.841]
+ * A blowout couples "favourite covers" to "over"; it DE-couples it from
+ * "under". Until 2026-09-27 the lookup read only |spread|, so fav+under and
+ * dog+over paid the full 1.05-1.25 same-direction bucket although they
+ * measure 0.66-0.96 at 7.5+ (i.e. clamp to 1.00). The one place the opposite
+ * pair is POSITIVE is the 0-3.5 bucket, where it now pays 1.06 instead of 1.00.
+ * dog+under tracks fav+over within 0.012 everywhere EXCEPT 35+ (1.310 vs
+ * 1.251 — closing totals there go over 57% of the time, so the two cells'
+ * marginals drift apart). That bucket sits behind the 28+ decline
+ * (FOOTBALL_SGP_MAX_SPREAD_NCAAF); lifting that cap would price dog+under at
+ * 35+ ~5% cheap on this table.
+ *
  * Below two touchdowns there is NO correlation. Above it the joint probability
  * runs ~17% above the independent product — blowout game script (garbage-time
  * scoring, running clock, backups) genuinely couples the side to the total.
@@ -88,6 +112,14 @@
  *    the WIDEST bucket. The spread is the input that decides between 1.00 and
  *    1.17; if we cannot read it, assuming the small-spread value would
  *    underprice exactly the bucket that matters.
+ *  * DIRECTION comes from the legs: the spread sign is the bettor's side
+ *    (negative = took the favourite) and the total leg's selection is
+ *    over/under. When either is unreadable the bucket charges the MORE
+ *    expensive of its two directions — the same-direction factor everywhere
+ *    at 3.5+ (the pre-2026-09-27 behaviour), 1.06 at 0-3.5.
+ *  * A bucket without `oppositeFactor` (NFL; a FOOTBALL_SGP_CORRELATION
+ *    override written before 2026-09-27) prices both directions at `factor`,
+ *    i.e. direction-blind exactly as before.
  *  * CFL and any other americanfootball_* league returns null — not measured.
  *  * Every threshold and factor is overridable via FOOTBALL_SGP_CORRELATION
  *    (JSON), but the defaults ARE the measurement: an override is a deliberate
@@ -116,13 +148,20 @@ const DEFAULTS = {
     // lines joined to final scores; reproduces the old 14.5+ aggregate: 1.167 vs
     // 1.169). The old single 14.5+ bucket (1.17) was an AVERAGE that under-charged
     // the tail: Rutgers -42.5 + O56.5 quoted +233 vs FanDuel's real SGP +151.
+    //
+    // `factor` = SAME direction (fav covers + over / dog covers + under), the
+    // cell each bucket was measured on. `oppositeFactor` = fav covers + under /
+    // dog covers + over (2026-09-27, same games; the larger of the two cells,
+    // clamped). Bucket i covers [minSpread_i, minSpread_i-1), matching the
+    // measurement's lo <= |spread| < hi.
     spreadBuckets: [
-      { minSpread: 35, factor: 1.25 },    // 1.251 [1.171, 1.338] n=501 (40+: 1.265 [1.152, 1.391])
-      { minSpread: 28, factor: 1.24 },    // 1.239 [1.156, 1.329] n=574
-      { minSpread: 21, factor: 1.17 },    // 1.165 [1.104, 1.229] n=946
-      { minSpread: 14.5, factor: 1.11 },  // 1.112 [1.061, 1.164] n=1432
-      { minSpread: 7.5, factor: 1.05 },   // 1.050 [1.008, 1.091] n=2362 (was 1.004, CI contained 1)
-      { minSpread: 0, factor: 1.00 },     // 0-3.5 0.942 (clamped), 3.5-7.5 1.021 [0.975, 1.067]
+      { minSpread: 35, factor: 1.25, oppositeFactor: 1.00 },   // 1.251 [1.171, 1.338] n=501 (40+: 1.265 [1.152, 1.391]); opp 0.663 / 0.769 (dog+under 1.310 — see header)
+      { minSpread: 28, factor: 1.24, oppositeFactor: 1.00 },   // 1.239 [1.156, 1.329] n=574; opp 0.766 / 0.761
+      { minSpread: 21, factor: 1.17, oppositeFactor: 1.00 },   // 1.165 [1.104, 1.229] n=946; opp 0.831 / 0.827
+      { minSpread: 14.5, factor: 1.11, oppositeFactor: 1.00 }, // 1.112 [1.061, 1.164] n=1432; opp 0.892 / 0.880
+      { minSpread: 7.5, factor: 1.05, oppositeFactor: 1.00 },  // 1.050 [1.008, 1.091] n=2362 (was 1.004, CI contained 1); opp 0.956 / 0.949
+      { minSpread: 3.5, factor: 1.00, oppositeFactor: 1.00 },  // 1.021 [0.975, 1.067] n=2156; opp 0.981 / 0.980 — every CI contains 1
+      { minSpread: 0, factor: 1.00, oppositeFactor: 1.06 },    // 0.942 [0.892, 0.996] n=1494 -> clamp; opp 1.057 [1.003, 1.110] / 1.054 [1.003, 1.104]
     ],
   },
 };
@@ -166,9 +205,12 @@ function _resetForTest() { _overrideCache = undefined; }
  * @param {string}  a.combo        'spread_total' | 'ml_total'
  * @param {number} [a.spreadLine]  the bettor's spread; negative = they took the
  *                                 favourite. Only consulted for spread_total.
+ * @param {string} [a.totalSelection] 'over' | 'under' — the total leg's side.
+ *                                 Only consulted for spread_total; with the
+ *                                 spread sign it picks same vs opposite direction.
  * @returns {{factor:number, basis:string}|null} null when not calibrated.
  */
-function footballSgpFactor({ sport, combo, spreadLine } = {}) {
+function footballSgpFactor({ sport, combo, spreadLine, totalSelection } = {}) {
   const league = _leagueOf(sport);
   if (!league) return null;
   const t = _table()[league];
@@ -193,21 +235,35 @@ function footballSgpFactor({ sport, combo, spreadLine } = {}) {
   const sorted = buckets.slice().sort((x, y) => (Number(y.minSpread) || 0) - (Number(x.minSpread) || 0));
 
   const n = Number(spreadLine);
-  let mag, note;
+  let mag, note, side = null;
   if (Number.isFinite(n) && n !== 0) {
     mag = Math.abs(n);
     note = `spread ${mag}`;
+    side = n < 0 ? 'fav' : 'dog';
   } else {
     mag = Infinity;                       // fail toward the expensive side
     note = 'spread unknown -> widest bucket';
   }
+  const sel = String(totalSelection || '').toLowerCase();
+  const tot = sel === 'over' || sel === 'under' ? sel : null;
+  // fav+over and dog+under are the SAME direction (the favourite's blowout
+  // lifts the total); fav+under and dog+over are the opposite pair.
+  const dir = side && tot ? `${side}_${tot}` : null;
+  const same = dir ? (dir === 'fav_over' || dir === 'dog_under') : null;
   for (const b of sorted) {
     if (mag >= (Number(b.minSpread) || 0)) {
       const f = Number(b.factor);
       if (!Number.isFinite(f)) return null;
+      // No (or unreadable) oppositeFactor = direction-blind, as before.
+      const o = b.oppositeFactor == null ? NaN : Number(b.oppositeFactor);
+      const opp = Number.isFinite(o) ? o : f;
+      let use, dnote;
+      if (same === true) { use = f; dnote = `${dir} same-direction`; }
+      else if (same === false) { use = opp; dnote = `${dir} opposite-direction`; }
+      else { use = Math.max(f, opp); dnote = 'direction unknown -> dearer of both'; }
       return {
-        factor: Math.max(1, f),
-        basis: `${league}.spread_total (${note}, >=${b.minSpread})`,
+        factor: Math.max(1, use),
+        basis: `${league}.spread_total (${note}, >=${b.minSpread}, ${dnote})`,
       };
     }
   }

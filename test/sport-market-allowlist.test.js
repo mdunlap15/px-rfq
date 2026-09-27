@@ -60,7 +60,7 @@ test('the on-demand and cache-restore paths consult the same gate', () => {
   const restoreGate = SRC.lastIndexOf('_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType', restore);
   assert.ok(restore > -1 && restoreGate > -1 && restoreGate < restore, 'cache restore refuses BEFORE inserting');
   // primaries: a denied info never becomes a primary
-  assert.ok(/function _trackPrimaryForIndex\(lineInfo\) \{\n[^\n]*\n[^\n]*\n[^\n]*\n\s*if \(lineInfo && lineInfo\._marketDenied\) return;/.test(SRC), '_trackPrimaryForIndex ignores denied infos');
+  assert.ok(/function _trackPrimaryForIndex\(lineInfo\) \{\r?\n[^\n]*\n[^\n]*\n[^\n]*\n\s*if \(lineInfo && lineInfo\._marketDenied\) return;/.test(SRC), '_trackPrimaryForIndex ignores denied infos');
 });
 
 test('an env override replaces the default and clamps to arrays of strings', () => {

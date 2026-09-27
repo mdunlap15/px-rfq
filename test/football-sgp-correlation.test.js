@@ -11,7 +11,9 @@
 //      artefact — under 14.5 the CI contains 1.000 and at 14.5+ it is 1.169
 //      [1.131, 1.209]. A single aggregate would simultaneously overprice 68% of
 //      CFB games and underprice the 32% that matter. The spread-size split is
-//      therefore load-bearing, not a refinement.
+//      therefore load-bearing, not a refinement. So is the DIRECTION
+//      (2026-09-27): the buckets are fav+over / dog+under; fav+under and
+//      dog+over measure 0.66-0.96 at 7.5+ (clamp to 1.00) and 1.06 at 0-3.5.
 //
 //   2. Flipping FOOTBALL_SGP_ENABLED must release ONLY the measured shape.
 //      Everything else same-game football — player props above all — has no
@@ -47,32 +49,114 @@ test('NFL side+total is measured INDEPENDENT at every spread', () => {
   assert.strictEqual(F({ sport: NFL, combo: 'ml_total' }).factor, 1);
 });
 
-test('CFB spread+total follows the re-measured spread buckets (2026-09-25)', () => {
+// The SAME-direction side of the total for a spread: fav (negative) + over,
+// dog (positive) + under — the direction each bucket was measured on.
+const sameDir = (spread) => (spread < 0 ? 'over' : 'under');
+const oppDir = (spread) => (spread < 0 ? 'under' : 'over');
+const cfb = (spreadLine, totalSelection) => F({ sport: CFB, combo: 'spread_total', spreadLine, totalSelection }).factor;
+
+test('CFB SAME-direction spread+total follows the re-measured spread buckets (2026-09-25)', () => {
   // 9,465 games; the coupling rises with the spread. 0-7.5 CIs contain 1 (or
   // are negative and clamp), 7.5+ is measured positive and climbs to ~1.25.
+  // fav+over and dog+under share the bucket.
   const want = [
-    [-1.5, 1], [-3, 1], [-7, 1], [7, 1],
-    [-7.5, 1.05], [-10, 1.05], [-14, 1.05],
+    [-1.5, 1], [-3, 1], [-7, 1], [7, 1], [2.5, 1],
+    [-7.5, 1.05], [-10, 1.05], [-14, 1.05], [10, 1.05],
     [-14.5, 1.11], [-17, 1.11], [20.5, 1.11],
-    [-21, 1.17], [-24.5, 1.17],
+    [-21, 1.17], [-24.5, 1.17], [24.5, 1.17],
     [-28, 1.24], [-31.5, 1.24],
-    [-35, 1.25], [-42.5, 1.25], [-50, 1.25],
+    [-35, 1.25], [-42.5, 1.25], [-50, 1.25], [42.5, 1.25],
   ];
   for (const [spread, f] of want) {
-    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: spread }).factor, f, `CFB spread ${spread}`);
+    assert.strictEqual(cfb(spread, sameDir(spread)), f, `CFB spread ${spread} + ${sameDir(spread)}`);
+  }
+});
+
+test('CFB OPPOSITE-direction pairs (fav+under, dog+over) use their own measurement (2026-09-27)', () => {
+  // Measured 0.66-0.96 at 7.5+ (clamp to 1.00), ~0.98 at 3.5-7.5 (CI contains
+  // 1), and 1.054-1.057 at 0-3.5 — the one bucket where they are POSITIVE while
+  // the same direction (0.942) clamps.
+  const want = [
+    [-1.5, 1.06], [-3, 1.06], [2.5, 1.06], [3, 1.06],
+    [-3.5, 1], [-7, 1], [7, 1],
+    [-7.5, 1], [-10, 1], [-14, 1], [10, 1],
+    [-14.5, 1], [-17, 1], [20.5, 1],
+    [-21, 1], [-24.5, 1], [24.5, 1],
+    [-28, 1], [-35, 1], [-42.5, 1], [42.5, 1],
+  ];
+  for (const [spread, f] of want) {
+    assert.strictEqual(cfb(spread, oppDir(spread)), f, `CFB spread ${spread} + ${oppDir(spread)}`);
   }
 });
 
 test('bucket boundaries are inclusive', () => {
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14 }).factor, 1.05);
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -14.5 }).factor, 1.11);
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -27.5 }).factor, 1.17);
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -28 }).factor, 1.24);
-  assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: -35 }).factor, 1.25);
+  assert.strictEqual(cfb(-14, 'over'), 1.05);
+  assert.strictEqual(cfb(-14.5, 'over'), 1.11);
+  assert.strictEqual(cfb(-27.5, 'over'), 1.17);
+  assert.strictEqual(cfb(-28, 'over'), 1.24);
+  assert.strictEqual(cfb(-35, 'over'), 1.25);
+  // the 0-3.5 / 3.5-7.5 split only shows on the opposite direction
+  assert.strictEqual(cfb(-3, 'under'), 1.06);
+  assert.strictEqual(cfb(-3.5, 'under'), 1);
 });
 
 test('the extreme tail is no longer charged the 14.5+ average (Rutgers -42.5)', () => {
-  assert.ok(F({ sport: CFB, combo: 'spread_total', spreadLine: -42.5 }).factor > 1.17);
+  assert.ok(cfb(-42.5, 'over') > 1.17);
+});
+
+test('an unreadable DIRECTION charges the dearer of the bucket\'s two directions', () => {
+  // Either input missing (total side unreadable, or the spread sign — which
+  // also costs the magnitude) must fail toward the expensive side: the
+  // pre-2026-09-27 same-direction bucket at 3.5+, and 1.06 at 0-3.5.
+  for (const bad of [undefined, null, '', 'push', 'yes']) {
+    assert.strictEqual(cfb(-21, bad), 1.17, `-21 with total side ${String(bad)}`);
+    assert.strictEqual(cfb(10, bad), 1.05, `+10 with total side ${String(bad)}`);
+    assert.strictEqual(cfb(-2.5, bad), 1.06, `-2.5 with total side ${String(bad)}`);
+    assert.strictEqual(cfb(-5, bad), 1, `-5 with total side ${String(bad)}`);
+  }
+  // case-insensitive, so 'OVER' is a READABLE direction, not an unknown one
+  assert.strictEqual(cfb(-21, 'UNDER'), 1);
+  assert.strictEqual(cfb(-21, 'Over'), 1.17);
+});
+
+test('NFL and ml_total are direction-blind, as measured', () => {
+  for (const spread of [-3, -10, -21, 7]) {
+    for (const side of ['over', 'under', undefined]) {
+      assert.strictEqual(F({ sport: NFL, combo: 'spread_total', spreadLine: spread, totalSelection: side }).factor, 1);
+    }
+  }
+  for (const side of ['over', 'under', undefined]) {
+    assert.strictEqual(F({ sport: CFB, combo: 'ml_total', totalSelection: side }).factor, 1.02);
+  }
+});
+
+test('an override bucket WITHOUT oppositeFactor stays direction-blind (pre-2026-09-27 overrides keep their meaning)', () => {
+  const prev = process.env.FOOTBALL_SGP_CORRELATION;
+  process.env.FOOTBALL_SGP_CORRELATION = JSON.stringify({ ncaaf: { spreadBuckets: [{ minSpread: 14.5, factor: 1.17 }, { minSpread: 0, factor: 1.0 }] } });
+  fbCorr._resetForTest();
+  try {
+    assert.strictEqual(cfb(-21, 'over'), 1.17);
+    assert.strictEqual(cfb(-21, 'under'), 1.17);
+    assert.strictEqual(cfb(-2.5, 'under'), 1);
+  } finally {
+    if (prev === undefined) delete process.env.FOOTBALL_SGP_CORRELATION;
+    else process.env.FOOTBALL_SGP_CORRELATION = prev;
+    fbCorr._resetForTest();
+  }
+});
+
+test('an override oppositeFactor below 1 still clamps at 1.00', () => {
+  const prev = process.env.FOOTBALL_SGP_CORRELATION;
+  process.env.FOOTBALL_SGP_CORRELATION = JSON.stringify({ ncaaf: { spreadBuckets: [{ minSpread: 0, factor: 1.1, oppositeFactor: 0.83 }] } });
+  fbCorr._resetForTest();
+  try {
+    assert.strictEqual(cfb(-21, 'under'), 1);
+    assert.strictEqual(cfb(-21, 'over'), 1.1);
+  } finally {
+    if (prev === undefined) delete process.env.FOOTBALL_SGP_CORRELATION;
+    else process.env.FOOTBALL_SGP_CORRELATION = prev;
+    fbCorr._resetForTest();
+  }
 });
 
 test('CFB ml_total carries only the small measured uplift', () => {
@@ -82,10 +166,14 @@ test('CFB ml_total carries only the small measured uplift', () => {
 });
 
 test('an unreadable spread falls back to the WIDEST bucket, not the narrowest', () => {
-  // Failing toward 1.00 would underprice exactly the bucket that matters.
+  // Failing toward 1.00 would underprice exactly the bucket that matters. The
+  // spread sign is also what says fav/dog, so a readable total side does not
+  // rescue it into the (1.00) opposite direction.
   for (const bad of [undefined, null, NaN, 0, 'x']) {
-    assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: bad }).factor, 1.25,
-      `spread ${String(bad)} must fail toward the expensive side (widest bucket)`);
+    for (const side of [undefined, 'over', 'under']) {
+      assert.strictEqual(F({ sport: CFB, combo: 'spread_total', spreadLine: bad, totalSelection: side }).factor, 1.25,
+        `spread ${String(bad)} + ${String(side)} must fail toward the expensive side (widest bucket)`);
+    }
   }
 });
 
@@ -138,12 +226,16 @@ test('the released shape is exactly one side leg + one game total', () => {
   assert.ok(P([leg({ sport: NFL, marketType: 'spread', line: -7 }), leg({ sport: NFL, marketType: 'total' })]));
 });
 
-test('the combo and spread bucket survive leg ORDER', () => {
-  const a = P([leg({ marketType: 'total' }), leg({ marketType: 'spread', line: -21 })]);
-  const b = P([leg({ marketType: 'spread', line: -21 }), leg({ marketType: 'total' })]);
+test('the combo, spread bucket and direction survive leg ORDER', () => {
+  const a = P([leg({ marketType: 'total', selection: 'over' }), leg({ marketType: 'spread', line: -21 })]);
+  const b = P([leg({ marketType: 'spread', line: -21 }), leg({ marketType: 'total', selection: 'over' })]);
   assert.strictEqual(a.combo, 'spread_total');
   assert.strictEqual(a.factor, 1.17);
   assert.deepStrictEqual(a.factor, b.factor);
+  const c = P([leg({ marketType: 'total', selection: 'under' }), leg({ marketType: 'spread', line: -21 })]);
+  const d = P([leg({ marketType: 'spread', line: -21 }), leg({ marketType: 'total', selection: 'under' })]);
+  assert.strictEqual(c.factor, 1, 'fav -21 + under is the opposite direction');
+  assert.strictEqual(d.factor, 1);
 });
 
 test('every UNMEASURED same-game football shape is refused', () => {

@@ -22,11 +22,13 @@ function applyCalib(fairProb, marketType, side, calibMap) {
   return { fairProb: adj, applied: { from: fairProb, to: adj, mult } };
 }
 
-test('config ships the map EMPTY (off) by default', () => {
+// The only code default is the K-under calibration (2026-09-27 audit, see
+// test/k-under-fair.test.js); every other key ships off.
+test('config ships ONLY the K-under default when the env is unset', () => {
   delete process.env.PROP_FAIR_CALIBRATION;
   delete require.cache[require.resolve('../config')];
   const { config } = require('../config');
-  assert.deepEqual(config.pricing.propFairCalibration, {});
+  assert.deepEqual(config.pricing.propFairCalibration, { 'player_strikeouts.under': 1.19 });
 });
 
 test('config parses valid keys and rejects malformed / out-of-bounds', () => {
@@ -39,7 +41,7 @@ test('config parses valid keys and rejects malformed / out-of-bounds', () => {
   });
   delete require.cache[require.resolve('../config')];
   const { config } = require('../config');
-  assert.deepEqual(config.pricing.propFairCalibration, { 'hitter_hr.over': 0.82 });
+  assert.deepEqual(config.pricing.propFairCalibration, { 'player_strikeouts.under': 1.19, 'hitter_hr.over': 0.82 });
   delete process.env.PROP_FAIR_CALIBRATION;
   delete require.cache[require.resolve('../config')];
 });

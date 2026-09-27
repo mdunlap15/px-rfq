@@ -2805,6 +2805,13 @@ async function seedAllLines() {
             }
           }
           if (!propType || !toaMarketKey) continue;
+          // PITCHER_K_PROPS_ENABLED gates THIS path too. It is in fact the only
+          // live SEED path for K props: the dedicated K seed branch above never
+          // sees a K market, because the mainMarkets filter's excludePatterns
+          // drops "strikeouts"/"pitching" names first. Gated only by the
+          // allowlist, an allowlisted baseball_mlb.pitcher_strikeouts registered
+          // K lines with the kill-switch OFF (test/k-under-fair.test.js).
+          if (propType === 'pitcher_strikeouts' && !(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
           if (sportKey.startsWith('americanfootball') && !_fbPropWindowOpen) continue;
           // Registration-safety assertion: a football prop line may never
           // carry a full-game marketType (fails closed, logged — see
@@ -4136,7 +4143,24 @@ async function resolveUnknownLine(rfqLeg) {
           // Master kill-switch (default off) — same gate as the seed branch.
           // When disabled, don't resolve K-prop lines on demand either, so an
           // RFQ for a K-prop lineId we never seeded stays unresolved/declined.
-          if (!(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
+          if (!(config.pricing && config.pricing.pitcherKPropsEnabled)) {
+            // A bare `continue` left lineFoundInPxMarket false when THIS market
+            // holds the lineId, so the virtual fallback below re-registered the
+            // K line as an MLB GAME ALT-TOTAL (review 2026-09-27). PX has told us
+            // exactly what this line is: claim it and decline.
+            if (px.parseMarketSelections(market).some(sel => sel.lineId === lineId)) {
+              _recordResolveFailure(lineId, {
+                lineId,
+                reason: 'k_props_disabled',
+                marketType: 'player_strikeouts',
+                marketName: market.name,
+                sport: sportKey,
+                eventName: event.name,
+              });
+              return null;
+            }
+            continue;
+          }
           const parsedK = px.parseMarketSelections(market);
           const matchingK = parsedK.find(s => s.lineId === lineId);
           if (matchingK) {
@@ -4331,7 +4355,12 @@ async function resolveUnknownLine(rfqLeg) {
             }
             const allowlist = _propAllowlistSet();
             const allowKey = sportKey + '.' + propType;
-            const allowed = propType && toaMarketKey && allowlist.has(allowKey);
+            // K kill-switch, on-demand generic half: a K name the M1 branch
+            // above does not recognise ("... Strikeouts Recorded") classifies
+            // as pitcher_strikeouts here and must not re-open K props.
+            const kPropBlocked = propType === 'pitcher_strikeouts'
+              && !(config.pricing && config.pricing.pitcherKPropsEnabled);
+            const allowed = propType && toaMarketKey && allowlist.has(allowKey) && !kPropBlocked;
 
             if (allowed) {
               const matchingProp = parsedProp.find(s => s.lineId === lineId);

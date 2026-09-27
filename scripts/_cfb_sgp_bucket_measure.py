@@ -3,7 +3,8 @@
 #   cfb_line_odds.csv.gz  <- raw.githubusercontent.com/sportsdataverse/cfbfastR-data/main/betting/csv/cfb_line_odds.csv.gz
 #   cfbsched/<YYYY>.csv   <- .../main/schedules/csv/cfb_schedules_<YYYY>.csv, 2006-2025
 # M = P(fav covers AND over) / (P(cover) * P(over)); pushes excluded; 4,000-resample bootstrap CIs.
-# Feeds services/football-sgp-correlation.js DEFAULTS.ncaaf.spreadBuckets.
+# Feeds services/football-sgp-correlation.js DEFAULTS.ncaaf.spreadBuckets (`factor` from the
+# first table; `oppositeFactor` from the fav_under / dog_over columns of the second, 2026-09-27).
 import csv, gzip, glob, random, statistics as st
 from collections import defaultdict, Counter
 random.seed(7)
@@ -64,3 +65,26 @@ for lo,hi in buckets:
     if len(rs)<50: print(f'{lo:>5}-{hi:<5} n={len(rs)} (too few)'); continue
     m,c,o=M(rs); lo_ci,hi_ci=boot(rs)
     print(f'{lo:>5}-{hi:<5} {len(rs):5d}  {m:.3f}  [{lo_ci:.3f}, {hi_ci:.3f}]   {c:.3f}   {o:.3f}')
+
+# ---- DIRECTION (2026-09-27). M above is the fav_over cell only. The other three
+# cells of the 2x2 feed `oppositeFactor` (fav_under / dog_over) and check that
+# dog_under tracks the bucket. Same resamples for all four cells.
+DIRS={'fav_over':(True,True),'dog_under':(False,False),'fav_under':(True,False),'dog_over':(False,True)}
+def Md(rs,d):
+    ca,ob=DIRS[d]; n=len(rs)
+    a=sum(1 for _,x,_ in rs if x==ca)/n; b=sum(1 for _,_,y in rs if y==ob)/n
+    j=sum(1 for _,x,y in rs if x==ca and y==ob)/n
+    return j/(a*b) if a and b else float('nan')
+print('\nbucket         n  | '+' | '.join(f'{d:>22}' for d in DIRS))
+for lo,hi in buckets[:7]:
+    rs=[r for r in rows if lo<=r[0]<hi]
+    bs={d:[] for d in DIRS}
+    for _ in range(4000):
+        s=[random.choice(rs) for _ in rs]
+        for d in DIRS:
+            m=Md(s,d)
+            if m==m: bs[d].append(m)
+    cells=[]
+    for d in DIRS:
+        v=sorted(bs[d]); cells.append(f'{Md(rs,d):.3f} [{v[int(.025*len(v))]:.3f},{v[int(.975*len(v))]:.3f}]')
+    print(f'{lo:>5}-{hi:<5} {len(rs):5d} | '+' | '.join(f'{c:>22}' for c in cells))
