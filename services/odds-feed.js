@@ -161,14 +161,60 @@ const _TOA_MAX_CONCURRENT  = parseInt(process.env.TOA_MAX_CONCURRENT)  || 4;
 let   _toaInFlight = 0;
 const _toaQueue    = [];
 
+// 2026-09-28 WEDGE: odds were stale ~2h20m (14:31Z → restart 16:52Z, every
+// sport ~60min old, every RFQ declining "stale odds") while TOA itself answered
+// in 0.18s. A caller whose budget expired while QUEUED used to stay in the
+// queue: when its turn came it took a slot, found itself aborted, released,
+// and the next drain waited TOA_MIN_INTERVAL_MS. So every dead waiter still
+// cost a slot turn, and a backlog of them outlived the 500ms budget of every
+// live caller behind it — ~6 NFL-events + ~17 prop refreshes per second, all
+// timing out in line (123K fetchTimeouts), so no cache ever refreshed and the
+// expired caches generated still more blocking refreshes. Metastable: only a
+// restart cleared it. An abandoned waiter now removes itself, so the queue
+// only ever holds callers that can still use their slot.
+const _toaGateStats = { abandoned: 0, maxQueue: 0 };
+
 function _drainToaQueue() {
   while (_toaQueue.length && _toaInFlight < _TOA_MAX_CONCURRENT) {
     _toaInFlight++;
     _toaQueue.shift()(); // resolve the waiter → that caller proceeds
   }
 }
-function _toaAcquire() {
-  return new Promise(resolve => { _toaQueue.push(resolve); _drainToaQueue(); });
+function _gateAbortError(url, t) {
+  const err = new Error(`TOA gate wait exceeded ${t}ms for ${String(url || '').slice(0, 80)}`);
+  err.name = 'AbortError';
+  return err;
+}
+// `signal` (optional): when it aborts while we are still queued, the waiter is
+// spliced out and the promise rejects with an AbortError. Once the waiter has
+// been handed a slot the signal no longer touches the queue (the caller's own
+// fetch honours it).
+function _toaAcquire(signal, url, t) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) { _toaGateStats.abandoned++; reject(_gateAbortError(url, t)); return; }
+    let onAbort = null;
+    const waiter = () => {
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    if (signal) {
+      onAbort = () => {
+        const i = _toaQueue.indexOf(waiter);
+        if (i === -1) return;          // already handed a slot
+        _toaQueue.splice(i, 1);
+        _toaGateStats.abandoned++;
+        reject(_gateAbortError(url, t));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    _toaQueue.push(waiter);
+    if (_toaQueue.length > _toaGateStats.maxQueue) _toaGateStats.maxQueue = _toaQueue.length;
+    _drainToaQueue();
+  });
+}
+function getToaGateState() {
+  return { queued: _toaQueue.length, inFlight: _toaInFlight, maxConcurrent: _TOA_MAX_CONCURRENT,
+    abandoned: _toaGateStats.abandoned, maxQueue: _toaGateStats.maxQueue };
 }
 function _toaRelease() {
   _toaInFlight--;
@@ -199,11 +245,11 @@ async function abortableFetch(url, options, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), t);
   let held = false;
   try {
-    if (isToa) { await _toaAcquire(); held = true; }
+    // Pass the signal: a budget that expires while queued abandons the queue
+    // position (rejects with AbortError, never holds a slot).
+    if (isToa) { await _toaAcquire(controller.signal, url, t); held = true; }
     if (controller.signal.aborted) {
-      const err = new Error(`TOA gate wait exceeded ${t}ms for ${String(url).slice(0, 80)}`);
-      err.name = 'AbortError';
-      throw err;                      // released by the finally below — never leaks the slot
+      throw _gateAbortError(url, t);  // released by the finally below — never leaks the slot
     }
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
@@ -10663,7 +10709,7 @@ const toaStaleServeStats = {
   fetchTimeouts: 0,
   lastFetchTimeoutAt: null,
 };
-function getToaStaleServeStats() { return { ...toaStaleServeStats }; }
+function getToaStaleServeStats() { return { ...toaStaleServeStats, gate: getToaGateState() }; }
 
 // Map our internal sport keys to TOA sport keys. They happen to match
 // for MLB but kept explicit for future expansion.
@@ -10707,7 +10753,38 @@ async function _toaGetRetrying429(url, timeoutMs, deps = {}) {
   }
 }
 
-async function _refreshTheOddsApiEvents(sportKey) {
+// Single-flight + failure backoff for the events list (2026-09-28 wedge). The
+// BLOCKING path in _getTheOddsApiEvents had neither, so once the NFL events
+// cache expired every caller fired its own fetch — 314 in 52s, each timing
+// out in the gate queue and each failure leaving the cache expired for the
+// next caller. Concurrent callers now share one fetch, and after a failure the
+// blocking path serves the stale cache for TOA_REFRESH_FAIL_BACKOFF_SECONDS
+// instead of re-attempting a fetch that just failed.
+const TOA_REFRESH_FAIL_BACKOFF_MS = (() => {
+  const v = parseInt(process.env.TOA_REFRESH_FAIL_BACKOFF_SECONDS, 10);
+  return (Number.isFinite(v) && v >= 0 ? v : 20) * 1000;
+})();
+const _toaEventsInflight = {}; // sportKey -> Promise<events|null>
+const _toaEventsFailAt = {};   // sportKey -> ms of the last failed refresh
+const _propOddsFailAt = {};    // prop cacheKey -> ms of the last failed refresh
+function _inFailBackoff(failAt, now) {
+  return failAt != null && TOA_REFRESH_FAIL_BACKOFF_MS > 0 && (now - failAt) < TOA_REFRESH_FAIL_BACKOFF_MS;
+}
+
+function _refreshTheOddsApiEvents(sportKey) {
+  if (_toaEventsInflight[sportKey]) return _toaEventsInflight[sportKey];
+  const p = _refreshTheOddsApiEventsOnce(sportKey)
+    .then((events) => {
+      if (events == null) _toaEventsFailAt[sportKey] = Date.now();
+      else delete _toaEventsFailAt[sportKey];
+      return events;
+    })
+    .finally(() => { delete _toaEventsInflight[sportKey]; });
+  _toaEventsInflight[sportKey] = p;
+  return p;
+}
+
+async function _refreshTheOddsApiEventsOnce(sportKey) {
   const apiKey = process.env.THE_ODDS_API_KEY;
   const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/events?apiKey=${apiKey}`;
   try {
@@ -10759,14 +10836,20 @@ async function _getTheOddsApiEvents(sport) {
   // the stale cached entry if we have one — keeps the SP quoting through
   // TOA outages (quota exhaustion / network errors / TOA-side incidents)
   // rather than going dark on every prop and alt-line leg.
-  const events = await _refreshTheOddsApiEvents(sportKey);
+  // A refresh that failed moments ago is not retried from here (see
+  // TOA_REFRESH_FAIL_BACKOFF_MS) — the stale serve below is what it would
+  // have fallen back to anyway.
+  const inBackoff = _inFailBackoff(_toaEventsFailAt[sportKey], now);
+  const events = inBackoff ? null : await _refreshTheOddsApiEvents(sportKey);
   if (events != null) return events;
   if (cached) {
     const ageMin = Math.round((now - cached.fetchedAt) / 60000);
     toaStaleServeStats.events++;
     toaStaleServeStats.lastStaleEventsAt = new Date().toISOString();
     if (ageMin > toaStaleServeStats.maxStaleAgeMin) toaStaleServeStats.maxStaleAgeMin = ageMin;
-    log.warn('OddsFeed', `TOA events refresh failed for ${sportKey}; serving stale cache (${ageMin}min old, ${cached.events?.length || 0} events)`);
+    // Only the caller that actually attempted (and failed) the refresh logs;
+    // a backoff serve is counted but silent, or a storm floods the log.
+    if (!inBackoff) log.warn('OddsFeed', `TOA events refresh failed for ${sportKey}; serving stale cache (${ageMin}min old, ${cached.events?.length || 0} events)`);
     return cached.events;
   }
   return null;
@@ -10846,19 +10929,29 @@ async function _getTheOddsApiPropOdds(sport, eventId, marketKey) {
   // Single-flight: coalesce concurrent misses for this cacheKey onto ONE
   // fetch (see _propOddsInflight). The whole burst shares the result; on
   // failure they all fall through to the stale-serve below.
-  if (!_propOddsInflight[cacheKey]) {
-    _propOddsInflight[cacheKey] = _refreshTheOddsApiPropOdds(sport, eventId, marketKey)
-      .finally(() => { delete _propOddsInflight[cacheKey]; });
-  }
+  // Failure backoff (2026-09-28 wedge): a refresh for this key that failed
+  // moments ago is not re-attempted from the blocking path — serve stale.
   let refreshed = null;
-  try { refreshed = await _propOddsInflight[cacheKey]; } catch (_) { refreshed = null; }
+  const inBackoff = _inFailBackoff(_propOddsFailAt[cacheKey], now);
+  if (!inBackoff) {
+    if (!_propOddsInflight[cacheKey]) {
+      _propOddsInflight[cacheKey] = _refreshTheOddsApiPropOdds(sport, eventId, marketKey)
+        .then((r) => {
+          if (r == null) _propOddsFailAt[cacheKey] = Date.now();
+          else delete _propOddsFailAt[cacheKey];
+          return r;
+        })
+        .finally(() => { delete _propOddsInflight[cacheKey]; });
+    }
+    try { refreshed = await _propOddsInflight[cacheKey]; } catch (_) { refreshed = null; }
+  }
   if (refreshed != null) return refreshed;
   if (cached) {
     const ageMin = Math.round((now - cached.fetchedAt) / 60000);
     toaStaleServeStats.propOdds++;
     toaStaleServeStats.lastStalePropOddsAt = new Date().toISOString();
     if (ageMin > toaStaleServeStats.maxStaleAgeMin) toaStaleServeStats.maxStaleAgeMin = ageMin;
-    log.warn('OddsFeed', `TOA prop refresh failed (${cacheKey}); serving stale cache ${ageMin}min old`);
+    if (!inBackoff) log.warn('OddsFeed', `TOA prop refresh failed (${cacheKey}); serving stale cache ${ageMin}min old`);
     return cached;
   }
   return null;
@@ -11605,6 +11698,15 @@ module.exports = {
   _noteToa429,
   _noteToaSuccess,
   _toaCooldownRemainingMs,
+  // 2026-09-28 gate-wedge fix — test seams (test/toa-gate-wedge.test.js).
+  abortableFetch,
+  getToaGateState,
+  _getTheOddsApiEvents,
+  _getTheOddsApiPropOdds,
+  __resetToaGateForTest: () => { _toaQueue.length = 0; _toaInFlight = 0; _toaGateStats.abandoned = 0; _toaGateStats.maxQueue = 0;
+    for (const o of [_toaEventsInflight, _toaEventsFailAt, _propOddsFailAt, toaEventsCache, toaPropOddsCache]) for (const k of Object.keys(o)) delete o[k]; },
+  __setToaEventsCacheForTest: (sportKey, entry) => { toaEventsCache[sportKey] = entry; },
+  __setToaPropOddsCacheForTest: (cacheKey, entry) => { toaPropOddsCache[cacheKey] = entry; },
   _awaitToaCooldown,
   getFairProb,
   getFairProbAsync,

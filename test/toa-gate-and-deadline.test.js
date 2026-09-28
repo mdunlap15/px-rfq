@@ -132,7 +132,9 @@ test('the gate timer starts BEFORE the queue wait, so queue+fetch is bounded', (
   // NOTE: the `t <= 0` fast path legitimately acquires with no timer (the
   // caller asked for no timeout), so scope this to the TIMED path — the
   // acquire that follows the controller.
-  const acquireAt = body.indexOf('await _toaAcquire(); held = true;', timerAt);
+  // Since 2026-09-28 the timed path passes the controller's signal so a waiter
+  // whose budget expires while queued leaves the queue (toa-gate-wedge.test.js).
+  const acquireAt = body.indexOf('await _toaAcquire(controller.signal, url, t); held = true;', timerAt);
   assert.ok(timerAt > -1 && acquireAt > -1, 'the timed path must arm a timer and then acquire');
   assert.ok(timerAt < acquireAt,
     'the abort timer must be armed BEFORE the gate acquire, or queue wait is unbounded');

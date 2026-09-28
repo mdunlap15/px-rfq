@@ -1465,7 +1465,7 @@ function _seedSwapBreakerFires(prevSize, newSize, pct, minPrev) {
   return newSize < prevSize * (eff / 100);
 }
 
-async function seedAllLines() {
+async function seedAllLines(gen) {
   log.info('Lines', '=== Starting line seed ===');
   log.info('Lines', '[golf-debug] seedAllLines starting — golf bypass code v2 is live');
 
@@ -3371,6 +3371,15 @@ async function seedAllLines() {
   //
   // Cold start: _seedIndexTarget is null and this block is a no-op (seed
   // wrote directly to live as before).
+  //
+  // An ABANDONED generation (see refreshLines) must not swap: the staging
+  // target now belongs to the newer seed and is only partly built. Skip the
+  // swap AND the PX supported-lines sync below — both belong to the current
+  // generation.
+  if (gen != null && gen !== _seedGen) {
+    log.warn('Lines', `Abandoned seed gen ${gen} finished (current gen ${_seedGen}) — skipping swap and PX sync`);
+    return { abandoned: true, gen };
+  }
   if (_seedIndexTarget && _seedPrimaryTarget) {
     // SWAP CIRCUIT BREAKER — refuse to replace a working index with an empty
     // one. See _seedSwapBreakerFires. Without this, any upstream shape change
@@ -5202,21 +5211,67 @@ async function debugGolfMatching() {
  * the live index remains intact (we never swapped) so RFQs keep working off
  * the prior refresh's data until the next cycle succeeds.
  */
+// SINGLE-FLIGHT (2026-09-28). The line refresh timer fires every
+// REFRESH_INTERVAL_MINUTES (prod 2) with no in-flight guard, and seeds were
+// taking 5-25 minutes. Each overlapping call RESET _seedIndexTarget = {}
+// under the running seed, so the first seed to finish swapped in whatever the
+// newest target held — a partial index — and the supported-lines sync then
+// DE-REGISTERED the rest from PX. Observed the same morning: 5 of 8 NHL
+// opening games and 2 of 4 MLB Wild Card Game 1s missing while PX listed them
+// and every one of them matched the odds cache. Overlapping calls now join the
+// running seed. A seed older than LINE_SEED_MAX_RUN_MINUTES is ABANDONED
+// rather than joined forever: a new generation starts and the old one's swap
+// + PX sync are skipped when it finally returns (seedAllLines checks gen).
+const LINE_SEED_MAX_RUN_MS = (() => {
+  const v = Number(process.env.LINE_SEED_MAX_RUN_MINUTES);
+  return (Number.isFinite(v) && v > 0 ? v : 30) * 60000;
+})();
+let _seedGen = 0;
+let _refreshLinesInFlight = null; // { promise, startedAt, gen }
+function getSeedRunState() {
+  const cur = _refreshLinesInFlight;
+  return { gen: _seedGen, inFlight: !!cur,
+    runningForSec: cur ? Math.round((Date.now() - cur.startedAt) / 1000) : null,
+    maxRunMin: LINE_SEED_MAX_RUN_MS / 60000 };
+}
+
 async function refreshLines() {
+  const cur = _refreshLinesInFlight;
+  if (cur) {
+    const ageMs = Date.now() - cur.startedAt;
+    if (ageMs < LINE_SEED_MAX_RUN_MS) {
+      log.info('Lines', `Line refresh already in flight (gen ${cur.gen}, ${Math.round(ageMs / 1000)}s) — joining it instead of starting an overlapping seed`);
+      return cur.promise;
+    }
+    log.error('Lines', `Seed gen ${cur.gen} has run ${Math.round(ageMs / 60000)}min (> ${LINE_SEED_MAX_RUN_MS / 60000}min) — abandoning it and starting a fresh seed; its swap and PX sync will be skipped`);
+  }
   log.info('Lines', 'Refreshing all lines (build-then-swap)...');
+  const gen = ++_seedGen;
   _seedIndexTarget = {};
   _seedPrimaryTarget = {};
+  const promise = (async () => {
+    try {
+      return await seedAllLines(gen);
+    } catch (err) {
+      // Seed failed mid-build. The swap-block inside seedAllLines never ran,
+      // so live lineIndex/primaryByEvent are untouched. Just clear the
+      // staging targets so any post-failure cache write-through (e.g. a
+      // resolveUnknownLine that races in right after the throw) writes to
+      // live and not to the dead staging object. An abandoned generation must
+      // not clear the CURRENT generation's targets.
+      if (gen === _seedGen) {
+        _seedIndexTarget = null;
+        _seedPrimaryTarget = null;
+      }
+      throw err;
+    }
+  })();
+  const entry = { promise, startedAt: Date.now(), gen };
+  _refreshLinesInFlight = entry;
   try {
-    return await seedAllLines();
-  } catch (err) {
-    // Seed failed mid-build. The swap-block inside seedAllLines never ran,
-    // so live lineIndex/primaryByEvent are untouched. Just clear the
-    // staging targets so any post-failure cache write-through (e.g. a
-    // resolveUnknownLine that races in right after the throw) writes to
-    // live and not to the dead staging object.
-    _seedIndexTarget = null;
-    _seedPrimaryTarget = null;
-    throw err;
+    return await promise;
+  } finally {
+    if (_refreshLinesInFlight === entry) _refreshLinesInFlight = null;
   }
 }
 
@@ -5313,6 +5368,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 }
 
 module.exports = {
+  getSeedRunState,
   seedAllLines,
   refreshLines,
   lookupLine,
