@@ -8451,6 +8451,28 @@
    * player-prop legs by DEFAULT so O/U prop lines are unambiguous everywhere
    * (tables + CSV). Pass {propMarket:false} to suppress it.
    */
+  // 1v1 sports (tennis, MMA, boxing, golf matchups): the selection is one
+  // competitor, so the name alone hides who they are playing. Returns the
+  // OTHER competitor from homeTeam/awayTeam, or null. Diacritic- and
+  // punctuation-insensitive: PX sends "Vlasto Čepo" while the competitor list
+  // may be ASCII-folded, and a strict compare returns a player as his own
+  // opponent (operator 2026-08-01). Bare Over/Under legs have no selected side.
+  function oneVsOneOpponent(l) {
+    if (!l) return null;
+    const sp = String(l.sport || l.oddsApiSport || '').toLowerCase();
+    if (!(sp === 'tennis' || sp.startsWith('tennis_') || sp === 'mma_mixed_martial_arts'
+          || sp === 'boxing_boxing' || sp === 'golf_matchups')) return null;
+    const self = String(l.team || l.teamName || '').trim();
+    if (!self || /^(over|under)\b/i.test(self)) return null;
+    const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+    const n = norm(self);
+    if (!n) return null;
+    if (l.homeTeam && norm(l.homeTeam) !== n) return l.homeTeam;
+    if (l.awayTeam && norm(l.awayTeam) !== n) return l.awayTeam;
+    return null;
+  }
+
   function formatParlaySelections(legs, opts = {}) {
     try {
       if (!legs || legs.length === 0) return '-';
@@ -8523,7 +8545,12 @@
           const ctx = (away && home) ? (away + ' @ ' + home + ' ') : '';
           return ctx + periodTag + side + lineStr;
         }
-        const _base = periodTag + formatSelection(name, mkt, line, l.selection, l);
+        let _base = periodTag + formatSelection(name, mkt, line, l.selection, l);
+        // Tennis / MMA / boxing / golf matchups: name the opponent — "Hubert
+        // Hurkacz, Andrey Rublev" alone does not say who either is playing
+        // (operator 2026-09-28).
+        const _opp = oneVsOneOpponent(l);
+        if (_opp) _base += ' (vs ' + _opp + ')';
         if (opts.propMarket !== false) {
           const _isProp = /^player_|^run_first_inning/.test(String(mkt).toLowerCase()) || !!l.propType;
           if (_isProp) {
