@@ -1569,6 +1569,12 @@ const config = {
     // exposure. Applied only when at least one leg is a series market.
     maxSeriesRiskPerParlay: parseFloat(process.env.MAX_SERIES_RISK_PER_PARLAY) || 500,
     maxSeriesGrossExposure: _capNum(process.env.MAX_SERIES_GROSS_EXPOSURE, 1000),
+    // MLB playoff series markets (2026-09-28 operator directive: quote the
+    // Wild Card series, off the board at Game 1's first pitch). Kill-switch
+    // (runtime key mlbSeriesEnabled — literal 'false' turns it off) and the
+    // max age of the DK series board that may still price.
+    mlbSeriesEnabled: process.env.MLB_SERIES_ENABLED !== 'false',
+    mlbSeriesMaxAgeMin: parseFloat(process.env.MLB_SERIES_MAX_AGE_MIN) || 45,
 
     // Consensus-floor guardrail. When our offered implied prob on a single
     // leg would land more than this many percentage points BELOW the

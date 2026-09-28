@@ -25,6 +25,7 @@ const SWITCHES = [
   ['footballSgp',         'FOOTBALL_SGP_ENABLED'],
   ['sharpApi',            'SHARPAPI_ENABLED'],
   ['rfi',                 'RFI_ENABLED'],
+  ['mlbSeries',           'MLB_SERIES_ENABLED'],
 ];
 
 test('/status exposes a killSwitches block', () => {

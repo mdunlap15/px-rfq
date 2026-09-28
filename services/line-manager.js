@@ -364,6 +364,49 @@ function _sportMarketAllowed(sport, marketType, eventId) {
   return ok;
 }
 
+// MLB playoff SERIES close (2026-09-28): a series market registers only until
+// Game 1's first pitch and never again (services/series-window.js). Enforced
+// at all three index entry points (seed, cache restore, on-demand) so PX stops
+// sending the RFQ within one seed of the close — the pricer declines anything
+// that races in. The kill-switch (mlbSeriesEnabled) takes the whole family off.
+const seriesWindow = require('./series-window');
+const SERIES_GAME_LOOKBACK_MS = 6 * 3600 * 1000;
+// Start times of every NON-series line on this matchup still in the index
+// (live + the seed's staging target), limited to games that started at most
+// SERIES_GAME_LOOKBACK_MS ago: an in-progress Game 1 must close its series,
+// but a same-matchup regular-season game days earlier must not.
+function getPairGameStarts(sport, a, b) {
+  const key = seriesWindow.pairKey(a, b);
+  if (!key) return [];
+  const floor = Date.now() - SERIES_GAME_LOOKBACK_MS;
+  const out = new Set();
+  for (const idx of [lineIndex, _seedIndexTarget]) {
+    if (!idx) continue;
+    for (const li of Object.values(idx)) {
+      if (!li || li.sport !== sport) continue;
+      if (typeof li.marketType === 'string' && li.marketType.startsWith('series_')) continue;
+      if (seriesWindow.pairKey(li.homeTeam, li.awayTeam) !== key) continue;
+      const t = Date.parse(li.startTime);
+      if (Number.isFinite(t) && t >= floor) out.add(t);
+    }
+  }
+  return [...out];
+}
+function _mlbSeriesAdmissible(info) {
+  if (!seriesWindow.isMlbSeriesLine(info)) return true;
+  if (config.pricing && config.pricing.mlbSeriesEnabled === false) return false;
+  return !seriesWindow.isClosed(info, { extraStarts: getPairGameStarts('baseball_mlb', info.homeTeam, info.awayTeam) });
+}
+// True while any MLB series line is registered and still open — gates the DK
+// series scrape so Chromium only launches for MLB when there is something to
+// price.
+function hasOpenMlbSeriesLines() {
+  for (const li of Object.values(lineIndex)) {
+    if (seriesWindow.isMlbSeriesLine(li) && _mlbSeriesAdmissible(li)) return true;
+  }
+  return false;
+}
+
 function _setSeedLine(lineId, info) {
   // Stamp the id ON the object (2026-08-13). legExposureKey(lineInfo) reads
   // li.lineId to build its 'L:<id>|<day>' key; registered infos never carried
@@ -380,6 +423,10 @@ function _setSeedLine(lineId, info) {
   // a line that isn't in the index.
   if (!_sportMarketAllowed(info.sport || info.oddsApiSport, info.marketType, info.pxEventId)) {
     info._marketDenied = true;
+    return info;
+  }
+  if (!_mlbSeriesAdmissible(info)) {
+    info._marketDenied = true;   // same downstream handling: never indexed, no primary tracked
     return info;
   }
   (_seedIndexTarget || lineIndex)[lineId] = info;
@@ -3772,6 +3819,7 @@ async function lookupLineAsync(lineId) {
     // (or from a wider allowlist) must not resurrect a market the seed now
     // refuses. Treat it as unknown, same as the seed and on-demand paths.
     if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType, cached.pxEventId)) return null;
+    if (!_mlbSeriesAdmissible(cached)) return null;   // MLB series past Game 1 (series-window.js)
     // Football 48h near-window — the THIRD index entry point (2026-09-22). The
     // seed filter and on-demand resolve both gate this, but the Supabase
     // cache-restore did not, so between seeds the RFQ path re-registered every
@@ -5029,6 +5077,10 @@ async function resolveUnknownLine(rfqLeg) {
         _recordResolveFailure(lineId, { lineId, reason: 'market_not_allowed_for_sport', eventName: event.name, sport: sportKey, marketType: foundInfo.marketType });
         return null;
       }
+      if (!_mlbSeriesAdmissible(foundInfo)) {
+        _recordResolveFailure(lineId, { lineId, reason: 'mlb_series_closed', eventName: event.name, sport: sportKey, marketType: foundInfo.marketType });
+        return null;
+      }
       // Add to index locally
       foundInfo.lineId = lineId; // legExposureKey needs it — see _setSeedLine
       lineIndex[lineId] = foundInfo;
@@ -5369,6 +5421,9 @@ function getPrimarySpreadHomePoint(pxEventId) {
 
 module.exports = {
   getSeedRunState,
+  getPairGameStarts,
+  hasOpenMlbSeriesLines,
+  _mlbSeriesAdmissible,
   seedAllLines,
   refreshLines,
   lookupLine,

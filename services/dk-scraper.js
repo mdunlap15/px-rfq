@@ -33,6 +33,18 @@ const SPORT_CONFIGS = {
     league: 'hockey/nhl',
     baseUrl: 'https://sportsbook.draftkings.com/leagues/hockey/nhl',
   },
+  // MLB postseason (2026-09-28, Wild Card). DK files MLB series under
+  // category=futures&subcategory=series-props — neither of the NBA/NHL URL
+  // shapes below — and posts Series Winner ONLY (no series spread / total
+  // games), so only the winner category is scraped. Verified live 2026-09-28:
+  // 4 "Series Winner" markets, one per Wild Card series, labels "NY Yankees",
+  // "BOS Red Sox", "CHI White Sox", "CHI Cubs" (abbrev + nickname).
+  mlb: {
+    league: 'baseball/mlb',
+    baseUrl: 'https://sportsbook.draftkings.com/leagues/baseball/mlb',
+    categories: ['winner'],
+    urls: { winner: [['futures', 'series-props']] },
+  },
 };
 
 // Market categories we care about, identified by REGEX over
@@ -262,17 +274,21 @@ async function fetchSeriesMarkets(sport, { force = false } = {}) {
       // Fallback path (DK renamed slug or category): a few extra
       // navigations bounded to the same browser session.
       for (const cat of MARKET_CATEGORIES) {
-        outer:
-        for (const urlCat of URL_CATEGORIES) {
-          for (const slug of cat.slugs) {
-            if (payloadsByCategoryKey[cat.key].length > 0) break outer;
-            const url = `${cfg.baseUrl}?category=${urlCat}&subcategory=${slug}`;
-            try {
-              await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-              await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
-            } catch (err) {
-              log.warn('DkScraper', `${sport} ${urlCat}/${slug} navigation failed: ${err.message}`);
-            }
+        // A sport may scrape a subset of categories (MLB: winner only) and may
+        // pin its own (category, subcategory) URL pairs instead of the
+        // URL_CATEGORIES × cat.slugs cartesian product.
+        if (Array.isArray(cfg.categories) && !cfg.categories.includes(cat.key)) continue;
+        const pairs = (cfg.urls && Array.isArray(cfg.urls[cat.key]))
+          ? cfg.urls[cat.key]
+          : URL_CATEGORIES.flatMap(urlCat => cat.slugs.map(slug => [urlCat, slug]));
+        for (const [urlCat, slug] of pairs) {
+          if (payloadsByCategoryKey[cat.key].length > 0) break;
+          const url = `${cfg.baseUrl}?category=${urlCat}&subcategory=${slug}`;
+          try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+            await new Promise(r => setTimeout(r, POST_NAV_WAIT_MS));
+          } catch (err) {
+            log.warn('DkScraper', `${sport} ${urlCat}/${slug} navigation failed: ${err.message}`);
           }
         }
       }
@@ -2149,23 +2165,67 @@ function normalizeTeamName(name) {
  *      (after stripping "(Series)") — rare but covers edge cases
  *   3) last-N-words match (e.g. "Cavaliers" → "CLE Cavaliers")
  */
-function lookupSeriesFairProb(sport, teamName) {
+//
+// 2026-09-28 (MLB Wild Card): the bare last-word fallback matched "Chicago
+// White Sox" to DK's "BOS Red Sox" ("sox" == "sox") whenever the Red Sox
+// series came first — i.e. it would have priced the White Sox off the Red
+// Sox's price. Now:
+//   - a NICKNAME step: DK labels are "<abbrev> <nickname>", so DK "CHI White
+//     Sox" → "white sox", matched as a whole-word suffix of the PX name;
+//   - the last-word fallback only returns a UNIQUE hit across the board;
+//   - opts.homeTeam/opts.awayTeam scope the lookup to the ONE DK series whose
+//     two teams are that matchup (fails closed if none is);
+//   - opts.maxAgeMs refuses a board older than that.
+function _seriesNameMatch(candidate, target) {
+  if (!candidate || !target) return false;
+  if (candidate === target) return true;
+  if (candidate.endsWith(' ' + target) || target.endsWith(' ' + candidate)) return true;
+  const toks = candidate.split(' ');
+  if (toks.length >= 2) {
+    const nick = toks.slice(1).join(' ');
+    if (target === nick || target.endsWith(' ' + nick)) return true;
+  }
+  return false;
+}
+function _seriesTeamsFor(series, target) {
+  return series.teams.filter(t => _seriesNameMatch(normalizeTeamName(t.name), target));
+}
+function getSeriesCacheAgeMs(sport) {
+  const cache = cacheBySport[sport];
+  return cache && cache.at ? Date.now() - cache.at : null;
+}
+function lookupSeriesFairProb(sport, teamName, opts = {}) {
   const cache = cacheBySport[sport];
   if (!cache || !cache.data) return null;
+  if (opts.maxAgeMs != null && (Date.now() - cache.at) > opts.maxAgeMs) return null;
   const target = normalizeTeamName(teamName);
   if (!target) return null;
   const targetLast = target.split(' ').pop();
-  for (const s of (cache.data.series || cache.data.winners || [])) {
+  const base = (s, t) => ({ fairProb: t.fairProb, decimalOdds: t.decimalOdds, americanOdds: t.americanOdds, source: 'dk', eventName: s.eventName, startTime: s.startTime });
+  let board = (cache.data.series || cache.data.winners || []);
+  if (opts.homeTeam && opts.awayTeam) {
+    const h = normalizeTeamName(opts.homeTeam), a = normalizeTeamName(opts.awayTeam);
+    board = board.filter(s => s.teams.length === 2
+      && ((_seriesNameMatch(normalizeTeamName(s.teams[0].name), h) && _seriesNameMatch(normalizeTeamName(s.teams[1].name), a))
+       || (_seriesNameMatch(normalizeTeamName(s.teams[0].name), a) && _seriesNameMatch(normalizeTeamName(s.teams[1].name), h))));
+    if (board.length !== 1) return null;          // matchup not on DK's board (or ambiguous) → fail closed
+  }
+  // Name/nickname hits across the WHOLE (scoped) board — a unique hit only.
+  // Per-series uniqueness is not enough: a bare "Sox" is unique inside the
+  // Red Sox series and again inside the White Sox series.
+  const nameHits = [];
+  for (const s of board) for (const t of _seriesTeamsFor(s, target)) nameHits.push(base(s, t));
+  if (nameHits.length === 1) return nameHits[0];
+  if (nameHits.length > 1) return null;
+  // Last-word fallback — only a UNIQUE hit across the whole (scoped) board.
+  const lastHits = [];
+  for (const s of board) {
     for (const t of s.teams) {
-      const candidate = normalizeTeamName(t.name);
-      const base = { fairProb: t.fairProb, decimalOdds: t.decimalOdds, americanOdds: t.americanOdds, source: 'dk', eventName: s.eventName, startTime: s.startTime };
-      if (candidate === target) return base;
-      if (candidate.endsWith(' ' + target) || target.endsWith(' ' + candidate)) return base;
-      const candLast = candidate.split(' ').pop();
-      if (candLast && candLast === targetLast) return base;
+      const candLast = normalizeTeamName(t.name).split(' ').pop();
+      if (candLast && candLast === targetLast) lastHits.push(base(s, t));
     }
   }
-  return null;
+  return lastHits.length === 1 ? lastHits[0] : null;
 }
 
 /**
@@ -3673,6 +3733,9 @@ function parseGolfOutrightData(payloads) {
 
 module.exports = {
   fetchSeriesMarkets,
+  getSeriesCacheAgeMs,
+  // Test seam (test/mlb-series.test.js): install a parsed series board.
+  __setSeriesCacheForTest: (sport, data, at = Date.now()) => { if (data == null) delete cacheBySport[sport]; else cacheBySport[sport] = { at, data }; },
   fetchSeriesWinners,
   fetchNbaSeriesWinners,
   fetchNhlSeriesWinners,

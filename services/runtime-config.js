@@ -112,6 +112,8 @@ const REGISTRY = [
   // ---------------- RISK (danger) ----------------
   { key: 'maxRiskPerParlay', path: 'maxRiskPerParlay', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_RISK_PER_PARLAY', label: 'Max risk per parlay' },
   { key: 'maxRiskPerParlayWithProp', path: 'maxRiskPerParlayWithProp', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_RISK_PER_PARLAY_WITH_PROP', label: 'Max risk per parlay (with prop)' },
+  { key: 'mlbSeriesEnabled', path: 'mlbSeriesEnabled', type: 'bool', group: 'gating', danger: true, env: 'MLB_SERIES_ENABLED', label: 'Quote MLB playoff series markets' },
+  { key: 'maxSeriesGrossExposure', path: 'maxSeriesGrossExposure', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_SERIES_GROSS_EXPOSURE', label: 'Max gross risk per series event' },
   { key: 'maxSeriesRiskPerParlay', path: 'maxSeriesRiskPerParlay', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_SERIES_RISK_PER_PARLAY', label: 'Max series risk per parlay' },
   { key: 'maxExposurePerTeam', path: 'maxExposurePerTeam', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_EXPOSURE_PER_TEAM', label: 'Max exposure per team (weighted)' },
   { key: 'maxRawExposurePerTeam', path: 'maxRawExposurePerTeam', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_RAW_EXPOSURE_PER_TEAM', label: 'Max RAW exposure per team (0 = off)' },

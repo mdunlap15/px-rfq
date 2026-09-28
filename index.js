@@ -216,6 +216,14 @@ async function startup() {
   } catch (err) {
     log.warn('Startup', `    ⚠ Golf paste board restore failed: ${err.message}`);
   }
+  // MLB series close latch (series-window.js) BEFORE the seed: a restart
+  // between games of a series must not re-register a series whose Game 1
+  // already started just because PX advanced the series event's start time.
+  try {
+    await require('./services/series-window').hydrate();
+  } catch (err) {
+    log.warn('Startup', `    ⚠ MLB series latch hydrate failed: ${err.message}`);
+  }
   try {
     const seedStats = await lineManager.seedAllLines();
     log.info('Startup', `    ✓ ${seedStats.registeredLines} lines registered (${seedStats.matchedLines} matched of ${seedStats.totalLines} parsed)`);
@@ -688,7 +696,11 @@ async function startup() {
     // Run NBA + NHL series pre-warm in parallel to halve the cold-cache
     // window at boot. Previously serial — when NBA's Puppeteer fetch ran
     // long, NHL series RFQs arriving early got a "no fair value" decline.
-    await Promise.all(['nba', 'nhl'].map(sport =>
+    // MLB joins only while an open MLB series line is registered (postseason,
+    // before each series' Game 1) — no Chromium launch for it otherwise.
+    const bootSeries = ['nba', 'nhl'];
+    try { if (lineManager.hasOpenMlbSeriesLines()) bootSeries.push('mlb'); } catch (_) { /* skip mlb */ }
+    await Promise.all(bootSeries.map(sport =>
       dkScraper.fetchSeriesWinners(sport).catch(err => {
         log.warn('DkScraper', `Initial ${sport.toUpperCase()} fetch failed: ${err.message}`);
       })
@@ -769,6 +781,9 @@ async function startup() {
       // commence-time match guard.
       return !st || st.eventCount > 0;
     });
+    // MLB playoff series (2026-09-28): scraped only while an open MLB series
+    // line is registered, i.e. from PX listing the series until Game 1.
+    try { if (lineManager.hasOpenMlbSeriesLines()) activeSeries.push('mlb'); } catch (_) { /* skip mlb */ }
     await Promise.all(activeSeries.map(sport =>
       dkScraper.fetchSeriesWinners(sport, { force: true }).catch(err => {
         log.warn('DkScraper', `Periodic ${sport.toUpperCase()} refresh failed: ${err.message}`);
@@ -1161,9 +1176,18 @@ function startStatusServer() {
       //
       // `env` is the raw variable so an unset-vs-explicitly-false mistake is
       // visible; `on` is the resolved boolean the code actually branches on.
-      // Note the defaults differ on purpose: golfOutrightsParlay defaults ON,
-      // everything else defaults OFF.
+      // Note the defaults differ on purpose: golfOutrightsParlay and mlbSeries
+      // default ON, everything else defaults OFF.
       killSwitches: {
+        mlbSeries: {
+          on: config.pricing.mlbSeriesEnabled !== false,
+          env: process.env.MLB_SERIES_ENABLED ?? null,
+          defaultsTo: true,
+          gates: 'MLB playoff series-winner registration + pricing; each series closes at its Game 1 first pitch (latched)',
+          maxAgeMin: config.pricing.mlbSeriesMaxAgeMin,
+          dkBoardAgeSec: (() => { const a = dkScraper.getSeriesCacheAgeMs('mlb'); return a == null ? null : Math.round(a / 1000); })(),
+          closeLatch: require('./services/series-window').getState(),
+        },
         golfOutrightsParlay: {
           on: config.pricing.golfOutrightsParlayEnabled,
           env: process.env.GOLF_OUTRIGHTS_PARLAY_ENABLED ?? null,

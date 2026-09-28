@@ -5,6 +5,7 @@ const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
+const seriesWindow = require('./series-window');
 const ufcMov = require('./ufc-mov');
 const nflConsensus = require('./nfl-consensus');
 const { footballSgpFactor } = require('./football-sgp-correlation');
@@ -280,6 +281,18 @@ function isBlockedAltTotal(lineInfo) {
   return null;
 }
 
+// MLB series gate shared by the quote pre-pass, getSeriesFairProb (quote AND
+// confirm) and line registration: kill-switch + the Game-1 close latch. The
+// latch is fed the PX series event's own start plus every same-matchup MLB
+// game start still in the line index.
+function mlbSeriesQuotable(lineInfo, now = Date.now()) {
+  if (config.pricing.mlbSeriesEnabled === false) return false;
+  const extra = typeof lineManager.getPairGameStarts === 'function'
+    ? lineManager.getPairGameStarts('baseball_mlb', lineInfo.homeTeam, lineInfo.awayTeam)
+    : [];
+  return !seriesWindow.isClosed(lineInfo, { now, extraStarts: extra });
+}
+
 function getSeriesFairProb(lineInfo) {
   // Detect which series market this leg belongs to. marketType carries
   // the line-manager tag for winner/spread/total; oddsApiMarket is a
@@ -298,13 +311,31 @@ function getSeriesFairProb(lineInfo) {
   const sport = (lineInfo.oddsApiSport || lineInfo.sport || '').toLowerCase();
   const sportKey = sport.includes('nba') || sport.includes('basketball') ? 'nba'
                  : sport.includes('nhl') || sport.includes('icehockey') || sport.includes('hockey') ? 'nhl'
+                 : sport.includes('mlb') || sport.includes('baseball') ? 'mlb'
                  : null;
   if (!sportKey) return null;
   const bareTeam = teamName.replace(/\s*\(series\)\s*/ig, '').trim();
 
+  // MLB playoff series (2026-09-28): quote only until Game 1's first pitch,
+  // never reopen (services/series-window.js), off a DK board no older than
+  // mlbSeriesMaxAgeMin, and only the Series Winner (DK posts nothing else).
+  // Runs here so the CONFIRM reprice — which runs only priceParlay — closes
+  // at the same instant the quote path does.
+  if (sportKey === 'mlb') {
+    if (!isSeriesWinner) return null;
+    if (!mlbSeriesQuotable(lineInfo)) return null;
+  }
+
   let hit = null;
   if (isSeriesWinner) {
-    hit = dkScraper.lookupSeriesFairProb(sportKey, bareTeam || teamName);
+    hit = sportKey === 'mlb'
+      // Scoped to THIS matchup and age-limited. The unscoped nickname lookup
+      // is how "Chicago White Sox" could have read the Red Sox's price.
+      ? dkScraper.lookupSeriesFairProb('mlb', bareTeam || teamName, {
+          homeTeam: lineInfo.homeTeam, awayTeam: lineInfo.awayTeam,
+          maxAgeMs: (Number(config.pricing.mlbSeriesMaxAgeMin) || 45) * 60000,
+        })
+      : dkScraper.lookupSeriesFairProb(sportKey, bareTeam || teamName);
   } else if (isSeriesSpread) {
     // PX stores spread line as signed (negative for favorite side).
     // DK cache keys each team's leg by (team, |line|, '+'|'-').
@@ -326,7 +357,10 @@ function getSeriesFairProb(lineInfo) {
   // cached DK odds are pre-game and would give a bettor material edge
   // if the in-game team took an early lead. Once DK's scraper refresh
   // moves startTime forward (post-game to next game), we resume.
-  if (hit.startTime) {
+  // Not for MLB: DK's MLB series startTime is ROUND-level (all four Wild Card
+  // series carry 18:00Z 9/29 though their Game 1s run to 02:00Z), so it would
+  // close three series hours early. The MLB close is the Game-1 latch above.
+  if (hit.startTime && sportKey !== 'mlb') {
     const t = new Date(hit.startTime).getTime();
     if (Number.isFinite(t) && t <= Date.now()) {
       log.debug('Pricing', `Series in-play decline: ${teamName} ${mt || ''} (startTime ${hit.startTime}, ${Math.round((Date.now()-t)/60000)}min ago — DK has not relisted for next game)`);
@@ -5644,6 +5678,17 @@ function shouldDecline(legs, parlayId) {
     return typeof mt === 'string' && mt.startsWith('series_');
   });
   if (hasAnySeriesLeg) {
+    // MLB series close at Game 1's first pitch and never reopen (operator
+    // directive 2026-09-28). The generic started gate covers the PX series
+    // event only while PX keeps its start at Game 1.
+    for (const r of resolvedLegs) {
+      if (!seriesWindow.isMlbSeriesLine(r.lineInfo)) continue;
+      if (!mlbSeriesQuotable(r.lineInfo, nowMs)) {
+        const closeAt = seriesWindow.closeAtMs(r.lineInfo);
+        return { declined: true, reason: 'series closed',
+          detail: `MLB series market closed at Game 1 first pitch (${closeAt ? new Date(closeAt).toISOString() : 'unknown start'}): ${r.lineInfo.teamName || '?'}` };
+      }
+    }
     const normName = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s*\(series\)\s*/g, '').replace(/[^a-z0-9 ]/g, '').trim();
     const pairKey = (h, a) => {
       const nh = normName(h), na = normName(a);
@@ -5659,6 +5704,18 @@ function shouldDecline(legs, parlayId) {
     }
     for (const [key, entries] of Object.entries(byPair)) {
       if (entries.length <= 1) continue;
+      // Series WINNER + any individual-game leg between the same two teams
+      // (2026-09-28, MLB Wild Card; applies to every sport). The series
+      // outcome is built from those games — "Yankees win the series" + "Yankees
+      // ML Game 1" is strongly positively correlated — and independent
+      // multiplication would price it far too generously. Props and F5 legs
+      // count: they are all on a game of the series.
+      const hasSeriesWinner = entries.some(e => e.market === 'series_winner');
+      const hasAnyGameLeg = entries.some(e => typeof e.market === 'string' && !e.market.startsWith('series_'));
+      if (hasSeriesWinner && hasAnyGameLeg) {
+        log.info('Pricing', `Declined: series_winner + game leg on same matchup (${key})`);
+        return { declined: true, reason: 'correlated legs', detail: `series winner + individual game market on same matchup: ${key}` };
+      }
       const seriesSpreadLegs = entries.filter(e => e.market === 'series_spread');
       if (seriesSpreadLegs.length === 0) continue;
       if (seriesSpreadLegs.length >= 2) {
@@ -6047,6 +6104,8 @@ function getLastPriceFailure() {
 }
 
 module.exports = {
+  mlbSeriesQuotable,
+  getSeriesFairProb,   // test seam (test/mlb-series.test.js)
   setGolfOutrightsPaused,
   isGolfOutrightsPaused,
   // Exported for test/sgp-phi-family.test.js — pins the family buckets the
