@@ -1119,6 +1119,7 @@ function startStatusServer() {
         largeParlayFreezeSize: config.pricing.largeParlayFreezeSize,
         largeParlayFreezeSeconds: config.pricing.largeParlayFreezeSeconds,
         sgpAllowedCombos: config.pricing.sgpAllowedCombos,
+        sgpBlockedSports: config.pricing.sgpBlockedSports,
         sgpVigMultiplier: config.pricing.sgpVigMultiplier,
         sgpPropMlCorrBoost: config.pricing.sgpPropMlCorrBoost,
         sgpCorrelationByCombo: config.pricing.sgpCorrelationByCombo,
@@ -3108,6 +3109,9 @@ function startStatusServer() {
       res.json({
         ...status,
         allowedCombos: config.pricing.sgpAllowedCombos || [],
+        // Sports on which NO same-game parlay quotes (decline reason
+        // sgp_sport_blocked; combo= in the decline detail).
+        blockedSports: config.pricing.sgpBlockedSports || [],
         pxSubmitErrorsByCombo: websocket.getPxSubmitErrorsByCombo(),
         roster,
       });

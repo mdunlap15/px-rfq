@@ -1631,6 +1631,23 @@ const config = {
       ? process.env.SGP_ALLOWED_COMBOS
       : 'spread_total'
     ).split(',').map(s => s.trim()).filter(Boolean),
+    // SGP_BLOCKED_SPORTS: comma-separated sport keys on which NO same-game
+    // parlay may quote, whatever SGP_ALLOWED_COMBOS says. Operator directive
+    // 2026-09-28: "Do not allow any NHL SGPs for now. Let's monitor those to
+    // determine what combo allowances and SGP discount rates we need to
+    // apply." Enforced by the unconditional `sgp_sport_blocked` pre-pass in
+    // pricer.shouldDecline, which runs BEFORE combo classification and the
+    // allowlist, and records the would-be combo in the decline detail so
+    // demand is countable from the declines table.
+    //   unset        — default 'icehockey_nhl'
+    //   empty string — explicitly blocks NO sport (same unset-vs-'' rule as
+    //                  SGP_ALLOWED_COMBOS: '' must mean what it says)
+    // Runtime-editable (runtime key `sgpBlockedSports`), so NHL can be
+    // re-opened without a Railway edit / restart.
+    sgpBlockedSports: (process.env.SGP_BLOCKED_SPORTS != null
+      ? process.env.SGP_BLOCKED_SPORTS
+      : 'icehockey_nhl'
+    ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     // ---- SGP EXPERIMENTAL TIER (correlated-prop combo rollout) ----
     // New, more-correlated combo classes (starting with 'prop_nested')
     // launch in a small-test tier: a much tighter per-ticket cap, a daily

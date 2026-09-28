@@ -4432,6 +4432,151 @@ function _footballFuturesIdentityKeys(li) {
   return keys;
 }
 
+// ---------------------------------------------------------------------------
+// PER-SPORT SAME-GAME BLOCK — `sgp_sport_blocked`.
+//
+// Operator directive 2026-09-28: "Do not allow any NHL SGPs for now. Let's
+// monitor those to determine what combo allowances and SGP discount rates we
+// need to apply."
+//
+// config.pricing.sgpBlockedSports (env SGP_BLOCKED_SPORTS, default
+// ['icehockey_nhl'], runtime key `sgpBlockedSports`). Any parlay holding a
+// SAME-GAME group — 2+ legs on one pxEventId — whose sport is listed declines,
+// whatever SGP_ALLOWED_COMBOS says. Like mov_sgp_blocked this is an explicit,
+// UNCONDITIONAL pre-pass that runs BEFORE the prop-correlation pre-pass, combo
+// classification and the allowlist, so no combo key — added by env, runtime
+// edit or a future auto-included carve-out (kprop_ml / kprop_kprop) — can
+// re-open it. Cross-game parlays on the sport are untouched.
+//
+// MONITORING is the other half of the directive, so the decline detail leads
+// with parseable tokens (combo= dir= markets= legs= sport= event=) that land
+// verbatim in declines.detail — demand by combo and direction is a GROUP BY
+// on `substring(detail from 'combo=([^ ]+)')`, joinable to matched_parlays on
+// parlay_id for the fills we actually missed. `combo` uses the same keys as
+// SGP_ALLOWED_COMBOS / the correlation grid (ml_total, spread_total,
+// ml_spread, prop_*, 3plus, unclassified) and `dir` the grid's directional
+// suffixes (fav_over, dog_under, ...), so the numbers map straight onto the
+// knobs the operator will set.
+// ---------------------------------------------------------------------------
+
+function _sgpBlockedSportList() {
+  const raw = (config.pricing || {}).sgpBlockedSports;
+  const arr = raw instanceof Set ? [...raw] : Array.isArray(raw) ? raw : [];
+  return arr.map(s => String(s).trim().toLowerCase()).filter(Boolean);
+}
+
+function _sgpLegSport(li) {
+  return String((li && (li.sport || li.oddsApiSport)) || '').toLowerCase();
+}
+
+function _isPropLikeLeg(li) {
+  return /^player_/.test(String(li.marketType || ''));
+}
+
+// Classify a same-game group for MONITORING ONLY — nothing prices off it. Keys
+// mirror classifySgpCombo / the correlation grid; `dir` mirrors the grid's
+// directional suffixes. Fail-soft: anything unreadable is 'unk'.
+function _sgpMonitorShape(ls) {
+  const mts = ls.map(li => String(li.marketType || 'unknown'));
+  const markets = [...mts].sort().join('+');
+  let combo = 'unclassified';
+  let dir = null;
+  if (ls.length >= 3) {
+    combo = '3plus';
+  } else if (ls.length === 2) {
+    const props = ls.filter(_isPropLikeLeg);
+    const others = ls.filter(li => !_isPropLikeLeg(li));
+    if (props.length === 2) {
+      const pn = li => String(li.playerName || li.teamName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      combo = pn(props[0]) && pn(props[0]) === pn(props[1]) ? 'prop_same_player' : 'prop_prop';
+    } else if (props.length === 1) {
+      combo = `prop_${others[0].marketType || 'unknown'}`;
+    } else {
+      const key = [...mts].sort().join('_');
+      const byType = {};
+      for (const li of ls) byType[li.marketType] = li;
+      const totalSel = byType.total
+        ? String(byType.total.selection || byType.total.oddsApiSelection || '').toLowerCase()
+        : '';
+      const ou = (totalSel === 'over' || totalSel === 'under') ? totalSel : 'unk';
+      if (key === 'spread_total') {
+        combo = 'spread_total';
+        // Same read as priceParlay's directional key: the spread leg's SIGNED
+        // line on the bettor's side (negative = favourite).
+        const sl = Number(byType.spread.line);
+        const fd = Number.isFinite(sl) && sl !== 0 ? (sl < 0 ? 'fav' : 'dog') : 'unk';
+        dir = `${fd}_${ou}`;
+      } else if (key === 'moneyline_total') {
+        combo = 'ml_total';
+        // ML side from the leg's FAIR prob (the measured-MLB table's read).
+        // Sync cache read; a cold cache is 'unk', never a throw.
+        let fd = 'unk';
+        try {
+          const ml = byType.moneyline;
+          const fp = oddsFeed.getFairProb(
+            ml.oddsApiSport || ml.sport, ml.homeTeam, ml.awayTeam,
+            ml.oddsApiMarket || ml.marketType, ml.oddsApiSelection || ml.selection,
+            null, ml.startTime);
+          if (Number.isFinite(Number(fp)) && Number(fp) > 0) fd = Number(fp) > 0.5 ? 'fav' : 'dog';
+        } catch (_) { /* monitoring must never break pricing */ }
+        dir = `${fd}_${ou}`;
+      } else if (key === 'moneyline_spread') {
+        combo = 'ml_spread';
+        const side = li => String(li.oddsApiSelection || li.selection || '').toLowerCase();
+        const a = side(byType.moneyline), b = side(byType.spread);
+        dir = a && b ? (a === b ? 'same_side' : 'opp_side') : 'unk';
+      }
+    }
+  }
+  return { combo, dir, markets };
+}
+
+// Returns a decline result, or null when no blocked-sport same-game group exists.
+// `legInfos` are resolved lineInfos (raw {line_id} legs resolved by the caller).
+function _sgpSportBlockCheck(legInfos, parlayId) {
+  const blocked = _sgpBlockedSportList();
+  if (!blocked.length) return null;
+  const byEvent = new Map();
+  for (const li of legInfos) {
+    if (!li || !li.pxEventId) continue;
+    // Golf outright "events" hold the whole FIELD — a shared pxEventId there
+    // means same market, not same game (the generic SGP gate skips them too).
+    if (li.sport === 'golf_outrights') continue;
+    const k = String(li.pxEventId);
+    if (!byEvent.has(k)) byEvent.set(k, []);
+    byEvent.get(k).push(li);
+  }
+  const hits = [];
+  for (const [eid, ls] of byEvent) {
+    if (ls.length < 2) continue;
+    const sport = ls.map(_sgpLegSport).find(s => blocked.includes(s));
+    if (!sport) continue;
+    hits.push({ eid, ls, sport, shape: _sgpMonitorShape(ls) });
+  }
+  if (!hits.length) return null;
+  const h = hits[0];
+  const li0 = h.ls[0];
+  const game = li0.awayTeam && li0.homeTeam ? ` (${li0.awayTeam} @ ${li0.homeTeam})` : '';
+  const legDesc = h.ls.map(li =>
+    `${li.playerName || li.teamName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}${li.line != null ? ' ' + li.line : ''}`).join('; ');
+  const more = hits.length > 1
+    ? ` groups=${hits.length} also=${hits.slice(1).map(x => `${x.shape.combo}@${x.eid}`).join(',')}`
+    : '';
+  // SGP shadow log (no-op unless SGP_SHADOW_LOGGING=true), same idiom as the
+  // generic gate's `sgp_not_allowed:<combo>` so both land in sgp_audit.
+  try {
+    require('./sgp-audit').logSgpDecline(parlayId, h.eid,
+      h.ls.filter(_isPropLikeLeg), h.ls.filter(li => !_isPropLikeLeg(li)),
+      `sgp_sport_blocked:${h.shape.combo}`);
+  } catch (_) { /* observability must never break pricing */ }
+  return {
+    declined: true,
+    reason: 'sgp_sport_blocked',
+    detail: `combo=${h.shape.combo}${h.shape.dir ? ' dir=' + h.shape.dir : ''} markets=${h.shape.markets} legs=${h.ls.length} sport=${h.sport} event=${h.eid}${more}${game}: [${legDesc}] — same-game parlays on ${h.sport} are blocked by SGP_BLOCKED_SPORTS (operator 2026-09-28: monitoring demand before setting combo allowances / correlation factors)`,
+    sgpBlockedCombo: h.shape.combo,
+  };
+}
+
 function shouldDecline(legs, parlayId) {
   // parlayId is OPTIONAL — only used by side-effect-free observability
   // hooks (e.g. SGP shadow logging). Pricing logic must NOT depend on it.
@@ -4810,6 +4955,15 @@ function shouldDecline(legs, parlayId) {
         }
       }
     }
+
+    // ---- PER-SPORT SAME-GAME BLOCK (sgp_sport_blocked) --------------------
+    // Operator directive 2026-09-28: no NHL SGPs while demand is monitored.
+    // Runs AFTER the structural guards above (their reasons are more specific
+    // and can never be released) but BEFORE the golf/prop pre-passes, combo
+    // classification and the SGP_ALLOWED_COMBOS gate, so no combo key can
+    // re-open a blocked sport. See _sgpSportBlockCheck.
+    const sportBlock = _sgpSportBlockCheck(legInfos, parlayId);
+    if (sportBlock) return sportBlock;
   }
 
   // GOLF OUTRIGHT structural guards. MUST run before anything that could

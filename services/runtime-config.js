@@ -138,6 +138,10 @@ const REGISTRY = [
   // ---------------- GATING ----------------
   { key: 'sgpAllowedCombos', path: 'sgpAllowedCombos', type: 'strList', group: 'gating', danger: true, env: 'SGP_ALLOWED_COMBOS',
     label: 'SGP allowed combos', help: 'Which same-game combos may quote at all. Removing one stops those parlays entirely.' },
+  // Registered 2026-09-28 with the NHL SGP block so a sport can be re-opened
+  // (or another blocked) without a Railway edit — that restarts the trader.
+  { key: 'sgpBlockedSports', path: 'sgpBlockedSports', type: 'strList', group: 'gating', danger: true, env: 'SGP_BLOCKED_SPORTS',
+    label: 'SGP blocked sports', help: 'Sport keys (e.g. icehockey_nhl) on which NO same-game parlay quotes, whatever SGP allowed combos says. Declines as sgp_sport_blocked with combo=/dir=/markets= in the detail for demand monitoring. Empty = no sport blocked (re-opens them to the combo allowlist).' },
   { key: 'sgpCorrelationByCombo', path: 'sgpCorrelationByCombo', type: 'numMap', min: 0.1, max: 5, group: 'gating', danger: true, env: 'SGP_CORRELATION_BY_COMBO',
     label: 'SGP correlation by combo', help: 'Multiplier on fair for 2-leg same-game. Values below 1.00 are FLOORED to 1.00 at pricing (the grid never quotes below independent). NOTE 2026-08-03: Railway sets spread_fav_under / spread_dog_over to 1.08 (code defaults 1.00 since 2026-09-27, were 0.95). Settled data says current calibration is fine (z=+0.30) — do not "restore" on fill-rate grounds.' },
   { key: 'sgpCorrelation3PlusByCombo', path: 'sgpCorrelation3PlusByCombo', type: 'numMap', min: 0.1, max: 5, group: 'gating', danger: true, env: 'SGP_CORRELATION_3PLUS_BY_COMBO', label: 'SGP correlation (3+ legs)', help: 'Values below 1.00 are FLOORED to 1.00 at pricing.' },
