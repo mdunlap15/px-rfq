@@ -1587,8 +1587,9 @@ async function _runPostParseSupplements(sport, parsed, suppSnapshot) {
     }
   }
 
-  // Team totals for NBA/MLB/NHL (gap-fill from TOA on the refresh cycle).
-  if (['basketball_nba', 'baseball_mlb', 'icehockey_nhl'].includes(sport) && _supplementDue(sport, 'team_totals')) {
+  // Team totals for NBA/MLB (gap-fill from TOA on the refresh cycle). NHL
+  // dropped 2026-09-29 — team totals are not quoted there (TEAM_TOTAL_SPORTS).
+  if (TEAM_TOTAL_SPORTS.has(sport) && _supplementDue(sport, 'team_totals')) {
     try {
       const before = _countSupplementedMarkets(parsed, ['team_totals']);
       await supplementTeamTotals(parsed, sport);
@@ -2297,8 +2298,11 @@ async function getRfiFair(sport, homeTeam, awayTeam, commenceTime) {
 // per-event fetch never ran, so oddsEvt.markets.team_totals stayed empty and
 // the T1.8 football fail-closed guard in line-manager correctly refused to
 // register the lines. Adding it here is what lets that guard pass honestly.
+// icehockey_nhl REMOVED 2026-09-29: NHL team totals are not quoted (PX's
+// shootout-goal settlement basis is unverified), and the per-event fetch cost
+// ~200 TOA calls/hour on a key that was already frequency-limited.
 const TEAM_TOTAL_SPORTS = new Set([
-  'baseball_mlb', 'basketball_nba', 'icehockey_nhl',
+  'baseball_mlb', 'basketball_nba',
   'americanfootball_nfl', 'americanfootball_nfl_preseason', 'americanfootball_ncaaf',
 ]);
 const TEAM_TOTAL_BOOKMAKERS = process.env.TEAM_TOTAL_BOOKMAKERS || 'pinnacle,draftkings,fanduel,betmgm';
@@ -6937,6 +6941,15 @@ function getFairProb(sport, homeTeam, awayTeam, marketType, selection, line, tar
     return null;
   }
 
+  // NHL game-line book floor (2026-09-29). Three of the opening-week games
+  // were priced off DraftKings ALONE in our cache (TOA carried 20+ books for
+  // them) — one book is a mirror, not a consensus. Applies to full-game
+  // ML / puck line / total when the builder reports a book count.
+  if (sport === 'icehockey_nhl' && (marketType === 'h2h' || marketType === 'spreads' || marketType === 'totals')
+      && Number.isFinite(market.books) && market.books < NHL_MIN_BOOKS) {
+    return null;
+  }
+
   // ---- TENNIS SET MARKETS -------------------------------------------------
   // Resolved here rather than falling through the h2h/spreads/totals ladder
   // below, which has no notion of them and would return null — i.e. every set
@@ -8026,10 +8039,24 @@ function getAltLineCacheEntry(eventKey, marketType, selection, line) {
  * For spreads, `line` MUST be the signed team-perspective line (not abs) so
  * we can route to the correct signed home_point bucket.
  */
+const NHL_MIN_BOOKS = Math.max(1, parseInt(process.env.NHL_MIN_BOOKS, 10) || 2);
+
+function _altEntryFresh(alt, now = Date.now()) {
+  return !!alt && Number.isFinite(alt.fetchedAt) && (now - alt.fetchedAt) < ALT_LINES_TTL_MS;
+}
+
 function getAltLineFairProb(eventKey, marketType, selection, line) {
   const alt = altLinesCache[eventKey];
   if (!alt) {
     log.debug('AltLine', `MISS cache: ${eventKey} ${marketType} ${selection} line=${line} — no alt cache entry`);
+    return null;
+  }
+  // AGE CHECK (2026-09-29). getFairProb reaches this directly, not only via
+  // getAltLineFairProbSync (which already enforces the TTL), so an entry whose
+  // refresh kept failing stayed quotable indefinitely — NHL alt totals were
+  // seen priceable at 68–91 min old on 9/28. Same TTL as the sync path.
+  if (!_altEntryFresh(alt)) {
+    log.debug('AltLine', `STALE cache: ${eventKey} ${marketType} ${selection} line=${line} — ${Math.round((Date.now() - alt.fetchedAt) / 60000)}min old`);
     return null;
   }
 
@@ -8162,6 +8189,8 @@ function getAltLineBookOdds(homeTeam, awayTeam, marketType, selection, line, boo
   const eventKey = normalizeEventKey(homeTeam, awayTeam);
   const alt = altLinesCache[eventKey];
   if (!alt) return null;
+  // Feeds the consensus floor — a stale book price must not set it either.
+  if (!_altEntryFresh(alt)) return null;
 
   let lineData;
   if (marketType === 'spreads' || marketType === 'spreads_h1') {
@@ -11701,6 +11730,12 @@ module.exports = {
   // 2026-09-28 gate-wedge fix — test seams (test/toa-gate-wedge.test.js).
   abortableFetch,
   getToaGateState,
+  // 2026-09-29 NHL gaps — test seams (test/nhl-gaps.test.js).
+  _altEntryFresh,
+  getAltLineFairProb,
+  getAltLineBookOdds,
+  TEAM_TOTAL_SPORTS,
+  NHL_MIN_BOOKS,
   _getTheOddsApiEvents,
   _getTheOddsApiPropOdds,
   __resetToaGateForTest: () => { _toaQueue.length = 0; _toaInFlight = 0; _toaGateStats.abandoned = 0; _toaGateStats.maxQueue = 0;

@@ -349,6 +349,9 @@ function _sportMarketAllowed(sport, marketType, eventId) {
   if (evMap && sport && Array.isArray(evMap[sport])) {
     if (eventId == null || !evMap[sport].includes(String(eventId))) return false;
   }
+  // NHL team totals dark (2026-09-29) at every entry point, whatever the
+  // Railway SPORT_MARKET_ALLOWLIST says — see _nhlExcludedMarket.
+  if (sport === 'icehockey_nhl' && marketType === 'team_total') return false;
   const map = (config.pricing && config.pricing.sportMarketAllowlist) || null;
   if (!map || !sport) return true;
   const allowed = map[sport];
@@ -1194,8 +1197,17 @@ const FOOTBALL_Q1_SPORTS = new Set([
 // live only on TOA's per-event endpoint; see oddsFeed.ensureTeamTotals). NBA/
 // NHL are offseason now but wired for their return. Football team totals are
 // sourced by services/nfl-consensus instead, so they are NOT listed here.
+// NHL seed exclusions (2026-09-29) — see the mainMarkets filter.
+const NHL_REGULATION_RE = /\(\s*60\s*min|regular\s*time|regulation|3[-\s]?way/i;
+const NHL_TEAM_TOTAL_RE = /team\s*total|home\s*total|away\s*total/i;
+function _nhlExcludedMarket(m) {
+  const name = String((m && m.name) || '');
+  return NHL_REGULATION_RE.test(name) || NHL_TEAM_TOTAL_RE.test(name) || (m && m.type === 'team_total');
+}
+
+// icehockey_nhl REMOVED 2026-09-29 (see odds-feed TEAM_TOTAL_SPORTS).
 const TEAM_TOTAL_SEED_SPORTS = new Set([
-  'baseball_mlb', 'basketball_nba', 'icehockey_nhl',
+  'baseball_mlb', 'basketball_nba',
   'americanfootball_nfl', 'americanfootball_nfl_preseason', 'americanfootball_ncaaf',
 ]);
 
@@ -2107,6 +2119,15 @@ async function seedAllLines(gen) {
       const isSeriesSpread = seriesSpreadNamePat.test(name);
       const isSeriesTotal  = !isSeriesSpread && seriesTotalNamePat.test(name);
       const isSeriesMarket = isSeriesWinner || isSeriesSpread || isSeriesTotal;
+      // NHL (2026-09-29): full-game incl. OT/shootout ONLY. Regulation /
+      // "(60 Min)" / 3-way markets are a different product (regulation win
+      // probability runs ~11pp below full-game), and fullGameNames matches by
+      // substring — "Moneyline (Regulation)" and "Total Goals (Regular Time)"
+      // are IN it, so today's NHL 60-min markets were skipped only by PX's
+      // wording. Team totals stay dark until PX confirms how the shootout
+      // goal counts. Explicit here because SPORT_MARKET_ALLOWLIST is set in
+      // Railway, so a code-default allowlist entry would never take effect.
+      if (sportKey === 'icehockey_nhl' && _nhlExcludedMarket(m)) return false;
       const supportedBase = isCombatSport
         ? ['moneyline']
         : isMmaSport
@@ -5420,6 +5441,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 }
 
 module.exports = {
+  _nhlExcludedMarket,
   getSeedRunState,
   getPairGameStarts,
   hasOpenMlbSeriesLines,
