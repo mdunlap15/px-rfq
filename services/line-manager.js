@@ -373,16 +373,16 @@ function _sportMarketAllowed(sport, marketType, eventId) {
 // sending the RFQ within one seed of the close — the pricer declines anything
 // that races in. The kill-switch (mlbSeriesEnabled) takes the whole family off.
 const seriesWindow = require('./series-window');
-const SERIES_GAME_LOOKBACK_MS = 6 * 3600 * 1000;
-// Start times of every NON-series line on this matchup still in the index
-// (live + the seed's staging target), limited to games that started at most
-// SERIES_GAME_LOOKBACK_MS ago: an in-progress Game 1 must close its series,
-// but a same-matchup regular-season game days earlier must not.
-function getPairGameStarts(sport, a, b) {
+const SERIES_GAME_LOOKBACK_MS = 12 * 3600 * 1000;
+// Every NON-series MLB game on this matchup still in the index (live + the
+// seed's staging target) that starts in the future or started at most
+// SERIES_GAME_LOOKBACK_MS ago — the series window asks ESPN whether any of
+// them is in play. A same-matchup regular-season game days earlier is ignored.
+function getPairGames(sport, a, b) {
   const key = seriesWindow.pairKey(a, b);
   if (!key) return [];
   const floor = Date.now() - SERIES_GAME_LOOKBACK_MS;
-  const out = new Set();
+  const byStart = new Map();
   for (const idx of [lineIndex, _seedIndexTarget]) {
     if (!idx) continue;
     for (const li of Object.values(idx)) {
@@ -390,22 +390,25 @@ function getPairGameStarts(sport, a, b) {
       if (typeof li.marketType === 'string' && li.marketType.startsWith('series_')) continue;
       if (seriesWindow.pairKey(li.homeTeam, li.awayTeam) !== key) continue;
       const t = Date.parse(li.startTime);
-      if (Number.isFinite(t) && t >= floor) out.add(t);
+      if (Number.isFinite(t) && t >= floor && !byStart.has(t)) byStart.set(t, { startMs: t, home: li.homeTeam, away: li.awayTeam });
     }
   }
-  return [...out];
+  return [...byStart.values()];
 }
+// Registration: an MLB series line is admitted unless the kill-switch is off
+// or one of the matchup's games is IN PLAY (operator 2026-09-29). Board
+// freshness is a PRICING concern only — gating registration on it would
+// deadlock (the DK scrape only runs while series lines are registered).
 function _mlbSeriesAdmissible(info) {
   if (!seriesWindow.isMlbSeriesLine(info)) return true;
   if (config.pricing && config.pricing.mlbSeriesEnabled === false) return false;
-  return !seriesWindow.isClosed(info, { extraStarts: getPairGameStarts('baseball_mlb', info.homeTeam, info.awayTeam) });
+  return !seriesWindow.isClosed(info, { games: getPairGames('baseball_mlb', info.homeTeam, info.awayTeam) });
 }
-// True while any MLB series line is registered and still open — gates the DK
-// series scrape so Chromium only launches for MLB when there is something to
-// price.
+// True while any MLB series line is registered — gates the DK series scrape
+// so Chromium only launches for MLB when there is something to price.
 function hasOpenMlbSeriesLines() {
   for (const li of Object.values(lineIndex)) {
-    if (seriesWindow.isMlbSeriesLine(li) && _mlbSeriesAdmissible(li)) return true;
+    if (seriesWindow.isMlbSeriesLine(li)) return true;
   }
   return false;
 }
@@ -5443,7 +5446,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 module.exports = {
   _nhlExcludedMarket,
   getSeedRunState,
-  getPairGameStarts,
+  getPairGames,
   hasOpenMlbSeriesLines,
   _mlbSeriesAdmissible,
   seedAllLines,

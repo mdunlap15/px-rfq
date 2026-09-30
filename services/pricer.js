@@ -281,16 +281,16 @@ function isBlockedAltTotal(lineInfo) {
   return null;
 }
 
-// MLB series gate shared by the quote pre-pass, getSeriesFairProb (quote AND
-// confirm) and line registration: kill-switch + the Game-1 close latch. The
-// latch is fed the PX series event's own start plus every same-matchup MLB
-// game start still in the line index.
+// MLB series gate shared by the quote pre-pass and getSeriesFairProb (quote
+// AND confirm): kill-switch + closed while any game of the matchup is IN PLAY
+// + the DK board must post-date the last game's end (series-window.js).
 function mlbSeriesQuotable(lineInfo, now = Date.now()) {
   if (config.pricing.mlbSeriesEnabled === false) return false;
-  const extra = typeof lineManager.getPairGameStarts === 'function'
-    ? lineManager.getPairGameStarts('baseball_mlb', lineInfo.homeTeam, lineInfo.awayTeam)
+  const games = typeof lineManager.getPairGames === 'function'
+    ? lineManager.getPairGames('baseball_mlb', lineInfo.homeTeam, lineInfo.awayTeam)
     : [];
-  return !seriesWindow.isClosed(lineInfo, { now, extraStarts: extra });
+  const age = dkScraper.getSeriesCacheAgeMs('mlb');
+  return seriesWindow.isPriceable(lineInfo, { now, games, boardAtMs: age == null ? null : now - age });
 }
 
 function getSeriesFairProb(lineInfo) {
@@ -1067,7 +1067,7 @@ function priceParlay(legs, opts = {}) {
         priceParlay._lastFailure = { reason: 'unknown start time', detail: `${legLabel} has invalid startTime ${lineInfo.startTime}`, blockerLeg: legDescriptor };
         return null;
       }
-      if (nowMs > startMs && !isGolfOutright) {
+      if (nowMs > startMs && !isGolfOutright && !seriesWindow.isMlbSeriesLine(lineInfo)) {
         log.debug('Pricing', `Declined: event already started (${lineInfo.teamName}, started ${lineInfo.startTime})`);
         priceParlay._lastFailure = { reason: 'event started', detail: `${legLabel} already in progress`, blockerLeg: legDescriptor };
         return null;
@@ -5377,7 +5377,10 @@ function shouldDecline(legs, parlayId) {
       if (isNaN(startMs)) {
         return { declined: true, reason: 'unknown start time', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) has invalid startTime ${lineInfo.startTime} — cannot verify game hasn't started` };
       }
-      if (nowMs > startMs && !isGolfOutright) {
+      // MLB series: a series event's PX start is a PAST game once the series
+      // is under way; series-window.js decides (dark only while a game is in
+      // play), checked below in the series pre-pass.
+      if (nowMs > startMs && !isGolfOutright && !seriesWindow.isMlbSeriesLine(lineInfo)) {
         return { declined: true, reason: 'event started', detail: `${lineInfo.teamName || '?'} (${lineInfo.sport || '?'}) already in progress` };
       }
       // Early-actual-start veto (config.pricing.liveStartVetoSports, default
@@ -5678,15 +5681,13 @@ function shouldDecline(legs, parlayId) {
     return typeof mt === 'string' && mt.startsWith('series_');
   });
   if (hasAnySeriesLeg) {
-    // MLB series close at Game 1's first pitch and never reopen (operator
-    // directive 2026-09-28). The generic started gate covers the PX series
-    // event only while PX keeps its start at Game 1.
+    // MLB series: dark while any game of the matchup is in play, and until
+    // the DK board post-dates the last game's end (operator 2026-09-29).
     for (const r of resolvedLegs) {
       if (!seriesWindow.isMlbSeriesLine(r.lineInfo)) continue;
       if (!mlbSeriesQuotable(r.lineInfo, nowMs)) {
-        const closeAt = seriesWindow.closeAtMs(r.lineInfo);
         return { declined: true, reason: 'series closed',
-          detail: `MLB series market closed at Game 1 first pitch (${closeAt ? new Date(closeAt).toISOString() : 'unknown start'}): ${r.lineInfo.teamName || '?'}` };
+          detail: `MLB series market closed — a game of this series is in play or the DK series price has not refreshed since the last game ended: ${r.lineInfo.teamName || '?'}` };
       }
     }
     const normName = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s*\(series\)\s*/g, '').replace(/[^a-z0-9 ]/g, '').trim();

@@ -8,8 +8,9 @@
 //   * DK team matching: "Chicago White Sox" must read the White Sox price, not
 //     the Red Sox's ("sox" == "sox" was the old last-word fallback), and an
 //     MLB lookup is scoped to its own matchup and to a fresh board;
-//   * the close is LATCHED at Game 1's first pitch — PX advancing the series
-//     event's start to Game 2 must not reopen it;
+//   * a series is dark only while one of its games is in play, and prices
+//     again only once the DK board post-dates that game (operator 2026-09-29,
+//     revising 9/28's "off at Game 1");
 //   * DK's round-level startTime (18:00Z for all four series) does NOT close a
 //     series whose Game 1 is later;
 //   * a series-winner leg can't be parlayed with any leg on a game of the same
@@ -98,66 +99,75 @@ test('DK: NBA-style labels still match (regression)', () => {
   dk.__setSeriesCacheForTest('nba', null);
 });
 
-// ------------------------------------------------------------ close latch
+// ------------------------------------------------------- in-play window
+// Operator 2026-09-29: quote series BETWEEN games; dark only while a game of
+// the series is in play, and until the DK board post-dates that game's end.
 
-test('latch: open before Game 1, closed after, and NEVER reopened by a later series start', () => {
+const noEspn = () => null;
+const finalEspn = () => ({ completed: true, state: 'post' });
+const liveEspn = () => ({ completed: false, state: 'in' });
+
+test('window: open before a game, closed while it is in play, open after it is final', () => {
   seriesWindow.__resetForTest();
-  const g1 = Date.now() + 2 * H;
-  const li = seriesLine('New York Yankees', 'Boston Red Sox', 'New York Yankees', g1);
-  assert.strictEqual(seriesWindow.isClosed(li, { now: g1 - 60e3 }), false);
-  assert.strictEqual(seriesWindow.isClosed(li, { now: g1 }), true);
-  // PX advances the series event to Game 2 (24h later). We are between games.
-  const advanced = seriesLine('New York Yankees', 'Boston Red Sox', 'New York Yankees', g1 + 24 * H);
-  assert.strictEqual(seriesWindow.isClosed(advanced, { now: g1 + 6 * H }), true,
-    'a series whose Game 1 has started must stay closed after PX moves its start');
+  const g1 = Date.now() - 60 * 60e3;
+  const li = seriesLine('New York Yankees', 'Boston Red Sox', 'New York Yankees', Date.now() + 20 * H);
+  const games = [{ startMs: g1, home: 'New York Yankees', away: 'Boston Red Sox' }];
+  assert.strictEqual(seriesWindow.isClosed(li, { games: [], espnLookup: noEspn }), false, 'no game in play');
+  assert.strictEqual(seriesWindow.isClosed(li, { games, espnLookup: liveEspn }), true, 'Game 1 live');
+  assert.strictEqual(seriesWindow.isClosed(li, { games, espnLookup: noEspn }), true, 'no ESPN yet, within 5h of first pitch');
+  assert.strictEqual(seriesWindow.isClosed(li, { games, espnLookup: finalEspn }), false, 'Game 1 final -> open again');
 });
 
-test('latch: a same-matchup game starting before the PX series start closes it', () => {
+test('window: without ESPN a game counts as in play for MAX_GAME_MS, then not', () => {
   seriesWindow.__resetForTest();
-  const g1 = Date.now() + 1 * H;
-  const li = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', g1 + 5 * H);
-  assert.strictEqual(seriesWindow.isClosed(li, { now: g1 + 60e3, extraStarts: [g1] }), true);
+  const li = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() + 20 * H);
+  const late = [{ startMs: Date.now() - seriesWindow.MAX_GAME_MS - 60e3, home: 'San Diego Padres', away: 'Chicago Cubs' }];
+  assert.strictEqual(seriesWindow.isClosed(li, { games: late, espnLookup: noEspn }), false);
 });
 
-test('latch: unknown start fails CLOSED; non-MLB series are untouched', () => {
+test('window: the series line OWN past start counts as a game in play', () => {
+  seriesWindow.__resetForTest();
+  const li = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() - 30 * 60e3);
+  assert.strictEqual(seriesWindow.isClosed(li, { games: [], espnLookup: noEspn }), true);
+});
+
+test('pricing: after a final, the DK board must post-date the end (+grace)', () => {
+  seriesWindow.__resetForTest();
+  const now = Date.now();
+  const li = seriesLine('Houston Astros', 'Chicago White Sox', 'Houston Astros', now + 20 * H);
+  const games = [{ startMs: now - 4 * H, home: 'Houston Astros', away: 'Chicago White Sox' }];
+  assert.strictEqual(seriesWindow.isPriceable(li, { now, games, espnLookup: finalEspn, boardAtMs: now - 10 * 60e3 }), false,
+    'a board scraped before the final is the PRE-game price');
+  const later = now + seriesWindow.RELIST_GRACE_MS + 60e3;
+  assert.strictEqual(seriesWindow.isPriceable(li, { now: later, games, espnLookup: finalEspn, boardAtMs: later - 30e3 }), true);
+  assert.strictEqual(seriesWindow.isPriceable(li, { now: later, games, espnLookup: finalEspn, boardAtMs: null }), false);
+});
+
+test('window: unknown start fails CLOSED; non-MLB series are untouched', () => {
   seriesWindow.__resetForTest();
   const li = Object.assign(seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() + H), { startTime: null, startTimeMs: null });
-  assert.strictEqual(seriesWindow.isClosed(li), true);
+  assert.strictEqual(seriesWindow.isClosed(li, { espnLookup: noEspn }), true);
   const nhl = { sport: 'icehockey_nhl', marketType: 'series_winner', homeTeam: 'A', awayTeam: 'B', startTime: new Date(Date.now() - H).toISOString() };
   assert.strictEqual(seriesWindow.isClosed(nhl), false);
 });
 
-test('latch: hydrate restores a close time persisted before a restart', async () => {
-  seriesWindow.__resetForTest();
-  const db = require('../services/db');
-  const orig = db.loadKV;
-  const g1 = Date.now() - 3 * H;               // Game 1 started 3h ago
-  db.loadKV = async (k) => (k === seriesWindow.KV_KEY ? { [seriesWindow.pairKey('Atlanta Braves', 'Philadelphia Phillies')]: new Date(g1).toISOString() } : null);
-  try {
-    await seriesWindow.hydrate();
-  } finally { db.loadKV = orig; }
-  // After the restart PX shows the series starting at Game 2 — still closed.
-  const li = seriesLine('Atlanta Braves', 'Philadelphia Phillies', 'Atlanta Braves', Date.now() + 20 * H);
-  assert.strictEqual(seriesWindow.isClosed(li), true);
-});
-
 // ------------------------------------------------------- getSeriesFairProb
 
-test('pricer: an open MLB series prices off its own DK series even after DK\'s round-level start', () => {
-  reset();                                      // DK startTime 1h in the PAST
+test('pricer: an MLB series with no game in play prices off its own DK series even after DK round-level start', () => {
+  reset();
   const li = seriesLine('Chicago White Sox', 'Chicago White Sox', 'Houston Astros', Date.now() + 3 * H);
   assert.strictEqual(pricer.getSeriesFairProb(li), 0.43);
 });
 
-test('pricer: closed / stale / switched-off / non-winner MLB series do not price', () => {
+test('pricer: in-play / stale / switched-off / non-winner MLB series do not price', () => {
   reset();
-  const past = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() - 60e3);
-  assert.strictEqual(pricer.getSeriesFairProb(past), null, 'Game 1 has started');
+  const live = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() - 60e3);
+  assert.strictEqual(pricer.getSeriesFairProb(live), null, 'a game is in play');
 
-  seriesWindow.__resetForTest();                // the line above latched this matchup closed
+  seriesWindow.__resetForTest();
   installBoard(Date.now() - 2 * H);
   const open = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() + 3 * H);
-  assert.strictEqual(seriesWindow.isClosed(open), false, 'precondition: the series itself is open');
+  assert.strictEqual(seriesWindow.isClosed(open, { espnLookup: noEspn }), false, 'precondition: no game in play');
   assert.strictEqual(pricer.getSeriesFairProb(open), null, 'DK board older than mlbSeriesMaxAgeMin');
 
   reset();
@@ -212,12 +222,22 @@ test('shouldDecline: series winner + a DIFFERENT matchup is not a correlation de
     `unexpected: ${r && r.reason} / ${r && r.detail}`);
 });
 
-test('shouldDecline: a series whose Game 1 started declines "series closed" even after PX moves its start', () => {
+test('shouldDecline: a game in play declines "series closed"; a past series start alone is not "event started"', () => {
   seriesWindow.__resetForTest();
-  seriesWindow.noteStart('Boston Red Sox', 'New York Yankees', Date.now() - 30 * 60e3);  // Game 1 began 30 min ago
-  const r = decline('s-nyy', 'g-sd-ml');
-  assert.ok(r && r.declined);
-  assert.strictEqual(r.reason, 'series closed', `${r.reason} / ${r.detail}`);
+  reset();
+  const idx = lineManager.__debugGetLineIndex();
+  idx.__t_live = { sport: MLB, marketType: 'moneyline', homeTeam: 'New York Yankees', awayTeam: 'Boston Red Sox', startTime: new Date(Date.now() - 30 * 60e3).toISOString() };
+  try {
+    const r = decline('s-nyy', 'g-sd-ml');
+    assert.ok(r && r.declined);
+    assert.strictEqual(r.reason, 'series closed', r.reason + ' / ' + r.detail);
+  } finally { delete idx.__t_live; }
+  const prev = LINES['s-nyy'];
+  LINES['s-nyy'] = Object.assign({}, prev, { startTime: new Date(Date.now() - 6 * H).toISOString(), startTimeMs: Date.now() - 6 * H });
+  try {
+    const r2 = decline('s-nyy', 'g-sd-ml');
+    assert.ok(!(r2 && r2.declined && r2.reason === 'event started'), String(r2 && r2.reason));
+  } finally { LINES['s-nyy'] = prev; }
 });
 
 test('shouldDecline: the kill-switch closes MLB series', () => {
@@ -232,34 +252,28 @@ test('shouldDecline: the kill-switch closes MLB series', () => {
 
 // ------------------------------------------------------------ registration
 
-test('line index: a closed MLB series line is refused; an open one and non-MLB series are admitted', () => {
+test('line index: an MLB series line is refused only while a game is in play; non-MLB series are admitted', () => {
   seriesWindow.__resetForTest();
   const open = seriesLine('Houston Astros', 'Chicago White Sox', 'Houston Astros', Date.now() + 5 * H);
   assert.strictEqual(lineManager._mlbSeriesAdmissible(open), true);
-  seriesWindow.__resetForTest();
-  const closed = seriesLine('Houston Astros', 'Chicago White Sox', 'Houston Astros', Date.now() - 60e3);
-  assert.strictEqual(lineManager._mlbSeriesAdmissible(closed), false);
+  const live = seriesLine('Houston Astros', 'Chicago White Sox', 'Houston Astros', Date.now() - 60e3);
+  assert.strictEqual(lineManager._mlbSeriesAdmissible(live), false);
   const nhl = { sport: 'icehockey_nhl', marketType: 'series_winner', homeTeam: 'A', awayTeam: 'B', startTime: new Date(Date.now() - H).toISOString() };
   assert.strictEqual(lineManager._mlbSeriesAdmissible(nhl), true);
 });
 
-test('line index: an in-progress same-matchup game in the index closes the series', () => {
+test('line index: an in-progress same-matchup game in the index closes the series; an old meeting does not', () => {
   seriesWindow.__resetForTest();
   const idx = lineManager.__debugGetLineIndex();
   const started = Date.now() - 20 * 60e3;
   idx.__t_g1 = { sport: MLB, marketType: 'moneyline', homeTeam: 'Atlanta Braves', awayTeam: 'Philadelphia Phillies', startTime: new Date(started).toISOString() };
-  // A regular-season meeting days earlier must NOT close anything.
   idx.__t_old = { sport: MLB, marketType: 'moneyline', homeTeam: 'San Diego Padres', awayTeam: 'Chicago Cubs', startTime: new Date(Date.now() - 3 * 24 * H).toISOString() };
   try {
-    assert.deepStrictEqual(lineManager.getPairGameStarts(MLB, 'Philadelphia Phillies', 'Atlanta Braves'), [started]);
-    assert.deepStrictEqual(lineManager.getPairGameStarts(MLB, 'Chicago Cubs', 'San Diego Padres'), []);
-    const s = seriesLine('Atlanta Braves', 'Philadelphia Phillies', 'Atlanta Braves', Date.now() + 22 * H);
-    assert.strictEqual(lineManager._mlbSeriesAdmissible(s), false);
-    const sd = seriesLine('San Diego Padres', 'San Diego Padres', 'Chicago Cubs', Date.now() + 5 * H);
-    assert.strictEqual(lineManager._mlbSeriesAdmissible(sd), true);
-  } finally {
-    delete idx.__t_g1; delete idx.__t_old;
-  }
+    assert.deepStrictEqual(lineManager.getPairGames(MLB, 'Philadelphia Phillies', 'Atlanta Braves').map(g => g.startMs), [started]);
+    assert.deepStrictEqual(lineManager.getPairGames(MLB, 'Chicago Cubs', 'San Diego Padres'), []);
+    assert.strictEqual(lineManager._mlbSeriesAdmissible(seriesLine('Atlanta Braves', 'Philadelphia Phillies', 'Atlanta Braves', Date.now() + 22 * H)), false);
+    assert.strictEqual(lineManager._mlbSeriesAdmissible(seriesLine('San Diego Padres', 'San Diego Padres', 'Chicago Cubs', Date.now() + 5 * H)), true);
+  } finally { delete idx.__t_g1; delete idx.__t_old; }
 });
 
 test('pricer: an MLB series lookup is scoped to its matchup (fails closed off-board)', () => {

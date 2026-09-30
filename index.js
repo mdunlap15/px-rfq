@@ -1183,10 +1183,10 @@ function startStatusServer() {
           on: config.pricing.mlbSeriesEnabled !== false,
           env: process.env.MLB_SERIES_ENABLED ?? null,
           defaultsTo: true,
-          gates: 'MLB playoff series-winner registration + pricing; each series closes at its Game 1 first pitch (latched)',
+          gates: 'MLB playoff series-winner registration + pricing; dark while a game of the series is in play, and until the DK board post-dates that game',
           maxAgeMin: config.pricing.mlbSeriesMaxAgeMin,
           dkBoardAgeSec: (() => { const a = dkScraper.getSeriesCacheAgeMs('mlb'); return a == null ? null : Math.round(a / 1000); })(),
-          closeLatch: require('./services/series-window').getState(),
+          finalsSeen: require('./services/series-window').getState(),
         },
         golfOutrightsParlay: {
           on: config.pricing.golfOutrightsParlayEnabled,

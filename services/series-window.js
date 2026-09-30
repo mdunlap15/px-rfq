@@ -1,38 +1,28 @@
 /**
  * MLB playoff SERIES quote window.
  *
- * Operator directive 2026-09-28: "Let's also quote MLB wild card series
- * markets. $1.5K stakes. Make sure they come off the board at the start of
- * Game 1's of each series."
+ * Operator directive 2026-09-29 (revising 9/28's "off at Game 1"): "The wild
+ * card series are still in play. It's OK to quote them. We just shouldn't be
+ * quoting any while games from them are in play."
  *
- * A series market is open ONLY until the first pitch of Game 1 of that
- * series, and never reopens. None of the obvious signals is enough on its
- * own:
- *   - DK's series event `startEventDate` is ROUND-level: all four 2026 Wild
- *     Card series carry 2026-09-29T18:00Z even though Game 1s run 18:00Z,
- *     21:00Z, 00:00Z and 02:00Z. Using it closes three series 3-8h early.
- *   - PX's series event start equals Game 1's start today, and the generic
- *     started-event gate declines on it, BUT PX advances a series event's
- *     start to the next game (that is how NBA/NHL series kept quoting between
- *     games). Once that happens the generic gate re-opens the series.
- * So the close time is LATCHED: the earliest start ever observed for the
- * matchup (the PX series event's own start, and the start of any same-matchup
- * MLB game in the line index), kept as a running minimum that can only move
- * EARLIER, and persisted to kv_store so a restart between games cannot lose
- * it. Unknown/unparseable start → closed (fail closed).
+ * So a series market is:
+ *   - CLOSED while any game between the two teams is in progress — from its
+ *     first pitch until ESPN reports it final (fallback: MLB_SERIES_GAME_MAX_HOURS
+ *     after first pitch when ESPN can't see the game);
+ *   - for PRICING, additionally closed until the DK series board has been
+ *     scraped at least MLB_SERIES_RELIST_GRACE_MIN after the most recent game
+ *     ended. Right after a final, the cached DK price is the PRE-game price —
+ *     quoting it would hand the bettor the result of the game just played.
  *
- * Scope: baseball_mlb series_* lines only. NBA/NHL series keep their
- * between-games quoting behaviour.
+ * Game start times come from the caller (the PX series event's own start —
+ * PX moves it to the next game — plus every same-matchup MLB game still in the
+ * line index). DK's series startEventDate is ROUND-level and is ignored.
  */
-const log = require('./logger');
+const MAX_GAME_MS = (Number(process.env.MLB_SERIES_GAME_MAX_HOURS) || 5) * 3600e3;
+const RELIST_GRACE_MS = (Number(process.env.MLB_SERIES_RELIST_GRACE_MIN) || 5) * 60e3;
 
-const KV_KEY = 'mlb_series_first_start';
-// A latch older than this is dropped at hydrate/persist time: two teams meet
-// at most once per postseason, and next year's series must not inherit it.
-const LATCH_RETENTION_MS = 45 * 24 * 3600 * 1000;
-
-const _firstStart = new Map(); // pairKey -> earliest start ms observed
-let _persistTimer = null;
+// `${pairKey}|${startMs}` -> ms we first saw ESPN report the game final.
+const _finalSeen = new Map();
 
 function _norm(s) {
   return String(s || '')
@@ -56,107 +46,84 @@ function isMlbSeriesLine(info) {
   return sport === 'baseball_mlb' && mt.startsWith('series_');
 }
 
-function _schedulePersist() {
-  if (_persistTimer) return;
-  _persistTimer = setTimeout(() => {
-    _persistTimer = null;
-    try {
-      const db = require('./db');
-      const now = Date.now();
-      const out = {};
-      for (const [k, ms] of _firstStart) {
-        if (now - ms < LATCH_RETENTION_MS) out[k] = new Date(ms).toISOString();
-      }
-      Promise.resolve(db.saveKV(KV_KEY, out)).catch(() => {});
-    } catch (_) { /* persistence is best-effort; the in-memory latch still holds */ }
-  }, 2000);
-  if (_persistTimer.unref) _persistTimer.unref();
-}
-
-/** Record an observed start for a matchup. Only ever moves the latch EARLIER. */
-function noteStart(a, b, start) {
-  const key = pairKey(a, b);
-  const ms = typeof start === 'number' ? start : Date.parse(start);
-  if (!key || !Number.isFinite(ms)) return null;
-  const prev = _firstStart.get(key);
-  if (prev == null || ms < prev) {
-    _firstStart.set(key, ms);
-    _schedulePersist();
-  }
-  return _firstStart.get(key);
-}
-
-/**
- * Close time (ms) for an MLB series line: min(series event start, earliest
- * same-matchup game start supplied by the caller, latched minimum). Records
- * what it sees. Returns null when nothing parseable is known.
- */
-function closeAtMs(info, extraStarts = []) {
-  if (!info) return null;
-  const a = info.homeTeam, b = info.awayTeam;
-  const candidates = [info.startTimeMs, info.startTime, ...(extraStarts || [])];
-  for (const c of candidates) {
-    if (c == null) continue;
-    noteStart(a, b, c);
-  }
-  const key = pairKey(a, b);
-  return key ? (_firstStart.get(key) ?? null) : null;
-}
-
-/**
- * True when an MLB series line must not quote / register. Non-MLB-series
- * lines always return false. Fails CLOSED on an unknown close time.
- */
-function isClosed(info, { now = Date.now(), extraStarts = [] } = {}) {
-  if (!isMlbSeriesLine(info)) return false;
-  const closeAt = closeAtMs(info, extraStarts);
-  if (closeAt == null) return true;
-  return now >= closeAt;
-}
-
-async function hydrate() {
+function _defaultEspnLookup(g) {
   try {
-    const db = require('./db');
-    const saved = await db.loadKV(KV_KEY);
-    if (!saved || typeof saved !== 'object') return 0;
-    const now = Date.now();
-    let n = 0;
-    for (const [key, iso] of Object.entries(saved)) {
-      const ms = Date.parse(iso);
-      if (!Number.isFinite(ms) || now - ms >= LATCH_RETENTION_MS) continue;
-      const prev = _firstStart.get(key);
-      if (prev == null || ms < prev) _firstStart.set(key, ms);
-      n++;
-    }
-    if (n) log.info('SeriesWindow', `Hydrated ${n} MLB series close latch(es) from kv_store`);
-    return n;
-  } catch (err) {
-    log.warn('SeriesWindow', `hydrate failed (latch starts empty): ${err.message}`);
-    return 0;
-  }
+    const espn = require('./espn-scores');
+    return espn.getEspnGameResult('baseball_mlb', g.home, g.away, new Date(g.startMs).toISOString());
+  } catch (_) { return null; }
 }
 
-function getState(now = Date.now()) {
-  const out = {};
-  for (const [k, ms] of _firstStart) {
-    out[k] = { closesAt: new Date(ms).toISOString(), closed: now >= ms };
+/**
+ * State of the matchup's games at `now`:
+ *   { inPlay: bool, lastEndMs: ms|null, unknownStart: bool }
+ * `games` = [{ startMs, home, away }]; the series line's own start is added.
+ */
+function matchupState(info, { now = Date.now(), games = [], espnLookup = _defaultEspnLookup } = {}) {
+  const key = pairKey(info && info.homeTeam, info && info.awayTeam);
+  const own = info ? (Number.isFinite(info.startTimeMs) ? info.startTimeMs : Date.parse(info.startTime)) : NaN;
+  const all = [...(games || [])];
+  if (Number.isFinite(own)) all.push({ startMs: own, home: info.homeTeam, away: info.awayTeam });
+  const seen = new Set();
+  let inPlay = false, lastEndMs = null;
+  for (const g of all) {
+    if (!g || !Number.isFinite(g.startMs) || seen.has(g.startMs)) continue;
+    seen.add(g.startMs);
+    if (g.startMs > now) continue;                       // not started
+    const fk = key + '|' + g.startMs;
+    let endMs = _finalSeen.get(fk);
+    if (endMs == null) {
+      const r = espnLookup ? espnLookup(g) : null;
+      if (r && r.completed) { endMs = now; _finalSeen.set(fk, endMs); }
+    }
+    if (endMs == null && now - g.startMs >= MAX_GAME_MS) endMs = g.startMs + MAX_GAME_MS;
+    if (endMs == null) { inPlay = true; continue; }
+    if (lastEndMs == null || endMs > lastEndMs) lastEndMs = endMs;
   }
+  return { inPlay, lastEndMs, unknownStart: !Number.isFinite(own) };
+}
+
+/** Registration gate: closed while a game is in play (or the start is unknown). */
+function isClosed(info, opts = {}) {
+  if (!isMlbSeriesLine(info)) return false;
+  const st = matchupState(info, opts);
+  return st.unknownStart || st.inPlay;
+}
+
+/**
+ * Pricing gate: registration gate + the DK board must post-date the most
+ * recent game's end by RELIST_GRACE_MS. `boardAtMs` = when the DK board was
+ * scraped (null → closed).
+ */
+function isPriceable(info, { boardAtMs, ...opts } = {}) {
+  if (!isMlbSeriesLine(info)) return true;
+  const st = matchupState(info, opts);
+  if (st.unknownStart || st.inPlay) return false;
+  if (st.lastEndMs != null) {
+    if (!Number.isFinite(boardAtMs) || boardAtMs < st.lastEndMs + RELIST_GRACE_MS) return false;
+  }
+  return true;
+}
+
+function getState() {
+  const out = {};
+  for (const [k, ms] of _finalSeen) out[k] = { finalSeenAt: new Date(ms).toISOString() };
   return out;
 }
 
-function __resetForTest() {
-  _firstStart.clear();
-  if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
-}
+// Kept for boot-order compatibility (index.js awaits it); nothing persisted now.
+async function hydrate() { return 0; }
+
+function __resetForTest() { _finalSeen.clear(); }
 
 module.exports = {
   pairKey,
   isMlbSeriesLine,
-  noteStart,
-  closeAtMs,
+  matchupState,
   isClosed,
+  isPriceable,
   hydrate,
   getState,
-  KV_KEY,
+  MAX_GAME_MS,
+  RELIST_GRACE_MS,
   __resetForTest,
 };
