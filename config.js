@@ -1638,6 +1638,14 @@ const config = {
     // (runtime key mlbSeriesEnabled — literal 'false' turns it off) and the
     // max age of the DK series board that may still price.
     mlbSeriesEnabled: process.env.MLB_SERIES_ENABLED !== 'false',
+    // NFL/CFB GAME LINES — MAIN NUMBER ONLY (operator directive 2026-10-01:
+    // "make NFL/CFB RFQ game lines match the order book"). The single-leg
+    // posters list the consensus main point only; with this ON every
+    // point-bearing football game market (spread/total/team total, full game,
+    // 1H, Q1) registers ONLY its main point — see services/football-main-line.js.
+    // Default ON; literal 'false' restores the full alt ladder. Runtime key
+    // footballGameMainOnly.
+    footballGameMainOnly: process.env.FOOTBALL_GAME_MAIN_ONLY !== 'false',
     mlbSeriesMaxAgeMin: parseFloat(process.env.MLB_SERIES_MAX_AGE_MIN) || 45,
 
     // Consensus-floor guardrail. When our offered implied prob on a single

@@ -112,6 +112,7 @@ const REGISTRY = [
   // ---------------- RISK (danger) ----------------
   { key: 'maxRiskPerParlay', path: 'maxRiskPerParlay', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_RISK_PER_PARLAY', label: 'Max risk per parlay' },
   { key: 'maxRiskPerParlayWithProp', path: 'maxRiskPerParlayWithProp', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_RISK_PER_PARLAY_WITH_PROP', label: 'Max risk per parlay (with prop)' },
+  { key: 'footballGameMainOnly', path: 'footballGameMainOnly', type: 'bool', group: 'gating', danger: true, env: 'FOOTBALL_GAME_MAIN_ONLY', label: 'NFL/CFB game lines: register MAIN number only (no alt ladder)' },
   { key: 'mlbSeriesEnabled', path: 'mlbSeriesEnabled', type: 'bool', group: 'gating', danger: true, env: 'MLB_SERIES_ENABLED', label: 'Quote MLB playoff series markets' },
   { key: 'maxSeriesGrossExposure', path: 'maxSeriesGrossExposure', type: 'number', min: 0, max: 1000000, group: 'risk', danger: true, env: 'MAX_SERIES_GROSS_EXPOSURE', label: 'Max gross risk per series event' },
   { key: 'maxSeriesRiskPerParlay', path: 'maxSeriesRiskPerParlay', type: 'number', min: 0, max: 100000, group: 'risk', danger: true, env: 'MAX_SERIES_RISK_PER_PARLAY', label: 'Max series risk per parlay' },

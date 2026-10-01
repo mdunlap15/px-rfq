@@ -329,6 +329,7 @@ const { legLineId } = require('./leg-id');
 const px = require('./prophetx');
 const oddsFeed = require('./odds-feed');
 const nflConsensus = require('./nfl-consensus');
+const footballMainLine = require('./football-main-line');
 const dataGolf = require('./datagolf');
 const golfTopN = require('./golf-topn');
 const ufcMov = require('./ufc-mov');
@@ -488,7 +489,65 @@ function hasOpenMlbSeriesLines() {
   return false;
 }
 
-function _setSeedLine(lineId, info) {
+// NFL/CFB GAME LINES — MAIN NUMBER ONLY (operator directive 2026-10-01; see
+// services/football-main-line.js). The single gate every index entry point
+// calls: seed (_setSeedLine), cold-start hydration (_setSeedLine), Supabase
+// cache restore (lookupLineAsync) and on-demand / virtual registration
+// (resolveUnknownLine). `pxPointsByFamily` = PX's posted points per market
+// family when the caller has the whole PX market; absent -> exact-main only.
+// Returns null when admitted, else the refusal reason.
+const _footballMainDeniedLogged = new Set();
+function _footballMainRefusal(info, pxPointsByFamily) {
+  if (!footballMainLine.enabled(config) || !footballMainLine.inScope(info)) return null;
+  const fp = footballMainLine.familyPoint(info);
+  const pxPoints = fp && pxPointsByFamily ? pxPointsByFamily[fp.family] : undefined;
+  let oddsEvt = null;
+  try {
+    oddsEvt = oddsFeed.getEventMarkets(info.oddsApiSport || info.sport, info.homeTeam, info.awayTeam, info.startTime || null);
+  } catch (_) { oddsEvt = null; }
+  const r = footballMainLine.admit(info, config, {
+    nflMain: typeof nflConsensus.getMainLineSync === 'function' ? nflConsensus.getMainLineSync : null,
+    oddsEvt,
+    pxPoints,
+  });
+  if (r.ok) return null;
+  if (r.reason !== 'football_alt_line') {
+    const k = `${info.pxEventId}|${fp ? fp.family : info.oddsApiMarket}|${r.reason}`;
+    if (!_footballMainDeniedLogged.has(k)) {
+      if (_footballMainDeniedLogged.size > 5000) _footballMainDeniedLogged.clear();
+      _footballMainDeniedLogged.add(k);
+      log.info('Lines', `Football main-only: not registering ${info.oddsApiMarket} for ${info.pxEventName || info.pxEventId} (${r.reason}${r.main != null ? `, main ${r.main}` : ''})`);
+    }
+  }
+  return r.reason;
+}
+
+// PX's posted points per market family for one parsed PX market (football
+// only). Same side resolution as the seed loop, so the families line up with
+// footballMainLine.familyPoint() of the registered infos.
+function _footballPxPointsByFamily(parsed, sportKey, matchedHome, matchedAway) {
+  if (!footballMainLine.MAIN_ONLY_SPORTS.has(sportKey) || !Array.isArray(parsed)) return null;
+  const out = {};
+  for (const sel of parsed) {
+    if (!sel) continue;
+    const om = MARKET_TYPE_MAP[sel.marketType];
+    const pm = footballMainLine.POINT_MARKETS[om];
+    if (!pm) continue;
+    let oddsApiSelection = null;
+    if (pm.kind === 'spread') oddsApiSelection = resolveHomeAwaySide(sel.teamName, matchedHome, matchedAway);
+    else if (pm.kind === 'total') oddsApiSelection = sel.selection;
+    else {
+      const side = resolveTeamTotalSide(sel.teamName, matchedHome, matchedAway);
+      oddsApiSelection = side ? `${side}_${sel.selection || 'over'}` : null;
+    }
+    if (!oddsApiSelection) continue;
+    const fp = footballMainLine.familyPoint({ oddsApiMarket: om, oddsApiSelection, line: sel.line });
+    if (fp) (out[fp.family] ||= []).push(fp.point);
+  }
+  return out;
+}
+
+function _setSeedLine(lineId, info, opts) {
   // Stamp the id ON the object (2026-08-13). legExposureKey(lineInfo) reads
   // li.lineId to build its 'L:<id>|<day>' key; registered infos never carried
   // the field, so every QUOTE-TIME per-line exposure check fell to the
@@ -508,6 +567,13 @@ function _setSeedLine(lineId, info) {
   }
   if (!_mlbSeriesAdmissible(info)) {
     info._marketDenied = true;   // same downstream handling: never indexed, no primary tracked
+    return info;
+  }
+  // NFL/CFB main-number-only. A refused alt is simply absent from the staged
+  // index, so build-then-swap drops it from PX's supported set; the main
+  // itself re-registers every seed at whatever number the consensus is on.
+  if (_footballMainRefusal(info, opts && opts.pxPointsByFamily)) {
+    info._marketDenied = true;
     return info;
   }
   (_seedIndexTarget || lineIndex)[lineId] = info;
@@ -2521,6 +2587,7 @@ async function seedAllLines(gen) {
       const isSeriesSpreadMarket = seriesSpreadNamePat.test(mName);
       const isSeriesTotalMarket  = !isSeriesSpreadMarket && seriesTotalNamePat.test(mName);
       const isSeriesMarket = isSeriesWinnerMarket || isSeriesSpreadMarket || isSeriesTotalMarket;
+      const fbPxPoints = _footballPxPointsByFamily(parsed, sportKey, matchedHome, matchedAway);
 
       for (const sel of parsed) {
         totalLines++;
@@ -2837,7 +2904,7 @@ async function seedAllLines(gen) {
           tournamentName: oddsEvt?.eventName || null,
           roundNum: golfRoundNum ?? oddsEvt?.roundNum ?? null,
           matchupType: golfMatchupType ?? oddsEvt?.matchupType ?? null,
-        });
+        }, { pxPointsByFamily: fbPxPoints });
         _trackPrimaryForIndex(info);
       }
     }
@@ -3943,6 +4010,10 @@ async function lookupLineAsync(lineId) {
     // refuses. Treat it as unknown, same as the seed and on-demand paths.
     if (!_sportMarketAllowed(cached.sport || cached.oddsApiSport, cached.marketType, cached.pxEventId)) return null;
     if (!_mlbSeriesAdmissible(cached)) return null;   // MLB series past Game 1 (series-window.js)
+    // NFL/CFB main-number-only -- a cached alt must not resurrect. PX's posted
+    // points are unknown here, so only an EXACT main match restores; anything
+    // else falls through to resolveUnknownLine, which sees the whole market.
+    if (_footballMainRefusal(cached)) return null;
     // Football 48h near-window — the THIRD index entry point (2026-09-22). The
     // seed filter and on-demand resolve both gate this, but the Supabase
     // cache-restore did not, so between seeds the RFQ path re-registered every
@@ -4283,6 +4354,7 @@ async function resolveUnknownLine(rfqLeg) {
 
       // Find the line in the markets
       let foundInfo = null;
+      let foundParsed = null; // PX selections of the market foundInfo came from (football main-only)
       // Track whether the line_id was found in ANY PX market (even if we
       // couldn't use it — e.g. out-of-bounds line, player prop total).
       // When set, virtual registration is blocked: PX already told us what
@@ -4997,6 +5069,7 @@ async function resolveUnknownLine(rfqLeg) {
             roundNum: golfRoundNum ?? oddsEvt?.roundNum ?? null,
             matchupType: golfMatchupType ?? oddsEvt?.matchupType ?? null,
           };
+          foundParsed = parsed;
           break;
         }
         if (foundInfo) break;
@@ -5253,6 +5326,17 @@ async function resolveUnknownLine(rfqLeg) {
       if (!_mlbSeriesAdmissible(foundInfo)) {
         _recordResolveFailure(lineId, { lineId, reason: 'mlb_series_closed', eventName: event.name, sport: sportKey, marketType: foundInfo.marketType });
         return null;
+      }
+      // NFL/CFB main-number-only: a football alt point (incl. a virtual
+      // alt-total/spread registration, which never has PX's points -> exact
+      // main only) DECLINES instead of registering.
+      {
+        const _fbRefusal = _footballMainRefusal(foundInfo,
+          foundParsed ? _footballPxPointsByFamily(foundParsed, sportKey, foundInfo.homeTeam, foundInfo.awayTeam) : null);
+        if (_fbRefusal) {
+          _recordResolveFailure(lineId, { lineId, reason: _fbRefusal, eventName: event.name, sport: sportKey, marketType: foundInfo.marketType, line: foundInfo.line });
+          return null;
+        }
       }
       // Add to index locally
       foundInfo.lineId = lineId; // legExposureKey needs it — see _setSeedLine
@@ -5632,6 +5716,8 @@ module.exports = {
   // Exported for test/sport-market-allowlist.test.js — the per-sport market
   // gate and the seed insert it guards.
   _sportMarketAllowed,
+  _footballMainRefusal,
+  _footballPxPointsByFamily,
   _setSeedLine,
   _footballPropCtx,
   _footballPropWindowMinutes,

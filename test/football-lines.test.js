@@ -436,7 +436,7 @@ async function runSeed({ oddsMarkets, allowlist, propLookup, propOneSided, dropP
 }
 
 test('seed: full-game ML/spread/total register; 2H, 1Q, team totals (no consensus), props (no allowlist) do not', async () => {
-  const idx = await runSeed({ oddsMarkets: { h2h: {}, spreads: {}, totals: {} } });
+  const idx = await runSeed({ oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } } });
 
   // Full-game lines with odds coverage register (T1.8 scope check)
   assert.ok(idx['ml-ari'] && idx['ml-car'], 'moneyline registers both sides');
@@ -483,7 +483,7 @@ test('seed: T1.8 fails ALL football lines closed when the odds event is missing 
 });
 
 test('seed: team totals register on DIFFERENT teams once team_totals consensus exists (ARI/CAR collision)', async () => {
-  const idx = await runSeed({ oddsMarkets: { h2h: {}, spreads: {}, totals: {}, team_totals: {} } });
+  const idx = await runSeed({ oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 }, team_totals: { home: { line: 21.5 }, away: { line: 17.5 } } } });
 
   assert.ok(idx['tt-ari-o'] && idx['tt-ari-u'], 'ARI team total registers with consensus present');
   assert.ok(idx['tt-car-o'] && idx['tt-car-u'], 'CAR team total registers with consensus present');
@@ -504,7 +504,7 @@ test('seed: team totals register on DIFFERENT teams once team_totals consensus e
 test('seed: allowlisted anytime TD registers YES→over only, book-mirrored, marketType player_anytime_td', async () => {
   const raw = 0.45;
   const idx = await runSeed({
-    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } },
     allowlist: new Set([SPORT + '.anytime_td']),
     propOneSided: async (sport, marketKey, ctx, playerName, line) => {
       assert.equal(sport, SPORT, 'football props source under their own sport key');
@@ -541,7 +541,7 @@ test('seed: allowlisted anytime TD registers YES→over only, book-mirrored, mar
 
 test('seed: anytime TD fails closed when no book consensus returns', async () => {
   const idx = await runSeed({
-    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } },
     allowlist: new Set([SPORT + '.anytime_td']),
     propLookup: async () => null,
     propOneSided: async () => null,
@@ -552,7 +552,7 @@ test('seed: anytime TD fails closed when no book consensus returns', async () =>
 
 test('ADVERSARIAL seed: prophetx marketType-safety helper missing → football props fail closed end-to-end', async () => {
   const idx = await runSeed({
-    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } },
     allowlist: new Set([SPORT + '.anytime_td']),
     dropPxHelper: true,
     propOneSided: async () => ({
@@ -580,7 +580,7 @@ test('ADVERSARIAL seed: prophetx marketType-safety helper missing → football p
 
 test('football props do NOT register outside the T-minus window', async () => {
   const idx = await runSeed({
-    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } },
     allowlist: new Set([SPORT + '.anytime_td']),
     eventOverrides: { scheduled: SCHED_FAR },
     propOneSided: async () => {
@@ -594,7 +594,7 @@ test('football props do NOT register outside the T-minus window', async () => {
 
 test('an unparseable kickoff fails CLOSED (no window, no registration)', async () => {
   const idx = await runSeed({
-    oddsMarkets: { h2h: {}, spreads: {}, totals: {} },
+    oddsMarkets: { h2h: {}, spreads: { line: -2.5 }, totals: { line: 43.5 } },
     allowlist: new Set([SPORT + '.anytime_td']),
     eventOverrides: { scheduled: 'not-a-date' },
     propOneSided: async () => { throw new Error('must not reach the odds lookup'); },
@@ -611,4 +611,13 @@ test('MLB "Total Hits, Runs & RBIs" classifies and extracts (PX comma+ampersand 
   assert.equal(ws._classifyMlbProp('Cody Bellinger Hits + Runs + RBIs'), 'hitter_hits_runs_rbis');
   assert.equal(ws._extractPlayerNameFromPropMarket('Cody Bellinger Hits + Runs + RBIs'), 'Cody Bellinger');
   assert.equal(ws._classifyMlbProp('Cody Bellinger Total Hits'), 'hitter_hits');
+});
+
+// NFL/CFB main-number-only (2026-10-01): the seed registers a point market only
+// at the consensus MAIN — exact, or the unique PX point within 0.5 of it.
+test('seed: football main-only — spread 1pt off main is dropped, total within 0.5 kept, moneyline untouched', async () => {
+  const idx = await runSeed({ oddsMarkets: { h2h: {}, spreads: { line: -3.5 }, totals: { line: 44 } } });
+  assert.ok(idx['ml-ari'] && idx['ml-car'], 'moneyline unaffected');
+  assert.ok(!idx['sp-ari'] && !idx['sp-car'], 'PX -2.5 is 1pt from the -3.5 main and is not registered');
+  assert.ok(idx['tot-o'] && idx['tot-u'], 'PX 43.5 is the unique point within 0.5 of a 44 main');
 });

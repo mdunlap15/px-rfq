@@ -257,6 +257,17 @@ function buildBoard(payload, { minBooks = MIN_BOOKS } = {}) {
     if (!Object.keys(lines).length) continue;
     const mp = type === 'team_total' ? null : pickMainLine(mainPoints[type] || []);
     out[type] = { mainLine: mp, lines };
+    // Team totals: one MAIN number PER TEAM (the poster's team_totals(): median
+    // of the books' own main points, snapped to .5 — nfl_pre_post.py ~l.491).
+    if (type === 'team_total') {
+      const tm = {};
+      for (const [k, pts] of Object.entries(mainPoints)) {
+        if (!k.startsWith('team_total|')) continue;
+        const L = pickMainLine(pts);
+        if (L != null) tm[k.slice('team_total|'.length)] = L;
+      }
+      out[type].teamMainLines = tm;
+    }
   }
 
   if (!Object.keys(out).length) return null;
@@ -457,6 +468,26 @@ function getNflFairForLine(lineInfo) {
 }
 
 /**
+ * SYNC: the consensus MAIN number for one football market on a FRESH board, or
+ * null. This is the order-book posters' main (median of each book's MAIN-key
+ * point, snapped to .5 — never the alt ladder). Spreads are HOME-perspective.
+ * `team` (TOA team name) is required for team_total.
+ */
+function getMainLineSync(sport, homeTeam, awayTeam, marketType, team) {
+  if (!isFootball(sport)) return null;
+  const entry = _cache[_key(sport, homeTeam, awayTeam)];
+  if (!entry || !entry.board) return null;
+  if (!entry.at || Date.now() - entry.at > MAX_AGE_MS) return null;
+  const mkt = entry.board.markets[marketType];
+  if (!mkt) return null;
+  if (marketType === 'team_total') {
+    const L = mkt.teamMainLines && team != null ? mkt.teamMainLines[team] : null;
+    return Number.isFinite(L) ? L : null;
+  }
+  return Number.isFinite(mkt.mainLine) ? mkt.mainLine : null;
+}
+
+/**
  * Is there a FRESH board for this game? The pricer needs to tell two failures
  * apart:
  *   cold board  -> fall through to the legacy odds path (a missing line is
@@ -514,6 +545,7 @@ module.exports = {
   ensureNflConsensus,
   getNflFairSync,
   getNflFairForLine,
+  getMainLineSync,
   hasFreshBoard,
   warmFootballBoards,
   isFootball,
