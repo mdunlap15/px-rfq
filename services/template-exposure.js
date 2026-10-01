@@ -647,7 +647,18 @@ function getRampDecision(legs, opts = {}) {
     };
   }
   const exp = getExposure(legs);
-  const priorCount = exp.count;
+  // GATING COUNT (2026-10-01): confirmed bets + confirms IN FLIGHT — NOT open
+  // quotes. Counting pending quote reservations was the 9/26 team-cap bug in
+  // another place: declines read "4 prior bets (0 confirmed + 4 pending)", and
+  // previews, re-sends, fishers and quotes lost to other SPs blocked a shape
+  // nobody had bet — $730K of network fills over 9/10–9/30, ~$37K/day still
+  // on 9/29–30. Concurrent copies are bounded at CONFIRM instead
+  // (checkConfirmCooldown: in-flight lane + cooldown + this same count cap),
+  // exactly as the team caps are. pendingCount stays in the result for
+  // observability only.
+  const _confirming = exp.signature ? _liveConfirmingSigs(exp.signature, Date.now()).length : 0;
+  const priorCount = exp.confirmedCount + _confirming;
+  const gateStake = (exp.confirmedStake || 0);
 
   // Tiered defaults; all knobs Railway-tunable.
   const declineAt = config.pricing.templateRampDeclineAt;      // e.g. 4 → decline 5th+ bet
@@ -744,7 +755,7 @@ function getRampDecision(legs, opts = {}) {
 
   if (effectiveDeclineAt > 0 && priorCount >= effectiveDeclineAt) {
     _stats.rampHits.decline++;
-    const reason = `template_cap: ${priorCount} prior bets on this signature (${exp.confirmedCount} confirmed + ${exp.pendingCount} pending) in ${WINDOW_MS / 3600000}h window`
+    const reason = `template_cap: ${priorCount} prior bets on this signature (${exp.confirmedCount} confirmed + ${_confirming} confirming; ${exp.pendingCount} open quotes not counted) in ${WINDOW_MS / 3600000}h window`
       + (override ? ` (override +${override.extraAllowed} already applied)` : '');
     // Notification — fire-and-forget, debounced per sigHash. Tells the
     // operator a same-shape parlay was just blocked and gives them the
@@ -785,11 +796,11 @@ function getRampDecision(legs, opts = {}) {
   // totalStake already includes pending reservations, so concurrent copies
   // landing before any confirms are still bounded (same race-close as count).
   const maxStake = config.pricing.templateRampMaxStake || 0;
-  if (maxStake > 0 && priorCount >= 1 && exp.totalStake >= maxStake) {
+  if (maxStake > 0 && priorCount >= 1 && gateStake >= maxStake) {
     _stats.rampHits.stakeCap = (_stats.rampHits.stakeCap || 0) + 1;
     const sh = signatureHash(exp.signature);
-    const reason = `template_stake_cap: $${Math.round(exp.totalStake)} prior aggregate stake on this signature `
-      + `(${exp.confirmedCount} confirmed + ${exp.pendingCount} pending) >= $${maxStake} cap in ${WINDOW_MS / 3600000}h window`;
+    const reason = `template_stake_cap: $${Math.round(gateStake)} prior confirmed stake on this signature `
+      + `(${exp.confirmedCount} confirmed) >= $${maxStake} cap in ${WINDOW_MS / 3600000}h window`;
     try {
       const lastNotified = _capNotificationDebounce.get(sh) || 0;
       if (Date.now() - lastNotified >= CAP_NOTIFICATION_DEBOUNCE_MS) {
@@ -898,7 +909,6 @@ function releaseConfirmingSignature(parlayId) {
 function checkConfirmCooldown(legs, parlayId, nowMs = null) {
   if (!ENABLED) return { block: false, reason: null, sinceMs: null };
   const cooldownSec = config.pricing.templateRampCooldownSeconds;
-  if (!cooldownSec || cooldownSec <= 0) return { block: false, reason: null, sinceMs: null };
   const sig = canonicalSignature(legs);
   if (!sig) return { block: false, reason: null, sinceMs: null };
   const inflight = _liveConfirmingSigs(sig, nowMs || Date.now()).filter(e => e.parlayId !== parlayId);
@@ -915,6 +925,26 @@ function checkConfirmCooldown(legs, parlayId, nowMs = null) {
     return { block: false, reason: null, sinceMs: null };
   }
   const now = nowMs || Date.now();
+  // CONFIRM-TIME COUNT CAP (2026-10-01). Quote time no longer counts open
+  // quotes, so several live offers on one shape can reach confirm together;
+  // the cap is enforced exactly here instead (in-flight copies are already
+  // refused above). Same effective threshold (incl. operator override).
+  const _declineAt = config.pricing.templateRampDeclineAt;
+  if (_declineAt > 0) {
+    const _sh = signatureHash(sig);
+    const _ov = _sh ? _overrides.get(_sh) : null;
+    const _eff = _declineAt + (_ov ? _ov.extraAllowed : 0);
+    const _inWindow = entry.confirmations.filter(c => c.parlayId !== parlayId && c.confirmedAt >= now - WINDOW_MS).length;
+    if (_inWindow >= _eff) {
+      _stats.confirmHits.template_cap = (_stats.confirmHits.template_cap || 0) + 1;
+      return {
+        block: true,
+        reason: `template_cap_at_confirm: ${_inWindow} confirmed bets on this signature >= cap ${_eff} in ${WINDOW_MS / 3600000}h window`,
+        sinceMs: null,
+      };
+    }
+  }
+  if (!cooldownSec || cooldownSec <= 0) return { block: false, reason: null, sinceMs: null };
   // Exclude self if this parlay's confirmation has already been recorded
   // (paranoid — confirmer should call this BEFORE recordConfirmation).
   const others = entry.confirmations.filter(c => c.parlayId !== parlayId);

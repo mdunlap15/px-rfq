@@ -162,6 +162,10 @@ const REGISTRY = [
   // Stale price minutes (10), i.e. LOOSER. Always send the full map.
   { key: 'stalePriceMinutesBySport', path: 'stalePriceMinutesBySport', type: 'numMap', min: 1, max: 240, group: 'gating', danger: true, env: 'STALE_PRICE_MINUTES_BY_SPORT',
     label: 'Stale price minutes by sport', help: 'Per-sport stale threshold (minutes). Edit the FULL map — a sport you drop falls back to Stale price minutes (looser).' },
+  // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
+  // without a Railway edit (= restart). Read per RFQ in pricer.js.
+  { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'hrPairTrimPercent', path: 'hrPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'HR_PAIR_TRIM_PERCENT', label: 'MLB HR-pair trim A/B % (0 = dark)' },
   { key: 'dedupMaxRequotes', path: 'dedupMaxRequotes', type: 'number', min: 0, max: 10, group: 'gating', env: 'DEDUP_MAX_REQUOTES',
     label: 'Dedup max re-quotes', help: 'Identical re-sends re-priced per leg-set inside the 5s window (preview then place). 0 = decline every repeat (pre-2026-09-26 behaviour).' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
