@@ -38,8 +38,11 @@ test('both TD markets map to their one-sided TOA keys with lineless YES semantic
 });
 
 test('the seed treats first TD as one-sided (YES mirror), like anytime TD', () => {
-  assert.ok(/\(!!footballProp && \(propType === 'anytime_td' \|\| propType === 'first_td'\)\)/.test(LM_SRC),
-    'oneSidedEligible must include first_td or the two-sided lookup fails closed and nothing registers');
+  // Since 2026-10-01 the TD families live in one set (anytime/first/last).
+  assert.ok(/\(!!footballProp && _FOOTBALL_TD_PROPS\.has\(propType\)\)/.test(LM_SRC),
+    'oneSidedEligible must cover the TD set or the two-sided lookup fails closed and nothing registers');
+  assert.ok(/const _FOOTBALL_TD_PROPS = new Set\(\['anytime_td', 'first_td', 'last_td'\]\)/.test(LM_SRC),
+    'the TD set must include first_td');
 });
 
 // ------------------------------------------------- same-game correlation

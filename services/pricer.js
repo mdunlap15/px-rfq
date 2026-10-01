@@ -4682,7 +4682,7 @@ function shouldDecline(legs, parlayId) {
     // "<Player> To Score First Touchdown" must not be swept up by the
     // `first touchdown` token. Keyed on the REGISTERED marketType, never on
     // the name: an unregistered "First Touchdown" novelty still declines.
-    if (/^player_(?:first|anytime)_td$/.test(String(lineInfo.marketType || ''))) continue;
+    if (/^player_(?:first|anytime|last)_td$/.test(String(lineInfo.marketType || ''))) continue;
     const ev = String(lineInfo.pxEventName || '');
     const mn = String(lineInfo.marketName || '');
     if (NOVELTY_PATTERN.test(ev) || NOVELTY_PATTERN.test(mn)) {

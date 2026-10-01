@@ -81,12 +81,19 @@ function extractPlayerNameFromPropMarket(marketName) {
     // first-TD market returned a null player and was skipped at the seed's
     // `if (!playerName) continue;` — zero football prop lines had ever
     // registered apart from anytime TD.
+    // 2026-10-01 order-book mirror (nfl_game_cycle SUFP): the combined
+    // "Total Passing & Rushing Yards" must strip BEFORE the single-stat yards
+    // pattern, which would otherwise shave only "Rushing Yards".
+    /\s+(total\s+)?passing\s*(?:&|\+|and)\s*rushing\s+yards?$/i,
     /\s+(total\s+)?(passing|rushing|receiving)\s+yards?$/i,
+    /\s+(total\s+)?(passing|rushing)\s+attempts?$/i,
+    /\s+(total\s+)?longest\s+pass(?:\s+completion)?$/i,
     /\s+(total\s+)?(passing|rushing|receiving)\s+touchdowns?$/i,
     /\s+(total\s+)?longest\s+receptions?$/i,
     /\s+(total\s+)?pass(?:ing)?\s+completions?$/i,
     /\s+(total\s+)?receptions?$/i,
     /\s+(player\s+)?to\s+score\s+(the\s+)?first\s+touchdown\s*\??$/i,
+    /\s+(player\s+)?to\s+score\s+(the\s+)?last\s+touchdown\s*\??$/i,
     /\s+(total\s+)?interceptions?\s+thrown$/i,
     /\s+to\s+throw\s+an?\s+interception\s*\??$/i,
     // Single stats
@@ -179,12 +186,28 @@ function classifyFootballProp(marketName) {
   const n = String(marketName).toLowerCase().trim();
   // Multi-player / unit composites fail closed (mirrors the parser's
   // or/and/&/slash guard in prophetx.js parseMarketSelections).
+  // "<Player> Total Passing & Rushing Yards" is ONE player's combined stat
+  // (TOA player_pass_rush_yds), not a composite — PX writes it with an
+  // ampersand, so it is recognised BEFORE the composite guard. Anchored on the
+  // phrase at the END; the subject may not itself carry or/and/&/+/,/slash.
+  const _prm = /^(.+?)\s+(?:total\s+)?passing\s*(?:&|\+|and)\s*rushing\s+yards?$/.exec(n);
+  if (_prm && !/\b(?:or|and)\b|[&/+,]/.test(_prm[1])) return 'pass_rush_yards';
   if (/\b(?:or|and)\b|[&/+,]/.test(n)) return null;
   if (/\bto\s+score\s+a\s+touchdown\s*\??$/.test(n)) return 'anytime_td';
+  // Last TD (PX sub_type player_to_score_last_touchdown, live 2026-09-16 —
+  // "Khalil Shakir To Score Last Touchdown"): a closed field like first TD.
+  if (/\blast\s+touchdown\b/.test(n)) return 'last_td';
   if (/\b(?:first|1st)\s+touchdown\b|to\s+score\s+the\s+first\s+touchdown/.test(n)) return 'first_td';
   if (/passing\s+touchdowns?/.test(n)) return 'passing_tds';
   if (/passing\s+yards?/.test(n)) return 'passing_yards';
   if (/rushing\s+yards?/.test(n)) return 'rushing_yards';
+  // 2026-10-01 order-book mirror: the four NFL families nfl_game_cycle lists
+  // that the RFQ book did not (PX "Total Passing Attempts", "Total Rushing
+  // Attempts", "Longest Pass"; TOA player_pass_attempts / player_rush_attempts
+  // / player_pass_longest_completion).
+  if (/pass(?:ing)?\s+attempts?/.test(n)) return 'pass_attempts';
+  if (/rush(?:ing)?\s+attempts?/.test(n)) return 'rush_attempts';
+  if (/longest\s+pass(?:\s+completion)?$/.test(n)) return 'longest_pass';
   if (/receiving\s+yards?/.test(n)) return 'receiving_yards';
   // Before receptions: "Travis Kelce Longest Reception" also contains the word
   // reception and would otherwise bucket as a receptions COUNT prop.

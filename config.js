@@ -856,7 +856,9 @@ const config = {
     // be listed here. Comma-separated TOA market keys; env overrides the default.
     closedFieldOneSidedMarkets: (() => {
       const raw = process.env.CLOSED_FIELD_ONE_SIDED_MARKETS;
-      if (raw == null || raw === '') return ['player_1st_td'];
+      // player_last_td (2026-10-01, order-book mirror): exactly one player
+      // scores the LAST touchdown, plus "No Touchdown" — closed like first TD.
+      if (raw == null || raw === '') return ['player_1st_td', 'player_last_td'];
       return String(raw).split(',').map(s => s.trim()).filter(Boolean);
     })(),
     // ---- PER-SPORT MARKET ALLOWLIST (2026-09-09) ----
@@ -1344,6 +1346,68 @@ const config = {
     // nothing to audit it". Kept separate so raising the football bar never
     // silently tightens MLB/NBA/NHL.
     footballPropMinBooks: parseInt(process.env.FOOTBALL_PROP_MIN_BOOKS) || 3,
+    // ---- MIRROR THE ORDER BOOK (operator directive 2026-10-01) ----------
+    // "For NFL/CFB RFQs we need to be pricing all markets we are for the PX
+    // order book. Refer to what we're listing there and how we are pricing
+    // them and use the same methodology for RFQs." The single-leg posters are
+    // nfl_game_cycle.py (NFL props + TDs), cfb_props_cycle.py (CFB props + TD).
+    //
+    // FOOTBALL_PROP_FAIR_METHOD: 'poster' (default) prices a two-sided NFL/CFB
+    // prop's FAIR the way the poster does — the PROBABILITY-SPACE MEDIAN of
+    // each side across the books quoting both sides at the exact point, then
+    // ONE 2-way de-vig of that consensus pair (Shin for NFL, as
+    // nfl_game_cycle.pair_fair; proportional for CFB, as cfb_props_cycle), and
+    // for NFL Pinnacle's own pair at that point when it is within
+    // FOOTBALL_PROP_PIN_MAX_GAP of the consensus (the poster's 4pp stale
+    // guard). 'legacy' restores the per-book proportional de-vig averaged.
+    footballPropFairMethod: (process.env.FOOTBALL_PROP_FAIR_METHOD || 'poster').trim().toLowerCase() === 'legacy'
+      ? 'legacy' : 'poster',
+    footballPropPinMaxGap: (() => {
+      const v = parseFloat(process.env.FOOTBALL_PROP_PIN_MAX_GAP);
+      return Number.isFinite(v) && v > 0 && v < 0.5 ? v : 0.04;
+    })(),
+    // Anytime-TD field fair (the posters' TFIELD): fair_YES = median over books
+    // of imp_book × T / Σ(book's YES field), T = expected distinct TD scorers.
+    // NFL 4.10 (nfl_game_cycle TFIELD), CFB 5.0 (cfb_props_cycle CFB_TD_TFIELD).
+    // JSON sport → T; a sport absent from the map keeps the assumed-overround
+    // fair (toaOneSidedPropOverround).
+    footballAnytimeTdFieldT: (() => {
+      const DEF = { americanfootball_nfl: 4.10, americanfootball_nfl_preseason: 4.10, americanfootball_ncaaf: 5.0 };
+      const raw = process.env.FOOTBALL_ANYTIME_TD_FIELD_T;
+      if (!raw) return DEF;
+      try {
+        const j = JSON.parse(raw);
+        const out = {};
+        for (const [k, v] of Object.entries(j || {})) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0.5 && n < 15) out[k] = n;
+        }
+        return out;
+      } catch (_) { return DEF; }
+    })(),
+    // Per-league / per-weekday REGISTRATION windows for football props.
+    // Unset → the single FOOTBALL_PROP_TMINUS_MINUTES applies to every league
+    // (pre-2026-10-01 behaviour). 'poster' → the posters' live windows:
+    //   NFL  props T-60, TDs T-60; Monday/Thursday (ET weekday of kickoff)
+    //        props T-120, TDs T-360; receptions T-60 every day (LATE_SUBS).
+    //   CFB  props + TD T-120 (run_cfb_props_cycle.bat --tminus 120).
+    // Or JSON {sport: {props, td, monThuProps, monThuTd, late:{propType:min}}}.
+    footballPropWindows: (() => {
+      const raw = (process.env.FOOTBALL_PROP_WINDOWS || '').trim();
+      const POSTER = {
+        americanfootball_nfl: { props: 60, td: 60, monThuProps: 120, monThuTd: 360, late: { receptions: 60 } },
+        americanfootball_ncaaf: { props: 120, td: 120 },
+      };
+      if (!raw) return null;
+      if (raw.toLowerCase() === 'poster') return POSTER;
+      try { const j = JSON.parse(raw); return (j && typeof j === 'object') ? j : null; } catch (_) { return null; }
+    })(),
+    // ESPN availability gate (the posters' player_status.py): a football prop
+    // on a player ESPN lists Out / IR / Doubtful / Suspended / Inactive does
+    // not register. Questionable is NOT blocked. Fail-OPEN like the poster (an
+    // unmatched game or a failed read leaves the gate inactive that pass).
+    // Literal 'false' disables.
+    footballPropInjuryGate: String(process.env.FOOTBALL_PROP_INJURY_GATE || 'true').toLowerCase() !== 'false',
     // Minimum number of books with both sides required for a prop leg
     // to be quotable. Below this, decline the parlay (insufficient
     // de-vig confidence — single-book or near-single-book pricing is

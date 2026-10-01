@@ -11040,6 +11040,103 @@ function _playerNamesMatch(a, b) {
 //   { fairProbOver, fairProbUnder, books, booksWithBothSides,
 //     resolvedEventId, matchedRows, stages }
 // or { error, stages, ... } on failure.
+// ---- ORDER-BOOK MIRROR: football prop FAIR as the posters derive it ----
+// (operator directive 2026-10-01: "Refer to what we're listing there and how
+// we are pricing them and use the same methodology for RFQs.")
+//
+// Two-way SHIN de-vig — a line-for-line port of px_post_client.devig2_shin,
+// which nfl_game_cycle.pair_fair uses for every NFL two-sided fair. Shin backs
+// out an insider fraction z so p_i = [sqrt(z² + 4(1−z)q_i²/s) − z] / (2(1−z))
+// sum to 1; sum(p) is monotone decreasing in z, so bisection is exact.
+// Proportional on a non-vigged or degenerate pair (the poster's fail-safe).
+function _shinDeVig2(q1, q2) {
+  if (!(q1 > 0) || !(q2 > 0)) return null;
+  const s = q1 + q2;
+  if (s <= 1) return [q1 / s, q2 / s];
+  const psum = (z) => {
+    let t = 0;
+    for (const q of [q1, q2]) t += (Math.sqrt(z * z + 4 * (1 - z) * q * q / s) - z) / (2 * (1 - z));
+    return t;
+  };
+  let lo = 1e-9, hi = 0.999;
+  if (psum(hi) > 1) return [q1 / s, q2 / s];
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (psum(mid) > 1) lo = mid; else hi = mid;
+  }
+  const z = (lo + hi) / 2;
+  const p1 = (Math.sqrt(z * z + 4 * (1 - z) * q1 * q1 / s) - z) / (2 * (1 - z));
+  const p2 = (Math.sqrt(z * z + 4 * (1 - z) * q2 * q2 / s) - z) / (2 * (1 - z));
+  const t = p1 + p2;
+  return t > 0 ? [p1 / t, p2 / t] : [q1 / s, q2 / s];
+}
+const _median = (arr) => {
+  const a = arr.slice().sort((x, y) => x - y);
+  const n = a.length;
+  if (!n) return null;
+  return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+};
+const _POSTER_FAIR_SPORTS = {
+  // sport → de-vig: NFL = nfl_game_cycle (Shin + Pinnacle anchor);
+  // CFB = cfb_props_cycle (proportional, no anchor). CFL has no poster.
+  americanfootball_nfl: { devig: 'shin', pinAnchor: true },
+  americanfootball_nfl_preseason: { devig: 'shin', pinAnchor: true },
+  americanfootball_ncaaf: { devig: 'proportional', pinAnchor: false },
+};
+// pairsByBook: { book: { over: impliedProb, under: impliedProb } } — books that
+// quote BOTH sides at the exact point. Consensus = probability-space MEDIAN of
+// each side (nfl_game_cycle source(): "an even-count median of raw American
+// prices straddling even money is an impossible price"), then ONE 2-way de-vig
+// of that pair. NFL: Pinnacle's own pair replaces the consensus when its
+// de-vigged P(over) is within pinMaxGap of the consensus's (the poster's
+// PIN_MAX_GAP stale guard — beyond it the consensus is KEPT, never a decline).
+// Pure; returns null for an unsupported sport or no pairs.
+function _footballPosterPropFair(sport, pairsByBook, pinMaxGap) {
+  const spec = _POSTER_FAIR_SPORTS[sport];
+  if (!spec) return null;
+  const books = Object.keys(pairsByBook || {}).filter(b => {
+    const p = pairsByBook[b];
+    return p && p.over > 0 && p.over < 1 && p.under > 0 && p.under < 1;
+  });
+  if (!books.length) return null;
+  const dv = (o, u) => (spec.devig === 'shin' ? _shinDeVig2(o, u) : [o / (o + u), u / (o + u)]);
+  const cO = _median(books.map(b => pairsByBook[b].over));
+  const cU = _median(books.map(b => pairsByBook[b].under));
+  let fair = dv(cO, cU);
+  let anchor = 'consensus';
+  const pin = pairsByBook.pinnacle;
+  if (spec.pinAnchor && pin && books.includes('pinnacle')) {
+    const fp = dv(pin.over, pin.under);
+    const gap = (pinMaxGap != null && pinMaxGap > 0) ? pinMaxGap : 0.04;
+    if (fp && fair && Math.abs(fp[0] - fair[0]) <= gap) { fair = fp; anchor = 'pinnacle'; }
+    else anchor = 'consensus(pin_stale)';
+  }
+  if (!fair) return null;
+  return { fairOver: fair[0], fairUnder: fair[1], anchor, books: books.length, devig: spec.devig };
+}
+// Anytime-TD OPEN-field fair (the posters' TFIELD method): each book's YES
+// field sums to ~its expected distinct scorers × its overround, so
+// fair_book = raw × T / Σfield; fair = MEDIAN over books. T: NFL 4.10, CFB 5.0
+// (config.pricing.footballAnytimeTdFieldT). A book must carry a real field
+// (≥ 10 outcomes, the player's price inside it, a sum in (T, 3T)) — a partial
+// board would inflate the fair. Pure; null when no book qualifies.
+function _openFieldTdFair(fieldYesByBook, playerRawByBook, T) {
+  if (!(T > 0)) return null;
+  const vals = [];
+  for (const [book, raw] of Object.entries(playerRawByBook || {})) {
+    const field = fieldYesByBook && fieldYesByBook[book];
+    if (!Array.isArray(field) || field.length < 10) continue;
+    if (!(raw > 0 && raw < 1)) continue;
+    if (!field.some(p => Math.abs(p - raw) < 1e-9)) continue;
+    const S = field.reduce((a, b) => a + b, 0);
+    if (!(S > T && S < 3 * T)) continue;
+    const f = raw * T / S;
+    if (f > 0 && f < 1) vals.push(f);
+  }
+  if (!vals.length) return null;
+  return { fair: _median(vals), books: vals.length };
+}
+
 async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerName, line) {
   const stages = [];
   if (!sport || !marketKey || !pxEventInfo || !playerName) {
@@ -11205,6 +11302,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
   const fairProbsUnder = [];
   const viggedProbsOver = [];
   const viggedProbsUnder = [];
+  const pairsByBook = {};
   for (const book of books) {
     const o = overByBook[book];
     const u = underByBook[book];
@@ -11214,6 +11312,7 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     if (oProb == null || uProb == null) continue;
     viggedProbsOver.push(oProb);
     viggedProbsUnder.push(uProb);
+    pairsByBook[book] = { over: oProb, under: uProb };
     const dv = deVig2Way(oProb, uProb);
     if (Array.isArray(dv) && dv.length === 2 && Number.isFinite(dv[0]) && Number.isFinite(dv[1])) {
       fairProbsOver.push(dv[0]);
@@ -11221,13 +11320,24 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     }
   }
   const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  // ORDER-BOOK MIRROR (2026-10-01): NFL/CFB two-sided props take the poster's
+  // consensus-then-de-vig fair (see _footballPosterPropFair) instead of the
+  // per-book proportional average. The heavy-favourite floor still applies on
+  // top — it only ever raises a favourite's fair (the safe direction).
+  // FOOTBALL_PROP_FAIR_METHOD=legacy restores the average.
+  let baseOver = avg(fairProbsOver), baseUnder = avg(fairProbsUnder);
+  let posterFair = null;
+  if (config.pricing && config.pricing.footballPropFairMethod !== 'legacy' && fairProbsOver.length) {
+    posterFair = _footballPosterPropFair(sport, pairsByBook, config.pricing.footballPropPinMaxGap);
+    if (posterFair) { baseOver = posterFair.fairOver; baseUnder = posterFair.fairUnder; }
+  }
   let { fairProbOver, fairProbUnder } = _applyPropHeavyFavFloor(
-    avg(fairProbsOver), avg(fairProbsUnder),
+    baseOver, baseUnder,
     avg(viggedProbsOver), avg(viggedProbsUnder)
   );
   const exactLineFairOver = fairProbOver;
   const exactLineFairUnder = fairProbUnder;
-  let method = 'exact_line_devig';
+  let method = posterFair ? `poster_${posterFair.devig}_${posterFair.anchor}` : 'exact_line_devig';
   let impliedMean = null;
   let distBooks = 0;
 
@@ -11389,9 +11499,18 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
   // overround — see _closedFieldNormalizedFair. The QUOTE stays a raw
   // book-mirror; this corrects the FAIR that drives EV and risk.
   const closedSet = new Set((cfg && cfg.pricing && cfg.pricing.closedFieldOneSidedMarkets) || []);
-  const cf = (closedSet.has(marketKey) && std.fieldYesByBook)
+  let cf = (closedSet.has(marketKey) && std.fieldYesByBook)
     ? _closedFieldNormalizedFair(std.fieldYesByBook, overByBook)
     : null;
+  // ANYTIME TD — the posters' open-field fair (order-book mirror, 2026-10-01):
+  // median over books of raw × T / Σfield, T = expected distinct scorers per
+  // game (NFL 4.10, CFB 5.0). Falls back to the assumed-overround path when no
+  // book carries a usable field. Corrects the FAIR; the quote stays a mirror.
+  if (!cf && marketKey === 'player_anytime_td' && std.fieldYesByBook) {
+    const T = cfg && cfg.pricing && cfg.pricing.footballAnytimeTdFieldT && cfg.pricing.footballAnytimeTdFieldT[sport];
+    const of = T ? _openFieldTdFair(std.fieldYesByBook, overByBook, T) : null;
+    if (of) cf = { fair: of.fair, books: of.books, avgFieldSum: null, openField: T };
+  }
   const fairProbOver = cf
     ? Math.max(0.005, Math.min(0.95, cf.fair))
     : Math.max(0.005, Math.min(0.95, avgImp / (1 + assumedVig)));
@@ -11721,6 +11840,9 @@ module.exports = {
   // pure function so the priority/carry invariant is testable without a sweep.
   _sweepOrder,
   _closedFieldNormalizedFair,
+  _shinDeVig2,
+  _footballPosterPropFair,
+  _openFieldTdFair,
   _sweepPrioritySet,
   SWEEP_PRIORITY_DEFAULT,
   _resetRefreshStatsForTest,

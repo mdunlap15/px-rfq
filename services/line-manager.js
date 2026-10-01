@@ -150,13 +150,27 @@ const _FOOTBALL_PROP_TO_TOA_MARKET = {
   field_goals_made: 'player_field_goals',
   pass_completions: 'player_pass_completions',
   longest_reception: 'player_reception_longest',
+  // 2026-10-01 ORDER-BOOK MIRROR (operator: "pricing all markets we are for
+  // the PX order book ... use the same methodology for RFQs"). Every family
+  // nfl_game_cycle.py PROPKEY/TDKEY lists that the RFQ book lacked, under the
+  // poster's own TOA keys (⚠ the longest-pass key is player_pass_longest_
+  // COMPLETION — `player_pass_longest` 422s). Last TD is a closed one-sided
+  // field like first TD (lineless YES mirror + field normalisation).
+  pass_rush_yards: 'player_pass_rush_yds',
+  pass_attempts: 'player_pass_attempts',
+  rush_attempts: 'player_rush_attempts',
+  longest_pass: 'player_pass_longest_completion',
+  last_td: 'player_last_td',
 };
+// The one-sided (YES-only, lineless) football TD-scorer families.
+const _FOOTBALL_TD_PROPS = new Set(['anytime_td', 'first_td', 'last_td']);
 // The football props TOA prices on BOTH sides, i.e. the ones that go through the
 // ordinary two-sided de-vig rather than the one-sided YES mirror. Anything not
 // in here and not in _footballPropCtx never registers.
 const _FOOTBALL_PROP_TWO_SIDED = new Set([
   'passing_yards', 'passing_tds', 'rushing_yards', 'receiving_yards', 'receptions',
   'interception_thrown', 'field_goals_made', 'pass_completions', 'longest_reception',
+  'pass_rush_yards', 'pass_attempts', 'rush_attempts', 'longest_pass',
 ]);
 // Line semantics for lineless football YES/NO props (parallel to the
 // {line, toaLine} object _classifySoccerProp returns). Null for any
@@ -179,7 +193,7 @@ function _footballTdGensByBase(markets, ws, normParts) {
   if (!ws || typeof ws._classifyFootballProp !== 'function' || typeof normParts !== 'function') return map;
   for (const m of (markets || [])) {
     const t = ws._classifyFootballProp(m && m.name);
-    if (t !== 'anytime_td' && t !== 'first_td') continue;
+    if (!_FOOTBALL_TD_PROPS.has(t)) continue;
     const nm = ws._extractPlayerNameFromPropMarket(m.name);
     const pp = nm ? normParts(nm) : null;
     if (!pp) continue;
@@ -189,7 +203,7 @@ function _footballTdGensByBase(markets, ws, normParts) {
   return map;
 }
 function _applyFootballTdSuffix(playerName, propType, gensByBase, normParts) {
-  if (!playerName || propType === 'anytime_td' || propType === 'first_td') return playerName;
+  if (!playerName || _FOOTBALL_TD_PROPS.has(propType)) return playerName;
   if (typeof normParts !== 'function') return playerName;
   const pp = normParts(playerName);
   if (!pp || pp.gen !== '') return playerName;
@@ -201,7 +215,68 @@ function _applyFootballTdSuffix(playerName, propType, gensByBase, normParts) {
 function _footballPropCtx(propType) {
   if (propType === 'anytime_td') return { propType, line: 0.5, toaLine: null };
   if (propType === 'first_td') return { propType, line: 0.5, toaLine: null };
+  if (propType === 'last_td') return { propType, line: 0.5, toaLine: null };
   return null;
+}
+
+// ---- ORDER-BOOK MIRROR: football prop REGISTRATION WINDOW (2026-10-01) ----
+// Minutes before kickoff a football prop may register. With
+// config.pricing.footballPropWindows unset this is the single
+// footballPropTMinusMinutes for every league (the pre-mirror behaviour); with
+// the 'poster' preset it is the posters' live window: NFL props T-60 and TDs
+// T-60, widened on Monday/Thursday (ET weekday of kickoff) to props T-120 / TDs
+// T-360 — each the LARGER of the weekday value and the base, as
+// nfl_game_cycle._prop_windows — with receptions held to T-60 every day
+// (LATE_SUBS); CFB props + TD T-120. Pure, for test/football-poster-mirror.
+function _etWeekday(ms) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const mar1 = Date.UTC(y, 2, 1), nov1 = Date.UTC(y, 10, 1);
+  const dowMar1 = new Date(mar1).getUTCDay(), dowNov1 = new Date(nov1).getUTCDay();
+  const dstOn = mar1 + (((7 - dowMar1) % 7) + 7) * 86400e3 + 7 * 3600e3;   // 2nd Sun Mar 02:00 EST
+  const dstOff = nov1 + ((7 - dowNov1) % 7) * 86400e3 + 6 * 3600e3;        // 1st Sun Nov 02:00 EDT
+  const off = (ms >= dstOn && ms < dstOff) ? -4 : -5;
+  return new Date(ms + off * 3600e3).getUTCDay();                          // 0=Sun … 1=Mon, 4=Thu
+}
+function _footballPropWindowMinutes(sportKey, scheduled, propType) {
+  const base = (config.pricing && config.pricing.footballPropTMinusMinutes) || 120;
+  const map = config.pricing && config.pricing.footballPropWindows;
+  const w = map && map[sportKey];
+  if (!w || typeof w !== 'object') return base;
+  const td = _FOOTBALL_TD_PROPS.has(propType);
+  let win = Number(td ? (w.td != null ? w.td : w.props) : w.props);
+  if (!Number.isFinite(win) || win <= 0) return base;
+  const ms = Date.parse(scheduled || '');
+  if (Number.isFinite(ms)) {
+    const dow = _etWeekday(ms);
+    if (dow === 1 || dow === 4) {
+      const mt = Number(td ? w.monThuTd : w.monThuProps);
+      if (Number.isFinite(mt) && mt > win) win = mt;
+    }
+  }
+  const late = w.late && Number(w.late[propType]);
+  if (Number.isFinite(late) && late > 0 && late < win) win = late;
+  return win;
+}
+function _footballPropWindowOpen(sportKey, scheduled, propType) {
+  if (!String(sportKey || '').startsWith('americanfootball')) return true;
+  const ms = Date.parse(scheduled || '');
+  if (!Number.isFinite(ms)) return false;                                  // unknown kickoff: fail closed
+  return (ms - Date.now()) / 60000 <= _footballPropWindowMinutes(sportKey, scheduled, propType);
+}
+
+// ---- ORDER-BOOK MIRROR: "one line per (player, market)" ----
+// The posters list the BEST-BOOKED point only (most books quoting both sides,
+// ties to the middle of the ladder). Shared by the seed pre-pass and the
+// on-demand bridge so an RFQ can never register an alt the seed refused.
+// scored: [{line, books}] → kept line or null.
+function _footballBestPropPoint(scored) {
+  const c = (scored || []).filter(s => s && s.line != null);
+  if (!c.length) return null;
+  const pts = c.map(s => s.line).sort((a, b) => a - b);
+  const mid = pts[Math.floor(pts.length / 2)];
+  const sorted = c.slice().sort((a, b) => ((b.books || 0) - (a.books || 0)) || (Math.abs(a.line - mid) - Math.abs(b.line - mid)));
+  return sorted[0].books ? sorted[0].line : null;
 }
 // Registration-safety assertion for football player props (the BTTS/MoV/
 // tennis-sets marketType trap, fourth occurrence — see prophetx.js
@@ -2817,14 +2892,24 @@ async function seedAllLines(gen) {
         // This gates REGISTRATION, not pricing, so outside the window PX is
         // never told we support the line and never sends the RFQ — the same
         // posture as the golf outright kill-switch.
-        const fbPropWindowMin = (config.pricing && config.pricing.footballPropTMinusMinutes) || 120;
-        const _fbPropWindowOpen = (() => {
-          if (!sportKey.startsWith('americanfootball')) return true;
-          const ms = Date.parse(event.scheduled || '');
-          if (!Number.isFinite(ms)) return false;      // unknown kickoff: fail closed
-          const mins = (ms - Date.now()) / 60000;
-          return mins <= fbPropWindowMin;              // already started is handled downstream
-        })();
+        // The window is now per (league, weekday, prop family) — see
+        // _footballPropWindowMinutes (2026-10-01 order-book mirror); with
+        // FOOTBALL_PROP_WINDOWS unset it is the single global window as before.
+        // ESPN availability gate (order-book mirror, the posters'
+        // player_status.py): players listed Out/IR/Doubtful/... never register.
+        // Resolved lazily once per event, only when a football prop gets past
+        // the cheap gates; fail-open (null) on any miss, as the poster.
+        let _fbBlocked;   // undefined = not yet resolved; null = gate inactive
+        const _fbBlockedSet = async () => {
+          if (_fbBlocked !== undefined) return _fbBlocked;
+          _fbBlocked = null;
+          if (!(config.pricing && config.pricing.footballPropInjuryGate)) return _fbBlocked;
+          try {
+            _fbBlocked = await require('./football-injuries').getBlockedPlayers(
+              sportKey, matchedAway, matchedHome, event.scheduled || null);
+          } catch (_) { _fbBlocked = null; }
+          return _fbBlocked;
+        };
         // PX-anchored name suffixes for this game's football props (see
         // _footballTdGensByBase). Built once per event from PX's TD markets.
         const _fbTdGens = sportKey.startsWith('americanfootball')
@@ -2883,7 +2968,8 @@ async function seedAllLines(gen) {
           // allowlist, an allowlisted baseball_mlb.pitcher_strikeouts registered
           // K lines with the kill-switch OFF (test/k-under-fair.test.js).
           if (propType === 'pitcher_strikeouts' && !(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
-          if (sportKey.startsWith('americanfootball') && !_fbPropWindowOpen) continue;
+          if (sportKey.startsWith('americanfootball')
+              && !_footballPropWindowOpen(sportKey, event.scheduled, propType)) continue;
           // Registration-safety assertion: a football prop line may never
           // carry a full-game marketType (fails closed, logged — see
           // _footballPropRegistrationSafe).
@@ -2905,6 +2991,14 @@ async function seedAllLines(gen) {
             if (_suffixed !== playerName) {
               log.info('Lines', `Football prop name: "${playerName}" -> "${_suffixed}" from PX TD markets (${market.name}, ${event.name})`);
               playerName = _suffixed;
+            }
+          }
+          if (sportKey.startsWith('americanfootball')) {
+            const blocked = await _fbBlockedSet();
+            const st = blocked && require('./football-injuries').statusFor(blocked, playerName);
+            if (st) {
+              log.info('Lines', `Football prop skipped: ${playerName} ${propType} — ESPN availability "${st}" (${event.name})`);
+              continue;
             }
           }
 
@@ -2989,16 +3083,13 @@ async function seedAllLines(gen) {
               } catch (_) { /* unreadable point scores 0 and loses */ }
               scored.push({ line: cand, books: n });
             }
-            const pts = scored.map(s => s.line).sort((a, b) => a - b);
-            const mid = pts[Math.floor(pts.length / 2)];
-            scored.sort((a, b) => (b.books - a.books) || (Math.abs(a.line - mid) - Math.abs(b.line - mid)));
-            const keep = scored[0];
-            if (!keep || !keep.books) {
+            const keepLine = _footballBestPropPoint(scored);
+            if (keepLine == null) {
               log.info('Lines', `Football prop skipped: ${playerName} ${propType}: no point cleared the book gate across ${byLine.size} alts — skipping market`);
               continue;
             }
-            for (const cand of [...byLine.keys()]) if (cand !== keep.line) byLine.delete(cand);
-            log.debug('Lines', `Football prop ${playerName} ${propType}: ${scored.length} alt points → kept ${keep.line} (${keep.books} two-sided books)`);
+            for (const cand of [...byLine.keys()]) if (cand !== keepLine) byLine.delete(cand);
+            log.debug('Lines', `Football prop ${playerName} ${propType}: ${scored.length} alt points → kept ${keepLine}`);
           }
 
           for (const [thisLine, sels] of byLine) {
@@ -3088,7 +3179,7 @@ async function seedAllLines(gen) {
               // Football anytime-TD is Yes-only at every book (measured:
               // player_anytime_td, 2 books, no under anywhere) — the
               // two-sided path can never satisfy booksWithBothSides.
-              || (!!footballProp && (propType === 'anytime_td' || propType === 'first_td'));
+              || (!!footballProp && _FOOTBALL_TD_PROPS.has(propType));
             let oneSidedHit = null;       // { source, impliedOver, books[], fetchedAt }
             if (oneSidedEligible) {
               const lookupHasDk = lookup && Array.isArray(lookup.books)
@@ -3177,6 +3268,14 @@ async function seedAllLines(gen) {
                   ? config.pricing.propBookMirrorSweetener : 0.005;
                 if (mirrorRawOver != null && mirrorRawOver > 0 && mirrorRawOver < 1) {
                   overBookPriceOverride = Math.max(0.005, Math.min(0.98, mirrorRawOver * (1 - sweet)));
+                  // NEVER SHORTER THAN FAIR (order-book mirror, 2026-10-01): the
+                  // TD posters lengthen their NO ask until it is never shorter
+                  // than the field fair, i.e. the YES the counterparty buys is
+                  // never priced below fair YES. Same clamp here: the sweetened
+                  // mirror may not drop the bettor's YES below our fair.
+                  if (footballProp && fairOver > 0 && fairOver < 1 && overBookPriceOverride < fairOver) {
+                    overBookPriceOverride = Math.min(0.98, fairOver);
+                  }
                   log.debug('Lines', `${propType} book-mirror ${playerName}: raw ${(mirrorRawOver * 100).toFixed(1)}% (${mirrorSource}) -> quote ${(overBookPriceOverride * 100).toFixed(1)}% (sweetener ${(sweet * 100).toFixed(2)}%)`);
                 }
               }
@@ -4452,15 +4551,64 @@ async function resolveUnknownLine(rfqLeg) {
                   awayTeam: matchedAway,
                   startTime: event.scheduled || null,
                 };
-                let lookup = null;
-                try {
-                  lookup = await oddsFeed.lookupTheOddsApiPlayerProp(
-                    sportKey, toaMarketKey, eventCtx, playerName, matchingProp.line,
-                  );
-                } catch (err) {
-                  log.warn('Lines', `Phase-2 prop lookup error for ${playerName} ${propType} ${matchingProp.line}: ${err.message}`);
+                // FOOTBALL ON-DEMAND = THE SEED'S RULES (order-book mirror,
+                // 2026-10-01). This bridge used to apply the GLOBAL prop floor
+                // (2) and the trusted-single-book bypass, no prop window and no
+                // one-line rule — so an RFQ could register a football alt point,
+                // a 1-book point, or a player outside the window that the seed
+                // (and the order-book poster) refuse. Measured in prod 10/01:
+                // 18 of 108 NFL prop markets carried 2-6 registered points.
+                const isFb = sportKey.startsWith('americanfootball');
+                let fbRefuse = null;
+                if (isFb && !_footballPropWindowOpen(sportKey, event.scheduled, propType)) {
+                  fbRefuse = 'outside the football prop window';
                 }
-                const minBooks = (config.pricing && config.pricing.propMinBooksWithBothSides) || 3;
+                if (isFb && !fbRefuse && config.pricing && config.pricing.footballPropInjuryGate) {
+                  try {
+                    const fi = require('./football-injuries');
+                    const blocked = await fi.getBlockedPlayers(sportKey, matchedAway, matchedHome, event.scheduled || null);
+                    const st = blocked && fi.statusFor(blocked, playerName);
+                    if (st) fbRefuse = `ESPN availability "${st}"`;
+                  } catch (_) { /* fail-open, as the poster */ }
+                }
+                let lookup = null;
+                if (!fbRefuse) {
+                  try {
+                    lookup = await oddsFeed.lookupTheOddsApiPlayerProp(
+                      sportKey, toaMarketKey, eventCtx, playerName, matchingProp.line,
+                    );
+                  } catch (err) {
+                    log.warn('Lines', `Phase-2 prop lookup error for ${playerName} ${propType} ${matchingProp.line}: ${err.message}`);
+                  }
+                }
+                if (isFb && !fbRefuse && lookup && lookup.fairProbOver != null && lookup.fairProbUnder != null) {
+                  // One line per (player, market): only the best-booked point
+                  // registers. Per-point lookups share the cached TOA response.
+                  const lines = [...new Set(parsedProp
+                    .filter(s => (s.selection === 'over' || s.selection === 'under') && s.line != null)
+                    .map(s => s.line))];
+                  if (lines.length > 1) {
+                    const scored = [];
+                    for (const ln of lines) {
+                      let n = 0;
+                      try {
+                        const pr = ln === matchingProp.line ? lookup : await oddsFeed.lookupTheOddsApiPlayerProp(
+                          sportKey, toaMarketKey, eventCtx, playerName, ln);
+                        if (pr && pr.fairProbOver != null && pr.fairProbUnder != null) n = pr.booksWithBothSides || 0;
+                      } catch (_) { /* scores 0 */ }
+                      scored.push({ line: ln, books: n });
+                    }
+                    const best = _footballBestPropPoint(scored);
+                    if (best !== matchingProp.line) fbRefuse = `not the best-booked point (best ${best})`;
+                  }
+                }
+                if (fbRefuse) {
+                  log.info('Lines', `Football prop (on-demand) refused: ${playerName} ${propType} ${matchingProp.line} — ${fbRefuse}`);
+                  lookup = null;
+                }
+                const minBooks = isFb
+                  ? ((config.pricing && config.pricing.footballPropMinBooks) || 3)
+                  : ((config.pricing && config.pricing.propMinBooksWithBothSides) || 3);
                 // trustedAlone fallback: a single trusted book (Pin/FD/DK/
                 // BetMGM/BetRivers per config.propTrustedSingleBooks) with
                 // BOTH sides at the exact line is enough to register, even
@@ -4470,8 +4618,9 @@ async function resolveUnknownLine(rfqLeg) {
                 // alt lines that the pre-seed would have accepted. (Closed
                 // 2026-05-11 — Trout/Neto 1.5 TB RFQs were declining here
                 // after the per-line fix exposed the asymmetry between
-                // pre-seed and on-demand gates.)
-                const trustedSet = (config.pricing && config.pricing.propTrustedSingleBooks) || [];
+                // pre-seed and on-demand gates.) Football: ABSOLUTE floor, no
+                // trusted-book escape — the seed's rule.
+                const trustedSet = isFb ? [] : ((config.pricing && config.pricing.propTrustedSingleBooks) || []);
                 const lookupBoth = (lookup && lookup.booksWithBothSides) || 0;
                 const lookupHasTrustedSingle = lookup
                   && lookupBoth === 1
@@ -5485,6 +5634,11 @@ module.exports = {
   _sportMarketAllowed,
   _setSeedLine,
   _footballPropCtx,
+  _footballPropWindowMinutes,
+  _footballPropWindowOpen,
+  _footballBestPropPoint,
+  _etWeekday,
+  _FOOTBALL_PROP_TWO_SIDED,
   _footballTdGensByBase,
   _applyFootballTdSuffix,
   _footballPropRegistrationSafe,

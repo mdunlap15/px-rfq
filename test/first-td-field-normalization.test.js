@@ -76,8 +76,10 @@ test('no qualifying book → null, so the caller falls back to the assumed-overr
   assert.strictEqual(F({ dk: board(1.02) }, { dk: board(1.02)[0] }), null, 'sum 1.02 is below the 1.05 floor — not a real overround');
 });
 
-test('config: first TD is the only closed-field market by default; anytime TD is NOT', () => {
-  assert.deepStrictEqual(config.pricing.closedFieldOneSidedMarkets, ['player_1st_td']);
+test('config: first TD (and, since 2026-10-01, last TD) are the closed-field markets by default; anytime TD is NOT', () => {
+  // player_last_td added with the order-book mirror: exactly one player scores
+  // the LAST touchdown, like the first — a closed field.
+  assert.deepStrictEqual(config.pricing.closedFieldOneSidedMarkets, ['player_1st_td', 'player_last_td']);
   assert.ok(!config.pricing.closedFieldOneSidedMarkets.includes('player_anytime_td'),
     'anytime TD is an OPEN field (several players score) and must keep the per-outcome overround');
 });
