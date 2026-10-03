@@ -7333,7 +7333,16 @@ function getDisplayFairProb(sport, homeTeam, awayTeam, marketType, selection, li
  * h2h (moneyline) and team_totals have no line — always match.
  */
 function lineMatchesPrimary(market, marketType, requestedLine, selection) {
-  if (marketType !== 'spreads' && marketType !== 'totals') return true;
+  // POINT-SPECIFIC for EVERY spread/total family (2026-10-03 audit). This
+  // used to check only full-game 'spreads'/'totals' and return true for the
+  // period variants, so the per-leg consensus floor read the MAIN line's book
+  // price for every F5/H1/Q1 alt point — ATL F5 +0.5, +1.5 and +2.5 all floored
+  // to FD −148. A mismatch now falls through to the alt-line per-book cache for
+  // that exact point (or no floor at all), never another point's price.
+  const isSpreadFamily = /^spreads(_|$)/.test(String(marketType || ''));
+  const isTotalFamily = /^totals(_|$)/.test(String(marketType || ''));
+  if (!isSpreadFamily && !isTotalFamily) return true;
+  marketType = isSpreadFamily ? 'spreads' : 'totals';
   if (requestedLine == null) return false; // null line → can't verify match, route to alt
   if (market.line == null) return false;
 
@@ -11854,6 +11863,7 @@ module.exports = {
   getToaGateState,
   // 2026-09-29 NHL gaps — test seams (test/nhl-gaps.test.js).
   _altEntryFresh,
+  lineMatchesPrimary,   // test seam (test/consensus-floor-point.test.js)
   getAltLineFairProb,
   getAltLineBookOdds,
   TEAM_TOTAL_SPORTS,
