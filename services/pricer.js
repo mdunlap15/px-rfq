@@ -1254,6 +1254,29 @@ function priceParlay(legs, opts = {}) {
     // return null here and the leg declines rather than quoting off nothing.
     // Same-fight correlation is handled by the SGP gate in shouldDecline —
     // every method pair on one fight is mutually exclusive or nested.
+    if (s.lineInfo && MOV_MARKET_TYPES.has(s.lineInfo.marketType) && ufcMov.source() === 'bovada') {
+      // ORDER-BOOK METHODOLOGY (operator 2026-10-03, services/bovada-mov.js):
+      // the counterparty takes YES, we hold the NO the order-book poster lays.
+      // Offered prob = Bovada's RAW YES implied (direct mirror, bookPriceOverride
+      // bypasses vig); quoted only while YES >= MOV_RFQ_MIN_YES_ODDS (+300).
+      // fairProb = the poster's 6-way Shin fair (ITD = KO + SUB), for EV/risk.
+      // Every failure — NO side, outside 26h, stale/cold board, unmatched or
+      // ambiguous fighter, refused quote, below floor, no complete field —
+      // declines the leg.
+      const q = ufcMov.getMovQuoteForLine(s.lineInfo);
+      if (!q || !q.ok) {
+        priceParlay._lastFailure = {
+          reason: (q && q.reason === 'mov_below_floor') ? 'mov_below_floor' : 'no_fair_value',
+          detail: `${s.lineInfo.playerName || '?'} ${s.lineInfo.marketType}:${s.lineInfo.selection} — ${q ? q.reason : 'mov_error'}${q && q.detail ? ' (' + q.detail + ')' : ''}`,
+          blockerLeg: { team: s.lineInfo.playerName, market: s.lineInfo.marketType, sport: s.lineInfo.sport },
+        };
+        return null;
+      }
+      fairProbs[i] = q.fairProb;
+      s.bookPriceOverride = q.bookPriceOverride;
+      s.fairBasis = q.basis;
+      continue;
+    }
     if (s.lineInfo && MOV_MARKET_TYPES.has(s.lineInfo.marketType)) {
       const hit = ufcMov.getMovFairForLine(s.lineInfo);
       if (hit == null) {
@@ -4758,6 +4781,20 @@ function shouldDecline(legs, parlayId) {
             declined: true,
             reason: 'mov_sgp_blocked',
             detail: `method-of-victory legs cannot be parlayed same-game: ${a.playerName || a.teamName} ${a.marketType}:${a.selection} + ${bDesc} on event ${a.pxEventId} — method outcomes are mutually exclusive or nested within the same fight`,
+          };
+        }
+      }
+      // ONE-SIDED (operator 2026-10-03, MOV_SOURCE=bovada): MoV is YES-only —
+      // the counterparty takes YES and we hold the NO, like the order book.
+      // NO lines never register (line-manager refuses them at every index
+      // entry point); this is the belt-and-braces for one that slipped in.
+      if (ufcMov.source() === 'bovada') {
+        const noLeg = movLegs.find(li => String(li.selection || '').toLowerCase() !== 'yes');
+        if (noLeg) {
+          return {
+            declined: true,
+            reason: 'mov_no_side',
+            detail: `${noLeg.playerName || noLeg.teamName || '?'} ${noLeg.marketType}:${noLeg.selection} — method-of-victory is YES-side only (we hold the NO, like the order book)`,
           };
         }
       }

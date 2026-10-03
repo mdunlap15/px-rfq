@@ -959,13 +959,35 @@ function parseMarketSelections(market) {
       : /^ko/.test(how) ? 'mov_ko'
       : how === 'submission' ? 'mov_sub'
       : 'mov_dec';
+    // NAME vs SUB_TYPE CROSS-CHECK (order-book stager, 2026-09-22). On
+    // Connor/Guaylupo PX shipped MoV markets whose name and sub_type describe
+    // DIFFERENT methods ("... To Win By Submission" carrying
+    // fighter_to_win_by_unanimous_decision; 5 of 8 markets on that fight). We
+    // type on the NAME, so a disagreeing PX sub_type means we cannot know which
+    // contract we would be laying — refuse the whole market. An absent
+    // sub_type, or one outside the fighter_to_win_by_* family, is not a claim
+    // about the method and does not refuse.
+    const MOV_SUBTYPE = {
+      mov_ko: 'fighter_to_win_by_knockout_tko',
+      mov_sub: 'fighter_to_win_by_submission',
+      mov_dec: 'fighter_to_win_by_decision',
+      mov_itd: 'fighter_to_win_by_any_knockout_submission_dq',
+    };
+    const subType = String(market.sub_type || '').trim().toLowerCase();
+    if (subType.startsWith('fighter_to_win_by') && subType !== MOV_SUBTYPE[marketType]) return [];
+    // SIDE BY NAME, UNIQUELY (stager 2026-09-22): PX inverts the outcome ids on
+    // fighter_to_win_by_decision ONLY, so the side is read from the selection
+    // NAME — exactly "YES"/"NO" — never from an id or a position, and a market
+    // with two selections claiming the same side is unresolvable → refused.
     const results = [];
+    const sideCount = { yes: 0, no: 0 };
     for (const selGroup of (market.selections || [])) {
       for (const sel of (Array.isArray(selGroup) ? selGroup : [selGroup])) {
         if (!sel || !sel.line_id) continue;
-        const nameLC = (sel.name || sel.display_name || '').toLowerCase();
-        const selection = nameLC.includes('yes') ? 'yes' : nameLC.includes('no') ? 'no' : 'unknown';
+        const nameLC = String(sel.name || sel.display_name || '').trim().toLowerCase();
+        const selection = nameLC === 'yes' ? 'yes' : nameLC === 'no' ? 'no' : 'unknown';
         if (selection === 'unknown') continue;
+        sideCount[selection]++;
         results.push({
           lineId: sel.line_id,
           marketType,
@@ -978,6 +1000,7 @@ function parseMarketSelections(market) {
         });
       }
     }
+    if (sideCount.yes > 1 || sideCount.no > 1) return [];
     return results;
   }
 

@@ -8,6 +8,11 @@
 //     "<Fighter> To Win By Decision"         -> mov_dec
 //     "<Fighter> To Win Inside The Distance" -> mov_itd   (KO + SUB composite)
 //
+// ⚠ 2026-10-03: the RFQ MoV PRICE SOURCE is now BOVADA on the order-book
+// methodology (services/bovada-mov.js — YES-only legs, raw Bovada YES mirror,
+// +300 floor, 6-way Shin fair). Everything below describes the LEGACY DK path,
+// kept intact and selected with MOV_SOURCE=dk (see source()).
+//
 // SOURCE: DraftKings only. SharpAPI's method_of_victory feed DIED 2026-07-11
 // and returns an EMPTY board rather than an error — anything built on it fails
 // silently. See dk-scraper.fetchUfcMethodOfVictory for the scrape and its
@@ -60,6 +65,19 @@
 
 const log = require('./logger');
 const dkScraper = require('./dk-scraper');
+const bovadaMov = require('./bovada-mov');
+
+// ---------------------------------------------------------------------------
+// SOURCE SWITCH (2026-10-03). MOV_SOURCE=bovada (DEFAULT) = the order-book
+// methodology (services/bovada-mov.js): YES-only legs, price = Bovada's raw YES
+// implied (direct mirror), quote only while YES >= MOV_RFQ_MIN_YES_ODDS, fair =
+// 6-way Shin. MOV_SOURCE=dk restores the pre-2026-10-03 behaviour wholesale:
+// DK 6-way power-de-vig fair, YES+NO registered, priced fair x vig, no floor.
+// Read per call so it flips without a restart of this module.
+// ---------------------------------------------------------------------------
+function source() {
+  return String(process.env.MOV_SOURCE || 'bovada').trim().toLowerCase() === 'dk' ? 'dk' : 'bovada';
+}
 
 // READ tolerance: how old a board may be and still price. Method lines move far
 // less than a live golf board (these are pre-fight prices on a card days out),
@@ -170,6 +188,11 @@ function _buildFight(slug, dkFighters) {
  * golf-topn: a stale-but-real board beats no board, and MAX_AGE still applies).
  */
 async function warmMovBoards({ force = false } = {}) {
+  if (source() === 'bovada') return bovadaMov.warm({ force });
+  return warmDkMovBoards({ force });
+}
+
+async function warmDkMovBoards({ force = false } = {}) {
   if (!force && Date.now() - _cache.at < TTL_MS && Object.keys(_cache.byFight).length) return _cache;
   if (_inflight) return _inflight;
   _inflight = (async () => {
@@ -314,7 +337,30 @@ function getMovFairForLine(lineInfo) {
 
 const MOV_TYPES = new Set(['mov_ko', 'mov_sub', 'mov_dec', 'mov_itd']);
 
+/**
+ * Bovada-source quote for a MoV leg (MOV_SOURCE=bovada). Sync, never throws.
+ * { ok:true, fairProb, bookPriceOverride, ... } | { ok:false, reason, detail }.
+ */
+function getMovQuoteForLine(lineInfo, opts) {
+  return bovadaMov.getQuoteForLine(lineInfo, opts);
+}
+
+/**
+ * Index-entry gate for MoV lines (seed, on-demand resolve, cache restore).
+ * Returns a refusal reason or null. MOV_SOURCE=dk: no gate (old behaviour).
+ */
+function movRegistrationRefusal(lineInfo, opts) {
+  if (!lineInfo || !MOV_TYPES.has(lineInfo.marketType)) return null;
+  if (source() === 'dk') return null;
+  return bovadaMov.registrationRefusal(lineInfo, opts);
+}
+
 function __debugCache() {
+  if (source() === 'bovada') return { source: 'bovada', ...bovadaMov.__debug(), dk: __debugDkCache() };
+  return { source: 'dk', ...__debugDkCache() };
+}
+
+function __debugDkCache() {
   const fights = Object.entries(_cache.byFight).map(([slug, b]) => ({
     slug,
     fighters: [...b.fighters.values()].map(f => ({
@@ -338,4 +384,8 @@ function __debugCache() {
   };
 }
 
-module.exports = { warmMovBoards, ingestBoard, getMovFairSync, getMovFairForLine, __debugCache, _sig, _tokens, _buildFight };
+module.exports = {
+  warmMovBoards, warmDkMovBoards, ingestBoard, getMovFairSync, getMovFairForLine,
+  getMovQuoteForLine, movRegistrationRefusal, source, MOV_TYPES,
+  __debugCache, _sig, _tokens, _buildFight,
+};

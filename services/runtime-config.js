@@ -180,6 +180,11 @@ const REGISTRY = [
   { key: 'propNetExposureBySport', path: 'propNetExposureBySport', type: 'numMap', min: 0, max: 1000000, group: 'risk', danger: true, env: 'PROP_NET_EXPOSURE_BY_SPORT',
     label: 'Prop net exposure by sport', help: 'League-wide net player-prop cap per sport key. {} = no cap. Each new ticket is charged its FULL per-ticket prop cap, so a value below a few multiples of Max risk per parlay (props) declines everything.' },
 
+  // UFC MoV RFQ legs (2026-10-03): the order-book floor and the mirror knob.
+  { key: 'movRfqMinYesOdds', path: 'movRfqMinYesOdds', type: 'number', min: 100, max: 100000, group: 'gating', danger: true, env: 'MOV_RFQ_MIN_YES_ODDS',
+    label: 'UFC MoV min YES odds', help: 'A MoV YES leg registers/quotes only while Bovada YES >= this (American). 300 = the order-book poster NO <= -300 floor.' },
+  { key: 'movBookMirrorSweetener', path: 'movBookMirrorSweetener', type: 'number', min: 0, max: 0.2, group: 'pricing', danger: true, env: 'MOV_BOOK_MIRROR_SWEETENER',
+    label: 'UFC MoV mirror sweetener', help: 'Offered = Bovada raw YES implied × (1 − this). 0 = exact order-book price.' },
   { key: 'golfOutrightsParlayEnabled', path: 'golfOutrightsParlayEnabled', type: 'bool', group: 'gating', danger: true, env: 'GOLF_OUTRIGHTS_PARLAY_ENABLED',
     label: 'Golf outrights in parlays', help: 'Register golf outright (win/top 5/10/20) legs so PX can send outright RFQs. Needs a loaded DK ties-included board (POST /golf-outrights/paste) or top-N legs fail closed.' },
   { key: 'tennisSetsEnabled', path: 'tennisSetsEnabled', type: 'bool', group: 'gating', danger: true, env: 'TENNIS_SETS_ENABLED',

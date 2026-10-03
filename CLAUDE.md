@@ -89,9 +89,17 @@ client/
 | `GOLF_OUTRIGHT_PASTE_MAX_AGE_MIN` | No | Default: 720 (12h). Freshness ceiling for an **operator paste** board, deliberately longer than the scraped `GOLF_TOPN_MAX_AGE_MIN`: the operator pastes intentionally and stops via the kill-switch, so we don't force a re-paste on the tight scrape max-age. Beyond it, fail closed so a forgotten paste can't quote day-old odds. `outright_win` only ever comes from a paste, so it always uses this ceiling. |
 | `GOLF_MAKE_CUT_VIG` | No | Default: 0.03. Our margin OVER the de-vigged fair for make_cut (`offered_implied = fair × (1 + vig)`). Moves the price the **opposite** way to `GOLF_OUTRIGHTS_SWEETENER` — see Key Gotchas. |
 | `GOLF_MAKE_CUT_MIN_BOOKS` | No | Default: 2. Minimum sportsbooks quoting **both** make+miss before a player is priced. Cut boards are thin; 1-book players are noise. |
-| `MOV_TTL_MIN` | No | Default: 45. Warm cadence for the DK method-of-victory scrape (~3-5 min/card, background only — never on the RFQ path). |
-| `MOV_MAX_AGE_MIN` | No | Default: 180. Max board age that still prices; beyond it MoV legs fail closed. |
-| `MOV_DRAW_PROB` | No | Default: 0.005. The unpriced 7th outcome; the 6-way de-vig normalizes to `1 - this`. |
+| `MOV_SOURCE` | No | Default: `bovada` — UFC MoV RFQ legs follow the **order-book methodology** (`services/bovada-mov.js`, see "UFC Method of Victory"): YES-only, offered = Bovada's raw YES implied, quoted only while YES ≥ `MOV_RFQ_MIN_YES_ODDS`, fair = 6-way Shin. **`dk`** restores the pre-2026-10-03 behaviour wholesale (DK 6-way power-de-vig fair × vig, YES **and** NO registered, no floor/window). Read per call. |
+| `MOV_RFQ_MIN_YES_ODDS` | No | Default: 300 (runtime key `movRfqMinYesOdds`). A MoV YES leg registers and quotes only while Bovada's YES is at least this — the order-book poster's `NO <= -300` floor (`dwcs_mov_cycle.py MOV_FLOOR`) seen from the YES side. Compared on Bovada's raw American price (the poster snaps −YES to PX's ladder first; a parlay leg has no per-leg ladder). |
+| `MOV_RFQ_WINDOW_H` | No | Default: 26 (the stager's `MOV_WINDOW_H`). MoV lines outside this many hours of the fight do not register or quote; an unparseable start fails closed. |
+| `MOV_BOOK_MIRROR_SWEETENER` | No | Default: **0** (runtime key `movBookMirrorSweetener`) — offered = Bovada raw YES implied × (1 − this), so 0 is the order book's exact price. Separate from `PROP_BOOK_MIRROR_SWEETENER` (3%) on purpose. |
+| `MOV_MIRROR_FLOOR_AT_FAIR` | No | Default: on (literal `false` disables). If Bovada's raw YES is ever below its own Shin fair (possible on ITD, a separate Bovada quote vs the KO+SUB fair) the leg is offered at fair instead — never a −EV mirror. Shown per line as `clampedToFair` on `/ufc-mov`. |
+| `MOV_BOVADA_MAX_AGE_MIN` | No | Default: 30. Max Bovada board age that still PRICES; beyond it MoV legs fail closed (`mov_board_stale`). |
+| `MOV_BOVADA_REG_MAX_AGE_MIN` | No | Default: 360. How old a board may be and still steer REGISTRATION (floor / refusals). Longer than the pricing tolerance so registration does not flap on a missed refresh; older (or cold) → lines register and pricing decides. |
+| `MOV_BOVADA_TTL_SEC` / `MOV_BOVADA_TIMEOUT_MS` | No | Defaults: 120 / 15000. Bovada coupon refresh cadence (kicked by each line seed while PX lists MMA; single-flight, background only) and fetch timeout. |
+| `MOV_TTL_MIN` | No | Default: 45. **`MOV_SOURCE=dk` only.** Warm cadence for the DK method-of-victory scrape (~3-5 min/card, background only — never on the RFQ path). |
+| `MOV_MAX_AGE_MIN` | No | Default: 180. **`MOV_SOURCE=dk` only.** Max DK board age that still prices; beyond it MoV legs fail closed. |
+| `MOV_DRAW_PROB` | No | Default: 0.005. **`MOV_SOURCE=dk` only.** The unpriced 7th outcome; the DK 6-way de-vig normalizes to `1 - this`. (The Bovada path ports the poster's Shin, which normalizes to 1.0.) |
 | `MOV_MIN_PARLAY_PROB` | No | Default: 0.000001. Probability floor for **all-MoV** parlays, replacing the standard 0.1%. Raise it to re-impose a tail limit. |
 | `BTTS_SPORTS` | No | Default: `soccer_usa_mls`. Sport keys eligible for Both-Teams-To-Score. Deliberately NOT every soccer key: `btts` is a per-event fetch, so each league multiplies calls against the same TOA key the main odds path uses, and that key rate-limits by frequency. Widen one league at a time. |
 | `BTTS_BOOKMAKERS` | No | Default: `pinnacle,draftkings,fanduel,betmgm,betrivers,williamhill,matchbook`. Two-sided books only — a make-side-only book can't be de-vigged. |
@@ -357,7 +365,7 @@ was on the allowlist. Both the classifier and the extractor now accept `,`/`&`/`
 | `/wc-props` | GET | World Cup soccer player-prop visibility: registered counts by market, price source, freshness, active allowlist entries |
 | `/sgp-experiments` | GET | SGP experiment panel: per-combo dark/budget/stop-loss state, prop game-script exposure, PX submit-errors by combo |
 | `/sgp-experiments/reset` | POST | Clear a combo's auto-dark state after reviewing a stop-loss breach (`{combo:"prop_nested"}`) |
-| `/ufc-mov` | GET | UFC method-of-victory board: per-fight de-vigged KO/SUB/DEC/ITD fairs, age, `priceable`. **First stop when a MoV leg won't quote.** `?force=1` kicks a fresh scrape. |
+| `/ufc-mov` | GET | UFC method-of-victory board (`source` = bovada/dk). Bovada: per fight the straight YES quotes, 6-way Shin fairs, `eligibleYes` (≥ floor, in window), `refusals`, age, `priceable`, plus `registeredLines` — every MoV line in the index with its live quote or refusal reason. **First stop when a MoV leg won't quote.** `?force=1` kicks a fresh fetch. |
 | `/golf-topn` | GET | DK ties-included Top 5/10/20 board state + the DERIVED tie uplift per market. Diagnose with: missing slug = add `GOLF_DK_SLUG_MAP`; empty `markets` = DK isn't serving that board; stale `ageMs` = scrape failing. ⚠ **This reports PRIORITY 1 ONLY.** `priceable:false` does NOT mean top-N is dark — DataGolf is priority 2 and quotes fine on its own. To test whether outrights actually price, call `datagolf.getOutrightFairProbSync(player, marketType, tournament)` after a warm, or read `basis` on a live quote. |
 | `/prop-correlation` | GET | Live-calibrated same-game prop correlation factors from `prop_settlements` (realized joint win-rate ÷ product of marginal leg rates) + bettor-edge-vs-price. `?days=60&minN=8` |
 | `/settle-props` | POST | Settle finished MLB hitter-prop parlays vs box scores into `prop_settlements` now (`{sinceDays?:14, dryRun?:false}`). Daily job does this when `PROP_SETTLEMENT_ENABLED=true`. |
@@ -397,6 +405,66 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
 | `<Fighter> To Win By Decision` | `mov_dec` | 1070xxxxx |
 | `<Fighter> To Win Inside The Distance` | `mov_itd` | 1050xxxxx |
 
+**ORDER-BOOK METHODOLOGY (operator directive 2026-10-03, verbatim):** "We should be
+quoting (1-sided) UFC MoV lines. Use the methodology we use for the order book lines."
+Standing principle: "I don't want to derive any of our own lines; I want ours to always be
+direct references to the lines of sportsbooks, adjusted as we may choose." Reference
+chain (read-only, never run from here): `~/ufc_mov_board_bov.py` (stager: source, parse,
+floor, fair) → `~/ufc_mov_post.py` (poster) ← `~/dwcs_mov_cycle.py` (`MOV_FLOOR=-300`);
+`px_post_client.devig_n_shin`. Implemented in `services/bovada-mov.js` behind
+`MOV_SOURCE=bovada` (default; `dk` = the legacy DK path below, wholesale).
+- **Source = Bovada's public coupon JSON** (`/services/sports/event/coupon/events/A/description/ufc-mma?marketFilterId=all&preMatchOnly=true`),
+  plain HTTPS, no Puppeteer, ONE call per refresh — the coupon carries the full per-event
+  market set (verified 2026-10-03 identical to the per-event v2 endpoint the stager walks).
+  Warmed in the background each line seed (TTL 120s, single-flight, 15s timeout); the RFQ
+  path is a sync cache read. Single book, accepted by the operator — so the parser
+  **refuses** anything ambiguous rather than guessing.
+- **ONE-SIDED: YES only.** The poster lays the NO at −(Bovada YES); in a parlay the
+  counterparty takes YES and we hold the NO — the same position. NO lines are refused at
+  every index entry point (`_movRefusal`: seed `_setSeedLine`, Supabase cache restore,
+  on-demand resolve — the last is defensive, the on-demand path has never resolved MoV)
+  and `shouldDecline` declines a stray NO leg (`mov_no_side`).
+- **Eligibility = the poster's:** YES ≥ `MOV_RFQ_MIN_YES_ODDS` (+300 ⇔ NO ≤ −300), fight
+  within `MOV_RFQ_WINDOW_H` (26h), an unambiguous straight quote. **Registration** refuses
+  only on deterministic evidence (NO side, outside the window, a board that SAYS the YES is
+  below the floor or the quote is refused/ambiguous); a cold or very old board, or a fight
+  Bovada hasn't posted props for, REGISTERS and pricing fails closed — the golf top-N
+  build-then-swap lesson. The floor is real price state, so a YES crossing +300 does
+  (de)register on the next seed — exactly as the order book posts/cancels.
+- **PRICE = direct mirror:** the leg's offered prob is Bovada's raw YES implied
+  (`bookPriceOverride`, bypasses vig; `MOV_BOOK_MIRROR_SWEETENER` default 0). An all-MoV
+  parlay offers the product of the mirrors (Parkin KO +300 × Kopylov KO +475 → +2200).
+  Floored at fair (`MOV_MIRROR_FLOOR_AT_FAIR`).
+- **FAIR (EV / risk / exposure only):** the stager's 6-way n-way **Shin**
+  (`devigNShin`, exact port — pinned to values computed by `px_post_client.devig_n_shin`)
+  over KO/SUB/DEC × 2 fighters, normalized to 1.0; **ITD fair = KO + SUB**. A fight missing
+  any of the six has no fair and its legs DECLINE (`mov_no_fair`) — the poster posts
+  without a fair, a parlay cannot size risk without one.
+- **Parsing (stager `method_of`)**: KO = "Wins by KO, TKO or DQ" (tokenised — the comma
+  case), SUB, ITD = Bovada's own "Wins Inside Distance" quote mirrored onto PX's
+  `fighter_to_win_by_any_knockout_submission_dq` (a direct quote, not derived), DEC = a bare
+  "by Decision" if present, else **Unanimous + Split/Majority summed** (the stager drops
+  "Decision or Technical Decision" for the word *technical*; on 10/03 Silva's bare quote was
+  EVEN while UD+SMD summed to 60% — we mirror the stager). Dropped: round-specific, "Fight
+  Winner - … Only" (conditional), Double Chance, technical decisions, suspended outcomes.
+  **Duplicate quotes that disagree → refused, never averaged.** Three tightenings vs the
+  stager, each only turning a quote into a refusal: **Bout Specials markets excluded
+  outright** (the stager drops them from the fair only); the ITD-composite test reads `ko`
+  as a **token** (the stager's substring test classified "Roman Kopylov Wins by Submission"
+  as ITD on the 10/03 card); fighter attribution needs a **unique** winner.
+- **PX side**: `parseMarketSelections` refuses a MoV market whose `sub_type`
+  (`fighter_to_win_by_*`) disagrees with its NAME (Connor/Guaylupo 2026-09-22), reads the
+  side from the selection NAME exactly (PX inverts the ids on decision only) and refuses a
+  market with two YES or two NO selections.
+- **Names**: the bout is resolved from BOTH PX competitors; full-name signature or token
+  subset, or a **surname unique in that bout** (poster 10/03: Bovada "Michael Parkin" = PX
+  "Mick Parkin"), with at least one fighter matching on more than a surname; a shared
+  surname never matches on surname alone (Abus/Shara Magomedov); two matching bouts →
+  `mov_fight_ambiguous`; PX's U+FFFD mojibake is a one-char wildcard on the surname.
+- Locked by `test/bovada-mov.test.js` (real Bovada fixture
+  `test/fixtures/bovada-ufc-coupon-2026-10-03.json`; 24 mutants, all killed).
+
+**LEGACY DK PATH (`MOV_SOURCE=dk`)** — kept intact, no longer the default price source:
 - **SharpAPI's method_of_victory feed is DEAD** (2026-07-11) and returns an EMPTY
   board rather than erroring — anything built on it fails SILENTLY. DK is the only
   source (`dk-scraper.fetchUfcMethodOfVictory`, ported from the operator's
@@ -455,9 +523,10 @@ selections (the BTTS trap again — probe 2026-07-17, Usman/Du Plessis):
   board. A CS fight now fails closed only for the ordinary reasons (PX posts no
   method markets for it — common on prelims — or the board goes stale).
 - **A standalone operator routine posts single-market MoV NO lines** on PX
-  (DK raw mirror, offers tagged `claude_mov_`, $500-$2,000 tiers). Those positions
-  are INVISIBLE to this trader's exposure tracker — a parlay MoV quote on the same
-  fight outcome stacks risk across the two books with no shared cap. PX also
+  (now the Bovada stager above; offers tagged `claude_mov_`, DWCS $2,000 flat). Those
+  positions are INVISIBLE to this trader's exposure tracker — and since 2026-10-03 the
+  RFQ book holds the SAME NO on the same outcomes, so a parlay MoV fill stacks risk on
+  top of the order-book lay with no shared cap. PX also
   frequently lacks DEC markets that DK prices (10/10 skipped 2026-08-11).
 
 ## Football Player Props (parlay legs)

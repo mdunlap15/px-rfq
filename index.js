@@ -6687,19 +6687,38 @@ function startStatusServer() {
     catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // UFC method-of-victory board state. FIRST STOP when a MoV leg won't quote:
-  //   priceable:false + fightCount:0  -> scrape failing or never warmed
+  // UFC method-of-victory board state. FIRST STOP when a MoV leg won't quote.
+  // MOV_SOURCE=bovada (default, order-book methodology): the Bovada board —
+  // per fight the straight YES quotes, the 6-way Shin fairs, `eligibleYes`
+  // (YES >= MOV_RFQ_MIN_YES_ODDS inside MOV_RFQ_WINDOW_H), refusals, board age,
+  // `priceable` — plus `registeredLines`: the MoV lines actually in the index
+  // (YES only) with each one's current quote/refusal. The DK board is under
+  // `dk` for reference only. MOV_SOURCE=dk: the legacy DK board.
+  //   priceable:false + fightCount:0  -> fetch failing or Bovada has no MoV props yet
   //   ageMs > maxAgeMs                -> board stale, legs fail closed
-  //   fight present but a fighter absent -> DK had a partial board for it
-  // ?force=1 kicks a fresh scrape (SLOW ~3-5 min, background) and returns the
-  // CURRENT board immediately rather than waiting on it.
+  // ?force=1 kicks a fresh fetch in the background and returns the CURRENT
+  // board immediately rather than waiting on it.
   app.get('/ufc-mov', (req, res) => {
     try {
       const mov = require('./services/ufc-mov');
       if (req.query.force) {
         mov.warmMovBoards({ force: true }).catch(() => { /* logged inside */ });
       }
-      res.json({ ok: true, forcedWarm: !!req.query.force, ...mov.__debugCache() });
+      let registeredLines;
+      try {
+        const idx = lineManager.__debugGetLineIndex() || {};
+        registeredLines = Object.entries(idx)
+          .filter(([, li]) => li && mov.MOV_TYPES.has(li.marketType))
+          .map(([lineId, li]) => {
+            const q = mov.source() === 'bovada' ? mov.getMovQuoteForLine(li) : null;
+            return {
+              lineId, fighter: li.playerName, market: li.marketType, selection: li.selection,
+              event: li.pxEventName, startTime: li.startTime,
+              quote: q ? (q.ok ? { yes: q.yesAmerican, offeredPct: +(q.bookPriceOverride * 100).toFixed(2), fairPct: +(q.fairProb * 100).toFixed(2), clampedToFair: q.clampedToFair } : { refused: q.reason, detail: q.detail || null }) : null,
+            };
+          });
+      } catch (_) { registeredLines = null; }
+      res.json({ ok: true, forcedWarm: !!req.query.force, ...mov.__debugCache(), registeredLines });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 

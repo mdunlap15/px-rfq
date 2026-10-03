@@ -547,6 +547,32 @@ function _footballPxPointsByFamily(parsed, sportKey, matchedHome, matchedAway) {
   return out;
 }
 
+// UFC METHOD OF VICTORY — ONE-SIDED, ORDER-BOOK ELIGIBILITY (operator
+// 2026-10-03: "We should be quoting (1-sided) UFC MoV lines. Use the
+// methodology we use for the order book lines."). The single gate every index
+// entry point calls: seed (_setSeedLine), Supabase cache restore
+// (lookupLineAsync) and on-demand resolve (resolveUnknownLine). Refuses a NO
+// selection (we hold the NO — same position as the order-book poster), a fight
+// outside MOV_RFQ_WINDOW_H, and — when the Bovada board has an answer — a YES
+// below MOV_RFQ_MIN_YES_ODDS or an ambiguous/refused quote. A cold board or a
+// fight Bovada hasn't posted yet REGISTERS and lets pricing fail closed
+// (build-then-swap: a skipped line is deleted from PX's supported set). See
+// services/bovada-mov.js registrationRefusal. MOV_SOURCE=dk: no gate.
+const _movDeniedLogged = new Set();
+function _movRefusal(info) {
+  if (!info || !ufcMov.MOV_TYPES.has(info.marketType)) return null;
+  const r = ufcMov.movRegistrationRefusal(info);
+  if (r && r !== 'mov_no_side') {
+    const k = `${info.pxEventId}|${info.playerName}|${info.marketType}|${r}`;
+    if (!_movDeniedLogged.has(k)) {
+      if (_movDeniedLogged.size > 5000) _movDeniedLogged.clear();
+      _movDeniedLogged.add(k);
+      log.info('Lines', `UFC MoV: not registering ${info.playerName || '?'} ${info.marketType} YES (${r})`);
+    }
+  }
+  return r;
+}
+
 function _setSeedLine(lineId, info, opts) {
   // Stamp the id ON the object (2026-08-13). legExposureKey(lineInfo) reads
   // li.lineId to build its 'L:<id>|<day>' key; registered infos never carried
@@ -573,6 +599,10 @@ function _setSeedLine(lineId, info, opts) {
   // index, so build-then-swap drops it from PX's supported set; the main
   // itself re-registers every seed at whatever number the consensus is on.
   if (_footballMainRefusal(info, opts && opts.pxPointsByFamily)) {
+    info._marketDenied = true;
+    return info;
+  }
+  if (_movRefusal(info)) {
     info._marketDenied = true;
     return info;
   }
@@ -4014,6 +4044,8 @@ async function lookupLineAsync(lineId) {
     // points are unknown here, so only an EXACT main match restores; anything
     // else falls through to resolveUnknownLine, which sees the whole market.
     if (_footballMainRefusal(cached)) return null;
+    // UFC MoV one-sided + order-book eligibility (see _movRefusal).
+    if (_movRefusal(cached)) return null;
     // Football 48h near-window — the THIRD index entry point (2026-09-22). The
     // seed filter and on-demand resolve both gate this, but the Supabase
     // cache-restore did not, so between seeds the RFQ path re-registered every
@@ -5338,6 +5370,15 @@ async function resolveUnknownLine(rfqLeg) {
           return null;
         }
       }
+      // UFC MoV one-sided + order-book eligibility (see _movRefusal): an RFQ
+      // for a MoV NO line, or a YES the seed refused, must not register here.
+      {
+        const _movR = _movRefusal(foundInfo);
+        if (_movR) {
+          _recordResolveFailure(lineId, { lineId, reason: _movR, eventName: event.name, sport: sportKey, marketType: foundInfo.marketType, selection: foundInfo.selection });
+          return null;
+        }
+      }
       // Add to index locally
       foundInfo.lineId = lineId; // legExposureKey needs it — see _setSeedLine
       lineIndex[lineId] = foundInfo;
@@ -5716,6 +5757,7 @@ module.exports = {
   // Exported for test/sport-market-allowlist.test.js — the per-sport market
   // gate and the seed insert it guards.
   _sportMarketAllowed,
+  _movRefusal,
   _footballMainRefusal,
   _footballPxPointsByFamily,
   _setSeedLine,

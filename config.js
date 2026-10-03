@@ -1142,6 +1142,23 @@ const config = {
       const v = parseInt(process.env.DEDUP_MAX_REQUOTES, 10);
       return Number.isFinite(v) && v >= 0 ? v : 1;
     })(),
+    // UFC method-of-victory RFQ legs (2026-10-03, operator: "We should be
+    // quoting (1-sided) UFC MoV lines. Use the methodology we use for the
+    // order book lines."). A MoV YES leg registers/quotes only while Bovada's
+    // YES price is at least this (American) — the order-book poster's
+    // NO <= -300 floor seen from the YES side. Runtime key movRfqMinYesOdds.
+    movRfqMinYesOdds: (() => {
+      const v = parseInt(process.env.MOV_RFQ_MIN_YES_ODDS, 10);
+      return Number.isFinite(v) && v >= 100 ? v : 300;
+    })(),
+    // Fraction shaved off Bovada's raw YES implied probability before it is
+    // quoted (offered = raw × (1 − this)). DEFAULT 0 = the order book's exact
+    // price. Positive = a sweeter price for the bettor. Runtime key
+    // movBookMirrorSweetener.
+    movBookMirrorSweetener: (() => {
+      const v = parseFloat(process.env.MOV_BOOK_MIRROR_SWEETENER);
+      return Number.isFinite(v) && v >= 0 && v < 0.5 ? v : 0;
+    })(),
     offerValidSeconds: parseInt(process.env.OFFER_VALID_SECONDS) || 60,
     // Prop-containing parlays get a shorter offer validity: prop prices move
     // on lineup/usage news faster than team lines, and 60s of free option
