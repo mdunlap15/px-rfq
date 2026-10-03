@@ -7336,6 +7336,26 @@ function startStatusServer() {
   // orders and joins with tracker leg data. Replaces the old path of
   // filtering /orders by status==='confirmed' which includes silent-loss
   // ghosts that reconcile hasn't swept yet.
+  // Label a PX order's legs from the live line index when the tracker has no
+  // record of the order (e.g. it filled before a restart whose Supabase
+  // hydrate failed). A line no longer in the index still shows, by line_id.
+  function _legsFromPxOrder(po) {
+    return (po.legs || []).map(l => {
+      const lid = l.line_id || l.strike_id;
+      const li = lid ? lineManager.lookupLine(lid) : null;
+      return li ? {
+        lineId: lid, team: li.playerName || li.teamName || '?', market: li.marketType,
+        selection: li.selection, line: li.line != null ? li.line : (l.line ?? null),
+        sport: li.sport, homeTeam: li.homeTeam, awayTeam: li.awayTeam,
+        startTime: li.startTime, pxEventId: li.pxEventId, pxEventName: li.pxEventName,
+        playerName: li.playerName || null, fromPxOrder: true,
+      } : {
+        lineId: lid, team: `line ${String(lid || '?').slice(0, 8)}`, market: 'unknown',
+        line: l.line ?? null, pxEventId: l.sport_event_id || null, fromPxOrder: true,
+      };
+    });
+  }
+
   app.get('/px-positions', async (req, res) => {
     try {
       const ledger = await pxLedger.fetchLedger();
@@ -7372,7 +7392,10 @@ function startStatusServer() {
           orderUuid: uuid,
           status: 'confirmed',
           confirmedStake: Number(po.confirmed_stake ?? po.stake ?? 0),
-          confirmedOdds: tracked?.confirmedOdds ?? null,
+          // PX's own confirmed odds when the tracker doesn't know this order
+          // (2026-10-03: Supabase down at boot → 29 pre-restart open parlays
+          // rendered with no odds/legs).
+          confirmedOdds: tracked?.confirmedOdds ?? (po.confirmed_odds != null ? Number(po.confirmed_odds) : null),
           offeredOdds: tracked?.offeredOdds ?? null,
           fairParlayProb: tracked?.fairParlayProb ?? null,
           maxRisk: tracked?.maxRisk ?? null,
@@ -7386,7 +7409,9 @@ function startStatusServer() {
             return new Date(n < 1e12 ? n * 1000 : n).toISOString();
           })(),
           quotedAt: tracked?.quotedAt || null,
-          legs: tracked?.legs || tracked?.meta?.legs || [],
+          legs: (tracked?.legs && tracked.legs.length ? tracked.legs : null)
+            || (tracked?.meta?.legs && tracked.meta.legs.length ? tracked.meta.legs : null)
+            || _legsFromPxOrder(po),
           meta: tracked?.meta || {},
           pxSource: 'px',
         };
