@@ -103,7 +103,7 @@ const REGISTRY = [
   { key: 'vigHeavyFavThreshold', path: 'vigHeavyFavThreshold', type: 'number', min: 0, max: 1, group: 'pricing', env: 'VIG_HEAVY_FAV_THRESHOLD', label: 'Heavy-fav threshold' },
   { key: 'vigHeavyFavFairMarkup', path: 'vigHeavyFavFairMarkup', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'VIG_HEAVY_FAV_FAIR_MARKUP', label: 'Heavy-fav fair markup' },
   { key: 'vigChalkStackSurcharge', path: 'vigChalkStackSurcharge', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'VIG_CHALK_STACK_SURCHARGE', label: 'Chalk-stack surcharge' },
-  { key: 'priceFloorVsConsensusPp', path: 'priceFloorVsConsensusPp', type: 'number', min: 0, max: 1, group: 'pricing', env: 'PRICE_FLOOR_VS_CONSENSUS_PP',
+  { key: 'priceFloorVsConsensusPp', path: 'priceFloorVsConsensusPp', type: 'number', min: 0, max: 10, group: 'pricing', env: 'PRICE_FLOOR_VS_CONSENSUS_PP',
     label: 'Price floor vs consensus (pp)', help: 'Clamp: never quote more than this far below consensus.' },
   { key: 'devigFavMaxShare', path: 'devigFavMaxShare', type: 'number', min: 0, max: 1, group: 'pricing', env: 'DEVIG_FAV_MAX_SHARE', label: 'De-vig favourite max share' },
   { key: 'confirmationDriftThreshold', path: 'confirmationDriftThreshold', type: 'number', min: 0, max: 1, group: 'pricing', env: 'CONFIRMATION_DRIFT_THRESHOLD',
@@ -167,6 +167,11 @@ const REGISTRY = [
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
   { key: 'hrPairTrimPercent', path: 'hrPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'HR_PAIR_TRIM_PERCENT', label: 'MLB HR-pair trim A/B % (0 = dark)' },
+  // Parlay consensus floors (2026-10-03): runtime so the CFB competitiveness
+  // lever moves without a restart. Units are percentage POINTS (same as the
+  // per-leg floor). 0 disables the floor.
+  { key: 'priceFloorVsConsensusParlayPp', path: 'priceFloorVsConsensusParlayPp', type: 'number', min: 0, max: 10, group: 'pricing', env: 'PRICE_FLOOR_VS_CONSENSUS_PARLAY_PP', label: 'Parlay price floor vs consensus (pp)' },
+  { key: 'priceFloorVsConsensusParlayChalkPp', path: 'priceFloorVsConsensusParlayChalkPp', type: 'number', min: 0, max: 10, group: 'pricing', env: 'PRICE_FLOOR_VS_CONSENSUS_PARLAY_CHALK_PP', label: 'Chalk-parlay price floor vs consensus (pp)' },
   { key: 'dedupMaxRequotes', path: 'dedupMaxRequotes', type: 'number', min: 0, max: 10, group: 'gating', env: 'DEDUP_MAX_REQUOTES',
     label: 'Dedup max re-quotes', help: 'Identical re-sends re-priced per leg-set inside the 5s window (preview then place). 0 = decline every repeat (pre-2026-09-26 behaviour).' },
   { key: 'stalePropSeconds', path: 'stalePropSeconds', type: 'number', min: 30, max: 7200, group: 'gating', danger: true, env: 'STALE_PROP_SECONDS', label: 'Stale prop seconds' },
