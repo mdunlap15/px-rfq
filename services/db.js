@@ -1,7 +1,44 @@
 const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto');
 const log = require('./logger');
+const { DbCircuitBreaker, isTransientResult } = require('./db-breaker');
 
 let supabase = null;
+
+// ---------------------------------------------------------------------------
+// CIRCUIT BREAKER + RETRY SPOOL (2026-10-03 Supabase outage)
+// ---------------------------------------------------------------------------
+// Every Supabase request goes through _breaker.fetch (handed to createClient as
+// global.fetch below), so it gets a hard client-side timeout and fails FAST
+// while the breaker is open. See services/db-breaker.js for the state machine.
+//
+// Writes that matter are not lost while it is open: saveOrder (confirmed /
+// settled / orphaned / anything with an orderUuid), saveMatchedParlay and
+// critical KV writes go to a bounded in-memory RETRY SPOOL and are replayed,
+// paced, once a half-open probe succeeds. Unfilled quotes / rejects are
+// spooled as DROPPABLE (evicted first when the spool is full); declines and
+// SGP audits keep their own bounded batch buffers. The spool is in-memory: a
+// restart while it holds rows loses them (logged at shutdown is not possible
+// on Railway SIGKILL) — the PX reconcile at boot re-derives confirmed/settled
+// orders from PX REST, which is the backstop for exactly that case.
+function _envNum(name, def) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return def;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+let _breaker = new DbCircuitBreaker();
+function _wireBreaker(b) {
+  b.onStateChange(ev => {
+    if (ev.to === 'open') {
+      log.error('DB', `Circuit breaker OPEN (${ev.reason}) — Supabase calls fail fast for ${ev.state.retryInSec}s; ${_spool.size} row(s) spooled`);
+    } else if (ev.to === 'closed') {
+      log.warn('DB', `Circuit breaker CLOSED (${ev.reason}) — draining ${_spool.size} spooled row(s) at <=${_spoolDrainPerSec()}/s`);
+      _ensureDrainTimer();
+    }
+  });
+}
+let _testClient = null; // test hook: a client wired to a fake fetch (never the network)
 
 // TEST-RUNNER KILL SWITCH.
 //
@@ -37,6 +74,7 @@ const IS_TEST_RUN = !!process.env.NODE_TEST_CONTEXT
 let _warnedTestRun = false;
 
 function getClient() {
+  if (_testClient) return _testClient;
   if (IS_TEST_RUN) {
     if (!_warnedTestRun) {
       _warnedTestRun = true;
@@ -48,25 +86,227 @@ function getClient() {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_KEY;
     if (url && key) {
-      supabase = createClient(url, key);
-      log.info('DB', 'Supabase client initialized');
+      // global.fetch = the circuit breaker: hard timeout + fail-fast when open
+      // for EVERY request made through this client, including the direct
+      // db.getClient() call sites in index.js / order-tracker.
+      supabase = createClient(url, key, { global: { fetch: _breaker.fetch } });
+      log.info('DB', 'Supabase client initialized (circuit breaker armed)');
     }
   }
   return supabase;
 }
 
 function isEnabled() {
+  if (_testClient) return true;
   if (IS_TEST_RUN) return false;
   return !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 }
+
+/** True when Supabase is configured AND a request issued now would reach the network. */
+function isAvailable() {
+  return isEnabled() && _breaker.canAttempt();
+}
+function getBreaker() { return _breaker; }
+
+// --- retry spool ------------------------------------------------------------
+// Map preserves insertion order -> oldest first. Keyed so the same order saved
+// ten times while the DB is down occupies ONE slot (latest state wins).
+const _spool = new Map();
+const _spoolStats = {
+  enqueued: 0, replaced: 0, drained: 0, replayRespooled: 0,
+  droppedDroppable: 0, droppedCritical: 0, lastDrainAt: null,
+};
+let _spoolSeq = 0;
+let _drainTimer = null;
+let _draining = false;
+function _spoolMax() { return _envNum('DB_SPOOL_MAX', 5000); }
+function _spoolCriticalMax() { return _envNum('DB_SPOOL_CRITICAL_MAX', 50000); }
+function _spoolDrainPerSec() { return _envNum('DB_SPOOL_DRAIN_PER_SEC', 20); }
+
+function _spoolPut(key, kind, critical, payload, opts = {}) {
+  const prev = _spool.get(key);
+  if (prev) {
+    // A replay that failed must never clobber a NEWER payload spooled while it
+    // was in flight.
+    if (opts.ifAbsent) return;
+    _spool.delete(key);
+    _spoolStats.replaced++;
+    critical = critical || prev.critical; // never downgrade (quoted -> confirmed upgrades)
+  } else {
+    _spoolStats.enqueued++;
+  }
+  _spool.set(key, { key, kind, critical: !!critical, payload, enqueuedAt: Date.now() });
+  _enforceSpoolCap();
+  _ensureDrainTimer();
+}
+
+function _spoolCounts() {
+  let critical = 0;
+  for (const e of _spool.values()) if (e.critical) critical++;
+  return { total: _spool.size, critical, droppable: _spool.size - critical };
+}
+
+function _enforceSpoolCap() {
+  const max = _spoolMax();
+  if (_spool.size > max) {
+    // Oldest DROPPABLE rows go first; critical rows are never evicted here.
+    for (const [k, e] of _spool) {
+      if (_spool.size <= max) break;
+      if (!e.critical) { _spool.delete(k); _spoolStats.droppedDroppable++; }
+    }
+  }
+  const cmax = _spoolCriticalMax();
+  let { critical } = _spoolCounts();
+  if (critical > cmax) {
+    for (const [k, e] of _spool) {
+      if (critical <= cmax) break;
+      if (e.critical) {
+        _spool.delete(k); critical--; _spoolStats.droppedCritical++;
+        log.error('DB', `RETRY SPOOL OVERFLOW: dropped critical ${e.kind} ${k} (critical cap ${cmax}) — reconcile from PX after recovery`);
+      }
+    }
+  }
+}
+
+let _drainTimerEnabled = true; // tests drive _drainOnce() by hand
+function _ensureDrainTimer() {
+  if (!_drainTimerEnabled || _drainTimer || _spool.size === 0) return;
+  _drainTimer = setInterval(() => { _drainOnce().catch(() => {}); }, 1000);
+  if (_drainTimer.unref) _drainTimer.unref();
+}
+function _stopDrainTimer() {
+  if (_drainTimer) { clearInterval(_drainTimer); _drainTimer = null; }
+}
+
+async function _replay(entry) {
+  const o = { fromSpool: true };
+  switch (entry.kind) {
+    case 'order': return (await saveOrder(entry.payload, o)) !== 'spooled';
+    case 'matched': return (await _insertMatchedRow(entry.payload, o)) !== 'spooled';
+    case 'kv': return (await saveKV(entry.payload.key, entry.payload.value, { ...o, critical: entry.critical })).spooled !== true;
+    default: return true;
+  }
+}
+
+/**
+ * Replay up to `maxRows` spooled writes (default DB_SPOOL_DRAIN_PER_SEC), critical
+ * first. The 1s drain timer calls this, so the rate is paced at <= maxRows/s.
+ * While the breaker is open nothing is sent; when the backoff elapses the first
+ * replay IS the half-open probe. Returns the number of rows replayed.
+ */
+async function _drainOnce(maxRows) {
+  const limit = maxRows || _spoolDrainPerSec();
+  if (_draining) return 0;
+  if (_spool.size === 0) { _stopDrainTimer(); return 0; }
+  if (!_breaker.canAttempt()) return 0;
+  _draining = true;
+  let n = 0;
+  try {
+    const batch = [];
+    for (const e of _spool.values()) { if (e.critical) { batch.push(e); if (batch.length >= limit) break; } }
+    if (batch.length < limit) {
+      for (const e of _spool.values()) { if (!e.critical) { batch.push(e); if (batch.length >= limit) break; } }
+    }
+    for (const e of batch) {
+      if (!_breaker.canAttempt()) break;
+      if (_spool.get(e.key) !== e) continue; // replaced/evicted meanwhile
+      _spool.delete(e.key);
+      let done = false;
+      try { done = await _replay(e); } catch (_) { done = false; }
+      if (done) { n++; _spoolStats.drained++; }
+      else {
+        _spoolStats.replayRespooled++;
+        if (!_spool.has(e.key)) _spool.set(e.key, e); // keep it (replay fns normally re-spool themselves)
+        break; // the DB failed again — stop this tick, the breaker decides when to retry
+      }
+    }
+    if (n) _spoolStats.lastDrainAt = new Date().toISOString();
+  } finally {
+    _draining = false;
+    if (_spool.size === 0) _stopDrainTimer();
+  }
+  if (n) log.info('DB', `Retry spool: replayed ${n} row(s), ${_spool.size} remaining`);
+  return n;
+}
+
+// --- quote persistence sampling ----------------------------------------------
+// Unfilled quotes were ~half of every parlay_orders write (recordQuote +
+// updateOrderLatency = 2 upserts per quote) and almost nothing reads them
+// row-by-row: every analytic that needs OUR odds on a parlay someone filled
+// reads a row that is written anyway when the quote is matched / confirmed /
+// rejected / settled (recordMatchedParlay saves the quote with
+// meta.matchedByOtherSp / matchedTieUnclaimed). The rest is a denominator, so
+// a deterministic hash SAMPLE carries it: meta.persistWeight = 1/rate and
+// quoteRowWeight() lets count-style analytics reweight (Horvitz–Thompson).
+// QUOTE_PERSIST_SAMPLE=1 restores persist-every-quote; 0 persists none.
+const _quoteStats = { skipped: 0, sampled: 0, otherWrites: 0 };
+function quotePersistSampleRate() {
+  const raw = process.env.QUOTE_PERSIST_SAMPLE;
+  if (raw == null || raw === '') return 0.05;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0.05;
+  return Math.min(1, Math.max(0, n));
+}
+function isQuoteSampled(parlayId, rate = quotePersistSampleRate()) {
+  if (rate >= 1) return true;
+  if (rate <= 0 || !parlayId) return false;
+  const h = crypto.createHash('md5').update('qp:' + String(parlayId)).digest();
+  return h.readUInt32BE(0) / 0x100000000 < rate;
+}
+/** An 'unfilled quote' write: still status 'quoted' and nothing has happened to it yet. */
+function isUnfilledQuoteWrite(order) {
+  if (!order || order.status !== 'quoted') return false;
+  if (order.orderUuid != null || order.confirmedAt) return false;
+  const m = order.meta || {};
+  return !(m.matchedByOtherSp || m.matchedTieUnclaimed || m.pxMatchedAfterReject
+    || m.exposureOverrideOnMatch || m.persistAlways);
+}
+/** Count weight of a persisted parlay_orders row (1 unless it is a sampled unfilled quote). */
+function quoteRowWeight(row) {
+  const w = row && row.meta && Number(row.meta.persistWeight);
+  return Number.isFinite(w) && w >= 1 ? w : 1;
+}
+function _isCriticalOrder(order) {
+  if (!order) return false;
+  const st = String(order.status || '');
+  return st === 'confirmed' || st.startsWith('settled_') || st === 'orphaned'
+    || order.orderUuid != null || !!order.confirmedAt;
+}
+
+_wireBreaker(_breaker);
 
 // ---------------------------------------------------------------------------
 // PARLAY ORDERS
 // ---------------------------------------------------------------------------
 
-async function saveOrder(order) {
+/**
+ * Upsert one parlay_orders row. Returns 'saved' | 'skipped' (unsampled
+ * unfilled quote) | 'spooled' (DB unavailable — queued for replay) | 'error'
+ * (permanent failure, logged) | 'disabled' (no DB / blocked by a guard).
+ */
+async function saveOrder(order, opts = {}) {
   const db = getClient();
-  if (!db) return;
+  if (!db || !order || !order.parlayId) return 'disabled';
+
+  // Unfilled quotes: deterministic sample only (see quotePersistSampleRate).
+  let persistWeight = null;
+  if (isUnfilledQuoteWrite(order)) {
+    const rate = quotePersistSampleRate();
+    if (!isQuoteSampled(order.parlayId, rate)) { _quoteStats.skipped++; return 'skipped'; }
+    _quoteStats.sampled++;
+    persistWeight = rate > 0 && rate < 1 ? Math.round((1 / rate) * 1e6) / 1e6 : null;
+  } else {
+    _quoteStats.otherWrites++;
+  }
+
+  const spoolKey = 'order:' + order.parlayId;
+  const critical = _isCriticalOrder(order);
+  const spoolIt = () => {
+    // The spool holds the live order OBJECT, so a replay writes its latest state.
+    _spoolPut(spoolKey, 'order', critical, order, { ifAbsent: !!opts.fromSpool });
+    return 'spooled';
+  };
+  if (!_breaker.canAttempt()) return spoolIt();
 
   try {
     // Stash pxProfit, expectedValue, and CLV fields inside meta (no dedicated
@@ -76,6 +316,10 @@ async function saveOrder(order) {
     if (order.expectedValue != null) metaWithExtras.expectedValue = order.expectedValue;
     if (order.closingImpliedProb != null) metaWithExtras.closingImpliedProb = order.closingImpliedProb;
     if (order.clvDelta != null) metaWithExtras.clvDelta = order.clvDelta;
+    // Sample weight lives on the ROW only; a later deterministic write (match,
+    // confirm, settle) carries no weight because that row is no longer sampled.
+    if (persistWeight != null) metaWithExtras.persistWeight = persistWeight;
+    else delete metaWithExtras.persistWeight;
 
     const row = {
       parlay_id: order.parlayId,
@@ -100,14 +344,18 @@ async function saveOrder(order) {
     // The PX backfill is verified ground-truth data from the PX team's export.
     // Reconstructed orders are skeleton records from PX REST with incomplete data.
     if (metaWithExtras.reconstructed) {
-      const { data: existing } = await db
+      const guardRes = await db
         .from('parlay_orders')
         .select('meta')
         .eq('parlay_id', order.parlayId)
         .maybeSingle();
+      // The guard read failed because the DB is unreachable: spool rather than
+      // blindly upserting past a guard we could not evaluate.
+      if (isTransientResult(guardRes)) return spoolIt();
+      const existing = guardRes.data;
       if (existing?.meta?.pxBackfill) {
         log.debug('DB', `Blocked saveOrder for ${order.parlayId} — reconstructed cannot overwrite pxBackfill`);
-        return;
+        return 'disabled';
       }
     }
 
@@ -122,14 +370,16 @@ async function saveOrder(order) {
     // Scoped to status==='confirmed' writes so it adds no read to the
     // settlement hot path. See memory pnl-reconciliation-phantom-rows.
     if (row.status === 'confirmed') {
-      const { data: existing } = await db
+      const guardRes = await db
         .from('parlay_orders')
         .select('status, meta')
         .eq('parlay_id', order.parlayId)
         .maybeSingle();
+      if (isTransientResult(guardRes)) return spoolIt();
+      const existing = guardRes.data;
       if (existing && (existing.status === 'orphaned' || existing.meta?.orphaned)) {
         log.debug('DB', `Blocked saveOrder for ${order.parlayId} — cannot revert orphaned row to confirmed`);
-        return;
+        return 'disabled';
       }
     }
 
@@ -156,12 +406,16 @@ async function saveOrder(order) {
       } catch (_) { /* best-effort; fall through to the upsert */ }
     }
 
-    const { error } = await db
+    const upRes = await db
       .from('parlay_orders')
       .upsert(row, { onConflict: 'parlay_id' });
+    const { error } = upRes;
 
-    if (error) {
+    if (error && isTransientResult(upRes)) {
+      return spoolIt();
+    } else if (error) {
       log.error('DB', `Failed to save order ${order.parlayId}: ${error.message}`);
+      return 'error';
     } else if (order.status === 'confirmed') {
       // Belt-and-suspenders for the signature cooldown: EVERY code path
       // that confirms a parlay must end up calling saveOrder() to persist
@@ -176,10 +430,21 @@ async function saveOrder(order) {
         sigCd.lockSignature(row.legs, order.parlayId);
       } catch (_) { /* observability path must never break DB writes */ }
     }
+    return 'saved';
   } catch (err) {
     log.error('DB', `saveOrder error: ${err.message}`);
+    // An unexpected throw on a critical row must not silently lose it.
+    if (critical) return spoolIt();
+    return 'error';
   }
 }
+
+// Outcome of the most recent loadOrders(): order-tracker reads it to tell an
+// EMPTY book from a book it could not load (DB down at boot), and schedules a
+// deferred merge-load in the second case instead of trading on zero exposure
+// state forever.
+let _lastOrdersLoad = { ok: null, at: null, rows: 0, error: null };
+function getLastOrdersLoad() { return { ..._lastOrdersLoad }; }
 
 async function loadOrders(limit = 100) {
   const db = getClient();
@@ -187,6 +452,8 @@ async function loadOrders(limit = 100) {
     log.warn('DB', 'loadOrders: no Supabase client available');
     return [];
   }
+  let gaveUpPages = 0;
+  let aborted = null;
 
   // Load only settled + confirmed orders on startup. The 50K+ "quoted" rows
   // (unfilled RFQs) don't affect P&L, exposure, or positions and cause
@@ -203,6 +470,7 @@ async function loadOrders(limit = 100) {
   const STATUSES = ['confirmed', 'settled_won', 'settled_lost', 'settled_push', 'rejected'];
   try {
     for (const status of STATUSES) {
+      if (aborted) break;
       // Get authoritative count first so we know if pagination got truncated.
       let expected = null;
       try {
@@ -239,11 +507,17 @@ async function loadOrders(limit = 100) {
             break;
           }
           lastError = result.error;
+          // DB unreachable (breaker open / timeouts): stop the whole load NOW.
+          // Retrying every page of a 200K-row cap against a dead DB was ~200
+          // pages x 4 retries x backoff per status — an hour-long boot stall.
+          if (isTransientResult(result) && !_breaker.canAttempt()) { aborted = result.error.message; break; }
           log.warn('DB', `loadOrders ${status} offset ${offset} attempt ${attempt + 1}/${MAX_PAGE_RETRIES} failed: ${result.error.message}`);
           // Exponential backoff: 250ms, 500ms, 1s, 2s
           await new Promise(r => setTimeout(r, 250 * Math.pow(2, attempt)));
         }
+        if (aborted) break;
         if (lastError) {
+          gaveUpPages++;
           // After exhausting retries, log loudly. Do NOT break — try the
           // next page anyway. A single bad page shouldn't poison the
           // whole status. Worst case we still log the gap below.
@@ -268,12 +542,19 @@ async function loadOrders(limit = 100) {
         log.error('DB', `loadOrders PARTIAL LOAD for ${status}: got ${loaded} rows, expected ${expected} (missing ${expected - loaded})`);
       }
     }
+    if (aborted) {
+      log.error('DB', `loadOrders ABORTED — database unavailable (${aborted}); ${all.length} rows loaded before abort. A deferred merge-load will retry.`);
+      _lastOrdersLoad = { ok: false, at: new Date().toISOString(), rows: all.length, error: aborted };
+      return all.map(_rowToOrder);
+    }
+    _lastOrdersLoad = { ok: gaveUpPages === 0, at: new Date().toISOString(), rows: all.length, error: gaveUpPages ? `${gaveUpPages} page(s) failed` : null };
     log.info('DB', `loadOrders: ${all.length} rows in ${pagesFetched} pages (${Date.now() - startMs}ms) — ${JSON.stringify(perStatus)}`);
 
     // Convert DB rows back to order format
     return all.map(_rowToOrder);
   } catch (err) {
     log.error('DB', `loadOrders error: ${err.message}`);
+    _lastOrdersLoad = { ok: false, at: new Date().toISOString(), rows: 0, error: err.message };
     return [];
   }
 }
@@ -428,9 +709,11 @@ function _intOdds(v) {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
+// matched_parlays rows are market intelligence we cannot re-derive later (PX
+// does not replay order.matched), so they are CRITICAL in the retry spool.
 async function saveMatchedParlay(entry) {
   const db = getClient();
-  if (!db) return;
+  if (!db || !entry) return 'disabled';
 
   try {
     const row = {
@@ -443,16 +726,32 @@ async function saveMatchedParlay(entry) {
       outcome: entry.outcome,
       matched_at: entry.matchedAt,
     };
-
-    const { error } = await db
-      .from('matched_parlays')
-      .insert(row);
-
-    if (error) {
-      log.error('DB', `Failed to save matched parlay: ${error.message}`);
-    }
+    return await _insertMatchedRow(row, {});
   } catch (err) {
     log.error('DB', `saveMatchedParlay error: ${err.message}`);
+    return 'error';
+  }
+}
+
+async function _insertMatchedRow(row, opts = {}) {
+  const db = getClient();
+  if (!db) return 'disabled';
+  // Each matched event is its own spool slot (insert, not upsert). The key is
+  // fixed per row object so a failed replay re-uses its slot.
+  if (!row.__spoolKey) Object.defineProperty(row, '__spoolKey', { value: `matched:${row.parlay_id}:${++_spoolSeq}`, enumerable: false });
+  const spoolIt = () => { _spoolPut(row.__spoolKey, 'matched', true, row, { ifAbsent: !!opts.fromSpool }); return 'spooled'; };
+  if (!_breaker.canAttempt()) return spoolIt();
+  try {
+    const res = await db.from('matched_parlays').insert(row);
+    if (res.error && isTransientResult(res)) return spoolIt();
+    if (res.error) {
+      log.error('DB', `Failed to save matched parlay: ${res.error.message}`);
+      return 'error';
+    }
+    return 'saved';
+  } catch (err) {
+    log.error('DB', `saveMatchedParlay error: ${err.message}`);
+    return spoolIt();
   }
 }
 
@@ -557,12 +856,27 @@ function _ensureDeclineTimer() {
 async function flushDeclines() {
   const db = getClient();
   if (!db || _declineFlushing || !_declineBuf.length) return 0;
+  // Breaker open: hold the (bounded) buffer — no network — and retry on the
+  // next tick. Declines are droppable: the buffer cap evicts the oldest.
+  if (!_breaker.canAttempt()) { _ensureDeclineTimer(); return 0; }
   _declineFlushing = true;
   let written = 0;
   try {
     while (_declineBuf.length) {
       const batch = _declineBuf.splice(0, _DECLINE_FLUSH_MAX);
-      const { error } = await db.from('declines').insert(batch);
+      const res = await db.from('declines').insert(batch);
+      const { error } = res;
+      if (error && isTransientResult(res)) {
+        // DB unreachable: put the batch back (front) instead of dropping it,
+        // then stop — the breaker decides when the next attempt goes out.
+        _declineBuf.unshift(...batch);
+        if (_declineBuf.length > _DECLINE_BUF_CAP) {
+          _declineDropped += _declineBuf.length - _DECLINE_BUF_CAP;
+          _declineBuf.splice(0, _declineBuf.length - _DECLINE_BUF_CAP);
+        }
+        _reportSaveDeclineError(error.message, '');
+        break;
+      }
       if (error) {
         _reportSaveDeclineError(error.message, "(run the SQL migration to create 'declines' table / add missing column)");
         _declineDropped += batch.length;   // fire-and-forget semantics, as before: never retry-storm
@@ -714,20 +1028,26 @@ async function countOrders() {
 // ---------------------------------------------------------------------------
 
 /**
- * Bulk-upsert the entire lineIndex to Supabase so historical line_ids survive
- * restarts even after PX purges events from the mm namespace.
+ * Persist the lineIndex to Supabase so historical line_ids survive restarts
+ * even after PX purges events from the mm namespace (changed lines only — see
+ * DIFF-ONLY below).
  *
  * @param {Object} lineIndex - { lineId: { sport, pxEventId, teamName, ... } }
  */
-async function saveLineCache(lineIndex) {
-  const db = getClient();
-  if (!db) return;
-
-  const entries = Object.entries(lineIndex);
-  if (entries.length === 0) return;
-
-  const now = new Date().toISOString();
-  const rows = entries.map(([lineId, info]) => ({
+// DIFF-ONLY (2026-10-03). This used to upsert the WHOLE index — every line,
+// in 500-row chunks — on every 2-minute seed, i.e. ~720 full-table rewrites a
+// day of rows that had not changed, and it kept doing so into a dying DB.
+// Now: a fingerprint per line_id (the row minus updated_at) is kept in memory
+// and only NEW or CHANGED rows are upserted. A full re-save still runs every
+// LINE_CACHE_FULL_RESAVE_HOURS (default 6) so updated_at stays roughly fresh
+// (nothing reads it today) and a missed write self-heals. Fingerprints are
+// recorded only for chunks that actually landed, so a failed chunk is retried
+// on the next seed. Skipped entirely while the breaker is open.
+const _lineCacheFp = new Map();
+let _lineCacheLastFullAt = 0;
+const _lineCacheStats = { lastAt: null, lastRows: 0, lastChanged: 0, lastFull: false, totalUpserted: 0, skippedOpen: 0, savedRequests: 0 };
+function _lineCacheRow(lineId, info) {
+  return {
     line_id: lineId,
     sport: info.sport || null,
     px_event_id: info.pxEventId || null,
@@ -745,18 +1065,45 @@ async function saveLineCache(lineIndex) {
     odds_api_selection: info.oddsApiSelection || null,
     competitor_id: info.competitorId || null,
     start_time: info.startTime || null,
-    updated_at: now,
-  }));
+  };
+}
+async function saveLineCache(lineIndex, opts = {}) {
+  const db = getClient();
+  if (!db) return;
 
-  // Supabase upsert in chunks of 500 to stay within payload limits
+  const entries = Object.entries(lineIndex || {});
+  if (entries.length === 0) return;
+  if (!_breaker.canAttempt()) { _lineCacheStats.skippedOpen++; return; }
+
+  const fullEveryMs = _envNum('LINE_CACHE_FULL_RESAVE_HOURS', 6) * 3600 * 1000;
+  const full = !!opts.full || (Date.now() - _lineCacheLastFullAt) >= fullEveryMs;
+  const now = new Date().toISOString();
+  const pending = []; // [{ row, fp }]
+  const liveIds = new Set();
+  for (const [lineId, info] of entries) {
+    liveIds.add(lineId);
+    const row = _lineCacheRow(lineId, info || {});
+    const fp = JSON.stringify(row);
+    if (full || _lineCacheFp.get(lineId) !== fp) pending.push({ row, fp });
+  }
+  // Bound the fingerprint map to the live index.
+  for (const k of _lineCacheFp.keys()) if (!liveIds.has(k)) _lineCacheFp.delete(k);
+
   const CHUNK = 500;
+  _lineCacheStats.lastAt = now;
+  _lineCacheStats.lastRows = entries.length;
+  _lineCacheStats.lastChanged = pending.length;
+  _lineCacheStats.lastFull = full;
+  _lineCacheStats.savedRequests += Math.ceil(entries.length / CHUNK) - Math.ceil(pending.length / CHUNK);
+  if (pending.length === 0) return;
+
   let saved = 0;
   try {
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK);
+    for (let i = 0; i < pending.length; i += CHUNK) {
+      const chunk = pending.slice(i, i + CHUNK);
       const { error } = await db
         .from('line_cache')
-        .upsert(chunk, { onConflict: 'line_id' });
+        .upsert(chunk.map(p => ({ ...p.row, updated_at: now })), { onConflict: 'line_id' });
       if (error) {
         if (!saveLineCache._warned) {
           log.error('DB', `saveLineCache failed (run the SQL migration to create 'line_cache' table): ${error.message}`);
@@ -764,9 +1111,12 @@ async function saveLineCache(lineIndex) {
         }
         return;
       }
+      for (const p of chunk) _lineCacheFp.set(p.row.line_id, p.fp);
       saved += chunk.length;
     }
-    log.info('DB', `saveLineCache: upserted ${saved} lines`);
+    _lineCacheStats.totalUpserted += saved;
+    if (full) _lineCacheLastFullAt = Date.now();
+    log.info('DB', `saveLineCache: upserted ${saved}/${entries.length} lines (${full ? 'full re-save' : 'changed only'})`);
   } catch (err) {
     if (!saveLineCache._warned) {
       log.error('DB', `saveLineCache error: ${err.message}`);
@@ -1244,7 +1594,9 @@ async function loadFillBucketRowsSince(cutoffIso, cap = 200000) {
   try {
     const rows = await _pageKeyset({
       table: 'parlay_orders',
-      cols: 'parlay_id, status, legs, quoted_at, confirmed_at',
+      // persist_weight: sample weight of an unfilled quote (QUOTE_PERSIST_SAMPLE),
+      // read as a JSON path so the (large) meta column is not pulled.
+      cols: 'parlay_id, status, legs, quoted_at, confirmed_at, persist_weight:meta->persistWeight',
       tsCol: 'quoted_at',
       idCol: 'parlay_id',
       gteTs: cutoffIso,
@@ -1258,6 +1610,7 @@ async function loadFillBucketRowsSince(cutoffIso, cap = 200000) {
       legs: row.legs || [],
       quotedAt: row.quoted_at,
       confirmedAt: row.confirmed_at,
+      meta: row.persist_weight != null ? { persistWeight: Number(row.persist_weight) } : undefined,
     }));
   } catch (err) {
     log.error('DB', `loadFillBucketRowsSince error: ${err.message}`);
@@ -1385,44 +1738,92 @@ async function loadPushSubscriptions() {
  *   CREATE INDEX IF NOT EXISTS idx_sgp_audit_seen_at ON sgp_audit (seen_at DESC);
  *   CREATE INDEX IF NOT EXISTS idx_sgp_audit_combo_signature ON sgp_audit (combo_signature);
  */
+// BATCHED (2026-10-03). One HTTP upsert per same-game decline: with shadow
+// logging on, that is one request for every SGP decline (~200K/day at the
+// measured decline volume) — the largest single writer in the book. Rows are
+// buffered by parlay_id (a re-declined RFQ replaces its row, which also keeps a
+// multi-row upsert from touching one key twice) and flushed as one upsert every
+// SGP_AUDIT_FLUSH_MS (default 10s) or at SGP_AUDIT_FLUSH_MAX rows. Droppable:
+// bounded at SGP_AUDIT_BUF_CAP (5000, oldest dropped) and held — not sent —
+// while the breaker is open.
+const _sgpBuf = new Map();
+const _sgpStats = { flushed: 0, dropped: 0, flushes: 0 };
+let _sgpTimer = null;
+let _sgpFlushing = false;
+let _sgpStripHash = false;
+function _sgpFlushMs() { return _envNum('SGP_AUDIT_FLUSH_MS', 10_000); }
+function _sgpFlushMax() { return _envNum('SGP_AUDIT_FLUSH_MAX', 500); }
+function _sgpBufCap() { return _envNum('SGP_AUDIT_BUF_CAP', 5000); }
+
 async function saveSgpAudit(row) {
   if (!isEnabled() || !row || !row.parlay_id) return;
+  if (_sgpBuf.has(row.parlay_id)) _sgpBuf.delete(row.parlay_id);
+  _sgpBuf.set(row.parlay_id, row);
+  const cap = _sgpBufCap();
+  while (_sgpBuf.size > cap) {
+    _sgpBuf.delete(_sgpBuf.keys().next().value);
+    _sgpStats.dropped++;
+  }
+  if (_sgpBuf.size >= _sgpFlushMax()) flushSgpAudits().catch(() => {});
+  else _ensureSgpTimer();
+}
+function _ensureSgpTimer() {
+  if (_sgpTimer) return;
+  _sgpTimer = setTimeout(() => { _sgpTimer = null; flushSgpAudits().catch(() => {}); }, _sgpFlushMs());
+  if (_sgpTimer.unref) _sgpTimer.unref();
+}
+async function flushSgpAudits() {
   const db = getClient();
+  if (!db || _sgpFlushing || _sgpBuf.size === 0) return 0;
+  if (!_breaker.canAttempt()) { _ensureSgpTimer(); return 0; }
+  _sgpFlushing = true;
+  let written = 0;
   try {
-    // Upsert on parlay_id so duplicate-decline RFQs (rare but possible
-    // when PX retries) don't error on PK collision.
-    const { error } = await db.from('sgp_audit').upsert(row, { onConflict: 'parlay_id' });
-    if (error) {
-      // Two possible "table missing" error strings depending on Supabase
-      // client version: Postgres native ("relation does not exist") and
-      // PostgREST cache ("Could not find the table 'public.X' in the
-      // schema cache"). Match both.
-      const missing = /sgp_audit/i.test(error.message)
-        && (/does not exist/i.test(error.message) || /not find the table/i.test(error.message));
-      if (missing) {
-        if (!saveSgpAudit._warned) {
-          log.warn('DB', 'sgp_audit table missing — run the CREATE TABLE migration in db.js comments; SGP shadow logging is no-op until then');
-          saveSgpAudit._warned = true;
-        }
-        return;
+    while (_sgpBuf.size) {
+      const max = _sgpFlushMax();
+      const batch = [];
+      for (const [k, r] of _sgpBuf) { batch.push(r); _sgpBuf.delete(k); if (batch.length >= max) break; }
+      const rows = _sgpStripHash ? batch.map(({ leg_hash, ...rest }) => rest) : batch;
+      let res = await db.from('sgp_audit').upsert(rows, { onConflict: 'parlay_id' });
+      if (res.error && isTransientResult(res)) {
+        for (const r of batch) if (!_sgpBuf.has(r.parlay_id)) _sgpBuf.set(r.parlay_id, r);
+        break;
       }
-      // leg_hash column not yet added (scripts/sgp_stage0_ops.sql) — strip
-      // it and retry once so legacy logging keeps flowing.
-      if (/leg_hash/i.test(error.message) && row.leg_hash !== undefined) {
-        if (!saveSgpAudit._hashWarned) {
+      if (res.error) {
+        // Two possible "table missing" strings depending on client version.
+        const msg = res.error.message || '';
+        const missing = /sgp_audit/i.test(msg) && (/does not exist/i.test(msg) || /not find the table/i.test(msg));
+        if (missing) {
+          if (!saveSgpAudit._warned) {
+            log.warn('DB', 'sgp_audit table missing — run the CREATE TABLE migration in db.js comments; SGP shadow logging is no-op until then');
+            saveSgpAudit._warned = true;
+          }
+          _sgpStats.dropped += batch.length;
+          continue;
+        }
+        // leg_hash column not yet added (scripts/sgp_stage0_ops.sql) — strip it
+        // from now on and retry this batch once.
+        if (/leg_hash/i.test(msg) && !_sgpStripHash) {
           log.warn('DB', 'sgp_audit.leg_hash column missing — run scripts/sgp_stage0_ops.sql to enable dedup-aware demand counting; logging without it');
-          saveSgpAudit._hashWarned = true;
+          _sgpStripHash = true;
+          res = await db.from('sgp_audit').upsert(batch.map(({ leg_hash, ...rest }) => rest), { onConflict: 'parlay_id' });
+          if (!res.error) { written += batch.length; continue; }
         }
-        const { leg_hash, ...legacy } = row;
-        const retry = await db.from('sgp_audit').upsert(legacy, { onConflict: 'parlay_id' });
-        if (retry.error) log.warn('DB', `saveSgpAudit retry error: ${retry.error.message}`);
-        return;
+        log.warn('DB', `saveSgpAudit batch error: ${res.error.message}`);
+        _sgpStats.dropped += batch.length;
+        break;
       }
-      log.warn('DB', `saveSgpAudit error: ${error.message}`);
+      written += batch.length;
     }
   } catch (err) {
-    log.warn('DB', `saveSgpAudit exception: ${err.message}`);
+    log.warn('DB', `saveSgpAudit flush exception: ${err.message}`);
+  } finally {
+    _sgpFlushing = false;
+    _sgpStats.flushes++;
+    _sgpStats.flushed += written;
+    if (_sgpBuf.size) _ensureSgpTimer();
   }
+  return written;
 }
 
 /**
@@ -1476,37 +1877,77 @@ async function deletePushSubscription(endpoint) {
 // First used for the BetOnline Zurich manual-upload cache — operator
 // uploads once, cache survives Railway redeploys without re-posting.
 
-async function saveKV(key, value) {
+/**
+ * Upsert one kv_store row. Returns { ok:true } on success, otherwise
+ * { ok:false, transient, spooled, error }.
+ *
+ * opts.critical — when the DB is unreachable, queue the write in the retry
+ *   spool (latest value per key wins) instead of dropping it. Use ONLY for
+ *   whole-value state with last-write-wins semantics (e.g. the pause flag).
+ *   NEVER for state that was hydrated from the DB and merged in memory: if its
+ *   boot load failed, the in-memory copy is partial and a replay would CLOBBER
+ *   the stored value (the creator-blocklist clobber class). Those owners
+ *   (creator-blocklist, runtime-config) run their own load-then-persist retry.
+ */
+async function saveKV(key, value, opts = {}) {
   const db = getClient();
-  if (!db) return;
+  if (!db) return { ok: false, disabled: true };
+  const spoolIt = () => {
+    _spoolPut('kv:' + key, 'kv', true, { key, value }, { ifAbsent: !!opts.fromSpool });
+    return { ok: false, transient: true, spooled: true };
+  };
+  if (!_breaker.canAttempt()) {
+    if (opts.critical) return spoolIt();
+    return { ok: false, transient: true, spooled: false, error: 'database circuit breaker open' };
+  }
   try {
-    const { error } = await db
+    const res = await db
       .from('kv_store')
       .upsert({ key, value, updated_at: new Date().toISOString() });
-    if (error) log.warn('DB', `saveKV(${key}) error: ${error.message}`);
+    if (res.error) {
+      const transient = isTransientResult(res);
+      log.warn('DB', `saveKV(${key}) error: ${res.error.message}`);
+      if (transient && opts.critical) return spoolIt();
+      return { ok: false, transient, spooled: false, error: res.error.message };
+    }
+    return { ok: true };
   } catch (err) {
     log.warn('DB', `saveKV(${key}) exception: ${err.message}`);
+    if (opts.critical) return spoolIt();
+    return { ok: false, transient: true, spooled: false, error: err.message };
   }
 }
 
-async function loadKV(key) {
+/**
+ * Read one kv_store value, DISTINGUISHING "absent" from "could not read":
+ *   { ok:true, value }          value is null when the row does not exist
+ *   { ok:true, value:null, disabled:true }  no DB configured (memory-only mode)
+ *   { ok:false, error, transient }          read failed — the caller must not
+ *                                           treat this as "empty"
+ */
+async function loadKVStrict(key) {
   const db = getClient();
-  if (!db) return null;
+  if (!db) return { ok: true, value: null, disabled: true };
   try {
-    const { data, error } = await db
+    const res = await db
       .from('kv_store')
       .select('value')
       .eq('key', key)
       .maybeSingle();
-    if (error) {
-      log.warn('DB', `loadKV(${key}) error: ${error.message}`);
-      return null;
+    if (res.error) {
+      log.warn('DB', `loadKV(${key}) error: ${res.error.message}`);
+      return { ok: false, error: res.error.message, transient: isTransientResult(res) };
     }
-    return data?.value || null;
+    return { ok: true, value: (res.data && res.data.value) || null };
   } catch (err) {
     log.warn('DB', `loadKV(${key}) exception: ${err.message}`);
-    return null;
+    return { ok: false, error: err.message, transient: true };
   }
+}
+
+async function loadKV(key) {
+  const r = await loadKVStrict(key);
+  return r.ok ? (r.value || null) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1709,7 +2150,108 @@ async function loadMatchedParlaysSince(fromIso, opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// BOOT PROBE + HEALTH
+// ---------------------------------------------------------------------------
+/**
+ * One cheap read before the boot sequence's ~12 sequential DB hydrations. If
+ * Supabase does not answer within DB_BOOT_PROBE_MS (default 5s) the breaker is
+ * forced OPEN, so every boot read fails fast instead of each one burning a
+ * full timeout (or, pre-breaker, ~20s to a Cloudflare 522) in series.
+ */
+async function bootProbe() {
+  const db = getClient();
+  if (!db) return { skipped: true };
+  const ms = _envNum('DB_BOOT_PROBE_MS', 5000);
+  const t0 = Date.now();
+  let timer = null;
+  try {
+    const res = await Promise.race([
+      db.from('kv_store').select('key').limit(1),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ error: { message: `no answer within ${ms}ms` }, status: 0 }), ms); if (timer.unref) timer.unref(); }),
+    ]);
+    if (res && res.error && isTransientResult(res)) {
+      _breaker.forceOpen(`boot probe failed: ${res.error.message}`);
+      log.error('DB', `Boot probe FAILED (${res.error.message}) — breaker forced open; boot hydrations will fail fast and use fallbacks`);
+      return { ok: false, ms: Date.now() - t0, error: res.error.message };
+    }
+    log.info('DB', `Boot probe OK (${Date.now() - t0}ms)`);
+    return { ok: true, ms: Date.now() - t0 };
+  } catch (err) {
+    _breaker.forceOpen(`boot probe threw: ${err.message}`);
+    return { ok: false, ms: Date.now() - t0, error: err.message };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Breaker + spool + write-volume state for /status and /health. */
+function getHealth({ brief = false } = {}) {
+  const b = _breaker.snapshot();
+  const counts = _spoolCounts();
+  if (brief) {
+    return { enabled: isEnabled(), state: b.state, retryInSec: b.retryInSec, spooled: counts.total, spooledCritical: counts.critical, droppedCritical: _spoolStats.droppedCritical };
+  }
+  let oldest = null;
+  for (const e of _spool.values()) { oldest = e.enqueuedAt; break; }
+  return {
+    enabled: isEnabled(),
+    breaker: b,
+    spool: {
+      ...counts,
+      oldestAgeSec: oldest ? Math.round((Date.now() - oldest) / 1000) : null,
+      max: _spoolMax(), criticalMax: _spoolCriticalMax(), drainPerSec: _spoolDrainPerSec(),
+      ..._spoolStats,
+    },
+    writes: {
+      quotePersistSample: quotePersistSampleRate(),
+      quotes: { ..._quoteStats },
+      declines: getDeclineWriteStats(),
+      sgpAudit: { buffered: _sgpBuf.size, ..._sgpStats },
+      lineCache: { ..._lineCacheStats, fingerprints: _lineCacheFp.size },
+    },
+    lastOrdersLoad: getLastOrdersLoad(),
+  };
+}
+
+// Test hooks — never used by production code.
+function __setTestClient(client, breaker) {
+  _testClient = client || null;
+  if (breaker) { _breaker = breaker; _wireBreaker(_breaker); }
+}
+function __resetForTest() {
+  _testClient = null;
+  _spool.clear();
+  _stopDrainTimer();
+  for (const k of Object.keys(_spoolStats)) _spoolStats[k] = k === 'lastDrainAt' ? null : 0;
+  for (const k of Object.keys(_quoteStats)) _quoteStats[k] = 0;
+  _sgpBuf.clear();
+  _lineCacheFp.clear();
+  _lineCacheLastFullAt = 0;
+  _declineBuf.length = 0;
+  _breaker = new DbCircuitBreaker();
+  _wireBreaker(_breaker);
+}
+function __setDrainTimerEnabled(on) { _drainTimerEnabled = !!on; if (!on) _stopDrainTimer(); }
+function __spoolEntries() { return [..._spool.values()].map(e => ({ key: e.key, kind: e.kind, critical: e.critical })); }
+
 module.exports = {
+  isAvailable,
+  getBreaker,
+  getHealth,
+  bootProbe,
+  getLastOrdersLoad,
+  loadKVStrict,
+  flushSgpAudits,
+  quotePersistSampleRate,
+  isQuoteSampled,
+  isUnfilledQuoteWrite,
+  quoteRowWeight,
+  _drainOnce,
+  __setTestClient,
+  __resetForTest,
+  __spoolEntries,
+  __setDrainTimerEnabled,
   // Test seam: keyset pager, exercised with a fake client in
   // test/keyset-pagination.test.js (ties, cap, retry, loop guard).
   _pageKeyset,

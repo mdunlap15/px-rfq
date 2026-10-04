@@ -44,6 +44,82 @@ let _refreshTimer = null;
 let _initialized = false;
 let _inflightLoad = null; // coalesces concurrent ensureFresh() loads onto one DB round-trip
 
+// DB-DOWN SAFETY (2026-10-03 outage). A restart while Supabase was unreachable
+// booted with an EMPTY blocklist. Three rules now:
+//   1. Never persist until a REAL DB load has landed (`_loadedOnce`). The
+//      in-memory list after a failed boot load is a fallback/partial copy, and
+//      writing it would CLOBBER the stored list — the 2026-06-26 clobber bug,
+//      reintroduced by any spool/retry that replays a write made while down.
+//   2. Operator add/remove while the DB is unavailable takes effect in memory
+//      IMMEDIATELY (the RFQ + confirm gates see it) and is kept in
+//      `_pendingOps`, re-applied on top of every load until a persist lands —
+//      so the 30s refresh cannot silently undo a block made during an outage.
+//   3. A failed boot load falls back to the last-known-good list: the
+//      state-snapshot file (STATE_SNAPSHOT_DIR on a Railway volume), else the
+//      operator-maintained CREATOR_BLOCKLIST_FALLBACK env ids. The first real
+//      DB load replaces the fallback (the DB is authoritative).
+let _loadedOnce = false;
+let _pendingOps = []; // [{ op:'add'|'remove', id, reason, addedAt }]
+let _source = 'none'; // 'db' | 'snapshot' | 'env-fallback' | 'none'
+let _flushing = null;
+
+function _snapshot() {
+  try { return require('./state-snapshot'); } catch (_) { return null; }
+}
+
+function _applyOps(entries) {
+  const m = new Map();
+  for (const e of entries || []) if (e && e.creatorId) m.set(String(e.creatorId), e);
+  for (const op of _pendingOps) {
+    if (op.op === 'add') {
+      const prev = m.get(op.id);
+      m.set(op.id, { creatorId: op.id, reason: op.reason || (prev && prev.reason) || '', addedAt: (prev && prev.addedAt) || op.addedAt });
+    } else if (op.op === 'remove') {
+      m.delete(op.id);
+    }
+  }
+  return [...m.values()];
+}
+
+// Called after every successful DB read: merge pending local ops, mark loaded,
+// refresh the snapshot, and push pending ops to the DB.
+function _onLoaded(entries) {
+  _hydrate(_applyOps(entries));
+  _loadedOnce = true;
+  _source = 'db';
+  if (_pendingOps.length) _flushPending().catch(() => {});
+  else _writeSnapshot();
+}
+
+function _writeSnapshot() {
+  const snap = _snapshot();
+  if (snap) snap.write('creator-blocklist', { entries: list() });
+}
+
+function _fallbackEntries() {
+  const snap = _snapshot();
+  const fromFile = snap && snap.read('creator-blocklist');
+  if (fromFile && fromFile.data && Array.isArray(fromFile.data.entries) && fromFile.data.entries.length) {
+    return { entries: fromFile.data.entries, source: 'snapshot', savedAt: fromFile.savedAt };
+  }
+  const raw = process.env.CREATOR_BLOCKLIST_FALLBACK || '';
+  const ids = raw.split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+  if (ids.length) {
+    const at = new Date().toISOString();
+    return { entries: ids.map(id => ({ creatorId: id, reason: 'CREATOR_BLOCKLIST_FALLBACK (DB unavailable at boot)', addedAt: at })), source: 'env-fallback' };
+  }
+  return null;
+}
+
+/** Copy-paste value for the CREATOR_BLOCKLIST_FALLBACK env var (current list). */
+function fallbackEnvValue() {
+  return list().map(e => e.creatorId).join(',');
+}
+
+function getPersistenceState() {
+  return { source: _source, loadedOnce: _loadedOnce, pendingOps: _pendingOps.length, entries: _blocked.size, lastRefreshAt: _lastRefreshAt ? new Date(_lastRefreshAt).toISOString() : null };
+}
+
 function _hydrate(entries) {
   const next = new Map();
   for (const e of entries || []) {
@@ -69,10 +145,55 @@ function _hydrate(entries) {
 async function _load() {
   const stored = await db.loadKV(KV_KEY);
   if (stored && Array.isArray(stored.entries)) {
-    _hydrate(stored.entries);
+    _onLoaded(stored.entries);
     return true;
   }
   return false;
+}
+
+// Strict variant for the write path: distinguishes "row absent" (a real, empty
+// load — safe to create) from "could not read" (never persist). Falls back to
+// the loadKV semantics when the db module has no strict reader.
+async function _loadStrict() {
+  if (typeof db.loadKVStrict === 'function') {
+    const r = await db.loadKVStrict(KV_KEY);
+    if (!r || !r.ok) return false;
+    const entries = r.value && Array.isArray(r.value.entries) ? r.value.entries : [];
+    _onLoaded(entries);
+    return true;
+  }
+  return _load();
+}
+
+// Persist the pending ops. Never writes before a real load (rule 1). Resolves
+// true when the DB now holds the in-memory list.
+function _flushPending() {
+  if (_flushing) return _flushing;
+  _flushing = (async () => {
+    if (!_loadedOnce) {
+      let ok = false;
+      try { ok = await _loadStrict(); } catch (_) { ok = false; }
+      if (!ok) return false;          // _onLoaded re-entered us if it succeeded
+      if (!_pendingOps.length) return true;
+    }
+    const opsAtWrite = _pendingOps.length;
+    let res;
+    try {
+      res = await db.saveKV(KV_KEY, { entries: list(), updatedAt: new Date().toISOString() });
+    } catch (e) {
+      res = { ok: false, error: e.message };
+    }
+    // Legacy/stub saveKV resolves undefined on success.
+    const ok = res === undefined || res === null || res.ok !== false;
+    if (!ok) {
+      log.warn('CreatorBlocklist', `Persist deferred (DB unavailable) — ${_pendingOps.length} change(s) held in memory and re-applied until the DB answers`);
+      return false;
+    }
+    _pendingOps.splice(0, opsAtWrite);
+    _writeSnapshot();
+    return true;
+  })().finally(() => { _flushing = null; });
+  return _flushing;
 }
 
 async function restoreFromPersistence() {
@@ -94,7 +215,17 @@ async function restoreFromPersistence() {
   if (loaded) {
     log.info('CreatorBlocklist', `Hydrated ${_blocked.size} entries from Supabase kv_store`);
   } else {
-    log.warn('CreatorBlocklist', 'Hydrate failed after 3 attempts — starting empty; ensureFresh() will retry at confirm time');
+    const fb = _fallbackEntries();
+    if (fb) {
+      _hydrate(_applyOps(fb.entries));
+      // Deliberately NOT fresh: ensureFresh()/the 30s timer keep trying the DB,
+      // and the first real load replaces this list.
+      _lastRefreshAt = 0;
+      _source = fb.source;
+      log.error('CreatorBlocklist', `Hydrate failed after 3 attempts — using LAST-KNOWN-GOOD fallback (${fb.source}${fb.savedAt ? ` saved ${fb.savedAt}` : ''}): ${_blocked.size} entr${_blocked.size === 1 ? 'y' : 'ies'}; the DB list replaces it on the first successful load`);
+    } else {
+      log.error('CreatorBlocklist', 'Hydrate failed after 3 attempts and NO fallback is configured (set CREATOR_BLOCKLIST_FALLBACK or STATE_SNAPSHOT_DIR) — starting EMPTY; ensureFresh() will retry at confirm time');
+    }
   }
   // Periodic refresh in case kv was mutated out-of-band. Doesn't await —
   // first call to isBlocked() during refresh just uses the previous snapshot.
@@ -185,12 +316,11 @@ function list() {
   return out;
 }
 
-async function _persist() {
-  const payload = {
-    entries: list(),
-    updatedAt: new Date().toISOString(),
-  };
-  await db.saveKV(KV_KEY, payload);
+// Record a local mutation and try to persist it. Never throws; the mutation is
+// already live in memory, and stays pending until a write lands.
+async function _persist(op) {
+  if (op) _pendingOps.push(op);
+  try { await _flushPending(); } catch (_) { /* held in _pendingOps */ }
 }
 
 async function add(creatorId, reason) {
@@ -201,16 +331,17 @@ async function add(creatorId, reason) {
     // Idempotent: update reason if a new one was given, else no-op.
     if (reason && reason !== existing.reason) {
       _blocked.set(id, { ...existing, reason });
-      await _persist();
+      await _persist({ op: 'add', id, reason, addedAt: existing.addedAt });
       return { added: false, updated: true };
     }
     return { added: false, updated: false };
   }
+  const addedAt = new Date().toISOString();
   _blocked.set(id, {
     reason: reason || '',
-    addedAt: new Date().toISOString(),
+    addedAt,
   });
-  await _persist();
+  await _persist({ op: 'add', id, reason: reason || '', addedAt });
   log.info('CreatorBlocklist', `Blocked ${id} (reason: ${reason || '<none>'})`);
   // Post-block sweep: PX exposes no offer-retract API, so our already-resting
   // quotes from this creator stay live in PX's book until they expire or a
@@ -244,7 +375,7 @@ async function remove(creatorId) {
   const id = String(creatorId);
   if (!_blocked.has(id)) return { removed: false };
   _blocked.delete(id);
-  await _persist();
+  await _persist({ op: 'remove', id });
   log.info('CreatorBlocklist', `Unblocked ${id}`);
   return { removed: true };
 }
@@ -255,9 +386,11 @@ async function __refresh() {
 }
 
 // Test hook — let unit tests inject state without a real DB.
-function __setForTest(entries) {
+function __setForTest(entries, opts = {}) {
   _hydrate(entries);
   _initialized = true;
+  // Injected state stands in for a DB load unless the test says otherwise.
+  _loadedOnce = opts.loadedOnce !== false;
 }
 
 // Test hook — force the module back to cold-boot state (empty + uninitialized)
@@ -267,6 +400,10 @@ function __resetForTest() {
   _lastRefreshAt = 0;
   _initialized = false;
   _inflightLoad = null;
+  _loadedOnce = false;
+  _pendingOps = [];
+  _source = 'none';
+  _flushing = null;
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
 }
 
@@ -279,6 +416,8 @@ module.exports = {
   remove,
   ensureFresh,
   resolveConfirmBlock,
+  fallbackEnvValue,
+  getPersistenceState,
   __refresh,
   __setForTest,
   __resetForTest,

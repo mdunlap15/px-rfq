@@ -552,7 +552,9 @@ const PAUSED_STATE_KEY = 'websocket_paused_state';
 async function persistPausedState(newValue) {
   try {
     const db = require('./db');
-    await db.saveKV(PAUSED_STATE_KEY, { paused: newValue, updatedAt: new Date().toISOString() });
+    // critical: a pause/resume made while Supabase is down is spooled and
+    // replayed on recovery (whole-value, last-write-wins — safe to replay).
+    await db.saveKV(PAUSED_STATE_KEY, { paused: newValue, updatedAt: new Date().toISOString() }, { critical: true });
   } catch (err) {
     log.warn('WS', `persistPausedState failed: ${err.message}`);
   }

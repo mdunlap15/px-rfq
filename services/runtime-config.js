@@ -25,8 +25,9 @@
  * config key: an unregistered key is refused, so a typo cannot silently write a
  * field the pricer never reads.
  *
- * Best-effort persistence: if Supabase is down we still apply in memory and
- * simply do not survive the next restart (same degradation as vig-config-store).
+ * Persistence is write-behind (2026-10-03): set()/reset() apply in memory and
+ * respond even when Supabase is down; see "persistence" below for the
+ * load-before-persist rule and the DB-down boot fallback.
  */
 
 const { config } = require('../config');
@@ -245,21 +246,57 @@ function _snapshotEnv() {
   return out;
 }
 
-/** Boot hook. Capture env baseline, then apply persisted overrides per key. */
-async function hydrate() {
-  _envBaseline = _snapshotEnv();
-  const db = getDb();
-  if (!db || typeof db.loadKV !== 'function') return { applied: 0, reason: 'no-db' };
+// --- persistence (2026-10-03 rework) ----------------------------------------
+// The overrides map is held IN MEMORY (`_overrides`) and is the authority for
+// list()/set()/reset(); Supabase is a write-behind copy.
+//
+// Before this, set() did a DB read-modify-write and AWAITED it, and list()
+// read the DB on every GET. During the 2026-10-03 outage POST /config/runtime
+// hung ~20s and surfaced as "upstream error" through Railway's edge, GET hung
+// outright — and the read half of the read-modify-write returned {} when the
+// DB was down, so the eventual write would have replaced EVERY persisted
+// override with just the one key being set.
+//
+// Now:
+//   - set()/reset() apply in memory and respond; the persist is awaited for at
+//     most PERSIST_WAIT_MS and otherwise continues in the background
+//     (`persisted: 'pending'` in the response).
+//   - Nothing is ever persisted until a REAL DB read has been merged
+//     (`_loaded`), so a DB-down boot can never clobber the stored overrides.
+//   - A failed boot load applies the last-known-good fallback (state-snapshot
+//     file on a Railway volume, else RUNTIME_CONFIG_FALLBACK env JSON) and a
+//     background retry merges the stored overrides once the DB answers —
+//     skipping keys the operator set in this process (`_touched`).
+let _overrides = {};
+let _loaded = false;
+let _dirty = false;
+let _mutations = 0;
+let _source = 'none';
+const _touched = new Set();
+let _retryTimer = null;
+let _persisting = null;
+const PERSIST_WAIT_MS = Number(process.env.RUNTIME_CONFIG_PERSIST_WAIT_MS) > 0 ? Number(process.env.RUNTIME_CONFIG_PERSIST_WAIT_MS) : 1500;
+const RETRY_MS = Number(process.env.RUNTIME_CONFIG_RETRY_MS) > 0 ? Number(process.env.RUNTIME_CONFIG_RETRY_MS) : 30_000;
 
-  let rec;
-  try { rec = await db.loadKV(KV_KEY); } catch (e) { return { applied: 0, reason: `load-failed: ${e.message}` }; }
-  if (!rec || !rec.overrides) return { applied: 0, reason: 'none' };
+function _snapshot() {
+  try { return require('./state-snapshot'); } catch (_) { return null; }
+}
 
-  let applied = 0; const discarded = [];
-  const keep = {};
-  for (const [key, entry] of Object.entries(rec.overrides)) {
+async function _strictLoad(db) {
+  try {
+    if (typeof db.loadKVStrict === 'function') return await db.loadKVStrict(KV_KEY);
+    return { ok: true, value: await db.loadKV(KV_KEY) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function _applyEntries(entries, { skipTouched }) {
+  let applied = 0; const discarded = []; const keep = {};
+  for (const [key, entry] of Object.entries(entries || {})) {
     const def = BY_KEY.get(key);
     if (!def || !entry) continue;                       // key retired from the registry
+    if (skipTouched && _touched.has(key)) continue;     // operator set it this process — theirs wins
     if (_stable(entry.envSnapshot) !== _stable(_envBaseline[key])) {
       discarded.push(key);                              // Railway changed this var → env wins
       continue;
@@ -268,28 +305,161 @@ async function hydrate() {
     keep[key] = entry;
     applied++;
   }
-  if (discarded.length) {
-    log.info('RuntimeConfig', `Discarded ${discarded.length} override(s) whose env changed in Railway: ${discarded.join(', ')}`);
-    try { await db.saveKV(KV_KEY, { overrides: keep, updatedAt: new Date().toISOString() }); } catch (_) {}
-  }
-  if (applied) log.info('RuntimeConfig', `Applied ${applied} persisted runtime override(s)`);
-  return { applied, discarded, reason: 'ok' };
+  return { applied, discarded, keep };
 }
 
-async function _persist(overrides) {
-  const db = getDb();
-  if (!db || typeof db.saveKV !== 'function') return;
-  try { await db.saveKV(KV_KEY, { overrides, updatedAt: new Date().toISOString() }); } catch (_) {}
+// Merge a REAL DB read into memory. Pure (never persists) — callers persist.
+function _mergeLoaded(rec) {
+  const stored = (rec && rec.overrides) || {};
+  // A fallback-applied key the DB does not hold: the DB is authoritative, so
+  // restore the env baseline (unless the operator set it this process).
+  for (const key of Object.keys(_overrides)) {
+    if (_touched.has(key) || Object.prototype.hasOwnProperty.call(stored, key)) continue;
+    const def = BY_KEY.get(key);
+    if (def) _write(def, _envBaseline[key]);
+    delete _overrides[key];
+  }
+  const r = _applyEntries(stored, { skipTouched: true });
+  for (const [k, v] of Object.entries(r.keep)) _overrides[k] = v;
+  if (r.discarded.length) {
+    log.info('RuntimeConfig', `Discarded ${r.discarded.length} override(s) whose env changed in Railway: ${r.discarded.join(', ')}`);
+    _dirty = true; _mutations++;
+  }
+  if (r.applied) log.info('RuntimeConfig', `Applied ${r.applied} persisted runtime override(s)`);
+  _loaded = true;
+  _source = 'db';
+  const snap = _snapshot();
+  if (snap) snap.write('runtime-config', { overrides: _overrides });
+  return { ...r, hadRecord: !!(rec && rec.overrides) };
 }
-async function _loadOverrides() {
+
+function _applyFallback() {
+  const snap = _snapshot();
+  const fromFile = snap && snap.read('runtime-config');
+  let entries = null; let source = null;
+  if (fromFile && fromFile.data && fromFile.data.overrides) {
+    entries = fromFile.data.overrides; source = `snapshot(${fromFile.savedAt || '?'})`;
+  } else if (process.env.RUNTIME_CONFIG_FALLBACK) {
+    // Plain { key: value } JSON, operator-maintained. Validated through the
+    // registry exactly like a POST; an invalid entry is skipped, never applied.
+    try {
+      const raw = JSON.parse(process.env.RUNTIME_CONFIG_FALLBACK);
+      entries = {};
+      for (const [key, rawValue] of Object.entries(raw || {})) {
+        const def = BY_KEY.get(key);
+        if (!def) continue;
+        const t = T[def.type];
+        let value;
+        try { value = t.parse(rawValue); } catch (_) { continue; }
+        if (!t.valid(value, def)) { log.warn('RuntimeConfig', `RUNTIME_CONFIG_FALLBACK: invalid ${key} skipped`); continue; }
+        entries[key] = { value, envSnapshot: _envBaseline[key], updatedAt: null };
+      }
+      source = 'env RUNTIME_CONFIG_FALLBACK';
+    } catch (e) {
+      log.error('RuntimeConfig', `RUNTIME_CONFIG_FALLBACK is not valid JSON — ignored: ${e.message}`);
+    }
+  }
+  if (!entries) return { applied: 0, discarded: [], source: null };
+  const r = _applyEntries(entries, { skipTouched: true });
+  for (const [k, v] of Object.entries(r.keep)) _overrides[k] = v;
+  _source = source;
+  log.warn('RuntimeConfig', `DB unavailable at boot — applied ${r.applied} override(s) from ${source}; the stored overrides will be merged when Supabase answers`);
+  return { applied: r.applied, discarded: r.discarded, source };
+}
+
+function _scheduleRetry() {
+  if (_retryTimer) return;
+  _retryTimer = setTimeout(async () => {
+    _retryTimer = null;
+    try { await _retryTick(); } catch (_) { /* rescheduled below */ }
+    if (!_loaded || _dirty) _scheduleRetry();
+  }, RETRY_MS);
+  if (_retryTimer.unref) _retryTimer.unref();
+}
+
+async function _retryTick() {
   const db = getDb();
-  if (!db || typeof db.loadKV !== 'function') return {};
-  try { const rec = await db.loadKV(KV_KEY); return (rec && rec.overrides) || {}; } catch (_) { return {}; }
+  if (!db) return;
+  if (!_loaded) {
+    const r = await _strictLoad(db);
+    if (!r.ok) return;
+    _mergeLoaded(r.value);
+    log.info('RuntimeConfig', 'Deferred hydrate: stored overrides merged after the DB came back');
+  }
+  if (_dirty) await _persistNow();
+}
+
+// Single-flight persist of the whole in-memory map. Resolves true when the DB
+// holds the current map, false when it could not be written (retry scheduled).
+function _persistNow() {
+  if (_persisting) return _persisting;
+  _persisting = (async () => {
+    const db = getDb();
+    if (!db || typeof db.saveKV !== 'function') { _dirty = false; return true; }
+    if (!_loaded) {
+      const r = await _strictLoad(db);
+      if (!r.ok) { _scheduleRetry(); return false; }
+      _mergeLoaded(r.value);
+    }
+    for (let i = 0; i < 3 && _dirty; i++) {
+      const gen = _mutations;
+      let res;
+      try { res = await db.saveKV(KV_KEY, { overrides: { ..._overrides }, updatedAt: new Date().toISOString() }); }
+      catch (e) { res = { ok: false, error: e.message }; }
+      // Legacy/stub saveKV resolves undefined on success.
+      const ok = res === undefined || res === null || res.ok !== false;
+      if (!ok) { _scheduleRetry(); return false; }
+      if (gen === _mutations) _dirty = false;
+    }
+    const snap = _snapshot();
+    if (snap) snap.write('runtime-config', { overrides: _overrides });
+    return !_dirty;
+  })().finally(() => { _persisting = null; });
+  return _persisting;
+}
+
+// Await the persist for at most PERSIST_WAIT_MS so an HTTP handler always responds.
+async function _persistBounded() {
+  let timer = null;
+  try {
+    return await Promise.race([
+      _persistNow(),
+      new Promise(resolve => { timer = setTimeout(() => resolve('pending'), PERSIST_WAIT_MS); if (timer.unref) timer.unref(); }),
+    ]);
+  } catch (_) {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Boot hook. Capture env baseline, then apply persisted overrides per key. */
+async function hydrate() {
+  _envBaseline = _snapshotEnv();
+  const db = getDb();
+  if (!db || typeof db.loadKV !== 'function') return { applied: 0, reason: 'no-db' };
+
+  const r = await _strictLoad(db);
+  if (!r.ok) {
+    const fb = _applyFallback();
+    _scheduleRetry();
+    return { applied: fb.applied, discarded: fb.discarded, fallback: fb.source, reason: `load-failed: ${r.error}` };
+  }
+  const m = _mergeLoaded(r.value);
+  if (_dirty) await _persistBounded();
+  if (!m.hadRecord) return { applied: 0, reason: 'none' };
+  return { applied: m.applied, discarded: m.discarded, reason: 'ok' };
+}
+
+/** Persistence health for /status. */
+function getPersistenceState() {
+  return { loaded: _loaded, dirty: _dirty, source: _source, overrideCount: Object.keys(_overrides).length, touchedThisProcess: [..._touched] };
 }
 
 /**
- * Apply + persist a single key. Returns { ok, error?, key, value }.
+ * Apply + persist a single key. Returns { ok, error?, key, value, persisted }.
  * Validation is server-side and authoritative — the UI is not the gate.
+ * The value is LIVE when this returns, whether or not the DB write landed.
  */
 async function set(key, rawValue) {
   const def = BY_KEY.get(key);
@@ -302,14 +472,14 @@ async function set(key, rawValue) {
   if (!_envBaseline) _envBaseline = _snapshotEnv();
   const before = _read(def);
   _write(def, value);
-
-  const overrides = await _loadOverrides();
-  overrides[key] = { value, envSnapshot: _envBaseline[key], updatedAt: new Date().toISOString() };
-  await _persist(overrides);
+  _touched.add(key);
+  _overrides[key] = { value, envSnapshot: _envBaseline[key], updatedAt: new Date().toISOString() };
+  _dirty = true; _mutations++;
+  const persisted = await _persistBounded();
 
   log.info('RuntimeConfig', `${key}: ${JSON.stringify(before)} -> ${JSON.stringify(value)}`
-    + (def.danger ? '  [RISK KEY]' : ''));
-  return { ok: true, key, value, previous: before };
+    + (def.danger ? '  [RISK KEY]' : '') + (persisted === true ? '' : `  [persist ${persisted === 'pending' ? 'pending' : 'deferred — DB unavailable'}]`));
+  return { ok: true, key, value, previous: before, persisted };
 }
 
 /** Drop an override and restore the boot env baseline for that key. */
@@ -318,17 +488,18 @@ async function reset(key) {
   if (!def) return { ok: false, error: `unknown key '${key}'` };
   if (!_envBaseline) _envBaseline = _snapshotEnv();
   _write(def, _envBaseline[key]);
-  const overrides = await _loadOverrides();
-  delete overrides[key];
-  await _persist(overrides);
+  _touched.add(key);
+  delete _overrides[key];
+  _dirty = true; _mutations++;
+  const persisted = await _persistBounded();
   log.info('RuntimeConfig', `${key}: override cleared, restored env baseline ${JSON.stringify(_envBaseline[key])}`);
-  return { ok: true, key, value: _envBaseline[key] };
+  return { ok: true, key, value: _envBaseline[key], persisted };
 }
 
 /** Current state of every tunable, for the dashboard. */
 async function list() {
   if (!_envBaseline) _envBaseline = _snapshotEnv();
-  const overrides = await _loadOverrides();
+  const overrides = _overrides; // in-memory — GET /config/runtime never waits on the DB
   return REGISTRY.map(d => {
     const effective = _read(d);
     const overridden = Object.prototype.hasOwnProperty.call(overrides, d.key)
@@ -352,4 +523,4 @@ async function list() {
   });
 }
 
-module.exports = { hydrate, set, reset, list, KV_KEY, REGISTRY, __T: T };
+module.exports = { hydrate, set, reset, list, getPersistenceState, KV_KEY, REGISTRY, __T: T };

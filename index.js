@@ -37,6 +37,9 @@ let serviceReady = false;
 // Cached Supabase total P&L — refreshed periodically, used by /status
 let cachedDbPnL = null;
 async function refreshDbPnL() {
+  // Display-only number (/status orders.dbPnL). Skip while the DB circuit
+  // breaker is open — no point paginating every settled row into a dead DB.
+  if (typeof db.isAvailable === 'function' && !db.isAvailable()) return;
   try {
     const total = await db.getTotalPnL();
     if (total != null) cachedDbPnL = Math.round(total * 100) / 100;
@@ -75,6 +78,18 @@ async function startup() {
   }
 
   log.info('Startup', `Config: vig=${config.pricing.defaultVig}, maxRisk=$${config.pricing.maxRiskPerParlay}, maxLegs=${config.pricing.maxLegs}`);
+
+  // DB boot probe (2026-10-03 outage). One bounded read before the ~12
+  // sequential boot hydrations below; if Supabase does not answer, the circuit
+  // breaker is forced OPEN so each of them fails fast (and the blocklist /
+  // runtime config fall back to their last-known-good copies) instead of each
+  // burning a full timeout in series.
+  try {
+    const probe = await db.bootProbe();
+    if (probe && probe.ok === false) log.error('Startup', `    ✗ Supabase unreachable at boot (${probe.error}) — booting DEGRADED: DB reads fail fast, writes spool, state retries in background`);
+  } catch (err) {
+    log.warn('Startup', `    ⚠ DB boot probe threw: ${err.message}`);
+  }
   log.info('Startup', `Sports: ${config.supportedSports.join(', ')}`);
   log.info('Startup', `PX Base URL: ${config.px.baseUrl}`);
 
@@ -623,9 +638,15 @@ async function startup() {
     }
   }, 5 * 60 * 1000);
 
-  // Refresh DB P&L on startup and every 2 minutes
+  // Refresh DB P&L on startup and every DB_PNL_REFRESH_MINUTES (default 15).
+  // Was every 2 minutes: getTotalPnL paginates EVERY settled parlay_orders row
+  // (getDailyPnL over 400 days, 1000-row OFFSET pages — ~20-40 requests of
+  // increasingly deep scans) for a single display number already available
+  // from memory (getDailyPnLFromMemory). 720 runs/day was one of the heaviest
+  // read loads on the Small instance that fell over on 2026-10-03.
   refreshDbPnL();
-  setInterval(refreshDbPnL, 2 * 60 * 1000);
+  const _dbPnlMin = Number(process.env.DB_PNL_REFRESH_MINUTES) > 0 ? Number(process.env.DB_PNL_REFRESH_MINUTES) : 15;
+  setInterval(refreshDbPnL, _dbPnlMin * 60 * 1000);
 
   // Daily MLB prop-parlay settlement (realized-outcome feedback loop). Settles
   // finished hitter-prop parlays against MLB box scores into prop_settlements,
@@ -1065,8 +1086,11 @@ function startStatusServer() {
   // Health check — always returns 200 so Railway deployment succeeds
   app.get('/health', (req, res) => {
     const ws = websocket.getState();
+    let dbBrief = null;
+    try { dbBrief = db.getHealth({ brief: true }); } catch (_) { /* never break the health check */ }
     res.json({
       ok: true,
+      db: dbBrief,
       ready: serviceReady,
       uptime: Math.round((Date.now() - startTime) / 1000),
       wsState: ws.connectionState,
@@ -1084,12 +1108,23 @@ function startStatusServer() {
 
   // Full status dashboard
   app.get('/status', (req, res) => {
+    // Supabase circuit breaker + retry spool + write volume + DB-down boot state.
+    let dbStatus = null;
+    try {
+      dbStatus = db.getHealth();
+      dbStatus.hydration = {
+        orders: orderTracker.getDbHydrationState ? orderTracker.getDbHydrationState() : null,
+        creatorBlocklist: require('./services/creator-blocklist').getPersistenceState(),
+        runtimeConfig: require('./services/runtime-config').getPersistenceState(),
+      };
+    } catch (err) { dbStatus = { error: err.message }; }
     res.json({
       service: {
         ready: serviceReady,
         uptime: Math.round((Date.now() - startTime) / 1000),
         startedAt: new Date(startTime).toISOString(),
       },
+      db: dbStatus,
       config: {
         // Core/legacy keys (kept for backward compat with existing dashboard consumers)
         vig: config.pricing.defaultVig,
@@ -2676,7 +2711,14 @@ function startStatusServer() {
   app.get('/admin/creators/blocked', (req, res) => {
     try {
       const creatorBlocklist = require('./services/creator-blocklist');
-      res.json({ ok: true, entries: creatorBlocklist.list() });
+      res.json({
+        ok: true,
+        entries: creatorBlocklist.list(),
+        // DB-down boot fallback (2026-10-03): paste this into Railway's
+        // CREATOR_BLOCKLIST_FALLBACK (off-peak — an env edit restarts the trader).
+        fallbackEnv: { name: 'CREATOR_BLOCKLIST_FALLBACK', value: creatorBlocklist.fallbackEnvValue() },
+        persistence: creatorBlocklist.getPersistenceState(),
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
@@ -5893,7 +5935,8 @@ function startStatusServer() {
         (typeof r.status === 'string' && r.status.startsWith('settled_'));
 
       function summarize(list) {
-        const quotes = list.length;
+        // Sampled unfilled quotes (QUOTE_PERSIST_SAMPLE) count 1/rate each.
+        const quotes = Math.round(list.reduce((s, r) => s + db.quoteRowWeight(r), 0));
         const fills = list.filter(isRealFill).length;
         const bidsWon = list.filter(isBestBidder).length;
         const stakes = list.filter(r => r.confirmed_stake != null).map(r => Number(r.confirmed_stake));
@@ -6323,7 +6366,8 @@ function startStatusServer() {
         if (list.length === 0) {
           return { quotes: 0 };
         }
-        const quotes = list.length;
+        // Sampled unfilled quotes (QUOTE_PERSIST_SAMPLE) count 1/rate each.
+        const quotes = Math.round(list.reduce((s, r) => s + db.quoteRowWeight(r), 0));
         const fills = list.filter(isRealFill).length;
         const bidsWon = list.filter(isBestBidder).length;
         const stakes = list.filter(r => r.confirmed_stake != null).map(r => Number(r.confirmed_stake));

@@ -150,11 +150,14 @@ function recordFillBucketFill(legs) {
  * that loadFromDb skips) and replays them as synthetic submit + fill
  * events. Does NOT touch sessionFillBuckets — that stays session-scoped.
  */
+let _fillBucketBackfilled = false;
 async function backfillFillBucketEvents() {
   if (!db.isEnabled()) return;
+  if (_fillBucketBackfilled) return; // a deferred merge-load must not replay history twice
   const cutoffIso = new Date(Date.now() - FILL_BUCKET_WINDOW_MS).toISOString();
   const rows = await db.loadFillBucketRowsSince(cutoffIso);
   if (!rows || rows.length === 0) return;
+  _fillBucketBackfilled = true;
   const FILLED_STATUSES = new Set(['confirmed', 'settled_won', 'settled_lost', 'settled_push', 'settled_void']);
   let submits = 0, fills = 0;
   const historical = [];
@@ -162,7 +165,11 @@ async function backfillFillBucketEvents() {
     const keys = fillBucketKeys(row.legs);
     const qt = row.quotedAt ? new Date(row.quotedAt).getTime() : null;
     if (qt && !Number.isNaN(qt)) {
-      for (const k of keys) { historical.push({ t: qt, key: k, kind: 'submit' }); submits++; }
+      // A SAMPLED unfilled quote (QUOTE_PERSIST_SAMPLE) stands for 1/rate
+      // quotes; replay it that many times so the submit denominator — and
+      // therefore the fill rate — stays unbiased.
+      const w = Math.max(1, Math.round(typeof db.quoteRowWeight === 'function' ? db.quoteRowWeight(row) : 1));
+      for (const k of keys) { for (let i = 0; i < w; i++) historical.push({ t: qt, key: k, kind: 'submit' }); submits += w; }
     }
     if (FILLED_STATUSES.has(row.status)) {
       const ft = row.confirmedAt ? new Date(row.confirmedAt).getTime() : qt;
@@ -8259,6 +8266,7 @@ module.exports = {
   enrichReconstructedFromPx,
   enrichOpenPositionsFromAffiliate,
   loadFromDb,
+  getDbHydrationState,
   backfillFillBucketEvents,
   // Exposed for /px-positions endpoint — lets it enrich PX-open orders
   // with tracker-held leg data without duplicating the uuid lookup.
@@ -9146,13 +9154,44 @@ function hydrateDeclinesInMemory(dbDeclines) {
   }
 }
 
-async function loadFromDb() {
+// DB-DOWN BOOT (2026-10-03). If Supabase is unreachable at boot, loadOrders
+// aborts fast (circuit breaker) and the book hydrates EMPTY — no confirmed
+// orders, so no exposure — which is the "possibly empty exposure" restart of
+// that outage. Rather than trade on that state forever, a deferred MERGE-load
+// retries with backoff until the DB answers. Merge mode never overwrites an
+// order already in memory (in-memory is the fresher copy: it holds every fill
+// taken since boot), only adds the missing history and its exposure.
+const _dbHydration = { state: 'pending', attempts: 0, lastAttemptAt: null, recoveredAt: null, lastError: null, mergedOrders: 0 };
+let _dbHydrationTimer = null;
+function getDbHydrationState() { return { ..._dbHydration }; }
+function _scheduleDeferredDbLoad() {
+  if (_dbHydrationTimer) return;
+  const base = Number(process.env.DB_DEFERRED_LOAD_MS) > 0 ? Number(process.env.DB_DEFERRED_LOAD_MS) : 60_000;
+  const delay = Math.min(base * Math.pow(2, Math.max(0, _dbHydration.attempts - 1)), 10 * 60_000);
+  _dbHydrationTimer = setTimeout(async () => {
+    _dbHydrationTimer = null;
+    if (typeof db.isAvailable === 'function' && !db.isAvailable()) { _scheduleDeferredDbLoad(); return; }
+    try {
+      await loadFromDb({ mergeOnly: true });
+    } catch (err) {
+      _dbHydration.lastError = err.message;
+      _scheduleDeferredDbLoad();
+    }
+  }, delay);
+  if (_dbHydrationTimer.unref) _dbHydrationTimer.unref();
+}
+
+async function loadFromDb(opts = {}) {
+  const mergeOnly = !!opts.mergeOnly;
   if (!db.isEnabled()) {
     log.info('DB', 'Supabase not configured — running in memory-only mode');
+    _dbHydration.state = 'memory-only';
     return;
   }
 
-  log.info('DB', 'Loading historical data from Supabase...');
+  log.info('DB', mergeOnly ? 'Deferred merge-load of historical data from Supabase...' : 'Loading historical data from Supabase...');
+  _dbHydration.attempts++;
+  _dbHydration.lastAttemptAt = new Date().toISOString();
 
   // Load orders (very high cap to pull ALL history; loadOrders paginates).
   // Bumped from 20,000 to 200,000 after observing the original cap drop
@@ -9164,6 +9203,14 @@ async function loadFromDb() {
   const dbOrders = await db.loadOrders(LOAD_CAP);
   if (dbOrders.length >= LOAD_CAP) {
     log.warn('DB', `loadFromDb hit cap ${LOAD_CAP} — may be truncating history. Raise LOAD_CAP.`);
+  }
+  const ordersLoad = typeof db.getLastOrdersLoad === 'function' ? db.getLastOrdersLoad() : { ok: true };
+  if (ordersLoad.ok === false) {
+    _dbHydration.state = 'failed-retrying';
+    _dbHydration.lastError = ordersLoad.error;
+    log.error('DB', `Order history load FAILED (${ordersLoad.error}) — exposure/P&L state is INCOMPLETE until a deferred merge-load succeeds`);
+    _scheduleDeferredDbLoad();
+    if (dbOrders.length === 0) return; // nothing loaded — skip the rest, the retry does it all
   }
 
   // Recent unfilled 'quoted' rows — DISPLAY ONLY, so the All Quotes table
@@ -9258,6 +9305,10 @@ async function loadFromDb() {
       log.debug('DB', `Skipping reconstructed order ${o.parlayId} on load`);
       continue;
     }
+    // Deferred merge: the in-memory order is fresher (it may have confirmed or
+    // settled since boot) — never replace it, never double-add its exposure.
+    if (mergeOnly && orders[o.parlayId]) continue;
+    if (mergeOnly) _dbHydration.mergedOrders++;
 
     orders[o.parlayId] = o;
     if (o.orderUuid) ordersByUuid[o.orderUuid] = o.parlayId;
@@ -9382,7 +9433,9 @@ async function loadFromDb() {
   // totalMatched (they really did happen) but don't inflate weLost or
   // miscategorize the win counter.
   const dbMatched = await db.loadMatchedParlays(10000);
+  const _haveMatched = mergeOnly ? new Set(matchedParlays.map(m => m && m.parlayId)) : null;
   for (const m of dbMatched) {
+    if (_haveMatched && _haveMatched.has(m.parlayId)) continue;
     matchedParlays.push(m);
     marketStats.totalMatched++;
     if (m.weQuoted) {
@@ -9425,4 +9478,14 @@ async function loadFromDb() {
   backfillFillBucketEvents().catch(err => {
     log.warn('Tracker', `backfillFillBucketEvents failed: ${err.message}`);
   });
+
+  if (ordersLoad.ok !== false) {
+    if (_dbHydration.state === 'failed-retrying') {
+      _dbHydration.recoveredAt = new Date().toISOString();
+      log.warn('DB', `Deferred merge-load SUCCEEDED — merged ${_dbHydration.mergedOrders} order(s) missing since boot`);
+      try { rebuildAllExposure(); } catch (err) { log.warn('DB', `post-merge rebuildAllExposure failed: ${err.message}`); }
+    }
+    _dbHydration.state = mergeOnly ? 'recovered' : 'ok';
+    _dbHydration.lastError = null;
+  }
 }
