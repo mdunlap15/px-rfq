@@ -6848,7 +6848,11 @@ function startStatusServer() {
           'first_half_moneyline', 'first_half_spread', 'first_half_total',
           'player_points', 'player_rebounds', 'player_assists', 'player_threes_made'],
         basketball_wnba: ['moneyline', 'spread', 'total'],
-        icehockey_nhl: ['moneyline', 'spread', 'total', 'team_total', 'player_shots_on_goal'],
+        // NHL team totals are deliberately NOT quoted (2026-09-29: PX's shootout-goal
+        // settlement basis is unverified; line-manager _nhlExcludedMarket refuses
+        // them at every entry point), so they are not an expected market — listing
+        // them made the dashboard banner flag a permanent "gap" (operator 2026-10-04).
+        icehockey_nhl: ['moneyline', 'spread', 'total', 'player_shots_on_goal'],
         tennis: ['moneyline'],
         soccer_epl: ['moneyline', 'spread', 'total'],
         soccer_uefa_champs_league: ['moneyline', 'spread', 'total'],
