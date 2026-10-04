@@ -18,7 +18,15 @@
  * PX moves it to the next game — plus every same-matchup MLB game still in the
  * line index). DK's series startEventDate is ROUND-level and is ignored.
  */
-const MAX_GAME_MS = (Number(process.env.MLB_SERIES_GAME_MAX_HOURS) || 5) * 3600e3;
+// Time fallback, used ONLY when ESPN has no record of the game: assume it is
+// still in play this long after first pitch (8h covers rain delays + extras).
+const MAX_GAME_MS = (Number(process.env.MLB_SERIES_GAME_MAX_HOURS) || 8) * 3600e3;
+// When ESPN DOES see the game as started-but-not-final it stays in play for as
+// long as that lasts — no time cutoff (operator 2026-10-04: "it's very
+// important we not be quoting series prices while games of the given series
+// are in play"). Hard cap only so a stuck ESPN record (postponement shown as
+// not-final) cannot dark a series for days.
+const ESPN_LIVE_CAP_MS = (Number(process.env.MLB_SERIES_ESPN_LIVE_CAP_HOURS) || 18) * 3600e3;
 const RELIST_GRACE_MS = (Number(process.env.MLB_SERIES_RELIST_GRACE_MIN) || 5) * 60e3;
 
 // `${pairKey}|${startMs}` -> ms we first saw ESPN report the game final.
@@ -71,11 +79,16 @@ function matchupState(info, { now = Date.now(), games = [], espnLookup = _defaul
     if (g.startMs > now) continue;                       // not started
     const fk = key + '|' + g.startMs;
     let endMs = _finalSeen.get(fk);
+    let espnSeesLive = false;
     if (endMs == null) {
       const r = espnLookup ? espnLookup(g) : null;
       if (r && r.completed) { endMs = now; _finalSeen.set(fk, endMs); }
+      else if (r) espnSeesLive = true;                   // ESPN knows the game and it is not final
     }
-    if (endMs == null && now - g.startMs >= MAX_GAME_MS) endMs = g.startMs + MAX_GAME_MS;
+    if (endMs == null) {
+      const cap = espnSeesLive ? ESPN_LIVE_CAP_MS : MAX_GAME_MS;
+      if (now - g.startMs >= cap) endMs = g.startMs + cap;
+    }
     if (endMs == null) { inPlay = true; continue; }
     if (lastEndMs == null || endMs > lastEndMs) lastEndMs = endMs;
   }
@@ -124,6 +137,7 @@ module.exports = {
   hydrate,
   getState,
   MAX_GAME_MS,
+  ESPN_LIVE_CAP_MS,
   RELIST_GRACE_MS,
   __resetForTest,
 };

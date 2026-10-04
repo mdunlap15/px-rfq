@@ -384,6 +384,35 @@ for (const b of BOOKS) _src[b] = { at: 0, pairs: null, drops: [], error: null, e
 let _inflight = null;
 let _lastWarm = null;     // { startedAt, finishedAt, ms }
 
+// RELAY (2026-10-04). The order book builds this exact consensus on the
+// operator's laptop (~/mlb_series_consensus.py, all three books) and publishes
+// it to kv_store 'mlb_series_consensus' = {ts, src_ts, series, books_read, ...}.
+// Railway cannot scrape DK (blocked) or BetOnline (times out), so our own pass
+// sees Bovada only and every series declines. While the relay is fresh it IS
+// the consensus — same books, same numbers as the order book. Board time =
+// src_ts (the OLDEST counted source's read time), so a book still showing a
+// pre-game price keeps a series dark after a final. Stale/absent relay → our
+// own sources (fail closed in practice).
+const RELAY_KEY = 'mlb_series_consensus';
+const RELAY_MAX_AGE_MS = () => (Number(process.env.MLB_SERIES_RELAY_MAX_AGE_MIN) || 15) * 60000;
+let _relay = null;        // { ts, srcTs, series, booksRead, errors, fetchedAt }
+function _relayFresh(now = Date.now()) {
+  return !!(_relay && Number.isFinite(_relay.ts) && now - _relay.ts * 1000 <= RELAY_MAX_AGE_MS()
+    && Number.isFinite(_relay.srcTs) && now - _relay.srcTs * 1000 <= RELAY_MAX_AGE_MS() + SRC_MAX_AGE_MS());
+}
+async function _loadRelay() {
+  try {
+    const db = require('./db');
+    const v = await db.loadKV(RELAY_KEY);
+    if (v && v.series && typeof v.series === 'object' && Number.isFinite(Number(v.ts))) {
+      _relay = { ts: Number(v.ts), srcTs: Number(v.src_ts != null ? v.src_ts : v.ts), series: v.series,
+        booksRead: v.books_read || [], errors: v.errors || {}, fetchedAt: Date.now() };
+    }
+  } catch (err) {
+    log.warn('MlbSeries', `relay read failed: ${err.message}`);
+  }
+}
+
 function _record(book, fn, raw, meta) {
   const drops = [];
   try {
@@ -474,6 +503,13 @@ async function warm() {
   const startedAt = Date.now();
   const deadline = WARM_DEADLINE_MS();
   _inflight = (async () => {
+    await _loadRelay();
+    if (_relayFresh()) {
+      _lastWarm = { startedAt: new Date(startedAt).toISOString(), ms: Date.now() - startedAt, via: 'relay' };
+      const c = getConsensus();
+      log.info('MlbSeries', `Consensus via order-book relay (age ${Math.round(Date.now() / 1000 - _relay.ts)}s, oldest source ${Math.round(Date.now() / 1000 - _relay.srcTs)}s): ${Object.keys(c.series).length} series, ${Object.values(c.series).filter(r => !r.decline).length} priceable`);
+      return c;
+    }
     const dk = require('./dk-scraper');
     const bov = _withTimeout(fetchBovada(), deadline, 'bovada')
       .then(body => _record('bovada', srcBovada, body, null), err => _fail('bovada', err));
@@ -504,6 +540,13 @@ async function warm() {
 // ---------------------------------------------------------------------------
 /** Consensus over the sources still inside SERIES_SRC_MAX_AGE_S at `now`. */
 function getConsensus(now = Date.now()) {
+  if (_relayFresh(now)) {
+    const series = {};
+    for (const [p, r] of Object.entries(_relay.series)) {
+      series[p] = Object.assign({}, r, { boardAtMs: _relay.srcTs * 1000, via: 'relay' });
+    }
+    return { series, rejected: {}, booksRead: _relay.booksRead, via: 'relay' };
+  }
   const maxAge = SRC_MAX_AGE_MS();
   const perBook = {}, ages = {};
   for (const b of BOOKS) {
@@ -583,6 +626,7 @@ function getStatus(now = Date.now()) {
     minBooks: MIN_BOOKS(), minBooksPairs: minBooksPairs(), maxGapPp: MAX_GAP_PP(), srcMaxAgeSec: SRC_MAX_AGE_MS() / 1000,
     minEv: MIN_EV(), maxSum: MAX_SUM(), maxAsk: MAX_ASK(),
     warming: !!_inflight, lastWarm: _lastWarm, sources, series,
+    relay: _relay ? { fresh: _relayFresh(now), ageSec: Math.round(now / 1000 - _relay.ts), oldestSourceAgeSec: Math.round(now / 1000 - _relay.srcTs), booksRead: _relay.booksRead, errors: _relay.errors } : null,
   };
 }
 
@@ -590,7 +634,11 @@ function getStatus(now = Date.now()) {
 function __setSourceForTest(book, pairs, at = Date.now()) {
   _src[book] = { at: pairs ? at : 0, pairs: pairs || null, drops: [], error: null, errorAt: null, meta: null };
 }
+function __setRelayForTest(v) {
+  _relay = v ? { ts: v.ts, srcTs: v.src_ts != null ? v.src_ts : v.ts, series: v.series, booksRead: v.books_read || [], errors: {}, fetchedAt: Date.now() } : null;
+}
 function __resetForTest() {
+  _relay = null;
   for (const b of BOOKS) __setSourceForTest(b, null);
   _inflight = null;
   _lastWarm = null;
@@ -612,5 +660,5 @@ module.exports = {
   // cache
   warm, getConsensus, getQuoteForLine, getBoardAtMs, getStatus,
   BOOKS,
-  __setSourceForTest, __resetForTest, __recordForTest,
+  __setSourceForTest, __resetForTest, __recordForTest, __setRelayForTest,
 };
