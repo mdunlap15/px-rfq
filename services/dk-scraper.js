@@ -43,7 +43,10 @@ const SPORT_CONFIGS = {
     league: 'baseball/mlb',
     baseUrl: 'https://sportsbook.draftkings.com/leagues/baseball/mlb',
     categories: ['winner'],
-    urls: { winner: [['futures', 'series-props']] },
+    // 2026-10-04: the futures URL now shows only game lines; postseason first.
+    // MLB PRICING no longer reads this path — see fetchMlbSeriesBoard +
+    // services/mlb-series-consensus.js (DK + BetOnline + Bovada consensus).
+    urls: { winner: [['postseason', 'series-props'], ['futures', 'series-props']] },
   },
 };
 
@@ -343,6 +346,124 @@ function fetchNbaSeriesSpreads(opts) { return fetchSeriesMarkets('nba', opts); }
 function fetchNhlSeriesSpreads(opts) { return fetchSeriesMarkets('nhl', opts); }
 function fetchNbaSeriesTotals(opts) { return fetchSeriesMarkets('nba', opts); }
 function fetchNhlSeriesTotals(opts) { return fetchSeriesMarkets('nhl', opts); }
+
+// ---------------------------------------------------------------------------
+// MLB playoff SERIES WINNER capture — port of C:/Users/mdunl/dk-mlb-series.js
+// (the order book's DK source for mlb_series_consensus.py), run through this
+// module's browser-slot governor. Feeds services/mlb-series-consensus.js.
+//
+// DK'S URL FOR THIS TAB IS NOT STABLE: category=futures&subcategory=series-
+// props redirected to the bare MLB page on 2026-09-28 (then flipped back), and
+// by 2026-10-04 it showed only game lines. Only the tab's TEXT held, so the
+// order: (1) load the MLB page and FOLLOW THE TAB WHOSE TEXT IS "SERIES PROPS",
+// (2) the postseason URLs, (3) the futures URLs. Verified 2026-10-04: no such
+// tab on the bare page, the postseason URL served all four Division Series.
+// Returns {scrapedAt, url, via, timedOut, markets:[{name, marketType, eventId,
+// event, start, suspended, selections:[{team, odds}]}]} — the script's output.
+// ---------------------------------------------------------------------------
+const DK_MLB_BASE = 'https://sportsbook.draftkings.com/leagues/baseball/mlb';
+const DK_MLB_SERIES_DIRECT = [
+  DK_MLB_BASE + '?category=postseason&subcategory=series-props&nav_1=winner',
+  DK_MLB_BASE + '?category=postseason&subcategory=series-props',
+];
+const DK_MLB_SERIES_LEGACY = [
+  DK_MLB_BASE + '?category=futures&subcategory=series-props&nav_1=winner',
+  DK_MLB_BASE + '?category=futures&subcategory=series-props',
+];
+const _isMlbSeriesMarket = (nm, mt) => mt === 'Series Winner'
+  || (/ - Winner$/.test(nm) && /(wild card|division series|championship series|\bALDS\b|\bNLDS\b|\bALCS\b|\bNLCS\b)/i.test(nm));
+const _dkAscii = (s) => (s == null ? s : String(s).replace(/\u2212/g, '-'));
+
+/** Pure: fold one DK XHR body into the markets/events accumulators (the script's response handler). */
+function extractMlbSeriesMarkets(d, markets, events) {
+  if (!d || typeof d !== 'object') return;
+  for (const e of d.events || []) events[e.id] = { name: e.name, start: e.startEventDate, status: e.status };
+  const sels = {};
+  for (const s of d.selections || []) (sels[s.marketId] = sels[s.marketId] || []).push(s);
+  for (const m of d.markets || []) {
+    const nm = m.name || '';
+    const mt = (m.marketType && m.marketType.name) || '';
+    if (!_isMlbSeriesMarket(nm, mt)) continue;
+    markets[m.id] = {
+      name: nm, marketType: mt, eventId: m.eventId, suspended: !!(m.isSuspended || m.suspended),
+      selections: (sels[m.id] || []).map(s => ({
+        team: (s.label || '').trim(),
+        odds: _dkAscii((s.displayOdds && s.displayOdds.american) || s.oddsAmerican),
+        suspended: !!s.isSuspended,
+      })),
+    };
+  }
+}
+
+/** Pure: the script's write() — attach event name/start, drop suspended selections. */
+function buildMlbSeriesMarkets(markets, events) {
+  return Object.values(markets).map(m => Object.assign({}, m, {
+    event: (events[m.eventId] || {}).name,
+    start: (events[m.eventId] || {}).start,
+    selections: m.selections.filter(s => !s.suspended).map(s => ({ team: s.team, odds: s.odds })),
+  }));
+}
+
+let _mlbSeriesInFlight = null;
+async function fetchMlbSeriesBoard({ deadlineMs } = {}) {
+  if (_mlbSeriesInFlight) return _mlbSeriesInFlight;
+  const deadline = deadlineMs || Number(process.env.DK_SERIES_DEADLINE_MS) || 70000;
+  _mlbSeriesInFlight = (async () => {
+    const browser = await _launchBrowser({ headless: true, args: ['--disable-blink-features=AutomationControlled'] });
+    const markets = {}, events = {};
+    let via = 'none', finalUrl = '', timedOut = false;
+    // Hard deadline: a hung page must not hold the (single) browser slot.
+    const timer = setTimeout(() => { timedOut = true; browser.close().catch(() => {}); }, deadline);
+    try {
+      const page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
+      page.on('response', async (r) => {
+        try {
+          const ct = r.headers()['content-type'] || '';
+          if (!/json/.test(ct)) return;
+          const t = await r.text();
+          if (!/"markets"/.test(t) || !/"selections"/.test(t)) return;
+          extractMlbSeriesMarkets(JSON.parse(t), markets, events);
+        } catch (_) { /* ignore */ }
+      });
+      const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+      const settle = async () => {
+        await sleep(3500);
+        for (let i = 0; i < 4; i++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)).catch(() => {}); await sleep(600); }
+      };
+      const tryUrls = async (urls, tag) => {
+        for (const u of urls) {
+          if (timedOut) return false;
+          await page.goto(u, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+          await settle();
+          finalUrl = page.url();
+          if (Object.keys(markets).length) { via = tag; return true; }
+        }
+        return false;
+      };
+      // 1. follow the tab by its TEXT
+      await page.goto(DK_MLB_BASE, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+      await sleep(2500);
+      const href = await page.evaluate(() => {
+        const a = Array.from(document.querySelectorAll('a')).find(e => /^series props$/i.test((e.innerText || '').trim()));
+        return a ? a.href : null;
+      }).catch(() => null);
+      if (href) await tryUrls([href], 'tab:' + href);
+      // 2. postseason URLs, 3. futures URLs
+      if (!Object.keys(markets).length) await tryUrls(DK_MLB_SERIES_DIRECT, 'direct-postseason');
+      if (!Object.keys(markets).length) await tryUrls(DK_MLB_SERIES_LEGACY, 'direct-futures');
+    } catch (err) {
+      if (!timedOut) throw err;
+    } finally {
+      clearTimeout(timer);
+      await browser.close().catch(() => {});
+    }
+    const out = buildMlbSeriesMarkets(markets, events);
+    log.info('DkScraper', `MLB series: ${out.length} Series Winner market(s) via ${via}${timedOut ? ' (DEADLINE)' : ''}`);
+    return { scrapedAt: new Date().toISOString(), url: finalUrl, via, timedOut, markets: out };
+  })().finally(() => { _mlbSeriesInFlight = null; });
+  return _mlbSeriesInFlight;
+}
 
 /**
  * Fetch UFC Method-of-Victory (per-fighter KO/TKO/DQ, Submission, Decision).
@@ -3733,6 +3854,12 @@ function parseGolfOutrightData(payloads) {
 
 module.exports = {
   fetchSeriesMarkets,
+  fetchMlbSeriesBoard,
+  extractMlbSeriesMarkets,
+  buildMlbSeriesMarkets,
+  // The browser-slot governor, for scrapes that live in other modules
+  // (mlb-series-consensus BetOnline page) — one Chromium budget for all.
+  launchBrowser: _launchBrowser,
   getSeriesCacheAgeMs,
   // Test seam (test/mlb-series.test.js): install a parsed series board.
   __setSeriesCacheForTest: (sport, data, at = Date.now()) => { if (data == null) delete cacheBySport[sport]; else cacheBySport[sport] = { at, data }; },

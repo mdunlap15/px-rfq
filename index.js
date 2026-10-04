@@ -692,14 +692,29 @@ async function startup() {
   // sport — too slow to run inline when an RFQ arrives — so fetch at
   // boot and refresh every 10 min. Pricer's getSeriesFairProb() reads
   // from this cache synchronously via dkScraper.lookupSeriesFairProb().
+  // MLB playoff SERIES — order-book consensus (services/mlb-series-consensus.js:
+  // DK + BetOnline Chrome scrapes through dk-scraper's browser governor, plus
+  // Bovada's JSON coupon). Its own cadence (MLB_SERIES_WARM_SEC, default 300):
+  // a source counts only while <= SERIES_SRC_MAX_AGE_S (600) old, so the old
+  // 10-min scrape loop would leave a series dark between passes. Runs ONLY
+  // while an MLB series line is registered and the kill switch is on; warm()
+  // is single-flight and deadline-bounded; the RFQ path is a sync cache read.
+  {
+    const mlbSeriesConsensus = require('./services/mlb-series-consensus');
+    const warmMlbSeries = () => {
+      if (config.pricing.mlbSeriesEnabled === false) return;
+      try { if (!lineManager.hasOpenMlbSeriesLines()) return; } catch (_) { return; }
+      mlbSeriesConsensus.warm().catch(err => log.warn('MlbSeries', `consensus warm failed: ${err.message}`));
+    };
+    warmMlbSeries();
+    setInterval(warmMlbSeries, Math.max(60, Number(process.env.MLB_SERIES_WARM_SEC) || 300) * 1000);
+  }
   (async () => {
     // Run NBA + NHL series pre-warm in parallel to halve the cold-cache
     // window at boot. Previously serial — when NBA's Puppeteer fetch ran
     // long, NHL series RFQs arriving early got a "no fair value" decline.
-    // MLB joins only while an open MLB series line is registered (postseason,
-    // before each series' Game 1) — no Chromium launch for it otherwise.
+    // (MLB series price off the consensus loop above, not this DK path.)
     const bootSeries = ['nba', 'nhl'];
-    try { if (lineManager.hasOpenMlbSeriesLines()) bootSeries.push('mlb'); } catch (_) { /* skip mlb */ }
     await Promise.all(bootSeries.map(sport =>
       dkScraper.fetchSeriesWinners(sport).catch(err => {
         log.warn('DkScraper', `Initial ${sport.toUpperCase()} fetch failed: ${err.message}`);
@@ -781,9 +796,7 @@ async function startup() {
       // commence-time match guard.
       return !st || st.eventCount > 0;
     });
-    // MLB playoff series (2026-09-28): scraped only while an open MLB series
-    // line is registered, i.e. from PX listing the series until Game 1.
-    try { if (lineManager.hasOpenMlbSeriesLines()) activeSeries.push('mlb'); } catch (_) { /* skip mlb */ }
+    // MLB playoff series: NOT here — the order-book consensus loop above.
     await Promise.all(activeSeries.map(sport =>
       dkScraper.fetchSeriesWinners(sport, { force: true }).catch(err => {
         log.warn('DkScraper', `Periodic ${sport.toUpperCase()} refresh failed: ${err.message}`);
@@ -1183,9 +1196,10 @@ function startStatusServer() {
           on: config.pricing.mlbSeriesEnabled !== false,
           env: process.env.MLB_SERIES_ENABLED ?? null,
           defaultsTo: true,
-          gates: 'MLB playoff series-winner registration + pricing; dark while a game of the series is in play, and until the DK board post-dates that game',
-          maxAgeMin: config.pricing.mlbSeriesMaxAgeMin,
-          dkBoardAgeSec: (() => { const a = dkScraper.getSeriesCacheAgeMs('mlb'); return a == null ? null : Math.round(a / 1000); })(),
+          gates: 'MLB playoff series-winner registration + pricing; dark while a game of the series is in play, and until every book in the series consensus was read after that game',
+          // Per series: books + prices, fair, raw, fair_lo, gap, decline
+          // reason, age, and the RFQ quote per side (services/mlb-series-consensus.js).
+          consensus: (() => { try { return require('./services/mlb-series-consensus').getStatus(); } catch (e) { return { error: e.message }; } })(),
           finalsSeen: require('./services/series-window').getState(),
         },
         golfOutrightsParlay: {

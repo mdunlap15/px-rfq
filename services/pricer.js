@@ -6,6 +6,7 @@ const oddsFeed = require('./odds-feed');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
 const seriesWindow = require('./series-window');
+const mlbSeriesConsensus = require('./mlb-series-consensus');
 const ufcMov = require('./ufc-mov');
 const nflConsensus = require('./nfl-consensus');
 const { footballSgpFactor } = require('./football-sgp-correlation');
@@ -283,14 +284,17 @@ function isBlockedAltTotal(lineInfo) {
 
 // MLB series gate shared by the quote pre-pass and getSeriesFairProb (quote
 // AND confirm): kill-switch + closed while any game of the matchup is IN PLAY
-// + the DK board must post-date the last game's end (series-window.js).
+// + the series' consensus board must post-date the last game's end
+// (series-window.js). The board time is the OLDEST source counted for THIS
+// series (services/mlb-series-consensus.js), so a series reopens after a final
+// only once every book that prices it was read after the game ended.
 function mlbSeriesQuotable(lineInfo, now = Date.now()) {
   if (config.pricing.mlbSeriesEnabled === false) return false;
   const games = typeof lineManager.getPairGames === 'function'
     ? lineManager.getPairGames('baseball_mlb', lineInfo.homeTeam, lineInfo.awayTeam)
     : [];
-  const age = dkScraper.getSeriesCacheAgeMs('mlb');
-  return seriesWindow.isPriceable(lineInfo, { now, games, boardAtMs: age == null ? null : now - age });
+  const boardAtMs = mlbSeriesConsensus.getBoardAtMs(lineInfo, now);
+  return seriesWindow.isPriceable(lineInfo, { now, games, boardAtMs });
 }
 
 function getSeriesFairProb(lineInfo) {
@@ -316,26 +320,30 @@ function getSeriesFairProb(lineInfo) {
   if (!sportKey) return null;
   const bareTeam = teamName.replace(/\s*\(series\)\s*/ig, '').trim();
 
-  // MLB playoff series (2026-09-28): quote only until Game 1's first pitch,
-  // never reopen (services/series-window.js), off a DK board no older than
-  // mlbSeriesMaxAgeMin, and only the Series Winner (DK posts nothing else).
-  // Runs here so the CONFIRM reprice — which runs only priceParlay — closes
-  // at the same instant the quote path does.
+  // MLB playoff series: Series Winner only, dark while a game of the series
+  // is in play (services/series-window.js), priced on the ORDER-BOOK
+  // methodology (services/mlb-series-consensus.js, operator 2026-10-04): fair
+  // = DK + BetOnline + Bovada median proportional de-vig; offered = the median
+  // RAW implied of the bettor's side (bookPriceOverride, bypasses vig),
+  // clamped never better for the bettor than the most favourable book's fair
+  // for that side and never under the poster's 1% minimum edge. Runs here so
+  // the CONFIRM reprice — which runs only priceParlay — closes at the same
+  // instant the quote path does. getSeriesFairProb._lastMlb carries the
+  // decline reason for priceParlay's failure detail.
   if (sportKey === 'mlb') {
-    if (!isSeriesWinner) return null;
-    if (!mlbSeriesQuotable(lineInfo)) return null;
+    getSeriesFairProb._lastMlb = null;
+    if (!isSeriesWinner) { getSeriesFairProb._lastMlb = { reason: 'mlb_series_not_winner' }; return null; }
+    if (!mlbSeriesQuotable(lineInfo)) { getSeriesFairProb._lastMlb = { reason: 'mlb_series_closed' }; return null; }
+    const q = mlbSeriesConsensus.getQuoteForLine(lineInfo);
+    getSeriesFairProb._lastMlb = q;
+    if (!q || !q.ok) return null;
+    return { fairProb: q.fairProb, bookPriceOverride: q.bookPriceOverride, basis: q.basis };
   }
 
   let hit = null;
   if (isSeriesWinner) {
-    hit = sportKey === 'mlb'
-      // Scoped to THIS matchup and age-limited. The unscoped nickname lookup
-      // is how "Chicago White Sox" could have read the Red Sox's price.
-      ? dkScraper.lookupSeriesFairProb('mlb', bareTeam || teamName, {
-          homeTeam: lineInfo.homeTeam, awayTeam: lineInfo.awayTeam,
-          maxAgeMs: (Number(config.pricing.mlbSeriesMaxAgeMin) || 45) * 60000,
-        })
-      : dkScraper.lookupSeriesFairProb(sportKey, bareTeam || teamName);
+    // (MLB returned above — it prices off the order-book consensus.)
+    hit = dkScraper.lookupSeriesFairProb(sportKey, bareTeam || teamName);
   } else if (isSeriesSpread) {
     // PX stores spread line as signed (negative for favorite side).
     // DK cache keys each team's leg by (team, |line|, '+'|'-').
@@ -1236,10 +1244,22 @@ function priceParlay(legs, opts = {}) {
       if (typeof seriesFair === 'object') {
         s.bookPriceOverride = seriesFair.bookPriceOverride;
         fairProbs[i] = seriesFair.fairProb;
+        if (seriesFair.basis) s.fairBasis = seriesFair.basis;
       } else {
         fairProbs[i] = seriesFair;
       }
       continue;
+    }
+    // An MLB series leg has ONE price source (the order-book consensus); it
+    // never falls through to the generic paths — fail closed with the reason.
+    if (seriesWindow.isMlbSeriesLine(s.lineInfo)) {
+      const q = getSeriesFairProb._lastMlb || {};
+      priceParlay._lastFailure = {
+        reason: 'no_fair_value',
+        detail: `${s.lineInfo.teamName || '?'} series_winner — ${q.reason || 'mlb_series_unpriced'}${q.detail ? ' (' + q.detail + ')' : ''}`,
+        blockerLeg: { team: s.lineInfo.teamName, market: s.lineInfo.marketType, sport: s.lineInfo.sport },
+      };
+      return null;
     }
     const mmaFair = getMmaFairProb(s.lineInfo);
     if (mmaFair != null) { fairProbs[i] = mmaFair; continue; }
@@ -5724,7 +5744,7 @@ function shouldDecline(legs, parlayId) {
       if (!seriesWindow.isMlbSeriesLine(r.lineInfo)) continue;
       if (!mlbSeriesQuotable(r.lineInfo, nowMs)) {
         return { declined: true, reason: 'series closed',
-          detail: `MLB series market closed — a game of this series is in play or the DK series price has not refreshed since the last game ended: ${r.lineInfo.teamName || '?'}` };
+          detail: `MLB series market closed — a game of this series is in play or the series consensus has not refreshed since the last game ended: ${r.lineInfo.teamName || '?'}` };
       }
     }
     const normName = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s*\(series\)\s*/g, '').replace(/[^a-z0-9 ]/g, '').trim();

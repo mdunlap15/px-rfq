@@ -55,9 +55,22 @@ function seriesLine(team, home, away, startMs, extra = {}) {
   }, extra);
 }
 
+// The ORDER-BOOK consensus the pricer reads since 2026-10-04 (three books,
+// services/mlb-series-consensus.js). White Sox fair 0.43 at every book.
+const consensus = require('../services/mlb-series-consensus');
+function installConsensus(at = Date.now()) {
+  const books = {
+    'red sox|yankees': { yankees: -170, 'red sox': 140 },
+    'cubs|padres': { padres: -120, cubs: 100 },
+    'astros|white sox': { astros: -145, 'white sox': 125 },
+  };
+  for (const b of consensus.BOOKS) consensus.__setSourceForTest(b, JSON.parse(JSON.stringify(books)), at);
+}
+
 function reset() {
   seriesWindow.__resetForTest();
   installBoard();
+  installConsensus();
 }
 
 // ------------------------------------------------------------ DK matching
@@ -153,10 +166,14 @@ test('window: unknown start fails CLOSED; non-MLB series are untouched', () => {
 
 // ------------------------------------------------------- getSeriesFairProb
 
-test('pricer: an MLB series with no game in play prices off its own DK series even after DK round-level start', () => {
+test('pricer: an MLB series with no game in play prices off its own consensus series even after DK round-level start', () => {
   reset();
   const li = seriesLine('Chicago White Sox', 'Chicago White Sox', 'Houston Astros', Date.now() + 3 * H);
-  assert.strictEqual(pricer.getSeriesFairProb(li), 0.43);
+  const q = pricer.getSeriesFairProb(li);
+  // proportional de-vig of -145/+125: 0.4444 / (0.5918 + 0.4444)
+  assert.ok(Math.abs(q.fairProb - (100 / 225) / (145 / 245 + 100 / 225)) < 1e-6, String(q.fairProb));
+  // offered = the raw +125 the books post (0.4444), above fair: a direct book reference
+  assert.ok(Math.abs(q.bookPriceOverride - 100 / 225) < 1e-9, String(q.bookPriceOverride));
 });
 
 test('pricer: in-play / stale / switched-off / non-winner MLB series do not price', () => {
@@ -165,10 +182,10 @@ test('pricer: in-play / stale / switched-off / non-winner MLB series do not pric
   assert.strictEqual(pricer.getSeriesFairProb(live), null, 'a game is in play');
 
   seriesWindow.__resetForTest();
-  installBoard(Date.now() - 2 * H);
+  installConsensus(Date.now() - 11 * 60e3);
   const open = seriesLine('Chicago Cubs', 'San Diego Padres', 'Chicago Cubs', Date.now() + 3 * H);
   assert.strictEqual(seriesWindow.isClosed(open, { espnLookup: noEspn }), false, 'precondition: no game in play');
-  assert.strictEqual(pricer.getSeriesFairProb(open), null, 'DK board older than mlbSeriesMaxAgeMin');
+  assert.strictEqual(pricer.getSeriesFairProb(open), null, 'every source older than SERIES_SRC_MAX_AGE_S');
 
   reset();
   const prev = config.pricing.mlbSeriesEnabled;
@@ -278,7 +295,7 @@ test('line index: an in-progress same-matchup game in the index closes the serie
 
 test('pricer: an MLB series lookup is scoped to its matchup (fails closed off-board)', () => {
   reset();
-  // The White Sox ARE on DK's board, but not against the Red Sox.
+  // The White Sox ARE on the consensus board, but not against the Red Sox.
   const li = seriesLine('Chicago White Sox', 'Chicago White Sox', 'Boston Red Sox', Date.now() + 3 * H);
   assert.strictEqual(pricer.getSeriesFairProb(li), null);
 });
