@@ -7425,10 +7425,35 @@ function startStatusServer() {
   // Label a PX order's legs from the live line index when the tracker has no
   // record of the order (e.g. it filled before a restart whose Supabase
   // hydrate failed). A line no longer in the index still shows, by line_id.
+  // Supabase line_cache keeps every registered line's labels after it leaves
+  // the live index (event started / pruned). Memoized so the 10s dashboard
+  // poll costs at most ONE DB read per line id, fetched in the background —
+  // labels appear from the next refresh (2026-10-04: a parlay filled while the
+  // DB was overloaded lost its tracker record in the restart and showed
+  // "Line 3744fee9 … Unknown" once its games had kicked off).
+  const _lineLabelMemo = new Map();          // lineId -> info | null
+  const _lineLabelInflight = new Set();
+  function _lineLabel(lid) {
+    if (!lid) return null;
+    const live = lineManager.lookupLine(lid);
+    if (live) return live;
+    if (_lineLabelMemo.has(lid)) return _lineLabelMemo.get(lid);
+    if (!_lineLabelInflight.has(lid) && _lineLabelInflight.size < 50) {
+      _lineLabelInflight.add(lid);
+      Promise.resolve(db.loadLineCacheEntry(lid))
+        .then(info => _lineLabelMemo.set(lid, info || null))
+        .catch(() => {})
+        .finally(() => _lineLabelInflight.delete(lid));
+    }
+    return null;
+  }
+  // Label a PX order's legs when the tracker has no record of the order (e.g.
+  // it filled before a restart whose DB writes were lost): live line index,
+  // else the Supabase line_cache, else the bare line id.
   function _legsFromPxOrder(po) {
     return (po.legs || []).map(l => {
       const lid = l.line_id || l.strike_id;
-      const li = lid ? lineManager.lookupLine(lid) : null;
+      const li = _lineLabel(lid);
       return li ? {
         lineId: lid, team: li.playerName || li.teamName || '?', market: li.marketType,
         selection: li.selection, line: li.line != null ? li.line : (l.line ?? null),
