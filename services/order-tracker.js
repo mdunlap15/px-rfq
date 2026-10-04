@@ -7799,9 +7799,11 @@ async function reconcileGhostConfirmed(px) {
           // flag for investigation but don't auto-demote.
           log.info('GhostReconcile', `PX says ${order.parlayId.substring(0,8)} is '${pxStatus}' (settlement=${pxSettlement}) — flagging`);
           order.meta = order.meta || {};
-          order.meta.pxStatusMismatch = pxStatus;
-          order.meta.pxStatusMismatchAt = new Date().toISOString();
-          db.saveOrder(order).catch(() => {});
+          if (order.meta.pxStatusMismatch !== pxStatus) {   // persist on change only (2026-10-04)
+            order.meta.pxStatusMismatch = pxStatus;
+            order.meta.pxStatusMismatchAt = new Date().toISOString();
+            db.saveOrder(order).catch(() => {});
+          }
         }
         // pxStatus === 'finalized' WITHOUT settlement_status = still waiting
         // for outcome → leave as 'confirmed' in our tracker.
@@ -7816,23 +7818,30 @@ async function reconcileGhostConfirmed(px) {
         //       (inferredResult / settlement_status) — game is over,
         //       further uncertainty is about PX not us.
         const wasAlreadyPhantom = order.meta && order.meta.phantom;
-        order.meta = order.meta || {};
-        order.meta.phantom = true;
-        order.meta.phantomReason = ageMs >= PHANTOM_MIN_AGE_MS
+        const reason = ageMs >= PHANTOM_MIN_AGE_MS
           ? 'orderUuid-not-in-px'
           : anyLegHasKnownResult(order)
           ? 'orderUuid-not-in-px-leg-result-known'
           : 'orderUuid-not-in-px-legs-finished';
-        order.meta.phantomMarkedAt = new Date().toISOString();
         phantomIds.push(order.parlayId);
         ghostsFound++;
-        // Decrement the lifetime confirmations stat — this order was
-        // counted as confirmed on the way in but we now know it never
-        // really was. Matches what fullPxReconcile will do on next run.
-        if (!wasAlreadyPhantom && stats.totalConfirmations > 0) {
-          stats.totalConfirmations--;
+        // Only touch + persist on a CHANGE (2026-10-04). Re-stamping
+        // phantomMarkedAt on every pass made every already-phantom order a
+        // "new" row each cycle — thousands of guard reads + upserts per pass,
+        // ~47 Supabase req/s, enough to saturate the Small instance.
+        if (!(wasAlreadyPhantom && order.meta.phantomReason === reason)) {
+          order.meta = order.meta || {};
+          order.meta.phantom = true;
+          order.meta.phantomReason = reason;
+          order.meta.phantomMarkedAt = new Date().toISOString();
+          // Decrement the lifetime confirmations stat — this order was
+          // counted as confirmed on the way in but we now know it never
+          // really was. Matches what fullPxReconcile will do on next run.
+          if (!wasAlreadyPhantom && stats.totalConfirmations > 0) {
+            stats.totalConfirmations--;
+          }
+          db.saveOrder(order).catch(() => {});
         }
-        db.saveOrder(order).catch(() => {});
       }
       // else: absent from PX list but still within grace window — do
       // nothing. Don't flag, don't clear an existing flag.
@@ -7866,20 +7875,24 @@ async function reconcileGhostConfirmed(px) {
           || allLegsDoneOver(order, LEGS_DONE_CUTOFF_MS)
           || anyLegHasKnownResult(order)) {
         const wasAlreadyPhantom = order.meta && order.meta.phantom;
-        order.meta = order.meta || {};
-        order.meta.phantom = true;
-        if (!wasAlreadyPhantom && stats.totalConfirmations > 0) {
-          stats.totalConfirmations--;
-        }
-        order.meta.phantomReason = ageMs >= PHANTOM_MIN_AGE_MS
+        const reason = ageMs >= PHANTOM_MIN_AGE_MS
           ? 'no-uuid-and-no-px-match'
           : anyLegHasKnownResult(order)
           ? 'no-uuid-leg-result-known'
           : 'no-uuid-legs-finished';
-        order.meta.phantomMarkedAt = new Date().toISOString();
         phantomIds.push(order.parlayId);
         ghostsFound++;
-        db.saveOrder(order).catch(() => {});
+        // Only touch + persist on a CHANGE (see the uuid branch above).
+        if (!(wasAlreadyPhantom && order.meta.phantomReason === reason)) {
+          order.meta = order.meta || {};
+          order.meta.phantom = true;
+          if (!wasAlreadyPhantom && stats.totalConfirmations > 0) {
+            stats.totalConfirmations--;
+          }
+          order.meta.phantomReason = reason;
+          order.meta.phantomMarkedAt = new Date().toISOString();
+          db.saveOrder(order).catch(() => {});
+        }
       }
     }
   }
