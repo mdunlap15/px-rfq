@@ -231,6 +231,36 @@ async function startup() {
   } catch (err) {
     log.warn('Startup', `    ⚠ Golf paste board restore failed: ${err.message}`);
   }
+  // BOOT ORDER (2026-10-04): the vig + Runtime Tuning overrides hydrate BEFORE
+  // the boot seed. They used to load after it, so the first seed after every
+  // restart registered with ENV defaults — on 10/04 footballGameMainOnly's env
+  // default (on) stripped every NFL/CFB alt ladder until the next seed ~3 min
+  // later, although the operator's saved override was off.
+  // Restore persisted Config-tab vig overrides (POST /config/vig edits from
+  // before the restart). MUST run before websocket.connect so the first RFQs
+  // price with the operator's last live vig settings. Railway env stays
+  // authoritative: if any vig env var changed since the override was written,
+  // the override is discarded and env wins (see vig-config-store precedence).
+  try {
+    const vcs = require('./services/vig-config-store');
+    const r = await vcs.hydrate();
+    log.info('Startup', `    ✓ Vig-config overrides: ${r.applied ? 'applied (Config-tab settings restored)' : r.discarded ? 'discarded (Railway vig env changed — env wins)' : 'none'}`);
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Vig-config hydrate failed: ${err.message} — using env vig`);
+  }
+  // Restore persisted Runtime Tuning overrides (pricing / risk / gating knobs
+  // set from the dashboard). Same precedence rule as the vig store, but applied
+  // PER KEY: a Railway change reclaims only the var it actually touched instead
+  // of dropping every override. MUST run before websocket.connect so the first
+  // RFQs price with the operator's live settings.
+  try {
+    const rtc = require('./services/runtime-config');
+    const r = await rtc.hydrate();
+    log.info('Startup', `    ✓ Runtime Tuning: ${r.applied || 0} override(s) applied`
+      + (r.discarded && r.discarded.length ? `, ${r.discarded.length} discarded (Railway env changed: ${r.discarded.join(', ')})` : ''));
+  } catch (err) {
+    log.warn('Startup', `    ⚠ Runtime-config hydrate failed: ${err.message} — using env values`);
+  }
   // MLB series close latch (series-window.js) BEFORE the seed: a restart
   // between games of a series must not re-register a series whose Game 1
   // already started just because PX advanced the series event's start time.
@@ -343,31 +373,6 @@ async function startup() {
     }
   } catch (err) {
     log.warn('Startup', `    ⚠ Template-cap override hydrate failed: ${err.message}`);
-  }
-  // Restore persisted Config-tab vig overrides (POST /config/vig edits from
-  // before the restart). MUST run before websocket.connect so the first RFQs
-  // price with the operator's last live vig settings. Railway env stays
-  // authoritative: if any vig env var changed since the override was written,
-  // the override is discarded and env wins (see vig-config-store precedence).
-  try {
-    const vcs = require('./services/vig-config-store');
-    const r = await vcs.hydrate();
-    log.info('Startup', `    ✓ Vig-config overrides: ${r.applied ? 'applied (Config-tab settings restored)' : r.discarded ? 'discarded (Railway vig env changed — env wins)' : 'none'}`);
-  } catch (err) {
-    log.warn('Startup', `    ⚠ Vig-config hydrate failed: ${err.message} — using env vig`);
-  }
-  // Restore persisted Runtime Tuning overrides (pricing / risk / gating knobs
-  // set from the dashboard). Same precedence rule as the vig store, but applied
-  // PER KEY: a Railway change reclaims only the var it actually touched instead
-  // of dropping every override. MUST run before websocket.connect so the first
-  // RFQs price with the operator's live settings.
-  try {
-    const rtc = require('./services/runtime-config');
-    const r = await rtc.hydrate();
-    log.info('Startup', `    ✓ Runtime Tuning: ${r.applied || 0} override(s) applied`
-      + (r.discarded && r.discarded.length ? `, ${r.discarded.length} discarded (Railway env changed: ${r.discarded.join(', ')})` : ''));
-  } catch (err) {
-    log.warn('Startup', `    ⚠ Runtime-config hydrate failed: ${err.message} — using env values`);
   }
   // Hydrate the signature-cooldown lock map from Supabase, then start the
   // periodic DB-sync loop. MUST run before websocket.connect so the first
