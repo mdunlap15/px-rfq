@@ -543,3 +543,30 @@ test('the CONSECUTIVE rule trips on its own: 5 straight failures after a healthy
   for (let i = 0; i < 5; i++) await assert.rejects(() => b.fetch('http://db.test/rest/v1/x', {}));
   assert.equal(b.state, 'open', '5/25 is only 20% of the window — the consecutive rule must trip it');
 });
+
+// 2026-10-04: identical re-saves (reconcile loops re-saving the same confirmed
+// orders every cycle) must not hit the DB at all — not even the guard read.
+test('saveOrder skips a row identical to the last successful write; a change writes', async () => {
+  const { tr } = wire();
+  const order = { parlayId: 'p-same-1', status: 'confirmed', legs: [{ lineId: 'a' }], offeredOdds: 200,
+    fairParlayProb: 0.3, maxRisk: 100, confirmedOdds: -200, confirmedStake: 50, orderUuid: 'u1',
+    quotedAt: '2026-10-04T00:00:00Z', confirmedAt: '2026-10-04T00:00:05Z', meta: {} };
+  assert.strictEqual(await db.saveOrder(order), 'saved');
+  const callsAfterFirst = tr.calls.length;
+  assert.strictEqual(await db.saveOrder(order), 'unchanged');
+  assert.strictEqual(await db.saveOrder(order), 'unchanged');
+  assert.strictEqual(tr.calls.length, callsAfterFirst, 'no request (read or write) for an unchanged row');
+  order.pnl = 25; order.status = 'settled_won'; order.settledAt = '2026-10-04T05:00:00Z';
+  assert.strictEqual(await db.saveOrder(order), 'saved');
+  assert.ok(tr.writes('parlay_orders').length >= 2);
+  assert.ok(db.getSaveOrderStats().unchangedSkipped >= 2);
+});
+
+test('a failed write clears the memo so the retry writes', async () => {
+  const { tr } = wire();
+  const order = { parlayId: 'p-fail-1', status: 'confirmed', legs: [], offeredOdds: 150, meta: {}, orderUuid: 'u2' };
+  tr.mode = '400';
+  await db.saveOrder(order);
+  tr.mode = 'ok';
+  assert.strictEqual(await db.saveOrder(order), 'saved');
+});

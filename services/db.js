@@ -284,9 +284,34 @@ _wireBreaker(_breaker);
  * unfilled quote) | 'spooled' (DB unavailable — queued for replay) | 'error'
  * (permanent failure, logged) | 'disabled' (no DB / blocked by a guard).
  */
+// UNCHANGED-ROW SKIP (2026-10-04). 734K Supabase requests in 10.5h (~19/s,
+// 363K GET + 350K POST on parlay_orders) after the breaker deploy, against
+// only ~47K quotes: periodic reconcile loops (reconcileGhostConfirmed and
+// friends) re-save the same confirmed/settled orders every cycle, and each
+// such save does a guard READ and an upsert — saturating the Small instance
+// at NFL peak (a 1-row read hit the statement timeout). A row identical to
+// the last one we successfully wrote for that parlay is skipped before any
+// DB call. The memo is cleared on any failure so a retry always writes.
+const _lastSavedHash = new Map();            // parlayId -> sha1 of the last successfully written row
+const LAST_SAVED_MAX = 50000;
+const _saveStats = { unchangedSkipped: 0, written: 0 };
+const _saveCallers = new Map();              // sampled call site -> count
+function _noteCaller() {
+  if (Math.random() > 0.02) return;          // ~2% sample keeps stack capture cheap
+  const frame = String(new Error().stack || '').split('\n')[3] || '?';
+  const m = frame.match(/at (?:async )?(\S+) .*[\\/]([^\\/]+:\d+)/);
+  const k = m ? `${m[1]} ${m[2]}` : frame.trim().slice(0, 80);
+  _saveCallers.set(k, (_saveCallers.get(k) || 0) + 1);
+}
+function getSaveOrderStats() {
+  return Object.assign({}, _saveStats, { memo: _lastSavedHash.size,
+    topCallersSampled2pct: [..._saveCallers.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12) });
+}
+
 async function saveOrder(order, opts = {}) {
   const db = getClient();
   if (!db || !order || !order.parlayId) return 'disabled';
+  _noteCaller();
 
   // Unfilled quotes: deterministic sample only (see quotePersistSampleRate).
   let persistWeight = null;
@@ -339,6 +364,13 @@ async function saveOrder(order, opts = {}) {
       settled_at: order.settledAt,
       meta: metaWithExtras,
     };
+
+    let rowHash = null;
+    try { rowHash = crypto.createHash('sha1').update(JSON.stringify(row)).digest('base64'); } catch (_) { /* unhashable → always write */ }
+    if (rowHash && _lastSavedHash.get(order.parlayId) === rowHash) {
+      _saveStats.unchangedSkipped++;
+      return 'unchanged';
+    }
 
     // Guard: never let a reconstructed order overwrite a pxBackfill record.
     // The PX backfill is verified ground-truth data from the PX team's export.
@@ -411,6 +443,12 @@ async function saveOrder(order, opts = {}) {
       .upsert(row, { onConflict: 'parlay_id' });
     const { error } = upRes;
 
+    if (error) _lastSavedHash.delete(order.parlayId);
+    else if (rowHash) {
+      if (_lastSavedHash.size >= LAST_SAVED_MAX) _lastSavedHash.delete(_lastSavedHash.keys().next().value);
+      _lastSavedHash.set(order.parlayId, rowHash);
+      _saveStats.written++;
+    }
     if (error && isTransientResult(upRes)) {
       return spoolIt();
     } else if (error) {
@@ -2206,6 +2244,7 @@ function getHealth({ brief = false } = {}) {
     writes: {
       quotePersistSample: quotePersistSampleRate(),
       quotes: { ..._quoteStats },
+      saveOrder: getSaveOrderStats(),
       declines: getDeclineWriteStats(),
       sgpAudit: { buffered: _sgpBuf.size, ..._sgpStats },
       lineCache: { ..._lineCacheStats, fingerprints: _lineCacheFp.size },
@@ -2220,6 +2259,7 @@ function __setTestClient(client, breaker) {
   if (breaker) { _breaker = breaker; _wireBreaker(_breaker); }
 }
 function __resetForTest() {
+  _lastSavedHash.clear(); _saveStats.unchangedSkipped = 0; _saveStats.written = 0; _saveCallers.clear();
   _testClient = null;
   _spool.clear();
   _stopDrainTimer();
@@ -2280,6 +2320,7 @@ module.exports = {
   loadPropShadowQuotes,
   saveKV,
   loadKV,
+  getSaveOrderStats,
   saveClosingLine,
   saveLineCache,
   loadLineCacheEntry,
