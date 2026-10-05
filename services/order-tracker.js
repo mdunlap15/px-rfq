@@ -5939,6 +5939,32 @@ function getDriftState() {
   };
 }
 
+/**
+ * A PX order that is OUR fill: PX's SP-orders endpoint lists only orders where
+ * we were the SP, and one that finalized/settled with a confirmed stake is a
+ * fill we hold. (Rejected/failed rows — our offer, no fill — carry no stake.)
+ */
+function _isPxFill(po) {
+  if (!po) return false;
+  const st = String(po.status || '').toLowerCase();
+  return (st === 'finalized' || st === 'settled') && Number(po.confirmed_stake) > 0;
+}
+
+/**
+ * Should a PX order with no in-memory record be imported? Yes when Supabase has
+ * its row, and ALSO when the read CONFIRMED there is no row but PX shows it as
+ * our fill. Until 2026-10-04 the second case was skipped as "never quoted by
+ * us" — but every row in PX's SP-orders list is ours, and a fill whose save was
+ * lost (spooled while Supabase was overloaded, then dropped by a restart) was
+ * then invisible to P&L and exposure for good: 44 fills / -$2,510 on 10/2–10/4.
+ * An id whose read FAILED is not in `checked` and is never imported, so a DB
+ * outage cannot turn into skeleton rows saved over real ones.
+ */
+function _shouldImportPxOrder(pxOrder, pid, dbFallback, dbChecked) {
+  if (dbFallback[pid]) return true;
+  return !!(dbChecked && dbChecked.has(pid) && _isPxFill(pxOrder));
+}
+
 async function pollOrderSettlements(px) {
   const confirmed = Object.values(orders).filter(o => o.status === 'confirmed' && o.orderUuid);
   if (confirmed.length === 0) {
@@ -5955,6 +5981,8 @@ async function pollOrderSettlements(px) {
 
     // Pre-fetch orders from Supabase so reconstructed orders preserve pricing data
     const dbFallback = {};
+    let dbChecked = new Set();
+    const pollLineCache = {};
     try {
       const missingIds = [];
       for (const pxOrder of pxOrders) {
@@ -5964,9 +5992,19 @@ async function pollOrderSettlements(px) {
         if (!existing) missingIds.push(pid);
       }
       if (missingIds.length > 0) {
-        const dbRows = await db.loadOrdersByParlayIds(missingIds);
+        const { rows: dbRows, checked } = await db.loadOrdersByParlayIdsChecked(missingIds);
         Object.assign(dbFallback, dbRows);
+        dbChecked = checked;
         log.info('Poll', `Pre-fetched ${Object.keys(dbRows).length}/${missingIds.length} orders from Supabase for pricing preservation`);
+        // Labels for fills with NO row (their games may have left the live index).
+        const lids = new Set();
+        const lineManager = require('./line-manager');
+        for (const pxOrder of pxOrders) {
+          const pid = pxOrder.p_id || pxOrder.parlay_id;
+          if (!pid || dbFallback[pid] || !dbChecked.has(pid) || !_isPxFill(pxOrder)) continue;
+          for (const l of pxOrder.legs || []) if (l.line_id && !lineManager.lookupLine(l.line_id)) lids.add(l.line_id);
+        }
+        if (lids.size) Object.assign(pollLineCache, await db.loadLineCacheBulk([...lids]));
       }
     } catch (err) {
       log.warn('Poll', `Supabase pricing pre-fetch failed: ${err.message}`);
@@ -5995,22 +6033,23 @@ async function pollOrderSettlements(px) {
       // If still no match: reconstruct the order from PX data so P&L is captured.
       // This handles cases where we missed the confirmation WS event entirely
       // (e.g., service was down) but PX knows about the settled order.
-      // Only reconstruct if we have a Supabase record (i.e., we actually quoted
-      // it). Without this guard, every PX order we never quoted gets imported as
-      // a skeleton on each poll cycle, corrupting P&L.
+      // Import when Supabase has the row, or when the read CONFIRMED there is
+      // none but PX shows it as our fill (see _shouldImportPxOrder). A rejected
+      // /failed offer, or an id whose DB read failed, is skipped.
       if (!order && pxParlayId) {
         const dbOrder = dbFallback[pxParlayId];
-        if (!dbOrder) {
-          log.debug('Poll', `Skipping PX order ${pxParlayId} — no Supabase record (never quoted by us)`);
+        if (!_shouldImportPxOrder(pxOrder, pxParlayId, dbFallback, dbChecked)) {
+          log.debug('Poll', `Skipping PX order ${pxParlayId} — no Supabase record and not a confirmed fill (or DB unread)`);
           continue;
         }
         const settlementStatus = pxOrder.settlement_status;
-        if (settlementStatus && !['tbd','requested'].includes(settlementStatus)) {
-          log.info('Poll', `Reconstructing missing settled order ${pxParlayId} (uuid=${uuid})`);
+        if ((settlementStatus && !['tbd','requested'].includes(settlementStatus)) || (!dbOrder && _isPxFill(pxOrder))) {
+          if (!dbOrder) log.warn('Poll', `Importing PX fill ${pxParlayId} (uuid=${uuid}) with NO Supabase record — its save was lost; rebuilding from PX`);
+          else log.info('Poll', `Reconstructing missing settled order ${pxParlayId} (uuid=${uuid})`);
           // Enrich legs from lineManager where possible
           const lineManager = require('./line-manager');
           const enrichedLegs = (pxOrder.legs || []).map(l => {
-            const info = lineManager.lookupLine(l.line_id);
+            const info = lineManager.lookupLine(l.line_id) || pollLineCache[l.line_id] || null;
             const eventName = l.sport_event_id ? lineManager.getEventName(l.sport_event_id) : null;
             let team = info?.teamName || '?';
             // If we only have the event name, use that as team context for totals/spreads
@@ -6081,7 +6120,7 @@ async function pollOrderSettlements(px) {
             settlementResult: dbOrder?.settlementResult || null,
             meta: dbOrder?.meta && Object.keys(dbOrder.meta).length > 1
               ? { ...dbOrder.meta, legs: mergedLegs }
-              : { reconstructed: true, legs: mergedLegs },
+              : { reconstructed: true, ...(dbOrder ? {} : { noDbRecord: true }), legs: mergedLegs },
           };
           orders[pxParlayId] = order;
           ordersByUuid[uuid] = pxParlayId;
@@ -6953,6 +6992,7 @@ async function fullPxReconcile(px) {
   // that was saved at quote time but lost from memory on restart.
   // Without this, reconstructed orders overwrite Supabase rows with nulls.
   const dbFallback = {};
+  let dbChecked = new Set();
   try {
     const missingIds = [];
     for (const pxOrder of pxOrders) {
@@ -6962,8 +7002,9 @@ async function fullPxReconcile(px) {
       if (!existing) missingIds.push(pid);
     }
     if (missingIds.length > 0) {
-      const dbRows = await db.loadOrdersByParlayIds(missingIds);
+      const { rows: dbRows, checked } = await db.loadOrdersByParlayIdsChecked(missingIds);
       Object.assign(dbFallback, dbRows);
+      dbChecked = checked;
       log.info('Reconcile', `Pre-fetched ${Object.keys(dbRows).length}/${missingIds.length} orders from Supabase for pricing preservation`);
     }
   } catch (err) {
@@ -6988,10 +7029,11 @@ async function fullPxReconcile(px) {
       // with null odds/stake/fair that pollutes the dashboard and inflates
       // the active order count.
       const dbOrder = dbFallback[pxParlayId];
-      if (!dbOrder) {
-        log.debug('Reconcile', `Skipping PX order ${pxParlayId} — no Supabase record (never quoted by us)`);
+      if (!_shouldImportPxOrder(pxOrder, pxParlayId, dbFallback, dbChecked)) {
+        log.debug('Reconcile', `Skipping PX order ${pxParlayId} — no Supabase record and not a confirmed fill (or DB unread)`);
         continue;
       }
+      if (!dbOrder) log.warn('Reconcile', `Importing PX fill ${pxParlayId} (uuid=${uuid}) with NO Supabase record — its save was lost; rebuilding from PX`);
 
       // Reconstruct skeleton from PX data (mirrors pollOrderSettlements logic).
       // Uses lineManager (live index) first, then lineCacheFallback (Supabase)
@@ -7074,7 +7116,7 @@ async function fullPxReconcile(px) {
         settlementResult: dbOrder?.settlementResult || null,
         meta: dbOrder?.meta && Object.keys(dbOrder.meta).length > 1
           ? { ...dbOrder.meta, legs: mergedLegs }
-          : { reconstructed: true, legs: mergedLegs },
+          : { reconstructed: true, ...(dbOrder ? {} : { noDbRecord: true }), legs: mergedLegs },
       };
       orders[pxParlayId] = order;
       ordersByUuid[uuid] = pxParlayId;
@@ -8118,6 +8160,8 @@ async function cleanFalseConfirms(opts = {}) {
 }
 
 module.exports = {
+  _isPxFill,
+  _shouldImportPxOrder,
   recordQuote,
   updateOrderLatency,
   getRecentLatencyRecords,

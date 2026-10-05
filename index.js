@@ -12596,14 +12596,29 @@ function startStatusServer() {
 // GRACEFUL SHUTDOWN
 // ---------------------------------------------------------------------------
 
-function shutdown(signal) {
+// Railway sends SIGTERM on every deploy and SIGKILLs after
+// RAILWAY_DEPLOYMENT_DRAINING_SECONDS, so SHUTDOWN_FLUSH_MS must stay below it.
+// The WebSocket closes FIRST so no new fill lands mid-flush; then the DB retry
+// spool is drained (fills spooled while Supabase was unreachable used to die
+// here — 2026-10-04) and anything still held is logged as [SpoolLost].
+let _shuttingDown = false;
+async function shutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
   log.info('Shutdown', `Received ${signal} — shutting down...`);
+  const hardExit = setTimeout(() => process.exit(0), Number(process.env.SHUTDOWN_HARD_EXIT_MS) || 25000);
+  if (hardExit.unref) hardExit.unref();
 
   if (oddsRefreshTimer) clearInterval(oddsRefreshTimer);
   if (lineRefreshTimer) clearInterval(lineRefreshTimer);
   if (settlementPollTimer) clearInterval(settlementPollTimer);
-  websocket.disconnect();
+  try { websocket.disconnect(); } catch (_) { /* best-effort */ }
 
+  try {
+    await db.flushSpoolForShutdown(Number(process.env.SHUTDOWN_FLUSH_MS) || 20000);
+  } catch (err) {
+    log.error('Shutdown', `spool flush failed: ${err.message}`);
+  }
   log.info('Shutdown', 'Final stats:', orderTracker.getStats());
   process.exit(0);
 }

@@ -82,6 +82,14 @@ class DbCircuitBreaker {
     this.maxOpenMs = opts.maxOpenMs ?? _envNum('DB_BREAKER_MAX_OPEN_MS', 600_000);
     this.writeTimeoutMs = opts.writeTimeoutMs ?? _envNum('DB_TIMEOUT_MS', 8_000);
     this.readTimeoutMs = opts.readTimeoutMs ?? _envNum('DB_READ_TIMEOUT_MS', 12_000);
+    // SQL-aggregate RPCs (declines_rollup etc.) are analytics READS sent as POST.
+    // They got the 8s WRITE timeout and their timeouts counted as outages, so one
+    // slow dashboard rollup tripped the breaker for the whole trader (2026-10-04
+    // 02:15Z and 02:28Z: DB answering cheap reads in ~100ms, breaker open, fills
+    // spooling). Own, longer timeout; a timeout is NOT an outage signal — same
+    // treatment as a plain 500 statement timeout. Network errors and gateway 5xx
+    // on an RPC still count.
+    this.rpcTimeoutMs = opts.rpcTimeoutMs ?? _envNum('DB_RPC_TIMEOUT_MS', 30_000);
     this.now = opts.now || Date.now;
     this.fetchImpl = opts.fetchImpl || ((url, init) => fetch(url, init));
     this._listeners = [];
@@ -249,7 +257,9 @@ class DbCircuitBreaker {
     if (decision === 'probe') this.totals.probes++;
     this._count(method, url);
 
-    const timeoutMs = (method === 'GET' || method === 'HEAD') ? this.readTimeoutMs : this.writeTimeoutMs;
+    const isRpc = /\/rest\/v1\/rpc\//.test(String(url));
+    const timeoutMs = isRpc ? this.rpcTimeoutMs
+      : (method === 'GET' || method === 'HEAD') ? this.readTimeoutMs : this.writeTimeoutMs;
     const controller = new AbortController();
     const callerSignal = init && init.signal;
     let timedOut = false;
@@ -279,6 +289,12 @@ class DbCircuitBreaker {
       }
       return out;
     } catch (err) {
+      if (timedOut && isRpc) {
+        // A heavy aggregate ran long — says nothing about DB health.
+        this.totals.rpcTimeouts = (this.totals.rpcTimeouts || 0) + 1;
+        if (decision === 'probe') this.probeInFlight = false;
+        throw _named('DbTimeout', `Supabase RPC exceeded ${timeoutMs}ms (${_tableOf(url)}) — not counted as an outage`);
+      }
       if (timedOut) {
         this.totals.timeouts++;
         this._recordFailure(decision, `timeout after ${timeoutMs}ms (${method} ${_tableOf(url)})`);
@@ -320,7 +336,7 @@ class DbCircuitBreaker {
       config: {
         failThreshold: this.failThreshold, windowMs: this.windowMs,
         baseOpenMs: this.baseOpenMs, maxOpenMs: this.maxOpenMs,
-        writeTimeoutMs: this.writeTimeoutMs, readTimeoutMs: this.readTimeoutMs,
+        writeTimeoutMs: this.writeTimeoutMs, readTimeoutMs: this.readTimeoutMs, rpcTimeoutMs: this.rpcTimeoutMs,
       },
     };
   }

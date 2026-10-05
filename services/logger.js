@@ -68,8 +68,13 @@ function flushNow() {
 // final messages (e.g. crash stack traces). SIGKILL still loses messages
 // — nothing we can do about that.
 process.on('beforeExit', flushNow);
-process.on('SIGTERM', () => { flushNow(); process.exit(0); });
-process.on('SIGINT',  () => { flushNow(); process.exit(0); });
+process.on('exit', flushNow);
+// Flush on a signal, but exit ONLY when nothing else is handling it. The
+// trader's own SIGTERM handler (index.js shutdown) is async — it flushes the
+// DB retry spool before exiting — and an unconditional exit here killed the
+// process first, so every deploy dropped spooled fills (2026-10-04).
+process.on('SIGTERM', () => { flushNow(); if (process.listenerCount('SIGTERM') <= 1) process.exit(0); });
+process.on('SIGINT',  () => { flushNow(); if (process.listenerCount('SIGINT') <= 1) process.exit(0); });
 
 function log(level, category, message, data) {
   if (LEVELS[level] < currentLevel) return;

@@ -229,6 +229,59 @@ async function _drainOnce(maxRows) {
   return n;
 }
 
+/**
+ * Flush the retry spool before the process exits (SIGTERM on every deploy).
+ *
+ * The spool is in-memory, so a deploy while it held rows LOST them: on
+ * 2026-10-04 the 1:09pm push dropped the fills confirmed 12:45-1:07pm (the
+ * write flood had the breaker open), and with no parlay_orders row those fills
+ * were invisible to P&L and exposure. Drains critical-first as fast as the DB
+ * answers until empty or the deadline. Whatever critical rows are still held
+ * (DB down) are written to the LOG as one `[SpoolLost]` line each — Railway
+ * keeps the logs of a removed deployment, so the order is recoverable
+ * (scripts/_restore_lost_orders.js) instead of gone.
+ */
+async function flushSpoolForShutdown(deadlineMs = 20000) {
+  const t0 = Date.now();
+  const before = _spoolCounts();
+  let drained = 0;
+  _stopDrainTimer();
+  while (_spool.size > 0 && Date.now() - t0 < deadlineMs) {
+    if (!_breaker.canAttempt()) break;
+    if (_draining) { await new Promise(r => setTimeout(r, 50)); continue; }
+    const n = await _drainOnce(50);
+    drained += n;
+    if (n === 0) {
+      if (!_breaker.canAttempt()) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+  const lost = [];
+  for (const e of _spool.values()) {
+    if (!e.critical) continue;
+    lost.push(e);
+    try {
+      const p = e.payload || {};
+      const rec = e.kind === 'order' ? {
+        kind: 'order', parlayId: p.parlayId, status: p.status, orderUuid: p.orderUuid || null,
+        offeredOdds: p.offeredOdds ?? null, fairParlayProb: p.fairParlayProb ?? null,
+        vig: (p.meta && p.meta.vig) ?? p.vig ?? null, maxRisk: p.maxRisk ?? null,
+        confirmedOdds: p.confirmedOdds ?? null, confirmedStake: p.confirmedStake ?? null,
+        quotedAt: p.quotedAt || null, confirmedAt: p.confirmedAt || null, pnl: p.pnl ?? null,
+        legs: (p.legs || (p.meta && p.meta.legs) || []).map(l => ({
+          lineId: l.lineId, team: l.team, market: l.market, line: l.line, selection: l.selection,
+          fairProb: l.fairProb, pinnacleOdds: l.pinnacleOdds, fanduelOdds: l.fanduelOdds,
+          draftkingsOdds: l.draftkingsOdds, legVig: l.legVig, legOfferedProb: l.legOfferedProb,
+        })),
+      } : { kind: e.kind, key: e.key, payload: p };
+      log.error('SpoolLost', JSON.stringify(rec));
+    } catch (_) { log.error('SpoolLost', `${e.kind} ${e.key} (unserializable)`); }
+  }
+  const res = { before, drained, remaining: _spoolCounts(), lostCritical: lost.length, ms: Date.now() - t0 };
+  (lost.length ? log.error : log.info)('DB', `Shutdown spool flush: drained ${drained}, ${res.remaining.total} left (${lost.length} critical logged as [SpoolLost]) in ${res.ms}ms`);
+  return res;
+}
+
 // --- quote persistence sampling ----------------------------------------------
 // Unfilled quotes were ~half of every parlay_orders write (recordQuote +
 // updateOrderLatency = 2 upserts per quote) and almost nothing reads them
@@ -677,8 +730,21 @@ async function loadRecentQuotedOrders(hours = 48, cap = 5000) {
  * etc.) that would otherwise be lost when reconstructing from PX REST.
  */
 async function loadOrdersByParlayIds(parlayIds) {
+  return (await loadOrdersByParlayIdsChecked(parlayIds)).rows;
+}
+
+/**
+ * Same read, but also returns `checked`: the parlay ids whose chunk was READ
+ * successfully. An id in `checked` with no row is a CONFIRMED absence; an id
+ * outside it is unknown (DB unreachable / query failed). Callers that act on
+ * "no row" (importing a PX fill the tracker never persisted) must use this —
+ * a failed read must never look like an absent row, or a skeleton would be
+ * saved over the real one.
+ */
+async function loadOrdersByParlayIdsChecked(parlayIds) {
   const client = getClient();
-  if (!client || !parlayIds || parlayIds.length === 0) return {};
+  const checked = new Set();
+  if (!client || !parlayIds || parlayIds.length === 0) return { rows: {}, checked };
 
   const result = {};
   // Supabase IN filter has practical limits; chunk to 500
@@ -694,6 +760,7 @@ async function loadOrdersByParlayIds(parlayIds) {
         log.warn('DB', `loadOrdersByParlayIds chunk failed: ${error.message}`);
         continue;
       }
+      for (const id of chunk) checked.add(id);
       for (const row of (data || [])) {
         result[row.parlay_id] = {
           parlayId: row.parlay_id,
@@ -718,7 +785,7 @@ async function loadOrdersByParlayIds(parlayIds) {
   } catch (err) {
     log.warn('DB', `loadOrdersByParlayIds error: ${err.message}`);
   }
-  return result;
+  return { rows: result, checked };
 }
 
 // ---------------------------------------------------------------------------
@@ -2276,6 +2343,8 @@ function __setDrainTimerEnabled(on) { _drainTimerEnabled = !!on; if (!on) _stopD
 function __spoolEntries() { return [..._spool.values()].map(e => ({ key: e.key, kind: e.kind, critical: e.critical })); }
 
 module.exports = {
+  flushSpoolForShutdown,
+  loadOrdersByParlayIdsChecked,
   isAvailable,
   getBreaker,
   getHealth,
