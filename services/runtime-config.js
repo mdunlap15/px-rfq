@@ -167,6 +167,8 @@ const REGISTRY = [
   // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'cfbWidenPercent', path: 'cfbWidenPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'CFB_WIDEN_PERCENT', label: 'CFB SGP / 4+ leg widen A/B % (0 = dark)' },
+  { key: 'cfbWidenRelPct', path: 'cfbWidenRelPct', type: 'number', min: 0.1, max: 10, group: 'pricing', env: 'CFB_WIDEN_REL_PCT', label: 'CFB widen arm: relative price add, %' },
   { key: 'hrPairTrimPercent', path: 'hrPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'HR_PAIR_TRIM_PERCENT', label: 'MLB HR-pair trim A/B % (0 = dark)' },
   // Parlay consensus floors (2026-10-03): runtime so the CFB competitiveness
   // lever moves without a restart. Units are percentage POINTS (same as the

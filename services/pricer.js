@@ -3521,6 +3521,54 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // CFB MARGIN-WIDEN A/B (2026-10-05) — see config.pricing.cfbWidenPercent.
+  //
+  // The opposite direction to the trims above: the widen arm makes the quote
+  // LESS generous. Scope = every leg CFB AND (same-game OR 4+ legs); those are
+  // the only football buckets where the 10/5 deep-dive found adding margin
+  // could pay (CFB same-game EV rises with price; CFB 4+ legs is the thinnest
+  // margin with ~0% realized). The core NFL/CFB cross-game book is at the field
+  // and is deliberately NOT in scope.
+  //
+  // Applied AFTER every consensus floor / Pin-match / trim, so nothing below
+  // can undo it, and BEFORE the theo-edge gate, which can only see a larger
+  // edge. Per-leg confirm probs are distributed from the final price
+  // (distributeLegProbs), so PX's Rule-2 reconciliation still holds. The arm
+  // is a pure function of parlayId, so the confirm reprice lands in the same
+  // arm; the 5% drift check keys on fairParlayProb, which is untouched.
+  // -------------------------------------------------------------------
+  const _cfbWiden = { arm: null, scope: null, applied: false, preProb: null, relPct: null };
+  {
+    const _allCfb = pricedLegs.length >= 2
+      && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'americanfootball_ncaaf');
+    const _scope = !_allCfb ? null
+      : isSGPParlay ? 'sgp'
+      : pricedLegs.length >= 4 ? 'legs4plus'
+      : null;
+    const _pct = config.pricing.cfbWidenPercent || 0;
+    if (_scope && opts.parlayId && _pct > 0) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('cfbw:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _cfbWiden.arm = inArm ? 'widen' : 'control';
+      _cfbWiden.scope = _scope;
+      if (inArm && offeredImpliedProb > 0 && offeredImpliedProb < 0.99) {
+        const rel = config.pricing.cfbWidenRelPct || 2;
+        const widened = Math.min(0.99, offeredImpliedProb * (1 + rel / 100));
+        if (widened > offeredImpliedProb) {
+          _cfbWiden.preProb = offeredImpliedProb;
+          _cfbWiden.applied = true;
+          _cfbWiden.relPct = rel;
+          log.debug('Pricing', `CFB widen[${_scope}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(widened * 100).toFixed(3)}% (+${rel}% rel, fair ${(fairParlayProb * 100).toFixed(3)}%)`);
+          offeredImpliedProb = widened;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
   //
   // After all pricing adjustments, edge = (offered − fair) / fair × 100.
@@ -4114,6 +4162,15 @@ function priceParlay(legs, opts = {}) {
       mlTrimApplied: _mlTrim.applied,
       mlTrimPreProb: _mlTrim.preProb != null ? Math.round(_mlTrim.preProb * 100000) / 100000 : null,
       mlTrimFraction: _mlTrim.fraction,
+      // CFB margin-widen A/B: arm null = out of scope or dark; 'control' /
+      // 'widen' in scope (scope 'sgp' | 'legs4plus'). cfbWidenPreProb is the
+      // un-widened offered prob, so the control-price counterfactual is
+      // recoverable from every widen-arm row.
+      cfbWidenArm: _cfbWiden.arm,
+      cfbWidenScope: _cfbWiden.scope,
+      cfbWidenApplied: _cfbWiden.applied,
+      cfbWidenPreProb: _cfbWiden.preProb != null ? Math.round(_cfbWiden.preProb * 100000) / 100000 : null,
+      cfbWidenRelPct: _cfbWiden.relPct,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.

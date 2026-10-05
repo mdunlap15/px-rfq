@@ -977,6 +977,26 @@ const config = {
       if (!Number.isFinite(v) || v < 0) return 4;
       return v;
     })(),
+    // CFB MARGIN-WIDEN A/B (2026-10-05). The football deep-dive found the core
+    // NFL/CFB cross-game book priced at the field (consensus floor, frequent
+    // exact ties, losses 7-8% relative behind) — widening there loses more than
+    // it earns. Two CFB buckets are the exception: same-game parlays (modelled
+    // EV RISES with price) and 4+ leg parlays (thinnest margin, realized ~0%,
+    // EV ~flat to price). Scope: EVERY leg americanfootball_ncaaf AND
+    // (same-game OR >= 4 legs). Arm = md5('cfbw:'+parlayId) mod 100 < percent;
+    // meta.cfbWidenArm records 'widen'/'control' whether or not it fires.
+    // Widen arm: offered implied prob x (1 + relPct/100) — LESS generous to the
+    // bettor, applied after every floor. Ships DARK (percent 0).
+    cfbWidenPercent: (() => {
+      const v = parseInt(process.env.CFB_WIDEN_PERCENT);
+      if (!Number.isFinite(v) || v < 0) return 0;
+      return Math.min(v, 100);
+    })(),
+    cfbWidenRelPct: (() => {
+      const v = parseFloat(process.env.CFB_WIDEN_REL_PCT);
+      if (!Number.isFinite(v) || v <= 0) return 2;
+      return Math.min(v, 10);             // never more than +10% relative
+    })(),
     // Safety net: decline any total leg where our de-vigged fair diverges
     // from the simple book consensus (mean of Pin/DK/FD implied probs) by
     // more than the threshold. Backstop for the getBookPairsForTotals fix
