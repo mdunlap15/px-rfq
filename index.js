@@ -4650,7 +4650,10 @@ function startStatusServer() {
     try {
       const id = String(req.query.event_id || '').replace(/[^0-9]/g, '');
       if (!id) return res.status(400).json({ error: 'event_id required' });
-      res.json(await px.pxFetch(`/partner/mm/get_markets?event_id=${id}`));
+      // ?v=2 reads PX's v2 feed, which carries each market's sub_type (the key the
+      // order-book posters map markets by); v1 does not.
+      const v2 = String(req.query.v || '') === '2';
+      res.json(await px.pxFetch(`/partner${v2 ? '/v2' : ''}/mm/get_markets?event_id=${id}`));
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
   });
   // Full open/standing wagers over a date window via the v2 cursor feed, paginated
