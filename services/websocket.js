@@ -30,6 +30,13 @@ function extractPlayerNameFromPropMarket(marketName) {
     /\s+(double|triple)\s*[-]?\s*double$/i,
     // ---- MLB ----
     /\s+(total\s+)?pitching\s+strike\s*outs?$/i,
+    // Pitcher counting props (2026-10-06, the order book's mlb_props_cycle
+    // set): must strip BEFORE the hitter hits/runs/walks patterns, which would
+    // otherwise shave only "Allowed"-less tails and leave a mangled name.
+    /\s+(total\s+)?outs\s+recorded$/i,
+    /\s+(total\s+)?hits\s+allowed$/i,
+    /\s+(total\s+)?earned\s+runs?\s+allowed$/i,
+    /\s+(total\s+)?walks\s+(allowed|issued)$/i,
     /\s+(total\s+)?batting\s+strike\s*outs?$/i,
     /\s+(total\s+)?strike\s*outs?\s+(thrown|recorded)$/i,
     /\s+(total\s+)?strike\s*outs?$/i,
@@ -85,6 +92,11 @@ function extractPlayerNameFromPropMarket(marketName) {
     // "Total Passing & Rushing Yards" must strip BEFORE the single-stat yards
     // pattern, which would otherwise shave only "Rushing Yards".
     /\s+(total\s+)?passing\s*(?:&|\+|and)\s*rushing\s+yards?$/i,
+    /\s+(total\s+)?rushing\s*(?:&|\+|and)\s*receiving\s+yards?$/i,
+    // NFL defensive props (2026-10-06, the order book's nfl_game_cycle set).
+    /\s+(total\s+)?tackles\s*(?:&|\+|and)\s*assists?$/i,
+    /\s+(total\s+)?(solo\s+)?tackles?$/i,
+    /\s+(total\s+)?sacks?$/i,
     /\s+(total\s+)?(passing|rushing|receiving)\s+yards?$/i,
     /\s+(total\s+)?(passing|rushing)\s+attempts?$/i,
     /\s+(total\s+)?longest\s+pass(?:\s+completion)?$/i,
@@ -192,7 +204,18 @@ function classifyFootballProp(marketName) {
   // phrase at the END; the subject may not itself carry or/and/&/+/,/slash.
   const _prm = /^(.+?)\s+(?:total\s+)?passing\s*(?:&|\+|and)\s*rushing\s+yards?$/.exec(n);
   if (_prm && !/\b(?:or|and)\b|[&/+,]/.test(_prm[1])) return 'pass_rush_yards';
+  // Same shape for "<Player> Total Rushing & Receiving Yards" (TOA
+  // player_rush_reception_yds) and "<Player> Total Tackles & Assists" (TOA
+  // player_tackles_assists, in the order book's nfl_game_cycle PROPKEY).
+  const _rrm = /^(.+?)\s+(?:total\s+)?rushing\s*(?:&|\+|and)\s*receiving\s+yards?$/.exec(n);
+  if (_rrm && !/\b(?:or|and)\b|[&/+,]/.test(_rrm[1])) return 'rush_rec_yards';
+  const _tam = /^(.+?)\s+(?:total\s+)?tackles\s*(?:&|\+|and)\s*assists?$/.exec(n);
+  if (_tam && !/\b(?:or|and)\b|[&/+,]/.test(_tam[1])) return 'tackles_assists';
   if (/\b(?:or|and)\b|[&/+,]/.test(n)) return null;
+  // PX "Total Tackles" = SOLO tackles (it lists "Tackles & Assists" and
+  // "Assists" separately) — the order book's mapping, measured on SNF 10/4.
+  if (/\b(?:solo\s+)?tackles?$/.test(n)) return 'solo_tackles';
+  if (/\bsacks?$/.test(n)) return 'sacks';
   if (/\bto\s+score\s+a\s+touchdown\s*\??$/.test(n)) return 'anytime_td';
   // Last TD (PX sub_type player_to_score_last_touchdown, live 2026-09-16 —
   // "Khalil Shakir To Score Last Touchdown"): a closed field like first TD.
@@ -275,7 +298,13 @@ function classifyMlbProp(marketName) {
   }
   // Pitcher non-K props. Earned runs, innings pitched, outs recorded
   // are pitcher-only by definition.
-  if (/innings\s+pitch|outs\s+recorded|earned\s+run|hits\s+allow|walks\s+(allow|issued)|pitcher.*(win|loss|decision|to\s+(get|record))|\bera\b|\bwhip\b/.test(n)) {
+  // The four the order book prices (mlb_props_cycle PROPK, 2026-10-06), each a
+  // two-sided TOA market: outs recorded, hits allowed, earned runs, walks.
+  if (/outs\s+recorded/.test(n)) return 'pitcher_outs';
+  if (/hits\s+allow/.test(n)) return 'pitcher_hits_allowed';
+  if (/earned\s+runs?\s+allow|earned\s+runs?$/.test(n)) return 'pitcher_earned_runs';
+  if (/walks\s+(allow|issued)/.test(n)) return 'pitcher_walks';
+  if (/innings\s+pitch|earned\s+run|pitcher.*(win|loss|decision|to\s+(get|record))|\bera\b|\bwhip\b/.test(n)) {
     return 'pitcher_other';
   }
   // Hitter combo props (multi-stat), e.g. "Hits + Runs + RBIs" /

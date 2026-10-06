@@ -4899,6 +4899,25 @@ function shouldDecline(legs, parlayId) {
     // Runs on RAW {line_id} legs via the resolution above — production sends
     // unresolved legs, which is exactly how the golf nesting guard silently
     // never fired for weeks.
+    // ---- PITCHER COUNTING PROPS: never same-game (2026-10-06) -------------
+    // Outs recorded / hits allowed / earned runs / walks are coupled to every
+    // other leg on the game (the opposing hitters' props, the total, the side),
+    // mostly NEGATIVELY for hitter props — the opposite of what the
+    // prop_prop_xteam multiplier assumes. Explicit pre-pass, like MoV, so no
+    // SGP_ALLOWED_COMBOS key can re-open it. Cross-game pitcher props quote.
+    const PITCHER_COUNT_TYPES = new Set(['player_pitcher_outs', 'player_pitcher_hits_allowed', 'player_pitcher_earned_runs', 'player_pitcher_walks']);
+    const pitcherLegs = legInfos.filter(li => PITCHER_COUNT_TYPES.has(li.marketType));
+    for (const a of pitcherLegs) {
+      for (const b of legInfos) {
+        if (a === b || !a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+        return {
+          declined: true,
+          reason: 'pitcher_prop_same_game',
+          detail: `pitcher prop ${a.playerName || a.teamName} ${a.marketType} cannot be parlayed with another leg on the same game (${b.playerName || b.teamName || '?'} ${b.marketType})`,
+        };
+      }
+    }
+
     const movLegs = legInfos.filter(li => MOV_MARKET_TYPES.has(li.marketType));
     if (movLegs.length) {
       for (const a of movLegs) {

@@ -262,6 +262,12 @@ test('football prop → TOA map: the two-sided markets plus the one-sided anytim
     rush_attempts: 'player_rush_attempts',
     longest_pass: 'player_pass_longest_completion',
     last_td: 'player_last_td',
+    // 2026-10-06: the order book's defensive families + rushing & receiving
+    // yards (test/px-market-additions.test.js).
+    solo_tackles: 'player_solo_tackles',
+    tackles_assists: 'player_tackles_assists',
+    sacks: 'player_sacks',
+    rush_rec_yards: 'player_rush_reception_yds',
   });
   // ⚠ The TD markets are ONE-SIDED at every book (anytime 8 books / 0 two-sided,
   // first_td 6 / 0), so they cannot be 2-way de-vigged and keep the lineless

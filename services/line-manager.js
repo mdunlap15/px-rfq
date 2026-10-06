@@ -62,6 +62,13 @@ const _MLB_PROP_TO_TOA_MARKET = {
   hitter_rbi_runs: 'batter_rbis',
   hitter_stolen_bases: 'batter_stolen_bases',
   hitter_hits_runs_rbis: 'batter_hits_runs_rbis',
+  // Pitcher counting props (2026-10-06) — the order book's mlb_props_cycle keys.
+  // Probed live 10/6 (Braves @ Dodgers): pitcher_outs 8 books / 7 two-sided,
+  // pitcher_hits_allowed 5 / 5. Exact-line two-sided de-vig, like the hitters.
+  pitcher_outs: 'pitcher_outs',
+  pitcher_hits_allowed: 'pitcher_hits_allowed',
+  pitcher_earned_runs: 'pitcher_earned_runs',
+  pitcher_walks: 'pitcher_walks',
 };
 // Map a propType to the internal lineIndex marketType. Almost everything uses
 // the 'player_<propType>' convention, but K-props MUST register as
@@ -161,6 +168,14 @@ const _FOOTBALL_PROP_TO_TOA_MARKET = {
   rush_attempts: 'player_rush_attempts',
   longest_pass: 'player_pass_longest_completion',
   last_td: 'player_last_td',
+  // 2026-10-06: the order book's defensive families (nfl_game_cycle PROPKEY,
+  // Mike 2026-10-04 "add tackles, sacks and assists") + rushing & receiving
+  // yards (PX top-25 list; TOA 4 books two-sided on DAL @ TB 10/6 — NOT yet in
+  // the order book's map, so it stays off PROP_LAUNCH_ALLOWLIST until it is).
+  solo_tackles: 'player_solo_tackles',
+  tackles_assists: 'player_tackles_assists',
+  sacks: 'player_sacks',
+  rush_rec_yards: 'player_rush_reception_yds',
 };
 // The one-sided (YES-only, lineless) football TD-scorer families.
 const _FOOTBALL_TD_PROPS = new Set(['anytime_td', 'first_td', 'last_td']);
@@ -171,6 +186,7 @@ const _FOOTBALL_PROP_TWO_SIDED = new Set([
   'passing_yards', 'passing_tds', 'rushing_yards', 'receiving_yards', 'receptions',
   'interception_thrown', 'field_goals_made', 'pass_completions', 'longest_reception',
   'pass_rush_yards', 'pass_attempts', 'rush_attempts', 'longest_pass',
+  'solo_tackles', 'tackles_assists', 'sacks', 'rush_rec_yards',
 ]);
 // Line semantics for lineless football YES/NO props (parallel to the
 // {line, toaLine} object _classifySoccerProp returns). Null for any
@@ -1459,6 +1475,17 @@ const BTTS_MARKET_RE = /^both\s+teams\s+to\s+score\b/i;
 // the full-match board.
 const SOCCER_WIN_3WAY_RE = /\bto\s+win\s*\(\s*90\s*min\s*\)\s*$/i;
 const SOCCER_DRAW_3WAY_RE = /^draw\s*\(\s*90\s*min\s*\)\s*$/i;
+// A PX 3-way YES/NO sub-market we cannot price: anything "To Win (… Min)" /
+// "Draw (… Min)" EXCEPT the soccer full-match "(90 Min)" pair, which prices off
+// the true 3-way board (h2h_3way).
+function _skipUnsupported3Way(sportKey, market) {
+  if (!market || market.type !== 'moneyline') return false;
+  const name = String(market.name || '');
+  if (!/\bto win\b.*\(.*min.*\)|^draw\s*\(.*min.*\)/i.test(name)) return false;
+  const soccer = /soccer|fifa/i.test(sportKey || '');
+  if (soccer && (SOCCER_WIN_3WAY_RE.test(name) || SOCCER_DRAW_3WAY_RE.test(name))) return false;
+  return true;
+}
 const BTTS_PERIOD_RE = /\b(1st|2nd|first|second)\s*(half|period)\b|\bhalf\b|\bperiod\b/i;
 
 /**
@@ -2489,7 +2516,11 @@ async function seedAllLines(gen) {
       // currently support quoting these — skip them entirely so they don't leak
       // into the moneyline path where they'd be mispriced as 2-way team bets.
       // The regular 2-way market is "Moneyline (2 Way)" with team selections.
-      if (market.type === 'moneyline' && /\bto win\b.*\(.*min.*\)|^draw\s*\(.*min.*\)/i.test(market.name || '')) {
+      // 2026-10-06: soccer "(90 Min)" 3-way markets are SUPPORTED (3fdb256,
+      // 2026-08-22 wired registration + pricing) but this older skip still ran
+      // first, so not one 3-way line ever registered. Only the unsupported
+      // variants (NHL "(60 Min)" regulation, period-qualified) are skipped now.
+      if (_skipUnsupported3Way(sportKey, market)) {
         log.debug('Lines', `Skipping PX 3-way sub-market at seed: ${market.name}`);
         continue;
       }
@@ -5718,6 +5749,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 }
 
 module.exports = {
+  _skipUnsupported3Way,
   _nhlExcludedMarket,
   getSeedRunState,
   getPairGames,
