@@ -3,6 +3,7 @@ const log = require('./logger');
 const { legLineId } = require('./leg-id');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
+const obRelay = require('./ob-relay');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
 const seriesWindow = require('./series-window');
@@ -913,6 +914,22 @@ function exposureTeamLabel(li) {
 //   const result = (r && typeof r.then === 'function') ? await r : r;
 // On RFQs that DO need async work (alt-line cache miss or Pinnacle
 // verify), priceParlay returns a Promise that resolves to the result.
+function calibKeyFor(lineInfo) {
+  if (!lineInfo || !lineInfo.marketType || !lineInfo.oddsApiSelection) return null;
+  return `${lineInfo.marketType}.${String(lineInfo.oddsApiSelection).toLowerCase()}`;
+}
+
+function _legInputAgeSec(lineInfo) {
+  try {
+    if (!lineInfo) return null;
+    if (/^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt) {
+      return Math.max(0, Math.round((Date.now() - lineInfo.propFetchedAt) / 1000));
+    }
+    const m = oddsFeed.getCacheAge(lineInfo.oddsApiSport || lineInfo.sport);
+    return Number.isFinite(m) ? Math.max(0, Math.round(m * 60)) : null;
+  } catch (_) { return null; }
+}
+
 function priceParlay(legs, opts = {}) {
   priceParlay._lastFailure = null; // clear any prior failure
   // Latency diagnostic — captures function entry to surface in _timings.
@@ -1831,6 +1848,30 @@ function priceParlay(legs, opts = {}) {
       }
     }
 
+    // ORDER-BOOK FAIR RELAY (2026-10-06) — see services/ob-relay.js. A leg on a
+    // PX line the order book priced in the last obRelayMaxAgeSec takes the order
+    // book's fair (its exact-point, Pinnacle-primary / sharp-composite, more-
+    // adverse-wins number), or 1 − the other side's. Skipped for book-mirror legs
+    // (the price there IS the book) and for legs carrying a measured RFQ fair
+    // calibration (HR over / K under): that multiplier was fit to OUR de-vig and
+    // stacking it on the order book's would move the price toward the bettor.
+    let fairSource = 'rfq';
+    let relayHit = null;
+    // Golf is excluded: matchups can TIE, so 1 − the other side is not this side's
+    // probability, and the relay carries no tie convention.
+    if (effectiveBookPriceOverride == null && fairProb != null && fairProb > 0 && fairProb < 1
+        && !String(lineInfo.sport || '').startsWith('golf')) {
+      const _ck = calibKeyFor(lineInfo);
+      const _cm = _ck && config.pricing.propFairCalibration ? config.pricing.propFairCalibration[_ck] : null;
+      if (!(_cm != null && _cm !== 1)) {
+        relayHit = obRelay.resolve(lineId, fairProb);
+        if (relayHit) {
+          fairSource = relayHit.adverseOverride ? 'rfq_adverse_over_ob' : ('ob_' + relayHit.via);
+          fairProb = relayHit.used;
+        }
+      }
+    }
+
     // Per-prop-type-per-side fair CALIBRATION. De-vig inherits the books'
     // favourite-longshot shading, so some prop legs are systematically
     // mispriced (HR-over: our fair 21.2% vs realised 16.3%, z=-3.62 on 930
@@ -1856,6 +1897,8 @@ function priceParlay(legs, opts = {}) {
       lineId,
       lineInfo,
       fairProb,
+      fairSource,
+      relayHit: relayHit ? { fair: relayHit.fair, own: relayHit.own, ageSec: relayHit.ageSec, via: relayHit.via, source: relayHit.source } : null,
       bookPriceOverride: effectiveBookPriceOverride,
       manualOddsApplied,
       vigBump: legVigBumps[legIdx] || 0,
@@ -4061,6 +4104,15 @@ function priceParlay(legs, opts = {}) {
           // RULE 2 reconciling per-leg prob: Π(legConfirmProb) === parlay implied prob.
           // Sent to PX in the confirmation so per-leg probs multiply to the parlay odds.
           legConfirmProb: l._legConfirmProb != null ? Math.round(l._legConfirmProb * 1000000) / 1000000 : null,
+          // Age of the odds this leg was priced from, at QUOTE time (fill-drift
+          // measurement, 2026-10-06): the prop's own fetch time for player
+          // props, else the sport cache age. null when the source keeps no age
+          // (golf / series boards).
+          inputAgeSec: l.relayHit ? l.relayHit.ageSec : _legInputAgeSec(l.lineInfo),
+          // 'rfq' = our own fair; 'ob_direct' / 'ob_complement' = the order
+          // book's (relay); 'rfq_adverse_over_ob' = ours, more adverse by > gap.
+          fairSource: l.fairSource || 'rfq',
+          obRelay: l.relayHit || null,
           bookPriceOverride: l.bookPriceOverride != null ? Math.round(l.bookPriceOverride * 10000) / 10000 : null,
           displayFairProb: l.displayFairProb ? Math.round(l.displayFairProb * 10000) / 10000 : null,
           pinnacleOdds: l.pinnacleOdds || null,
@@ -6209,6 +6261,22 @@ async function validateForConfirmation(parlayId, originalMeta) {
   if (drift > driftThreshold) {
     log.warn('Pricing', `Price drift of ${(drift * 100).toFixed(1)}% since quote (threshold ${(driftThreshold * 100).toFixed(1)}%) — rejecting confirmation`);
     return { valid: false, reason: `price drift ${(drift * 100).toFixed(1)}% > ${(driftThreshold * 100).toFixed(1)}%`, currentPricing };
+  }
+
+  // ADVERSE-ONLY check (2026-10-06): the bettor's side got likelier since the
+  // quote. Tighter than the symmetric backstop above, and blind to moves in our
+  // favour (those were being rejected too). The re-price above already reads the
+  // order-book relay, so a move the order book's ~20 s guards have seen counts
+  // here even before our own sweep refreshes.
+  const adverse = (currentProb - originalProb) / originalProb;
+  const adverseThreshold = config.pricing.confirmAdverseDriftThreshold;
+  if (adverseThreshold > 0 && adverse > adverseThreshold) {
+    const moved = (currentPricing.meta.legs || []).filter(l => {
+      const q = (originalMeta.legs || []).find(x => x.lineId === l.lineId);
+      return q && q.fairProb > 0 && l.fairProb > q.fairProb * (1 + adverseThreshold / 2);
+    }).map(l => `${l.team || l.lineId} ${l.fairSource || 'rfq'}`).join(', ');
+    log.warn('Pricing', `Fair moved ${(adverse * 100).toFixed(1)}% against us since quote (threshold ${(adverseThreshold * 100).toFixed(1)}%) — rejecting confirmation${moved ? ' [' + moved + ']' : ''}`);
+    return { valid: false, reason: `adverse move ${(adverse * 100).toFixed(1)}% > ${(adverseThreshold * 100).toFixed(1)}%`, currentPricing };
   }
 
   return { valid: true, currentPricing };

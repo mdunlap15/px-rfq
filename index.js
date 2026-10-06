@@ -332,6 +332,11 @@ async function startup() {
     log.warn('Startup', `    ✗ Alt-line warm failed: ${err.message} — continuing; warm loop will retry`);
   }
 
+  // Order-book fair relay (2026-10-06): poll px_rfq_relay so parlay legs on
+  // lines the order book prices use the order book's fair. First read is
+  // awaited (bounded by the DB breaker) so the first RFQs see it.
+  try { const obRelay = require('./services/ob-relay'); await obRelay.poll(); obRelay.start(); log.info('Startup', `    ✓ Order-book relay: ${obRelay.getStatus().fresh} fresh fair(s)`); } catch (err) { log.warn('Startup', `    ✗ Order-book relay start failed: ${err.message}`); }
+
   // Step 4: Connect WebSocket
   log.info('Startup', '4/5 Connecting to ProphetX WebSocket...');
   // Load persisted pause state BEFORE connecting. Boot defaults to
@@ -1231,6 +1236,9 @@ function startStatusServer() {
       // visible; `on` is the resolved boolean the code actually branches on.
       // Note the defaults differ on purpose: golfOutrightsParlay and mlbSeries
       // default ON, everything else defaults OFF.
+      // Order-book fair relay + fill-drift measurement (2026-10-06).
+      obRelay: (() => { try { return require('./services/ob-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {
         mlbSeries: {
           on: config.pricing.mlbSeriesEnabled !== false,
@@ -3167,6 +3175,33 @@ function startStatusServer() {
   // The `error` bucket is the canary: a non-zero value means confirms threw in
   // the handler — the formerly-silent non-fill class. last15min/last60min show
   // recent conversion; `recent` is the per-event tail.
+  // Fill drift (2026-10-06): how far each filled leg's fair moved against us
+  // at +5 / +30 min, bucketed by sport, prop vs game line and the age of the
+  // odds the leg was priced from. Drift > 0 = the bettor's side got likelier.
+  // ?days=7 (max 30). Reads only rows that carry meta.fillDrift.
+  app.get('/fill-drift', async (req, res) => {
+    try {
+      const fillDrift = require('./services/fill-drift');
+      const days = Math.max(1, Math.min(30, parseInt(req.query.days) || 7));
+      const client = db.getClient();
+      const rows = [];
+      if (client) {
+        const since = new Date(Date.now() - days * 86400e3).toISOString();
+        for (let from = 0; from < 20000; from += 1000) {
+          const r = await client.from('parlay_orders').select('parlay_id,legs,meta,confirmed_at')
+            .gte('confirmed_at', since).not('meta->fillDrift', 'is', null)
+            .order('confirmed_at', { ascending: false }).range(from, from + 999);
+          if (r.error) throw new Error(r.error.message);
+          rows.push(...r.data.map(x => ({ legs: x.legs, meta: x.meta })));
+          if (r.data.length < 1000) break;
+        }
+      }
+      res.json({ ok: true, days, tracker: fillDrift.getStats(), ...fillDrift.summarize(rows) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   app.get('/confirm-activity', (req, res) => {
     res.json(websocket.getConfirmActivity());
   });

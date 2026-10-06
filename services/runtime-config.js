@@ -167,6 +167,10 @@ const REGISTRY = [
   // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'obRelayEnabled', path: 'obRelayEnabled', type: 'bool', group: 'pricing', env: 'OB_RELAY_ENABLED', label: 'Use the order-book fair relay for parlay legs' },
+  { key: 'obRelayMaxAgeSec', path: 'obRelayMaxAgeSec', type: 'number', min: 30, max: 3600, group: 'pricing', env: 'OB_RELAY_MAX_AGE_SEC', label: 'Order-book relay: max fair age, seconds' },
+  { key: 'obRelayMaxGapPp', path: 'obRelayMaxGapPp', type: 'number', min: 0.005, max: 0.5, group: 'pricing', env: 'OB_RELAY_MAX_GAP_PP', label: 'Order-book relay: own fair wins if more adverse by more than (prob)' },
+  { key: 'confirmAdverseDriftThreshold', path: 'confirmAdverseDriftThreshold', type: 'number', min: 0, max: 1, group: 'pricing', env: 'CONFIRM_ADVERSE_DRIFT', label: 'Confirm: reject if fair moved against us by more than (fraction; 0 = off)' },
   { key: 'cfbWidenPercent', path: 'cfbWidenPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'CFB_WIDEN_PERCENT', label: 'CFB SGP / 4+ leg widen A/B % (0 = dark)' },
   { key: 'cfbWidenRelPct', path: 'cfbWidenRelPct', type: 'number', min: 0.1, max: 10, group: 'pricing', env: 'CFB_WIDEN_REL_PCT', label: 'CFB widen arm: relative price add, %' },
   { key: 'hrPairTrimPercent', path: 'hrPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'HR_PAIR_TRIM_PERCENT', label: 'MLB HR-pair trim A/B % (0 = dark)' },

@@ -1156,6 +1156,29 @@ const config = {
     // Confirmation-time re-price drift threshold. If current fair prob drifts
     // by more than this fraction from the original quote, reject the confirm.
     confirmationDriftThreshold: parseFloat(process.env.CONFIRMATION_DRIFT_THRESHOLD) || 0.03,
+    // ADVERSE-ONLY confirm check (2026-10-06): reject a confirm whose re-priced
+    // fair moved AGAINST us (bettor side likelier) by more than this fraction
+    // since the quote. The symmetric threshold above stays as a sanity backstop.
+    // The re-price reads the order-book relay (ob-relay.js), refreshed by the
+    // order book's ~20 s line guards, so this sees moves our own 2-min sweep
+    // has not caught yet. Runtime key confirmAdverseDriftThreshold; 0 disables.
+    confirmAdverseDriftThreshold: (() => {
+      const v = parseFloat(process.env.CONFIRM_ADVERSE_DRIFT);
+      return Number.isFinite(v) && v >= 0 ? v : 0.015;
+    })(),
+    // ORDER-BOOK FAIR RELAY (2026-10-06, operator: same methodology as the
+    // order book, via a relay). A parlay leg on a PX line the order book priced
+    // in the last obRelayMaxAgeSec uses the order book's fair (or 1 − the other
+    // side's). Runtime keys obRelayEnabled / obRelayMaxAgeSec / obRelayMaxGapPp.
+    obRelayEnabled: process.env.OB_RELAY_ENABLED !== 'false',
+    obRelayMaxAgeSec: (() => {
+      const v = parseInt(process.env.OB_RELAY_MAX_AGE_SEC, 10);
+      return Number.isFinite(v) && v > 0 ? v : 300;
+    })(),
+    obRelayMaxGapPp: (() => {
+      const v = parseFloat(process.env.OB_RELAY_MAX_GAP_PP);
+      return Number.isFinite(v) && v > 0 ? v : 0.06;
+    })(),
     // Identical re-sends allowed per leg-set inside the 5s dedup window
     // (2026-09-26). Default 1 = preview + place; 0 restores decline-every-repeat.
     dedupMaxRequotes: (() => {

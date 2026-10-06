@@ -2359,6 +2359,10 @@ async function handleConfirm(data) {
       // POST succeeded — now safe to record confirmation locally.
       orderTracker.recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake);
 
+      // Fill-drift measurement: re-grade these legs at +5 / +30 min (timers
+      // only — nothing on the confirm path waits on it).
+      try { require('./fill-drift').track(parlayId); } catch (_) { /* best effort */ }
+
       // Feed the SGP guard ledgers (prop game-script risk + experimental
       // combo daily budget). Best-effort — never blocks the fill.
       try {
