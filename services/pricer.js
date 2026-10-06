@@ -4,6 +4,7 @@ const { legLineId } = require('./leg-id');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const obRelay = require('./ob-relay');
+const rfqWatch = require('./rfq-watch');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
 const seriesWindow = require('./series-window');
@@ -1915,6 +1916,9 @@ function priceParlay(legs, opts = {}) {
 
     fairParlayProb *= fairProb;
   }
+
+  // Order-book guards watch the events RFQ is actively quoting (rfq-watch.js).
+  rfqWatch.touch(pricedLegs.map(l => l.lineInfo));
 
   // Sanity check — if fair parlay prob is extremely small OR not finite,
   // decline. !Number.isFinite catches NaN that may have leaked in from

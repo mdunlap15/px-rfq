@@ -135,3 +135,14 @@ test('confirm: adverse move beyond 1.5% rejects; a move in our favour within the
     assert.strictEqual((await pricer.validateForConfirmation('cf-p1', q)).valid, true, '0 disables the adverse check');
   } finally { restore(); }
 });
+
+test('lo/hi: a leg on the graded line uses fair_hi; the other side uses 1 − fair_lo (adverse to OUR position)', () => {
+  stub();
+  try {
+    obRelay.__setForTest({ A: [0.40, nowS() - 5, 'multi_line_guard:nhl', 0.43] }, { siblings: [['A', 'B'], ['B', 'A']] });
+    assert.strictEqual(obRelay.getFair('A').fair, 0.43, 'bettor backs A: the higher P(A)');
+    assert.ok(Math.abs(obRelay.getFair('B').fair - 0.60) < 1e-9, 'bettor backs B: 1 − the lower P(A)');
+    obRelay.__setForTest({ C: [0.40, nowS() - 5, 'poster'] });
+    assert.strictEqual(obRelay.getFair('C').fair, 0.40, 'a 3-element entry reads as lo == hi');
+  } finally { restore(); }
+});

@@ -81,13 +81,21 @@ function _rebuildSiblings() {
   }
 }
 
+// Entry = [fair_lo, ts, source, fair_hi]. The guards grade a line against two
+// candidate fairs and the order book keeps the LOWER for the side it holds; the
+// RFQ book holds the OPPOSITE position when a bettor backs that line, so the
+// same "more adverse decides" rule, applied from our side, is fair_hi for this
+// line and 1 − fair_lo for the other side. Posters write one fair (lo == hi);
+// a 3-element entry predates the split and reads as lo == hi.
 function _fresh(entry, nowS) {
   if (!Array.isArray(entry) || entry.length < 2) return null;
-  const f = Number(entry[0]), ts = Number(entry[1]);
-  if (!(f > 0 && f < 1) || !Number.isFinite(ts)) return null;
+  const lo = Number(entry[0]), ts = Number(entry[1]);
+  let hi = entry.length >= 4 ? Number(entry[3]) : lo;
+  if (!(lo > 0 && lo < 1) || !Number.isFinite(ts)) return null;
+  if (!(hi > 0 && hi < 1) || hi < lo) hi = lo;
   const age = nowS - ts;
   if (age < -60 || age > maxAgeSec()) return null;
-  return { fair: f, ageSec: Math.max(0, Math.round(age)), source: entry[2] || null };
+  return { lo, hi, ageSec: Math.max(0, Math.round(age)), source: entry[2] || null };
 }
 
 /**
@@ -98,12 +106,12 @@ function getFair(lineId) {
   if (!enabled() || !lineId) return null;
   const nowS = Date.now() / 1000;
   const d = _fresh(_map[lineId], nowS);
-  if (d) return { ...d, via: 'direct' };
+  if (d) return { fair: d.hi, lo: d.lo, hi: d.hi, ageSec: d.ageSec, source: d.source, via: 'direct' };
   _rebuildSiblings();
   const sib = _siblings.get(lineId);
   if (sib) {
     const s = _fresh(_map[sib], nowS);
-    if (s) return { fair: 1 - s.fair, ageSec: s.ageSec, source: s.source, via: 'complement', sibling: sib };
+    if (s) return { fair: 1 - s.lo, lo: 1 - s.hi, hi: 1 - s.lo, ageSec: s.ageSec, source: s.source, via: 'complement', sibling: sib };
   }
   return null;
 }
