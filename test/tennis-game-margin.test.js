@@ -129,3 +129,20 @@ test('fresh-source gate kill switch', async () => {
   const sv = config.pricing.tennisRequireToaSource; config.pricing.tennisRequireToaSource = false;
   try { assert.ok(await price([a, b], 'gate-ks')); } finally { config.pricing.tennisRequireToaSource = sv; restore(); }
 });
+
+test('TOA-only tennis (default): the Pinnacle-direct / Bovada / DK merges add nothing to the cache', async () => {
+  const of = require('../services/odds-feed');
+  const sv = config.pricing.tennisToaOnly;
+  config.pricing.tennisToaOnly = true;
+  try {
+    for (const fn of ['mergePinnacleTennisMatches', 'mergeBovadaTennisMatches', 'mergeDkTennisMatches']) {
+      if (typeof of[fn] !== 'function') continue;
+      const r = await of[fn]({ reapply: true });
+      assert.strictEqual(r.added, 0, fn); assert.strictEqual(r.skipped, 'tennis TOA-only', fn);
+    }
+  } finally { config.pricing.tennisToaOnly = sv; }
+});
+
+test('tennisToaOnly defaults ON', () => {
+  assert.notStrictEqual(require('../config').config.pricing.tennisToaOnly, false);
+});

@@ -1188,6 +1188,10 @@ const config = {
     // scrapes declines (tennis_source_not_fresh). Moneyline and set markets are
     // unchanged. Runtime key tennisRequireToaSource; literal 'false' disables.
     tennisRequireToaSource: process.env.TENNIS_REQUIRE_TOA_SOURCE !== 'false',
+    // TOA-only tennis, every market (2026-10-07): the scraped Pinnacle-direct /
+    // Bovada / DK tennis boards never enter the odds cache (odds-feed merges are
+    // no-ops). Runtime key tennisToaOnly; literal 'false' restores them.
+    tennisToaOnly: process.env.TENNIS_TOA_ONLY !== 'false',
     tennisSpreadMinEv: (() => { const v = parseFloat(process.env.TENNIS_SPREAD_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.06; })(),
     tennisDogMinEv: (() => { const v = parseFloat(process.env.TENNIS_DOG_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.08; })(),
     obRelayMaxAgeSec: (() => {

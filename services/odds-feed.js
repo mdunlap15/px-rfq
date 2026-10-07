@@ -5439,6 +5439,15 @@ async function mergeOddsApiLive(sport) {
  * (they did before too — no regression).
  */
 async function mergeDkTennisMatches() {
+  // TOA-ONLY TENNIS (operator 2026-10-07: "I don't want anything pricing off the
+  // 15-minute-old Pinnacle. If we can't get odds that are close to real-time, we
+  // should not be listing those markets."). Pinnacle's guest API is a ~15-min CDN
+  // snapshot (max-age~905), Bovada's coupon a ~10-min one (max-age=600) and the DK
+  // scrape runs on its own slow cadence; TOA's prices read 5-19 s old. With this
+  // on (default) no scraped board enters the cache, so a match TOA does not carry
+  // has no odds -> it does not register and cannot price. TENNIS_TOA_ONLY=false
+  // restores the scraped boards.
+  if (config.pricing.tennisToaOnly !== false) return { added: 0, updated: 0, skipped: 'tennis TOA-only' };
   const dk = require('./dk-scraper');
   let data;
   try {
@@ -5613,6 +5622,15 @@ const BOVADA_TENNIS_REAPPLY_MAX_AGE_MS =
  *   oddsCache['tennis'] replacement so merged events survive the overwrite.
  */
 async function mergeBovadaTennisMatches(opts = {}) {
+  // TOA-ONLY TENNIS (operator 2026-10-07: "I don't want anything pricing off the
+  // 15-minute-old Pinnacle. If we can't get odds that are close to real-time, we
+  // should not be listing those markets."). Pinnacle's guest API is a ~15-min CDN
+  // snapshot (max-age~905), Bovada's coupon a ~10-min one (max-age=600) and the DK
+  // scrape runs on its own slow cadence; TOA's prices read 5-19 s old. With this
+  // on (default) no scraped board enters the cache, so a match TOA does not carry
+  // has no odds -> it does not register and cannot price. TENNIS_TOA_ONLY=false
+  // restores the scraped boards.
+  if (config.pricing.tennisToaOnly !== false) return { added: 0, updated: 0, skipped: 'tennis TOA-only' };
   const bov = require('./bovada-tennis');
   let data;
   if (opts.reapply) {
@@ -5649,6 +5667,15 @@ async function mergeBovadaTennisMatches(opts = {}) {
  *   hitting the network — same wholesale-overwrite survival trick as Bovada.
  */
 async function mergePinnacleTennisMatches(opts = {}) {
+  // TOA-ONLY TENNIS (operator 2026-10-07: "I don't want anything pricing off the
+  // 15-minute-old Pinnacle. If we can't get odds that are close to real-time, we
+  // should not be listing those markets."). Pinnacle's guest API is a ~15-min CDN
+  // snapshot (max-age~905), Bovada's coupon a ~10-min one (max-age=600) and the DK
+  // scrape runs on its own slow cadence; TOA's prices read 5-19 s old. With this
+  // on (default) no scraped board enters the cache, so a match TOA does not carry
+  // has no odds -> it does not register and cannot price. TENNIS_TOA_ONLY=false
+  // restores the scraped boards.
+  if (config.pricing.tennisToaOnly !== false) return { added: 0, updated: 0, skipped: 'tennis TOA-only' };
   const pin = require('./pinnacle-tennis');
   let data;
   if (opts.reapply) {

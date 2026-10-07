@@ -10,6 +10,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const of = require('../services/odds-feed');
+// These tests exercise the Pinnacle-direct merge's SET parsing, which ships OFF in
+// production since 2026-10-07 (TOA-only tennis: the guest API is a ~15-min CDN snapshot).
+require('../config').config.pricing.tennisToaOnly = false;
 
 // Seed a tennis event straight into the cache via the Pinnacle merge path.
 function seed() {
