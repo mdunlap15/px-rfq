@@ -64,3 +64,17 @@ test('soccer "(90 Min)" 3-way markets are no longer skipped at seed; NHL "(60 Mi
   assert.strictEqual(lm._skipUnsupported3Way('soccer_epl', m('Arsenal FC to Win (45 Min)')), true, 'period-qualified stays out');
   assert.strictEqual(lm._skipUnsupported3Way('soccer_epl', m('Moneyline (2 Way)')), false, 'not a 3-way sub-market');
 });
+
+test('MLB runs scored / singles / doubles get their own families (runs no longer share the RBI bucket)', () => {
+  assert.strictEqual(ws._classifyMlbProp('Aaron Judge Total Runs'), 'hitter_runs');
+  assert.strictEqual(ws._classifyMlbProp('Cal Raleigh Runs Scored'), 'hitter_runs', 'was hitter_rbi_runs -> batter_rbis');
+  assert.strictEqual(ws._classifyMlbProp('Mookie Betts Singles'), 'hitter_singles');
+  assert.strictEqual(ws._classifyMlbProp('Freddie Freeman Doubles'), 'hitter_doubles');
+  assert.strictEqual(ws._classifyMlbProp('Juan Soto Total RBIs'), 'hitter_rbi_runs');
+  assert.strictEqual(ws._classifyMlbProp('Aaron Judge Total Home Runs'), 'hitter_hr');
+  assert.strictEqual(ws._classifyMlbProp('Shohei Ohtani Total Hits, Runs & RBIs'), 'hitter_hits_runs_rbis');
+  const lm = require('../services/line-manager');
+  assert.strictEqual(lm._MLB_PROP_TO_TOA_MARKET.hitter_runs, 'batter_runs_scored');
+  assert.strictEqual(lm._MLB_PROP_TO_TOA_MARKET.hitter_singles, 'batter_singles');
+  assert.strictEqual(lm._MLB_PROP_TO_TOA_MARKET.hitter_doubles, 'batter_doubles');
+});

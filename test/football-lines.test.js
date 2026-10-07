@@ -176,8 +176,9 @@ test('MLB classifier: own-sport names unchanged', () => {
   assert.equal(ws._classifyMlbProp('Mookie Betts Total Bases'), 'hitter_total_bases');
   assert.equal(ws._classifyMlbProp('Randy Arozarena Total Hits, Runs & RBIs'), 'hitter_hits_runs_rbis'); // PX's live form (2026-09-10)
   assert.equal(ws._classifyMlbProp('Freddie Freeman Hits + Runs + RBIs'), 'hitter_hits_runs_rbis');
-  // "To Score a Run" is a real MLB shape and keeps its old bucket
-  assert.equal(ws._classifyMlbProp('Juan Soto Runs Scored'), 'hitter_rbi_runs');
+  // Runs SCORED has its own market since 2026-10-06 (batter_runs_scored); the old
+  // hitter_rbi_runs bucket would have priced it off batter_rbis.
+  assert.equal(ws._classifyMlbProp('Juan Soto Runs Scored'), 'hitter_runs');
 });
 
 test('football classifier: anytime TD routes, composites and game markets do not', () => {

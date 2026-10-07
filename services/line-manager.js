@@ -62,6 +62,10 @@ const _MLB_PROP_TO_TOA_MARKET = {
   hitter_rbi_runs: 'batter_rbis',
   hitter_stolen_bases: 'batter_stolen_bases',
   hitter_hits_runs_rbis: 'batter_hits_runs_rbis',
+  // 2026-10-06: the order book's other hitter families (mlb_props_cycle PROPK).
+  hitter_runs: 'batter_runs_scored',
+  hitter_singles: 'batter_singles',
+  hitter_doubles: 'batter_doubles',
   // Pitcher counting props (2026-10-06) — the order book's mlb_props_cycle keys.
   // Probed live 10/6 (Braves @ Dodgers): pitcher_outs 8 books / 7 two-sided,
   // pitcher_hits_allowed 5 / 5. Exact-line two-sided de-vig, like the hitters.
@@ -3060,8 +3064,21 @@ async function seedAllLines(gen) {
               propType = ws._classifyNbaProp(market.name);
               toaMarketKey = _NBA_PROP_TO_TOA_MARKET[propType];
             } else if (sportKey.includes('hockey')) {
-              propType = ws._classifyNhlProp(market.name);
-              toaMarketKey = _NHL_PROP_TO_TOA_MARKET[propType];
+              // NHL ANYTIME GOAL SCORER (2026-10-06, the order book's nhl_gs
+              // source: TOA player_goal_scorer_anytime). PX posts it lineless
+              // YES/NO ("<Player> To Score A Goal") and books post only YES —
+              // the exact shape of the soccer goalscorer, so it rides that
+              // lineless YES-only book-mirror path (soccerProp ctx; the TOA
+              // sport stays icehockey_nhl). Without this it classified 'goals'
+              // and never registered (the over/under path needs a line).
+              if (/\bto\s+score\s+a\s+goal\s*\??$/i.test(market.name || '')) {
+                soccerProp = { propType: 'goal_scorer', line: 0.5, toaLine: null };
+                propType = 'goal_scorer';
+                toaMarketKey = 'player_goal_scorer_anytime';
+              } else {
+                propType = ws._classifyNhlProp(market.name);
+                toaMarketKey = _NHL_PROP_TO_TOA_MARKET[propType];
+              }
             } else if (sportKey === 'baseball_mlb') {
               propType = ws._classifyMlbProp(market.name);
               toaMarketKey = _MLB_PROP_TO_TOA_MARKET[propType];
@@ -5749,6 +5766,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 }
 
 module.exports = {
+  _MLB_PROP_TO_TOA_MARKET,
   _skipUnsupported3Way,
   _nhlExcludedMarket,
   getSeedRunState,

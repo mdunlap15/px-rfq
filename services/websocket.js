@@ -336,9 +336,15 @@ function classifyMlbProp(marketName) {
   // Hitter buckets — order matters; check most specific first
   if (/total\s+bases|tb\b/.test(n)) return 'hitter_total_bases';
   if (/home\s+run|\bhr\b/.test(n)) return 'hitter_hr';
-  if (/\brbi/.test(n) || /runs\s+batted\s+in/.test(n) || /runs\s+scored/.test(n)) return 'hitter_rbi_runs';
+  // Runs SCORED is its own market (TOA batter_runs_scored — the order book's
+  // mlb_props_cycle "Total Runs" mapping, 2026-10-06). It used to share the RBI
+  // bucket, i.e. it would have priced off batter_rbis, a different stat.
+  if (/runs\s+scored/.test(n) || (/\bruns?\b/.test(n) && !/\brbi|runs\s+batted|home\s+runs?/.test(n))) return 'hitter_runs';
+  if (/\brbi/.test(n) || /runs\s+batted\s+in/.test(n)) return 'hitter_rbi_runs';
   if (/\bhits\b|to\s+record\s+a\s+hit/.test(n)) return 'hitter_hits';
   if (/stolen\s+bases?|\bsb\b/.test(n)) return 'hitter_stolen_bases';
+  if (/\bsingles?$/.test(n)) return 'hitter_singles';
+  if (/\bdoubles?$/.test(n) && !/double\s*-?\s*double/.test(n)) return 'hitter_doubles';
   if (/single|double|triple|walk\b|to\s+score/.test(n)) return 'hitter_other';
   // No specific match — flag as generic MLB prop so the bucket is
   // visible (helps future iterations of this classifier catch new
