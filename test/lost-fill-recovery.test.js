@@ -82,6 +82,32 @@ test('shutdown flush writes spooled fills once the DB answers', async () => {
   assert.ok(res.drained >= 3);
 });
 
+test('shutdown flush forces a probe while the breaker is still inside its backoff (2026-10-07: SIGTERM mid-backoff wrote nothing)', async () => {
+  const { tr, breaker } = wire();
+  await tripOpen(tr);
+  assert.equal(breaker.state, 'open');
+  assert.equal(breaker.canAttempt(), false, 'backoff NOT elapsed');
+  tr.mode = 'ok';                            // DB is back; the breaker does not know yet
+  const res = await db.flushSpoolForShutdown(5000);
+  assert.equal(res.remaining.total, 0, JSON.stringify(res));
+  assert.equal(res.lostCritical, 0);
+  assert.ok(res.drained >= 3);
+  assert.equal(breaker.state, 'closed');
+});
+
+test('forced shutdown probes are bounded: a DB that stays down ends the flush inside the deadline', async () => {
+  const { tr } = wire();
+  await tripOpen(tr);
+  const before = tr.calls.length;
+  const t0 = Date.now();
+  const orig = log.error; log.error = () => {};
+  let res;
+  try { res = await db.flushSpoolForShutdown(3000); } finally { log.error = orig; }
+  assert.ok(Date.now() - t0 < 3500, 'within the deadline');
+  assert.ok(tr.calls.length - before <= 3, `at most 3 probes, saw ${tr.calls.length - before}`);
+  assert.equal(res.lostCritical, 3);
+});
+
 test('shutdown with the DB still down logs every held fill as [SpoolLost] (recoverable from logs)', async () => {
   const { tr } = wire();
   await tripOpen(tr);
@@ -147,4 +173,12 @@ test('an RPC timeout does not count toward tripping the breaker; a write timeout
     await assert.rejects(() => breaker.fetch('http://db.test/rest/v1/parlay_orders', { method: 'POST', body: '{}' }), e => e.name === 'DbTimeout');
   }
   assert.equal(breaker.state, 'open');
+});
+
+test('breaker keeps the undici err.cause code on a transport failure (diagnosis of "fetch failed" trips)', async () => {
+  const { DbCircuitBreaker: B } = require('../services/db-breaker');
+  const br = new B({ failThreshold: 99, fetchImpl: async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }); throw e; } });
+  await assert.rejects(br.fetch('http://db.test/rest/v1/parlay_orders', { method: 'POST' }));
+  assert.match(br.lastError, /fetch failed \[UND_ERR_SOCKET: other side closed\]/);
+  assert.equal(br.totals.failureCauses.UND_ERR_SOCKET, 1);
 });

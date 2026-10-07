@@ -133,6 +133,18 @@ class DbCircuitBreaker {
 
   isOpen() { return this.state !== 'closed'; }
 
+  /**
+   * SHUTDOWN ONLY: end the open backoff now so the next request is the
+   * half-open probe. The backoff protects a struggling DB from THIS process's
+   * future traffic; a process that is exiting has none, and holding the probe
+   * back means the spool dies unwritten (2026-10-07 01:15 ET: SIGTERM landed
+   * inside a 10-min level-6 backoff and 57 critical rows were logged as
+   * [SpoolLost] while Supabase answered a laptop read in 351 ms).
+   */
+  expireBackoff() {
+    if (this.state === 'open') this.openUntil = this.now();
+  }
+
   /** Trip immediately (boot probe failed, operator action). */
   forceOpen(reason) {
     this._trip(reason || 'forced', true);
@@ -305,7 +317,18 @@ class DbCircuitBreaker {
         if (decision === 'probe') this.probeInFlight = false;
         throw err;
       }
-      this._recordFailure(decision, `${err && err.name ? err.name : 'Error'}: ${err && err.message ? err.message : err}`);
+      // undici reports every transport failure as "TypeError: fetch failed";
+      // what happened (ECONNRESET, UND_ERR_SOCKET "other side closed",
+      // UND_ERR_CONNECT_TIMEOUT, ENOTFOUND...) is only on err.cause. Keep it
+      // — 45 trips on 2026-10-06 all read "fetch failed" and nothing more.
+      const cause = err && err.cause;
+      const code = cause ? String(cause.code || cause.name || 'cause') : null;
+      if (code) {
+        this.totals.failureCauses = this.totals.failureCauses || {};
+        this.totals.failureCauses[code] = (this.totals.failureCauses[code] || 0) + 1;
+      }
+      const detail = code ? ` [${code}${cause.message ? ': ' + String(cause.message).slice(0, 120) : ''}]` : '';
+      this._recordFailure(decision, `${err && err.name ? err.name : 'Error'}: ${err && err.message ? err.message : err}${detail}`);
       throw err;
     } finally {
       clearTimeout(timer);

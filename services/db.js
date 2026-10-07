@@ -246,15 +246,29 @@ async function flushSpoolForShutdown(deadlineMs = 20000) {
   const before = _spoolCounts();
   let drained = 0;
   _stopDrainTimer();
+  // An open breaker does NOT end the flush: the process is exiting, so the
+  // backoff has no future traffic to protect. Force up to SHUTDOWN_PROBES
+  // half-open probes (the first replay is the probe), spaced ~2s, inside the
+  // deadline. Before 2026-10-07 the loop broke on the first canAttempt()=false
+  // and a SIGTERM inside a 10-min backoff wrote nothing.
+  const maxProbes = 3;
+  let forced = 0;
   while (_spool.size > 0 && Date.now() - t0 < deadlineMs) {
-    if (!_breaker.canAttempt()) break;
+    if (!_breaker.canAttempt()) {
+      if (forced >= maxProbes) break;
+      if (forced > 0) {
+        const wait = Math.min(2000, deadlineMs - (Date.now() - t0));
+        if (wait <= 0) break;
+        await new Promise(r => setTimeout(r, wait));
+      }
+      forced++;
+      if (typeof _breaker.expireBackoff === 'function') _breaker.expireBackoff();
+      if (!_breaker.canAttempt()) break;   // half-open with a probe already in flight
+    }
     if (_draining) { await new Promise(r => setTimeout(r, 50)); continue; }
     const n = await _drainOnce(50);
     drained += n;
-    if (n === 0) {
-      if (!_breaker.canAttempt()) break;
-      await new Promise(r => setTimeout(r, 100));
-    }
+    if (n === 0) await new Promise(r => setTimeout(r, 100));
   }
   const lost = [];
   for (const e of _spool.values()) {
