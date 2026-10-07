@@ -337,6 +337,8 @@ async function startup() {
   // awaited (bounded by the DB breaker) so the first RFQs see it.
   try { const obRelay = require('./services/ob-relay'); await obRelay.poll(); obRelay.start(); log.info('Startup', `    ✓ Order-book relay: ${obRelay.getStatus().fresh} fresh fair(s)`); } catch (err) { log.warn('Startup', `    ✗ Order-book relay start failed: ${err.message}`); }
   try { require('./services/rfq-watch').start(); } catch (err) { log.warn('Startup', `    ✗ RFQ watch publisher start failed: ${err.message}`); }
+  // Near-start refresh: keep inputs inside the freshness-gate window <= ~60s old.
+  try { require('./services/near-start-refresh').start(); } catch (err) { log.warn('Startup', `    ✗ near-start refresh start failed: ${err.message}`); }
 
   // Step 4: Connect WebSocket
   log.info('Startup', '4/5 Connecting to ProphetX WebSocket...');
@@ -1241,6 +1243,7 @@ function startStatusServer() {
       obRelay: (() => { try { return require('./services/ob-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
       fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {
         mlbSeries: {
           on: config.pricing.mlbSeriesEnabled !== false,

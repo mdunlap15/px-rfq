@@ -34,6 +34,7 @@ const PROFILE_OF = (sport) => {
 const PROFILES = ['soccer', 'nhl', 'mlb', 'cfb', 'nfl'];
 
 const _active = new Map();      // pxEventId -> last quoted ms
+const _activeAll = new Map();   // same, EVERY sport (near-start refresh priority)
 const _lastWritten = {};        // profile -> { sig, at }
 const _stats = { writes: 0, writeErrors: 0, lastError: null, watched: {} };
 let _timer = null;
@@ -48,7 +49,9 @@ function touch(lineInfos) {
   try {
     const now = Date.now();
     for (const li of lineInfos || []) {
-      if (li && li.pxEventId != null && PROFILE_OF(li.oddsApiSport || li.sport)) _active.set(String(li.pxEventId), now);
+      if (!li || li.pxEventId == null) continue;
+      _activeAll.set(String(li.pxEventId), now);
+      if (PROFILE_OF(li.oddsApiSport || li.sport)) _active.set(String(li.pxEventId), now);
     }
   } catch (_) { /* never on the hot path's way */ }
 }
@@ -116,6 +119,13 @@ function getStatus() {
   return { enabled: enabled(), activeEvents: _active.size, activeMin: activeMin(), horizonH: horizonH(), ..._stats };
 }
 
-function __resetForTest() { _active.clear(); for (const k of Object.keys(_lastWritten)) delete _lastWritten[k]; }
+/** pxEventId -> last quoted ms, every sport, within RFQ_WATCH_ACTIVE_MIN. */
+function activeEvents(nowMs = Date.now()) {
+  const cutoff = nowMs - activeMin() * 60e3;
+  for (const [eid, t] of _activeAll) if (t < cutoff) _activeAll.delete(eid);
+  return _activeAll;
+}
 
-module.exports = { touch, build, publish, start, getStatus, PROFILE_OF, __resetForTest };
+function __resetForTest() { _active.clear(); _activeAll.clear(); for (const k of Object.keys(_lastWritten)) delete _lastWritten[k]; }
+
+module.exports = { touch, activeEvents, build, publish, start, getStatus, PROFILE_OF, __resetForTest };

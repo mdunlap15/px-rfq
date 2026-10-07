@@ -1964,7 +1964,7 @@ function _f5OddsUrl(eventId, apiKey) {
     + `&oddsFormat=american`;
 }
 
-async function supplementMlbF5Markets(parsedEvents) {
+async function supplementMlbF5Markets(parsedEvents, opts = {}) {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey) return;
 
@@ -1980,7 +1980,8 @@ async function supplementMlbF5Markets(parsedEvents) {
     const arr = Array.isArray(entry) ? entry : [entry];
     for (const ev of arr) {
       if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
-      if (ev.markets && ev.markets.h2h_f5 && ev.markets.spreads_f5 && ev.markets.totals_f5) continue;
+      // opts.force: the near-start refresher re-fetches a game that already has F5.
+      if (!opts.force && ev.markets && ev.markets.h2h_f5 && ev.markets.spreads_f5 && ev.markets.totals_f5) continue;
       candidates.push(ev);
     }
   }
@@ -2423,7 +2424,7 @@ function _attachBttsToCache(sport, toaHome, toaAway, btts) {
  * Mirrors ensureTeamTotals: timeout-bounded, single-flighted, TTL-cached,
  * fail-closed on started/unknown-start games.
  */
-async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
+async function ensureBtts(sport, homeTeam, awayTeam, commenceTime, opts = {}) {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey || !BTTS_SPORTS.has(sport)) return null;
   const startMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
@@ -2432,7 +2433,9 @@ async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
   const key = `${sport}|${normalizeEventKey(homeTeam, awayTeam)}`;
   const now = Date.now();
   const cached = _bttsCache[key];
-  if (cached && (now - cached.at) < BTTS_TTL_MS) {
+  // opts.maxAgeMs (near-start refresher) tightens the TTL for this call only.
+  const _bttsTtl = opts.maxAgeMs != null ? Math.min(BTTS_TTL_MS, opts.maxAgeMs) : BTTS_TTL_MS;
+  if (cached && (now - cached.at) < _bttsTtl) {
     // Re-attach: the odds cache may have been rebuilt since we fetched.
     if (cached.btts) _attachBttsToCache(sport, cached.toaHome, cached.toaAway, cached.btts);
     return cached.btts;
@@ -2626,7 +2629,7 @@ function _attachTeamTotalsToCache(sport, toaHome, toaAway, tt) {
   return attached;
 }
 
-async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
+async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime, opts = {}) {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey || !TEAM_TOTAL_SPORTS.has(sport)) return null;
   const startMs = commenceTime ? new Date(commenceTime).getTime() : NaN;
@@ -2635,7 +2638,8 @@ async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
   const key = `${sport}|${normalizeEventKey(homeTeam, awayTeam)}`;
   const now = Date.now();
   const cached = _teamTotalCache[key];
-  if (cached && (now - cached.at) < TEAM_TOTAL_TTL_MS) {
+  const _ttTtl = opts.maxAgeMs != null ? Math.min(TEAM_TOTAL_TTL_MS, opts.maxAgeMs) : TEAM_TOTAL_TTL_MS;
+  if (cached && (now - cached.at) < _ttTtl) {
     // Re-attach: the odds cache may have been rebuilt since we fetched, which
     // would have dropped the consensus. Cheap, no network.
     if (cached.tt) _attachTeamTotalsToCache(sport, cached.toaHome, cached.toaAway, cached.tt);
@@ -2726,7 +2730,7 @@ async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
  * This is why the previous bulk-endpoint implementation produced zero
  * 1H data for months. H1 markets live on the per-event endpoint.
  */
-async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
+async function supplementH1Markets(parsedEvents, sport = 'basketball_nba', opts = {}) {
   const theOddsApiKey = process.env.THE_ODDS_API_KEY;
   if (!theOddsApiKey) return;
   const label = _h1Label(sport);
@@ -2739,7 +2743,7 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba') {
       if (!ev || !ev.homeTeam || !ev.awayTeam) continue;
       const _needQ1 = Q1_SUPPLEMENT_SPORTS.has(sport)
         && !(ev.markets && ev.markets.h2h_q1 && ev.markets.spreads_q1 && ev.markets.totals_q1);
-      if (ev.markets && ev.markets.h2h_h1 && ev.markets.spreads_h1 && ev.markets.totals_h1 && !_needQ1) continue;
+      if (!opts.force && ev.markets && ev.markets.h2h_h1 && ev.markets.spreads_h1 && ev.markets.totals_h1 && !_needQ1) continue;
       candidates.push(ev);
     }
   }
@@ -8100,6 +8104,64 @@ const NHL_MIN_BOOKS = Math.max(1, parseInt(process.env.NHL_MIN_BOOKS, 10) || 2);
  * MAIN market's sport-cache age when the leg is on the primary point, else the
  * per-event alt-line cache age; otherwise the sport-cache age. null = unknown.
  */
+// The RAW cache event (no orientation flip, no copy) closest to targetTime,
+// within 12h — what the per-event supplements mutate in place.
+function _rawCacheEvent(sport, homeTeam, awayTeam, targetTime) {
+  const c = oddsCache[sport];
+  if (!c || !c.events) return null;
+  const t = targetTime ? Date.parse(targetTime) : NaN;
+  let best = null, bestD = Infinity;
+  for (const key of new Set([normalizeEventKey(homeTeam, awayTeam), normalizeEventKey(awayTeam, homeTeam)])) {
+    const entry = c.events[key];
+    for (const ev of (entry ? (Array.isArray(entry) ? entry : [entry]) : [])) {
+      if (!ev) continue;
+      const d = Number.isFinite(t) ? Math.abs(Date.parse(ev.commenceTime || '') - t) : 0;
+      if (d < bestD) { best = ev; bestD = d; }
+    }
+  }
+  return best && (bestD <= 12 * 3600e3 || !Number.isFinite(t)) ? best : null;
+}
+
+const _F5_KEYS = ['h2h_f5', 'spreads_f5', 'totals_f5'];
+const _H1_KEYS = ['h2h_h1', 'spreads_h1', 'totals_h1', 'h2h_q1', 'spreads_q1', 'totals_q1'];
+/**
+ * NEAR-START SUPPLEMENT REFRESH (2026-10-07). Re-fetches the per-event
+ * supplement markets one near-start game actually has registered lines on
+ * (marketKeys = cache keys: h2h_f5.., h2h_h1.., team_totals, btts) when their
+ * block is older than maxAgeMs. Uses the SAME supplement functions as the
+ * sweep (force past their "already attached" skips / TTLs), so the parse and
+ * de-vig are unchanged; only the cadence is. Returns the request count.
+ */
+async function refreshNearStartSupplements(sport, homeTeam, awayTeam, startTime, marketKeys, opts = {}) {
+  const ev = _rawCacheEvent(sport, homeTeam, awayTeam, startTime);
+  if (!ev) return { ok: false, reason: 'no_cache_event', requests: 0, done: [] };
+  if (_toaCooldownRemainingMs() > 0) return { ok: false, reason: 'toa_cooldown', requests: 0, done: [] };
+  const maxAgeMs = opts.maxAgeMs != null ? opts.maxAgeMs : 60000;
+  const want = new Set(marketKeys || []);
+  const now = Date.now();
+  const stale = (keys) => keys.some(k => want.has(k) && !(ev.markets && ev.markets[k] && Number.isFinite(ev.markets[k].fetchedAt)
+    && now - ev.markets[k].fetchedAt <= maxAgeMs));
+  const one = { near_start: ev };
+  let requests = 0; const done = [];
+  try {
+    if (sport === 'baseball_mlb' && stale(_F5_KEYS) && !opts.skipF5) {
+      await supplementMlbF5Markets(one, { force: true }); requests++; done.push('f5');
+    }
+    if (H1_SUPPLEMENT_SPORTS.has(sport) && stale(_H1_KEYS)) {
+      await supplementH1Markets(one, sport, { force: true }); requests++; done.push('h1');
+    }
+    if (TEAM_TOTAL_SPORTS.has(sport) && stale(['team_totals'])) {
+      await ensureTeamTotals(sport, ev.homeTeam, ev.awayTeam, ev.commenceTime, { maxAgeMs }); requests++; done.push('team_totals');
+    }
+    if (BTTS_SPORTS.has(sport) && stale(['btts'])) {
+      await ensureBtts(sport, ev.homeTeam, ev.awayTeam, ev.commenceTime, { maxAgeMs }); requests++; done.push('btts');
+    }
+  } catch (err) {
+    return { ok: false, reason: 'error: ' + err.message, requests, done };
+  }
+  return { ok: true, requests, done };
+}
+
 const LEG_AGE_BULK_MARKETS = new Set(['h2h', 'spreads', 'totals', 'h2h_3way', 'double_chance']);   // built by fetchFromTheOddsApi's bulk parse
 function getLegOddsAgeSec(lineInfo, now = Date.now()) {
   try {
@@ -11028,6 +11090,70 @@ async function _refreshTheOddsApiPropOdds(sport, eventId, marketKey) {
   }
 }
 
+// Same event match as lookupTheOddsApiPlayerProp (last-two-words team keys,
+// either orientation, start-time proximity for doubleheaders).
+function _matchToaPropEvent(events, pxEventInfo) {
+  const lastWords = (name, n = 2) => normalizeTeamName(name).split(/\s+/).filter(Boolean).slice(-n).join(' ');
+  const h = lastWords(pxEventInfo.homeTeam || ''), a = lastWords(pxEventInfo.awayTeam || '');
+  const hits = (events || []).filter(e => {
+    const eh = lastWords(e.home_team || ''), ea = lastWords(e.away_team || '');
+    return (eh === h && ea === a) || (eh === a && ea === h);
+  });
+  if (!hits.length) return null;
+  const st = pxEventInfo.startTime ? Date.parse(pxEventInfo.startTime) : null;
+  if (st && hits.length > 1) hits.sort((x, y) => Math.abs(Date.parse(x.commence_time) - st) - Math.abs(Date.parse(y.commence_time) - st));
+  return hits[0];
+}
+
+/**
+ * NEAR-START BATCH PROP REFRESH (2026-10-07). ONE per-event TOA request for
+ * several prop markets (markets=a,b,c), split back into the per-(event, market)
+ * cache entries the lookups read, all stamped with this fetch time. The key is
+ * limited by request FREQUENCY, not credits, so batching is what makes a
+ * <=60s near-start cadence affordable. A market absent from the response is
+ * stored EMPTY (no books -> no fair -> the line keeps its old fetch time and
+ * the freshness gate declines it), never left at its older price.
+ */
+const PROP_BATCH_MAX_MARKETS = Math.max(1, parseInt(process.env.NEAR_START_PROP_BATCH_MAX, 10) || 12);
+async function refreshPropOddsForEvent(sport, pxEventInfo, marketKeys, deps = {}) {
+  const apiKey = process.env.THE_ODDS_API_KEY;
+  const keys = [...new Set((marketKeys || []).filter(Boolean))];
+  if (!apiKey || !keys.length || !pxEventInfo) return { ok: false, reason: 'no_input', requests: 0 };
+  if (_toaCooldownRemainingMs() > 0) return { ok: false, reason: 'toa_cooldown', requests: 0 };
+  const sportKey = TOA_SPORT_KEYS[sport] || sport;
+  const events = await (deps.getEvents || _getTheOddsApiEvents)(sport);
+  const event = events ? _matchToaPropEvent(events, pxEventInfo) : null;
+  if (!event) return { ok: false, reason: events ? 'no_event_match' : 'events_fail', requests: 0 };
+  const get = deps.get || ((url) => _toaGetRetrying429(url));
+  let refreshed = 0, requests = 0;
+  for (let i = 0; i < keys.length; i += PROP_BATCH_MAX_MARKETS) {
+    const chunk = keys.slice(i, i + PROP_BATCH_MAX_MARKETS);
+    const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/events/${event.id}/odds`
+      + `?apiKey=${apiKey}&regions=${_TOA_PROP_REGIONS}&markets=${chunk.join(',')}&oddsFormat=american`;
+    requests++;
+    let data;
+    try {
+      const resp = await get(url);
+      if (!resp || !resp.ok) {
+        log.warn('OddsFeed', `near-start prop batch failed (${event.id} ${chunk.join(',')}): ${resp ? resp.status : 'no response'}`);
+        return { ok: false, reason: 'http_' + (resp ? resp.status : 'none'), refreshed, requests, eventId: event.id };
+      }
+      data = await resp.json();
+    } catch (err) {
+      return { ok: false, reason: 'error: ' + err.message, refreshed, requests, eventId: event.id };
+    }
+    const at = Date.now();
+    for (const mk of chunk) {
+      const bookmakers = (data.bookmakers || [])
+        .map(bk => Object.assign({}, bk, { markets: (bk.markets || []).filter(m => m.key === mk) }))
+        .filter(bk => bk.markets.length > 0);
+      toaPropOddsCache[`${sportKey}:${event.id}:${mk}`] = Object.assign({}, data, { bookmakers, fetchedAt: at, refreshing: false });
+      refreshed++;
+    }
+  }
+  return { ok: true, refreshed, requests, eventId: event.id };
+}
+
 async function _getTheOddsApiPropOdds(sport, eventId, marketKey) {
   const apiKey = process.env.THE_ODDS_API_KEY;
   if (!apiKey) return null;
@@ -11972,6 +12098,7 @@ module.exports = {
   __setOddsCacheForTest: (sport, entry) => { if (entry == null) delete oddsCache[sport]; else oddsCache[sport] = entry; },
   __mergeSupplementedMarketForTest: (a, b) => _mergeSupplementedMarket(a, b),
   __setToaPropOddsCacheForTest: (cacheKey, entry) => { toaPropOddsCache[cacheKey] = entry; },
+  __getToaPropOddsCacheForTest: (cacheKey) => toaPropOddsCache[cacheKey],
   _awaitToaCooldown,
   getFairProb,
   getFairProbAsync,
@@ -12013,6 +12140,10 @@ module.exports = {
   getLiveCacheStatus,
   getCacheAge,
   getLegOddsAgeSec,
+  refreshPropOddsForEvent,
+  refreshNearStartSupplements,
+  LEG_AGE_BULK_MARKETS,
+  __rawCacheEventForTest: (...a) => _rawCacheEvent(...a),
   isStale,
   isStaleForEvent,
   getStaleThreshold,
