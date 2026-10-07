@@ -169,6 +169,7 @@ const REGISTRY = [
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
   { key: 'freshGateEnabled', path: 'freshGateEnabled', type: 'bool', group: 'gating', env: 'FRESH_GATE_ENABLED', label: 'Near-start freshness gate on' },
   { key: 'freshGateWindowMin', path: 'freshGateWindowMin', type: 'number', min: 5, max: 1440, group: 'gating', env: 'FRESH_GATE_WINDOW_MIN', label: 'Freshness gate: minutes before start it applies' },
+  { key: 'freshGateExempt', path: 'freshGateExempt', type: 'strList', group: 'gating', danger: true, env: 'FRESH_GATE_EXEMPT', label: 'Freshness gate: exempt marketType prefixes / sport keys', help: 'Default mov_,series_winner,outright_,golf_outrights. Add golf_matchups to let DataGolf-priced golf matchups quote near the tee (boards measured ~90 min old).' },
   { key: 'freshGateMaxAgeSec', path: 'freshGateMaxAgeSec', type: 'number', min: 15, max: 1800, group: 'gating', env: 'FRESH_GATE_MAX_AGE_SEC', label: 'Freshness gate: max odds age (seconds)' },
   { key: 'tennisToaOnly', path: 'tennisToaOnly', type: 'bool', group: 'gating', env: 'TENNIS_TOA_ONLY', label: 'Tennis: TOA odds only (no Pinnacle-direct / Bovada / DK scrape boards)' },
   { key: 'tennisRequireToaSource', path: 'tennisRequireToaSource', type: 'bool', group: 'gating', env: 'TENNIS_REQUIRE_TOA_SOURCE', label: 'Tennis game spread / total: only off TOA (fresh) prices' },
