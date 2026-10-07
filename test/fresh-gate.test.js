@@ -101,3 +101,48 @@ test('golf matchups have no trustworthy odds age (DataGolf boards are snapshots)
   const of = require('../services/odds-feed');
   assert.strictEqual(of.getLegOddsAgeSec({ sport: 'golf_matchups', oddsApiSport: 'golf_matchups', marketType: 'moneyline' }), null);
 });
+
+// ---- supplement markets age by their OWN fetch (2026-10-07) -----------------
+// The sport cache is re-stamped on every bulk refresh while F5 / H1 / team
+// totals / BTTS blocks are carried forward up to 20 min, so reading the sport
+// age passed a 15-min-old F5 line as fresh.
+function withCache(sport, events, fn) {
+  const of = require('../services/odds-feed');
+  of.__setOddsCacheForTest(sport, { fetchedAt: Date.now() - 20e3, events });
+  try { return fn(of); } finally { of.__setOddsCacheForTest(sport, null); }
+}
+const evKey = (h, a) => require('../services/odds-feed').normalizeEventKey(h, a);
+const LI = (om, extra = {}) => Object.assign({ sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', marketType: 'x', oddsApiMarket: om,
+  homeTeam: 'Supp Home', awayTeam: 'Supp Away', startTime: new Date(Date.now() + 3600e3).toISOString(), oddsApiSelection: 'home' }, extra);
+
+test('a carried-forward supplement block with no fetch stamp has UNKNOWN age (not the sport age)', () => {
+  withCache('baseball_mlb', { [evKey('Supp Home', 'Supp Away')]: { homeTeam: 'Supp Home', awayTeam: 'Supp Away', commenceTime: LI('h2h').startTime,
+    markets: { h2h: { home: {}, away: {} }, h2h_f5: { home: {}, away: {} } } } }, (of) => {
+    assert.strictEqual(of.getLegOddsAgeSec(LI('h2h_f5')), null);
+    const main = of.getLegOddsAgeSec(LI('h2h'));
+    assert.ok(main >= 19 && main <= 21, 'bulk market keeps the sport age: ' + main);
+  });
+});
+
+test('a supplement block ages by its own fetchedAt; merge keeps older alt points older', () => {
+  const of = require('../services/odds-feed');
+  const old = of.__mergeSupplementedMarketForTest(null, { line: 4.5, byLine: { '4.5': {}, '5.5': {} } });
+  old.fetchedAt = Date.now() - 600e3; old.byLineAt = { '4.5': old.fetchedAt, '5.5': old.fetchedAt };
+  const merged = of.__mergeSupplementedMarketForTest(old, { line: 4.5, byLine: { '4.5': {} }, over: { point: 4.5 }, under: { point: 4.5 } });
+  assert.ok(Date.now() - merged.fetchedAt < 1000);
+  assert.ok(Date.now() - merged.byLineAt['4.5'] < 1000, 'refetched point is fresh');
+  assert.ok(Date.now() - merged.byLineAt['5.5'] >= 599e3, 'carried point keeps its old time');
+  withCache('baseball_mlb', { [evKey('Supp Home', 'Supp Away')]: { homeTeam: 'Supp Home', awayTeam: 'Supp Away', commenceTime: LI('h2h').startTime,
+    markets: { totals_f5: merged } } }, (o) => {
+    assert.ok(o.getLegOddsAgeSec(LI('totals_f5', { line: 4.5, oddsApiSelection: 'over' })) <= 1);
+    assert.ok(o.getLegOddsAgeSec(LI('totals_f5', { line: 5.5, oddsApiSelection: 'over' })) >= 599, 'alt point reads its own age');
+    assert.strictEqual(o.getLegOddsAgeSec(LI('totals_f5', { line: 6.5, oddsApiSelection: 'over' })), null, 'unknown point = unknown age');
+  });
+});
+
+test('RFI and other seed-time fairs age by propFetchedAt', () => {
+  const of = require('../services/odds-feed');
+  const a = of.getLegOddsAgeSec({ marketType: 'run_first_inning', oddsApiMarket: 'totals_1st_1_innings', propFetchedAt: Date.now() - 400e3 });
+  assert.ok(a >= 399 && a <= 401);
+  assert.strictEqual(of.getLegOddsAgeSec({ marketType: 'run_first_inning', oddsApiMarket: 'totals_1st_1_innings' }), null);
+});

@@ -1670,11 +1670,26 @@ function _countSupplementedMarkets(parsedEvents, keys) {
 // Then union the byLine maps from both, with fresh winning on any
 // line both sides happen to cover. SharpAPI-only lines (e.g. BetMGM
 // ±0.5 when TOA only had Pinnacle line=0) are preserved.
+// Every per-event supplement block carries its OWN fetch time (2026-10-07,
+// near-start freshness gate). The sport cache's fetchedAt is re-stamped on
+// every bulk replace while these blocks are carried forward up to
+// SUPPLEMENT_CARRY_MAX_AGE_MS, so the sport age says nothing about them.
+// byLineAt keeps a time per alt point: a point carried over from an older
+// fetch keeps that older time instead of inheriting the fresh one.
 function _mergeSupplementedMarket(existing, fresh) {
-  if (!existing) return fresh;
   if (!fresh) return existing;
+  const now = Date.now();
+  const byLineAt = {};
+  if (existing) {
+    const prevAt = existing.byLineAt || {};
+    for (const k of Object.keys(existing.byLine || {})) {
+      byLineAt[k] = prevAt[k] != null ? prevAt[k] : (Number.isFinite(existing.fetchedAt) ? existing.fetchedAt : null);
+    }
+  }
+  for (const k of Object.keys(fresh.byLine || {})) byLineAt[k] = now;
+  if (!existing) return { ...fresh, fetchedAt: now, byLineAt };
   const mergedByLine = { ...(existing.byLine || {}), ...(fresh.byLine || {}) };
-  return { ...fresh, byLine: mergedByLine };
+  return { ...fresh, byLine: mergedByLine, fetchedAt: now, byLineAt };
 }
 
 // Per-event TOA supplements (F5 / H1 / team_totals) are best-effort on
@@ -2526,6 +2541,7 @@ async function ensureBtts(sport, homeTeam, awayTeam, commenceTime) {
         books: books.length,
       };
 
+      btts.fetchedAt = now;   // the freshness gate ages the attached block by this
       _bttsCache[key] = { at: now, btts, toaHome: data.home_team, toaAway: data.away_team };
       _attachBttsToCache(sport, data.home_team, data.away_team, btts);
       return btts;
@@ -2601,7 +2617,7 @@ function _attachTeamTotalsToCache(sport, toaHome, toaAway, tt) {
       if (evH === nH) { home = tt.home; away = tt.away; }        // same orientation
       else if (evH === nA) { home = tt.away; away = tt.home; }   // event stored reversed vs TOA
       else continue;                                            // name mismatch — don't guess
-      const block = { books: tt.books || 1 };
+      const block = { books: tt.books || 1, fetchedAt: tt.fetchedAt };
       if (home) block.home = home;
       if (away) block.away = away;
       if (block.home || block.away) { ev.markets.team_totals = block; attached++; }
@@ -2685,6 +2701,7 @@ async function ensureTeamTotals(sport, homeTeam, awayTeam, commenceTime) {
       const tt = buildConsensusTeamTotals(bookPairs);
       if (!tt || (!tt.home && !tt.away)) { _teamTotalCache[key] = { at: now, tt: null }; return null; }
       tt.books = new Set(bookPairs.map(b => b.book)).size;
+      tt.fetchedAt = now;   // the freshness gate ages the attached block by this
 
       _teamTotalCache[key] = { at: now, tt, toaHome: data.home_team, toaAway: data.away_team };
       _attachTeamTotalsToCache(sport, data.home_team, data.away_team, tt);
@@ -8083,12 +8100,16 @@ const NHL_MIN_BOOKS = Math.max(1, parseInt(process.env.NHL_MIN_BOOKS, 10) || 2);
  * MAIN market's sport-cache age when the leg is on the primary point, else the
  * per-event alt-line cache age; otherwise the sport-cache age. null = unknown.
  */
+const LEG_AGE_BULK_MARKETS = new Set(['h2h', 'spreads', 'totals', 'h2h_3way', 'double_chance']);   // built by fetchFromTheOddsApi's bulk parse
 function getLegOddsAgeSec(lineInfo, now = Date.now()) {
   try {
     if (!lineInfo) return null;
     const mt = String(lineInfo.marketType || '');
-    if (/^player_/.test(mt)) {
-      return lineInfo.propFetchedAt ? Math.max(0, Math.round((now - lineInfo.propFetchedAt) / 1000)) : null;
+    const ageOf = (t) => (Number.isFinite(t) ? Math.max(0, Math.round((now - t) / 1000)) : null);
+    // Fairs captured at SEED time (player props, RFI) are priced from
+    // lineInfo.fairProb, so their age is the fetch behind that snapshot.
+    if (/^player_/.test(mt) || mt === 'run_first_inning' || lineInfo.propFetchedAt) {
+      return ageOf(lineInfo.propFetchedAt);
     }
     const sport = lineInfo.oddsApiSport || lineInfo.sport;
     // Golf matchups price off DataGolf, whose boards are periodic snapshots:
@@ -8098,11 +8119,26 @@ function getLegOddsAgeSec(lineInfo, now = Date.now()) {
     // freshness gate declines. (Outrights are exempt upstream: slow-moving.)
     if (String(sport).startsWith('golf_matchups')) return null;
     const om = String(lineInfo.oddsApiMarket || '');
+    const sel = lineInfo.oddsApiSelection || lineInfo.selection;
     const mainAge = () => { const m = getCacheAge(sport); return Number.isFinite(m) ? Math.max(0, Math.round(m * 60)) : null; };
-    if (/^(spreads|totals)(_|$)/.test(om)) {
-      const ev = getEventMarkets(sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime);
-      const block = ev && ev.markets ? ev.markets[om] : null;
-      if (block && lineMatchesPrimary(block, om, lineInfo.line, lineInfo.oddsApiSelection || lineInfo.selection)) return mainAge();
+    const ev = getEventMarkets(sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime);
+    const block = ev && ev.markets ? ev.markets[om] : null;
+    // Only the bulk markets are rebuilt on every sport refresh. Everything else
+    // (F5 / H1 / Q1 / team totals / BTTS / ...) is a per-event supplement that
+    // can be CARRIED FORWARD for up to 20 min while the sport age is re-stamped
+    // — so it must carry its own fetch time, and without one its age is unknown.
+    if (!LEG_AGE_BULK_MARKETS.has(om)) {
+      if (!block || !Number.isFinite(block.fetchedAt)) return null;
+      if (/^(spreads|totals)_/.test(om) && !lineMatchesPrimary(block, om, lineInfo.line, sel)) {
+        const at = block.byLineAt || {};
+        const l = lineInfo.line;
+        const hit = [`${sel}|${l}`, String(l), String(Math.abs(Number(l)))].find(k => at[k] != null);
+        return hit ? ageOf(at[hit]) : null;
+      }
+      return ageOf(block.fetchedAt);
+    }
+    if (om === 'spreads' || om === 'totals') {
+      if (block && lineMatchesPrimary(block, om, lineInfo.line, sel)) return mainAge();
       const alt = altLinesCache[normalizeEventKey(lineInfo.homeTeam, lineInfo.awayTeam)];
       return alt && Number.isFinite(alt.fetchedAt) ? Math.max(0, Math.round((now - alt.fetchedAt) / 1000)) : null;
     }
@@ -11933,6 +11969,8 @@ module.exports = {
   __resetToaGateForTest: () => { _toaQueue.length = 0; _toaInFlight = 0; _toaGateStats.abandoned = 0; _toaGateStats.maxQueue = 0;
     for (const o of [_toaEventsInflight, _toaEventsFailAt, _propOddsFailAt, toaEventsCache, toaPropOddsCache]) for (const k of Object.keys(o)) delete o[k]; },
   __setToaEventsCacheForTest: (sportKey, entry) => { toaEventsCache[sportKey] = entry; },
+  __setOddsCacheForTest: (sport, entry) => { if (entry == null) delete oddsCache[sport]; else oddsCache[sport] = entry; },
+  __mergeSupplementedMarketForTest: (a, b) => _mergeSupplementedMarket(a, b),
   __setToaPropOddsCacheForTest: (cacheKey, entry) => { toaPropOddsCache[cacheKey] = entry; },
   _awaitToaCooldown,
   getFairProb,
