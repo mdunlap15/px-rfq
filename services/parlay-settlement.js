@@ -73,6 +73,13 @@ function expectedPxSettlement(legs, opts = {}) {
   const voidLegs = outcomes.filter(o => o === 'void').length;
   const out = (result, basis) => ({ result, basis, voidLegs, sameGame });
   if (!list.length) return out(null, 'no_legs');
+  // A void leg in a parlay holding a same-game group voids the WHOLE parlay —
+  // even when another leg LOST (measured 2026-10-07 on settlements since 9/26:
+  // same-game group + void + lost -> PX push 20/20, no counterexample; the same
+  // shape with NO same-game group -> SP won 17/17). Before this, any_leg_lost
+  // came first and reconcileSettlements re-booked PX's $0 pushes as wins every
+  // few minutes, flip-flopping against the PX poll.
+  if (sameGame && voidLegs > 0) return out('push', 'same_game_void');
   if (outcomes.includes('lost')) return out('won', 'any_leg_lost');
   if (outcomes.some(o => o == null)) return out(null, 'incomplete');
   if (voidLegs === list.length) return out('push', 'all_legs_void');

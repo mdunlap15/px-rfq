@@ -6383,6 +6383,12 @@ function reconcileSettlements() {
       if (st) legStatuses.push(st);
     }
     if (legStatuses.length === 0) continue; // no leg data to reconcile against
+    // A void leg + a same-game group: PX voids the whole parlay even when a leg
+    // lost (parlay-settlement.expectedPxSettlement, measured 20/20). PX's own
+    // parlay result is the cash; never derive over it here (2026-10-07: this
+    // path re-booked 20 PX pushes as SP wins every ~5 min, fighting the poll).
+    if (parlaySettlement.hasSameGameGroup(primaryLegs)
+        && legStatuses.some(s => /push|void|cancel|refund/i.test(String(s)))) continue;
 
     // Derive correct SP result from legs (bettor-perspective leg data).
     // Only derive when the leg pattern is unambiguous. Won+push mixed parlays

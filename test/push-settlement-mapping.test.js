@@ -56,10 +56,50 @@ const L_01a09112 = () => [
 // The measured PX rule
 // ---------------------------------------------------------------------------
 
-test('rule: any lost leg -> SP won, whatever else pushed', () => {
-  const r = ps.expectedPxSettlement([leg('x', 1, 0.5, 'lost'), leg('y', 1, 0.5, 'push'), leg('z', 2, 0.5, 'won')]);
+test('rule: a lost leg with a push and NO same-game group -> SP won (17/17 since 9/26)', () => {
+  const r = ps.expectedPxSettlement([leg('x', 1, 0.5, 'lost'), leg('y', 3, 0.5, 'push'), leg('z', 2, 0.5, 'won')]);
   assert.equal(r.result, 'won');
   assert.equal(r.basis, 'any_leg_lost');
+});
+
+// 2026-10-07: PX settled push on 20/20 parlays holding a same-game group + a
+// void leg + a LOST leg (no counterexample in 608 settlements since 9/26). The
+// old rule ranked any_leg_lost first, and reconcileSettlements re-booked those
+// PX pushes as SP wins every ~5 min, fighting the settlement poll.
+// 01a10790-e190: GB@TB over 39.5 + GB -3 on the SAME game; GB won by 3 (push).
+const L_01a10790 = () => [
+  leg('d-gb-tb-o395', 50001, 0.4885, 'lost', { sport: 'americanfootball_nfl' }),
+  leg('d-gb-m3', 50001, 0.4964, 'push', { market: 'spread', sport: 'americanfootball_nfl' }),
+];
+// 01a10333-d23e: Braves ML + over 8 on Braves@Dodgers (8 runs: push), Rays ML, Padres ML.
+const L_01a10333 = () => [
+  leg('e-atl-ml', 60001, 0.3353, 'lost', { market: 'moneyline' }),
+  leg('e-atl-lad-o8', 60001, 0.5148, 'push'),
+  leg('e-tb-ml', 60002, 0.5523, 'won', { market: 'moneyline' }),
+  leg('e-sd-ml', 60003, 0.3508, 'lost', { market: 'moneyline' }),
+];
+
+test('rule: a push in a parlay holding a same-game group voids it EVEN WHEN a leg lost (01a10790, 01a10333)', () => {
+  for (const legs of [L_01a10790(), L_01a10333()]) {
+    const r = ps.expectedPxSettlement(legs);
+    assert.equal(r.result, 'push');
+    assert.equal(r.basis, 'same_game_void');
+  }
+  // the void leg OUTSIDE the same-game group counts too (4 of the 20)
+  const r2 = ps.expectedPxSettlement([leg('p', 1, 0.5, 'won'), leg('q', 1, 0.5, 'lost'), leg('r', 2, 0.5, 'void')]);
+  assert.equal(r2.result, 'push');
+});
+
+test('PX push on a lost+push same-game parlay is NOT flagged and reconcileSettlements never flips it to won', () => {
+  const { id, uuid } = book(L_01a10790(), -302, 145.62);
+  ot.recordSettlement(uuid, 'push', 0, { trusted: true });
+  let o = ot.findByParlayId(id);
+  assert.equal(o.status, 'settled_push');
+  assert.equal(o.meta.pxSettlementRuleMismatch, undefined, 'PX push here IS the rule');
+  ot.reconcileSettlements();
+  o = ot.findByParlayId(id);
+  assert.equal(o.status, 'settled_push', 'reconcile must not derive "won" over PX');
+  assert.equal(o.pnl, 0);
 });
 
 test('rule: won + push with NO same-game group -> SP lost at reduced odds (191/191 measured)', () => {
