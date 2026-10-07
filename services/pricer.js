@@ -1873,6 +1873,34 @@ function priceParlay(legs, opts = {}) {
       }
     }
 
+    // TENNIS GAME SPREAD / TOTAL GAMES — the order book's price, translated to a
+    // parlay leg (poster-service tennis_sets_post: osweet mirror, never-shorter-
+    // than-fair clamp, _spread_leg min EV). The order book backs side O at the
+    // mirror of the books' raw price of X, so its taker holds X at that raw price;
+    // in a parlay the bettor takes X and we hold O — the same position. So the
+    // leg's offered prob q (bettor side X, fair f) is:
+    //   base  = raw implied of X (Pinnacle first, else the mean of FD/DK)
+    //   q    >= f                                   (never shorter than fair)
+    //   spread: q >= (f + e)/(1 + e), e = 6%, or 8% when f > 0.5 (the side we
+    //           hold, O, is the dog) — exactly EV_O >= e on the side we hold.
+    // Not carried over (ladder/position-only): the odds-banded rung, step-back.
+    if (config.pricing.tennisGameMarginEnabled !== false
+        && effectiveBookPriceOverride == null && fairProb > 0 && fairProb < 1
+        && lineInfo.sport === 'tennis' && (lineInfo.marketType === 'spread' || lineInfo.marketType === 'total')) {
+      const rawPin = pinnacleOdds != null ? oddsFeed.americanToImpliedProb(pinnacleOdds) : null;
+      const rawOthers = [fanduelOdds, draftkingsOdds].filter(o => o != null).map(o => oddsFeed.americanToImpliedProb(o)).filter(p => p > 0 && p < 1);
+      const raw = (rawPin > 0 && rawPin < 1) ? rawPin : (rawOthers.length ? rawOthers.reduce((a, b) => a + b, 0) / rawOthers.length : null);
+      let q = raw != null ? raw : fairProb;
+      if (q < fairProb) q = fairProb;
+      if (lineInfo.marketType === 'spread') {
+        const e = fairProb > 0.5 ? Math.max(config.pricing.tennisSpreadMinEv || 0, config.pricing.tennisDogMinEv || 0)
+                                 : (config.pricing.tennisSpreadMinEv || 0);
+        const evFloor = (fairProb + e) / (1 + e);
+        if (q < evFloor) q = evFloor;
+      }
+      if (q > 0 && q < 0.99) effectiveBookPriceOverride = q;
+    }
+
     // Per-prop-type-per-side fair CALIBRATION. De-vig inherits the books'
     // favourite-longshot shading, so some prop legs are systematically
     // mispriced (HR-over: our fair 21.2% vs realised 16.3%, z=-3.62 on 930

@@ -1171,6 +1171,16 @@ const config = {
     // in the last obRelayMaxAgeSec uses the order book's fair (or 1 − the other
     // side's). Runtime keys obRelayEnabled / obRelayMaxAgeSec / obRelayMaxGapPp.
     obRelayEnabled: process.env.OB_RELAY_ENABLED !== 'false',
+    // TENNIS GAME SPREAD / TOTAL GAMES at the ORDER BOOK's margins (2026-10-06,
+    // operator: "open tennis spreads and totals with the same margins we use for
+    // the order book lines"). Same env names as poster-service tennis_sets_post.
+    // Spread legs: offered >= (fair + e)/(1 + e), e = TENNIS_SPREAD_MIN_EV (6%),
+    // or TENNIS_DOG_MIN_EV (8%) when the side WE hold is the dog (fair of the
+    // bettor's side > 50%). Both markets: base = the books' raw price of the
+    // bettor's side (Pinnacle first), never below fair. Runtime keys below.
+    tennisGameMarginEnabled: process.env.TENNIS_GAME_MARGIN !== 'false',
+    tennisSpreadMinEv: (() => { const v = parseFloat(process.env.TENNIS_SPREAD_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.06; })(),
+    tennisDogMinEv: (() => { const v = parseFloat(process.env.TENNIS_DOG_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.08; })(),
     obRelayMaxAgeSec: (() => {
       const v = parseInt(process.env.OB_RELAY_MAX_AGE_SEC, 10);
       return Number.isFinite(v) && v > 0 ? v : 300;

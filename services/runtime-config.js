@@ -167,6 +167,9 @@ const REGISTRY = [
   // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'tennisGameMarginEnabled', path: 'tennisGameMarginEnabled', type: 'bool', group: 'pricing', env: 'TENNIS_GAME_MARGIN', label: 'Tennis game spread / total games at the order-book margins' },
+  { key: 'tennisSpreadMinEv', path: 'tennisSpreadMinEv', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'TENNIS_SPREAD_MIN_EV', label: 'Tennis game spread: min EV on the side we hold' },
+  { key: 'tennisDogMinEv', path: 'tennisDogMinEv', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'TENNIS_DOG_MIN_EV', label: 'Tennis game spread: min EV when the side we hold is the dog' },
   { key: 'obRelayEnabled', path: 'obRelayEnabled', type: 'bool', group: 'pricing', env: 'OB_RELAY_ENABLED', label: 'Use the order-book fair relay for parlay legs' },
   { key: 'obRelayMaxAgeSec', path: 'obRelayMaxAgeSec', type: 'number', min: 30, max: 3600, group: 'pricing', env: 'OB_RELAY_MAX_AGE_SEC', label: 'Order-book relay: max fair age, seconds' },
   { key: 'obRelayMaxGapPp', path: 'obRelayMaxGapPp', type: 'number', min: 0.005, max: 0.5, group: 'pricing', env: 'OB_RELAY_MAX_GAP_PP', label: 'Order-book relay: own fair wins if more adverse by more than (prob)' },
