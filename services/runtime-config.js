@@ -167,6 +167,7 @@ const REGISTRY = [
   // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'tennisRequireToaSource', path: 'tennisRequireToaSource', type: 'bool', group: 'gating', env: 'TENNIS_REQUIRE_TOA_SOURCE', label: 'Tennis game spread / total: only off TOA (fresh) prices' },
   { key: 'tennisGameMarginEnabled', path: 'tennisGameMarginEnabled', type: 'bool', group: 'pricing', env: 'TENNIS_GAME_MARGIN', label: 'Tennis game spread / total games at the order-book margins' },
   { key: 'tennisSpreadMinEv', path: 'tennisSpreadMinEv', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'TENNIS_SPREAD_MIN_EV', label: 'Tennis game spread: min EV on the side we hold' },
   { key: 'tennisDogMinEv', path: 'tennisDogMinEv', type: 'number', min: 0, max: 0.5, group: 'pricing', env: 'TENNIS_DOG_MIN_EV', label: 'Tennis game spread: min EV when the side we hold is the dog' },

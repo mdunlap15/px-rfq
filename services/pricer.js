@@ -1884,6 +1884,30 @@ function priceParlay(legs, opts = {}) {
     //   spread: q >= (f + e)/(1 + e), e = 6%, or 8% when f > 0.5 (the side we
     //           hold, O, is the dog) — exactly EV_O >= e on the side we hold.
     // Not carried over (ladder/position-only): the odds-banded rung, step-back.
+    // FRESH-SOURCE GATE (operator option A, 2026-10-06): a tennis game spread /
+    // total leg prices only off a TOA market block (Pinnacle via TOA reads
+    // 5-19 s old). A block merged from the Pinnacle-direct guest API (a ~15 min
+    // CDN snapshot), Bovada or DK — or no block at all — declines.
+    if (config.pricing.tennisRequireToaSource !== false
+        && lineInfo.sport === 'tennis' && (lineInfo.marketType === 'spread' || lineInfo.marketType === 'total')) {
+      let blk = null;
+      try {
+        const ev = oddsFeed.getEventMarkets(lineInfo.oddsApiSport || 'tennis', lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime);
+        blk = ev && ev.markets ? ev.markets[lineInfo.marketType === 'spread' ? 'spreads' : 'totals'] : null;
+      } catch (_) { blk = null; }
+      const scraped = !blk ? 'no market block'
+        : blk.pinnacleScraped ? 'Pinnacle-direct (~15 min CDN snapshot)'
+        : blk.bovadaScraped ? 'Bovada scrape'
+        : blk.dkScraped ? 'DK scrape' : null;
+      if (scraped) {
+        priceParlay._lastFailure = {
+          reason: 'tennis_source_not_fresh',
+          detail: `${legLabel}: tennis ${lineInfo.marketType} priced only off TOA — this match's ${lineInfo.marketType === 'spread' ? 'spread' : 'total'} comes from ${scraped}`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
+    }
     if (config.pricing.tennisGameMarginEnabled !== false
         && effectiveBookPriceOverride == null && fairProb > 0 && fairProb < 1
         && lineInfo.sport === 'tennis' && (lineInfo.marketType === 'spread' || lineInfo.marketType === 'total')) {

@@ -2923,6 +2923,16 @@ async function seedAllLines(gen) {
             && !(oddsEvt && oddsEvt.markets && oddsEvt.markets[oddsApiMarket])) {
           continue;
         }
+        // ...and (2026-10-06, operator option A) only when that block came from
+        // TOA: the pricer declines a tennis spread/total off the Pinnacle-direct
+        // (~15 min CDN snapshot), Bovada or DK scrapes (tennis_source_not_fresh),
+        // so registering it would advertise a line we decline 100% of the time.
+        if (sportKey === 'tennis'
+            && (oddsApiMarket === 'spreads' || oddsApiMarket === 'totals')
+            && config.pricing.tennisRequireToaSource !== false) {
+          const _tb = oddsEvt.markets[oddsApiMarket];
+          if (_tb && (_tb.pinnacleScraped || _tb.bovadaScraped || _tb.dkScraped)) continue;
+        }
 
         // Football (NFL/preseason/NCAAF/CFL) — T1.8, same PX Rule 2 posture
         // as the tennis guard above but for EVERY market key: PX posts 14+

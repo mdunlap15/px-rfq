@@ -21,7 +21,13 @@ function leg(id, ev, marketType, sel, line) {
   return id;
 }
 const saved = {};
-function stub(fairs, pin = {}) {
+function stub(fairs, pin = {}, scraped = {}) {
+  saved.evm = oddsFeed.getEventMarkets;
+  oddsFeed.getEventMarkets = (sport, home) => {
+    const id = Object.keys(L).find(k => L[k].homeTeam === home);
+    const flag = scraped[id] ? { [scraped[id]]: true } : {};
+    return { markets: { spreads: { ...flag }, totals: { ...flag } } };   // TOA blocks carry no scraped flag
+  };
   saved.lookup = lineManager.lookupLine; saved.fair = oddsFeed.getFairProb; saved.stale = oddsFeed.isStaleForEvent;
   saved.pre = oddsFeed.isEventStalePreGame; saved.pin = oddsFeed.getPinnacleOdds; saved.cap = config.pricing.maxRiskPerParlay;
   saved.maxOdds = config.pricing.maxOdds; saved.en = config.pricing.tennisGameMarginEnabled; saved.relay = config.pricing.obRelayEnabled;
@@ -40,6 +46,7 @@ function stub(fairs, pin = {}) {
   config.pricing.maxRiskPerParlay = 3000; config.pricing.maxOdds = 50000; config.pricing.obRelayEnabled = false;
 }
 function restore() {
+  oddsFeed.getEventMarkets = saved.evm;
   lineManager.lookupLine = saved.lookup; oddsFeed.getFairProb = saved.fair; oddsFeed.isStaleForEvent = saved.stale;
   if (saved.pre) oddsFeed.isEventStalePreGame = saved.pre; oddsFeed.getPinnacleOdds = saved.pin;
   config.pricing.maxRiskPerParlay = saved.cap; config.pricing.maxOdds = saved.maxOdds;
@@ -92,4 +99,33 @@ test('kill switch: tennisGameMarginEnabled=false leaves the legs on the normal v
     const m = await price([a, b], 'tg-4');
     assert.ok(m.legs.every(l => l.bookPriceOverride == null));
   } finally { restore(); }
+});
+
+test('fresh-source gate: a spread / total off the Pinnacle-direct, Bovada or DK scrape declines; TOA prices', async () => {
+  for (const flag of ['pinnacleScraped', 'bovadaScraped', 'dkScraped']) {
+    const a = leg('gs-' + flag, 'G-' + flag, 'spread', 'home', -3.5), b = leg('gm-' + flag, 'GM-' + flag, 'moneyline', 'home', null);
+    stub({ [a]: 0.5 }, {}, { [a]: flag });
+    try {
+      const r = await pricer.priceParlay([a, b], { parlayId: 'gate-' + flag });
+      try { orderTracker.releasePending('gate-' + flag); } catch (_) {}
+      assert.strictEqual(r, null, flag + ' must decline');
+      assert.strictEqual(pricer.priceParlay._lastFailure.reason, 'tennis_source_not_fresh');
+    } finally { restore(); }
+  }
+  const c = leg('gs-toa', 'G-toa', 'total', 'over', 22.5), d = leg('gm-toa', 'GM-toa', 'moneyline', 'home', null);
+  stub({ [c]: 0.5 });
+  try { assert.ok((await price([c, d], 'gate-toa')).legs.length === 2, 'TOA block prices'); } finally { restore(); }
+});
+
+test('fresh-source gate leaves tennis moneylines alone even off the scrape', async () => {
+  const a = leg('mlg-1', 'ML1', 'moneyline', 'home', null), b = leg('mlg-2', 'ML2', 'moneyline', 'home', null);
+  stub({}, {}, { [a]: 'pinnacleScraped', [b]: 'pinnacleScraped' });
+  try { assert.ok(await price([a, b], 'gate-ml')); } finally { restore(); }
+});
+
+test('fresh-source gate kill switch', async () => {
+  const a = leg('ks-1', 'KS1', 'spread', 'home', -3.5), b = leg('ks-2', 'KS2', 'moneyline', 'home', null);
+  stub({ [a]: 0.5 }, {}, { [a]: 'pinnacleScraped' });
+  const sv = config.pricing.tennisRequireToaSource; config.pricing.tennisRequireToaSource = false;
+  try { assert.ok(await price([a, b], 'gate-ks')); } finally { config.pricing.tennisRequireToaSource = sv; restore(); }
 });

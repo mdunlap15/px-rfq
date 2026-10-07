@@ -1179,6 +1179,15 @@ const config = {
     // bettor's side > 50%). Both markets: base = the books' raw price of the
     // bettor's side (Pinnacle first), never below fair. Runtime keys below.
     tennisGameMarginEnabled: process.env.TENNIS_GAME_MARGIN !== 'false',
+    // Tennis game spread / total legs only off a FRESH source (2026-10-06,
+    // operator option A). Pinnacle's public guest API is a CDN snapshot cached
+    // up to ~15 min (Cache-Control max-age~905, measured age 6-12 min even 13
+    // min before a start; cache-busting returns 204) while TOA's Pinnacle prices
+    // read 5-19 s old. So a spread/total leg prices only when its market block
+    // came from TOA; a block merged from the Pinnacle-direct / Bovada / DK
+    // scrapes declines (tennis_source_not_fresh). Moneyline and set markets are
+    // unchanged. Runtime key tennisRequireToaSource; literal 'false' disables.
+    tennisRequireToaSource: process.env.TENNIS_REQUIRE_TOA_SOURCE !== 'false',
     tennisSpreadMinEv: (() => { const v = parseFloat(process.env.TENNIS_SPREAD_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.06; })(),
     tennisDogMinEv: (() => { const v = parseFloat(process.env.TENNIS_DOG_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.08; })(),
     obRelayMaxAgeSec: (() => {
