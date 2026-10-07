@@ -167,6 +167,9 @@ const REGISTRY = [
   // Pair-trim A/B splits (2026-10-01): runtime so an arm can start or stop
   // without a Railway edit (= restart). Read per RFQ in pricer.js.
   { key: 'mlPairTrimPercent', path: 'mlPairTrimPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'ML_PAIR_TRIM_PERCENT', label: 'MLB ML-pair trim A/B % (0 = dark)' },
+  { key: 'freshGateEnabled', path: 'freshGateEnabled', type: 'bool', group: 'gating', env: 'FRESH_GATE_ENABLED', label: 'Near-start freshness gate on' },
+  { key: 'freshGateWindowMin', path: 'freshGateWindowMin', type: 'number', min: 5, max: 1440, group: 'gating', env: 'FRESH_GATE_WINDOW_MIN', label: 'Freshness gate: minutes before start it applies' },
+  { key: 'freshGateMaxAgeSec', path: 'freshGateMaxAgeSec', type: 'number', min: 15, max: 1800, group: 'gating', env: 'FRESH_GATE_MAX_AGE_SEC', label: 'Freshness gate: max odds age (seconds)' },
   { key: 'tennisToaOnly', path: 'tennisToaOnly', type: 'bool', group: 'gating', env: 'TENNIS_TOA_ONLY', label: 'Tennis: TOA odds only (no Pinnacle-direct / Bovada / DK scrape boards)' },
   { key: 'tennisRequireToaSource', path: 'tennisRequireToaSource', type: 'bool', group: 'gating', env: 'TENNIS_REQUIRE_TOA_SOURCE', label: 'Tennis game spread / total: only off TOA (fresh) prices' },
   { key: 'tennisGameMarginEnabled', path: 'tennisGameMarginEnabled', type: 'bool', group: 'pricing', env: 'TENNIS_GAME_MARGIN', label: 'Tennis game spread / total games at the order-book margins' },

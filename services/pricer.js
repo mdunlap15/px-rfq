@@ -1925,6 +1925,31 @@ function priceParlay(legs, opts = {}) {
       if (q > 0 && q < 0.99) effectiveBookPriceOverride = q;
     }
 
+    // NEAR-START FRESHNESS GATE (2026-10-06, operator: "we simply cannot have
+    // delays of more than a minute or two" near the start). Inside
+    // freshGateWindowMin of start the odds this leg prices from must be at most
+    // freshGateMaxAgeSec old: a fresh order-book relay fair counts (its own
+    // age), else our feed's age for THIS leg (prop fetch / main cache / alt-line
+    // cache). Unknown age = decline. Slow-moving markets are exempt.
+    if (config.pricing.freshGateEnabled !== false) {
+      const _st = Date.parse(lineInfo.startTime || '');
+      const _ttsMin = Number.isFinite(_st) ? (_st - Date.now()) / 60000 : null;
+      const _mt = String(lineInfo.marketType || ''), _sp = String(lineInfo.sport || '');
+      const _exempt = (config.pricing.freshGateExempt || []).some(x => _mt.startsWith(x) || _sp === x || _sp.startsWith(x));
+      if (!_exempt && _ttsMin != null && _ttsMin > 0 && _ttsMin <= (config.pricing.freshGateWindowMin || 180)) {
+        const _age = relayHit ? relayHit.ageSec : oddsFeed.getLegOddsAgeSec(lineInfo);
+        const _max = config.pricing.freshGateMaxAgeSec || 120;
+        if (_age == null || _age > _max) {
+          priceParlay._lastFailure = {
+            reason: 'stale_near_start',
+            detail: `${legLabel}: starts in ${Math.round(_ttsMin)} min and its odds are ${_age == null ? 'of unknown age' : _age + 's old'} (max ${_max}s inside ${config.pricing.freshGateWindowMin || 180} min of start)`,
+            blockerLeg: legDescriptor,
+          };
+          return null;
+        }
+      }
+    }
+
     // Per-prop-type-per-side fair CALIBRATION. De-vig inherits the books'
     // favourite-longshot shading, so some prop legs are systematically
     // mispriced (HR-over: our fair 21.2% vs realised 16.3%, z=-3.62 on 930

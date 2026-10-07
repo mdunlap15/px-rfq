@@ -8077,6 +8077,33 @@ function getAltLineCacheEntry(eventKey, marketType, selection, line) {
  */
 const NHL_MIN_BOOKS = Math.max(1, parseInt(process.env.NHL_MIN_BOOKS, 10) || 2);
 
+/**
+ * Age in seconds of the odds a leg actually prices from (2026-10-06 freshness
+ * gate): the prop fetch time for player props; for a spread/total family the
+ * MAIN market's sport-cache age when the leg is on the primary point, else the
+ * per-event alt-line cache age; otherwise the sport-cache age. null = unknown.
+ */
+function getLegOddsAgeSec(lineInfo, now = Date.now()) {
+  try {
+    if (!lineInfo) return null;
+    const mt = String(lineInfo.marketType || '');
+    if (/^player_/.test(mt)) {
+      return lineInfo.propFetchedAt ? Math.max(0, Math.round((now - lineInfo.propFetchedAt) / 1000)) : null;
+    }
+    const sport = lineInfo.oddsApiSport || lineInfo.sport;
+    const om = String(lineInfo.oddsApiMarket || '');
+    const mainAge = () => { const m = getCacheAge(sport); return Number.isFinite(m) ? Math.max(0, Math.round(m * 60)) : null; };
+    if (/^(spreads|totals)(_|$)/.test(om)) {
+      const ev = getEventMarkets(sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime);
+      const block = ev && ev.markets ? ev.markets[om] : null;
+      if (block && lineMatchesPrimary(block, om, lineInfo.line, lineInfo.oddsApiSelection || lineInfo.selection)) return mainAge();
+      const alt = altLinesCache[normalizeEventKey(lineInfo.homeTeam, lineInfo.awayTeam)];
+      return alt && Number.isFinite(alt.fetchedAt) ? Math.max(0, Math.round((now - alt.fetchedAt) / 1000)) : null;
+    }
+    return mainAge();
+  } catch (_) { return null; }
+}
+
 function _altEntryFresh(alt, now = Date.now()) {
   return !!alt && Number.isFinite(alt.fetchedAt) && (now - alt.fetchedAt) < ALT_LINES_TTL_MS;
 }
@@ -11941,6 +11968,7 @@ module.exports = {
   getLiveFairProb,
   getLiveCacheStatus,
   getCacheAge,
+  getLegOddsAgeSec,
   isStale,
   isStaleForEvent,
   getStaleThreshold,

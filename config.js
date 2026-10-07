@@ -1192,6 +1192,18 @@ const config = {
     // Bovada / DK tennis boards never enter the odds cache (odds-feed merges are
     // no-ops). Runtime key tennisToaOnly; literal 'false' restores them.
     tennisToaOnly: process.env.TENNIS_TOA_ONLY !== 'false',
+    // NEAR-START FRESHNESS GATE (2026-10-06, operator: "for markets that can move
+    // a lot in the final few hours and minutes before start times, we simply
+    // cannot have delays of more than a minute or two" / "We have to get this
+    // fixed."). Inside FRESH_GATE_WINDOW_MIN of start a leg prices only if the
+    // odds it prices from are <= FRESH_GATE_MAX_AGE_SEC old — our own feed, or
+    // a fresh order-book relay fair. Slow-moving markets (UFC MoV, MLB series,
+    // golf outrights) are exempt: FRESH_GATE_EXEMPT, comma list of marketType
+    // prefixes / sport keys. Runtime keys freshGate*.
+    freshGateEnabled: process.env.FRESH_GATE_ENABLED !== 'false',
+    freshGateWindowMin: (() => { const v = parseFloat(process.env.FRESH_GATE_WINDOW_MIN); return Number.isFinite(v) && v > 0 ? v : 180; })(),
+    freshGateMaxAgeSec: (() => { const v = parseFloat(process.env.FRESH_GATE_MAX_AGE_SEC); return Number.isFinite(v) && v > 0 ? v : 120; })(),
+    freshGateExempt: (process.env.FRESH_GATE_EXEMPT || 'mov_,series_winner,outright_,golf_outrights').split(',').map(x => x.trim()).filter(Boolean),
     tennisSpreadMinEv: (() => { const v = parseFloat(process.env.TENNIS_SPREAD_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.06; })(),
     tennisDogMinEv: (() => { const v = parseFloat(process.env.TENNIS_DOG_MIN_EV); return Number.isFinite(v) && v >= 0 ? v : 0.08; })(),
     obRelayMaxAgeSec: (() => {
