@@ -96,3 +96,8 @@ test('kill switch and defaults', async () => {
   config.pricing.freshGateEnabled = false;
   try { assert.ok(await attempt([a, b], 'fg-7')); } finally { restore(); }
 });
+
+test('golf matchups have no trustworthy odds age (DataGolf boards are snapshots) -> declined near the start', () => {
+  const of = require('../services/odds-feed');
+  assert.strictEqual(of.getLegOddsAgeSec({ sport: 'golf_matchups', oddsApiSport: 'golf_matchups', marketType: 'moneyline' }), null);
+});

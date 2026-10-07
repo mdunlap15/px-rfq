@@ -8091,6 +8091,12 @@ function getLegOddsAgeSec(lineInfo, now = Date.now()) {
       return lineInfo.propFetchedAt ? Math.max(0, Math.round((now - lineInfo.propFetchedAt) / 1000)) : null;
     }
     const sport = lineInfo.oddsApiSport || lineInfo.sport;
+    // Golf matchups price off DataGolf, whose boards are periodic snapshots:
+    // measured 2026-10-07 01:05 ET, round + tournament matchups last_updated
+    // 91 min earlier and unchanged across polls. Our cache age (when WE fetched)
+    // says nothing about that, so near the start the age is UNKNOWN -> the
+    // freshness gate declines. (Outrights are exempt upstream: slow-moving.)
+    if (String(sport).startsWith('golf_matchups')) return null;
     const om = String(lineInfo.oddsApiMarket || '');
     const mainAge = () => { const m = getCacheAge(sport); return Number.isFinite(m) ? Math.max(0, Math.round(m * 60)) : null; };
     if (/^(spreads|totals)(_|$)/.test(om)) {
