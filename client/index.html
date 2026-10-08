@@ -2202,8 +2202,15 @@
       hint = `ProphetX rejected our accept &mdash; no env-var fix. Usually the
         bettor cancelled or the order expired between our quote and the confirm
         round-trip. Safe to ignore if rare; investigate if clustered.`;
+    } else if (allReasons.includes('team exposure') && Object.values(alerts.declineByReason || {})
+        .some(v => [v.lastDetail, ...(v.examples || []).map(e => e.detail)].some(d => /raw[_ -]hard|raw exposure/i.test(String(d || ''))))) {
+      // Two separate team caps; raising one never raises the other.
+      hint = `The per-team RAW hard cap is full &mdash; adjust ${code('maxRawExposurePerTeam')}
+        (Config tab / runtime override, no restart; env ${code('MAX_RAW_EXPOSURE_PER_TEAM')}).
+        ${code('MAX_EXPOSURE_PER_TEAM')} is the separate weighted cap and will not help.`;
     } else if (allReasons.includes('team exposure')) {
-      hint = `Adjust ${code('MAX_EXPOSURE_PER_TEAM')} in Railway env vars.`;
+      hint = `The per-team WEIGHTED cap is full &mdash; adjust ${code('maxExposurePerTeam')}
+        (Config tab / runtime override, no restart; env ${code('MAX_EXPOSURE_PER_TEAM')}).`;
     } else if (allReasons.includes('risk') && allReasons.includes('max')) {
       hint = `Adjust ${code('MAX_RISK_PER_PARLAY')} in Railway env vars.`;
     } else if (allReasons.includes('too many legs')) {
