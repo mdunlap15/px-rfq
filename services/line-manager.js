@@ -2350,6 +2350,38 @@ async function refreshPropsForEvent(pxEventId) {
   return { updated, considered };
 }
 
+// NFL TD same-game phase 1 (2026-10-09): a QB's own TD is excluded (too few
+// measured pairs). A player is a PASSER when PX's own board for the game
+// carries a passing market for him (passing yards / TDs / attempts /
+// completions / interceptions / longest pass / pass+rush yards). Read from the
+// PX markets the last seed's prop pass saw. Returns true / false, or null when
+// the game has no seed context (callers fail closed on null).
+const _PASSER_TYPES = new Set(['passing_yards', 'passing_tds', 'pass_attempts', 'pass_completions',
+  'interception_thrown', 'longest_pass', 'pass_rush_yards']);
+const _passerCache = new Map();   // pxEventId -> { at, names:Set }
+function isFootballPasser(pxEventId, playerName) {
+  const ctx = _propSeedCtx.get(String(pxEventId));
+  if (!ctx || !Array.isArray(ctx.markets)) return null;
+  let c = _passerCache.get(String(pxEventId));
+  if (!c || c.at !== ctx.at) {
+    const ws = _getWsModule();
+    if (!ws || typeof ws._classifyFootballProp !== 'function') return null;
+    const names = new Set();
+    for (const m of ctx.markets) {
+      if (!m || !m.name) continue;
+      let t = null;
+      try { t = ws._classifyFootballProp(m.name); } catch (_) { t = null; }
+      if (!_PASSER_TYPES.has(t)) continue;
+      const n = ws._extractPlayerNameFromPropMarket(m.name);
+      if (n) names.add(oddsFeed._normPlayerNameParts ? JSON.stringify(oddsFeed._normPlayerNameParts(n)) : String(n).toLowerCase());
+    }
+    c = { at: ctx.at, names };
+    _passerCache.set(String(pxEventId), c);
+  }
+  const key = oddsFeed._normPlayerNameParts ? JSON.stringify(oddsFeed._normPlayerNameParts(playerName)) : String(playerName || '').toLowerCase();
+  return c.names.has(key);
+}
+
 function pruneStalePropSeedCtx(now = Date.now()) {
   for (const [id, c] of _propSeedCtx) {
     const st = Date.parse((c.event && c.event.scheduled) || '');
@@ -5862,6 +5894,7 @@ function getPrimarySpreadHomePoint(pxEventId) {
 }
 
 module.exports = {
+  isFootballPasser,
   refreshPropsForEvent,
   pruneStalePropSeedCtx,
   __propSeedCtxForTest: () => _propSeedCtx,

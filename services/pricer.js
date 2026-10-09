@@ -2175,6 +2175,15 @@ function priceParlay(legs, opts = {}) {
       const isProp = li => /^player_/.test(li.marketType || '');
       const sideOf = li => String(li.oddsApiSelection || li.selection || '').toLowerCase();
       const consumed = new Set([..._sgpNestedUsed, ..._sgpXteamUsed]);
+      // NFL anytime-TD groups are MEASURED independent at our mirror quotes
+      // (nflTdSgpGroup) — the generic same-direction φ charge does not apply.
+      {
+        const byEv = {};
+        pricedLegs.forEach((pl, i) => { const e = pl.lineInfo && pl.lineInfo.pxEventId; if (e != null) (byEv[e] || (byEv[e] = [])).push(i); });
+        for (const idxs of Object.values(byEv)) {
+          if (idxs.length >= 2 && nflTdSgpGroup(idxs.map(i => pricedLegs[i].lineInfo)).ok) idxs.forEach(i => consumed.add(i));
+        }
+      }
       // A game TOTAL is a valid same-direction partner for a prop: one player's
       // Over is positively correlated with the GAME total Over (he's a component
       // of it). Include totals ONLY in events with no spread/ml leg, so we never
@@ -2344,6 +2353,10 @@ function priceParlay(legs, opts = {}) {
     for (const legs of Object.values(eventLegs)) {
       let combo = null;
       let factor = 1;
+      // NFL anytime-TD group: MEASURED independent at our mirror quotes (see
+      // nflTdSgpGroup) — never the 3+-leg grid default (prod 1.25), which is
+      // an unmeasured guess for this shape.
+      if (legs.length >= 2 && nflTdSgpGroup(legs.map(l => l.lineInfo)).ok) continue;
 
       if (legs.length === 2) {
         // 2-leg path — legacy combo names ('ml_total','spread_total').
@@ -4563,6 +4576,40 @@ function _xteamCombosAllowed() {
 //     missing, false, or any non-boolean (incl. the string 'true') = blocked.
 // ---------------------------------------------------------------------------
 
+// NFL ANYTIME-TD SAME-GAME PARLAYS — phase 1 (operator 2026-10-09).
+// Qualifies a same-game NFL leg group that may quote as 'nfl_td_sgp':
+//   * NFL only (CFB / CFL never measured), flag nflTdSgpEnabled on;
+//   * 2..nflTdSgpMaxLegs legs, EVERY one a player_anytime_td YES leg;
+//   * different players; NO QB (a passer on PX's board for the game — QB-TD
+//     pairs were too thin to measure). Unknown passer status FAILS CLOSED.
+// Measured on 855 NFL games 2023-25 (scripts/_nfl_sgp_prop_measure.js, fair
+// >= 25%): joint hits / our independent mirror quote 0.84 for pairs (same team
+// AND opposing), 0.70-0.75 for x3, 0.61 for x4, every 97.5% bound < 0.90 — the
+// TD mirror's margin covers the coupling, so these price at the independent
+// product. TD + a side / total / any other leg from the game is NOT included
+// (TD + own side / over measured 1.09-1.23 — phase 2, needs a factor).
+function nflTdSgpGroup(ls) {
+  if (!(config.pricing && config.pricing.nflTdSgpEnabled !== false)) return { ok: false, why: 'disabled' };
+  const max = (config.pricing && config.pricing.nflTdSgpMaxLegs) || 4;
+  if (!Array.isArray(ls) || ls.length < 2 || ls.length > max) return { ok: false, why: 'leg_count' };
+  const seen = new Set();
+  let eid = null;
+  for (const li of ls) {
+    if (!li) return { ok: false, why: 'missing' };
+    if (String(li.sport || li.oddsApiSport || '') !== 'americanfootball_nfl') return { ok: false, why: 'not_nfl' };
+    if (li.marketType !== 'player_anytime_td') return { ok: false, why: 'not_anytime_td' };
+    if (String(li.selection || li.oddsApiSelection || '').toLowerCase() !== 'over') return { ok: false, why: 'not_yes' };
+    if (eid == null) eid = li.pxEventId; else if (String(li.pxEventId) !== String(eid)) return { ok: false, why: 'events' };
+    const pk = _nestedNormPlayer(li.playerName || li.teamName);
+    if (!pk || seen.has(pk)) return { ok: false, why: 'same_player' };
+    seen.add(pk);
+    let passer = null;
+    try { passer = lineManager.isFootballPasser(li.pxEventId, li.playerName || li.teamName); } catch (_) { passer = null; }
+    if (passer !== false) return { ok: false, why: passer ? 'qb' : 'passer_unknown' };
+  }
+  return { ok: true, legs: ls.length };
+}
+
 function _isFootballLine(li) {
   return String((li && (li.sport || li.oddsApiSport)) || '').startsWith('americanfootball');
 }
@@ -5199,6 +5246,9 @@ function shouldDecline(legs, parlayId) {
       for (const [eid, ls] of fbByEvent) {
         if (ls.length < 2) continue;
         const desc = ls.map(li => `${li.teamName || li.playerName || '?'} ${li.marketType}${li.selection ? ':' + li.selection : ''}`).join(' + ');
+        // NFL anytime-TD same-game group (measured, phase 1) — independent of
+        // FOOTBALL_SGP_ENABLED; classifies 'nfl_td_sgp' downstream.
+        if (nflTdSgpGroup(ls).ok) continue;
         if (fbEnabled) {
           const calibrated = _footballSideTotalPair(ls);
           // CFB EXTREME-SPREAD SGP CAP (2026-09-25). Added when the top bucket was
@@ -5508,6 +5558,8 @@ function shouldDecline(legs, parlayId) {
           // + additive band-top pricing.
           if (group.others.length === 0 && group.props.length === 2
               && _xteamCombosAllowed() && matchXTeamPair(group.props[0], group.props[1])) continue;
+          // NFL ANYTIME-TD (phase 1): 2-4 TD legs, no QB, nothing else from the game.
+          if (group.others.length === 0 && nflTdSgpGroup(group.props).ok) continue;
           const propLabels = group.props.map(li =>
             `${li.playerName || li.teamName || '?'} ${li.propType || li.marketType} ${li.selection || ''} ${li.line ?? ''}`.trim());
           const otherLabels = group.others.map(li =>
@@ -5816,6 +5868,7 @@ function shouldDecline(legs, parlayId) {
   // the group is 3+ legs or the market pair isn't a recognized combo
   // (e.g. spread+spread — blocked by duplicate rules anyway).
   const classifySgpCombo = (entries) => {
+    if (entries.length >= 2 && nflTdSgpGroup(entries.map(e => e.li)).ok) return 'nfl_td_sgp';
     if (entries.length !== 2) return null;
     // Nested implication pair (Stage 1): two same-player prop legs from
     // the side-keyed implication table. Checked FIRST so e.g. a soccer
@@ -5845,6 +5898,9 @@ function shouldDecline(legs, parlayId) {
   // ensures kprop_kprop is opposing pitchers; this gate just needs to
   // recognize the combos.
   const allowedCombos = new Set([...(config.pricing.sgpAllowedCombos || []), 'kprop_ml', 'kprop_kprop']);
+  // nflTdSgpEnabled IS the lever for nfl_td_sgp (no SGP_ALLOWED_COMBOS edit,
+  // which would restart the trader); classification already required it.
+  if (config.pricing.nflTdSgpEnabled !== false) allowedCombos.add('nfl_td_sgp');
   // `sgpCombo` is captured on the whole parlay for downstream pricing +
   // order-tracking. Currently we only support single-event SGP legs
   // (length==2 on one pxEventId); multi-event SGPs not supported yet.

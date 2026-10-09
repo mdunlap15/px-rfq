@@ -89,7 +89,10 @@ test('a TD leg is blocked against EVERY other leg on the same game, with footbal
     'anytime TD + team total': ['cmc-any', 'lar-tt'],
     'first TD + spread': ['cmc-first', 'sf-spread'],
     'first TD + game total': ['cmc-first', 'game-total'],
-    'two anytime TDs, same game': ['cmc-any', 'kittle-any'],
+    // Since 2026-10-09 two NFL anytime TDs CAN quote (nfl_td_sgp) — but only when
+    // PX's board proves neither is a QB; with no seed context here the passer
+    // status is unknown, so the carve-out fails closed (test/nfl-td-sgp.test.js).
+    'two anytime TDs, same game (passer status unknown)': ['cmc-any', 'kittle-any'],
     'same player, first + anytime': ['cmc-first', 'cmc-any'],
     'TD + side + total stack': ['cmc-any', 'sf-spread', 'game-total'],
   };

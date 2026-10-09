@@ -1579,6 +1579,17 @@ const config = {
     // coupling of anything quoted. Consumers must treat undefined as false
     // (absence-safe): only the literal env string 'true' releases the block.
     footballSgpEnabled: process.env.FOOTBALL_SGP_ENABLED === 'true',
+    // NFL ANYTIME-TD SAME-GAME PARLAYS, phase 1 (operator 2026-10-09: "yes,
+    // build phase 1"). 2..NFL_TD_SGP_MAX_LEGS anytime-TD legs on one NFL game,
+    // different players, no QB, nothing else from that game. Measured on 855
+    // games (scripts/_nfl_sgp_prop_measure.js): joint hits / our independent
+    // mirror quote = 0.84 (pairs), 0.70-0.75 (x3), 0.61 (x4), every 97.5% bound
+    // < 0.90 -- so these price at the independent product (factor 1.00).
+    // Launched as the EXPERIMENTAL combo 'nfl_td_sgp' (MAX_RISK_SGP_EXPERIMENTAL
+    // per ticket, daily budget, weekly stop-loss auto-dark). Independent of
+    // FOOTBALL_SGP_ENABLED. Runtime key nflTdSgpEnabled.
+    nflTdSgpEnabled: process.env.NFL_TD_SGP_ENABLED !== 'false',
+    nflTdSgpMaxLegs: (() => { const v = parseInt(process.env.NFL_TD_SGP_MAX_LEGS, 10); return Number.isFinite(v) && v >= 2 ? Math.min(v, 4) : 4; })(),
     // TOA set-market sourcing (services/toa-tennis-sets.js). These are the
     // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
     // which are PER-EVENT only and retail-book-only (Pinnacle is absent from
@@ -1833,7 +1844,10 @@ const config = {
     experimentalSgpCombos: new Set((process.env.SGP_EXPERIMENTAL_COMBOS != null
       ? process.env.SGP_EXPERIMENTAL_COMBOS
       : 'prop_nested,prop_prop_xteam'
-    ).split(',').map(s => s.trim()).filter(Boolean)),
+    ).split(',').map(s => s.trim()).filter(Boolean)
+      // nfl_td_sgp launches experimental whatever SGP_EXPERIMENTAL_COMBOS says;
+      // NFL_TD_SGP_EXPERIMENTAL=false graduates it to ordinary caps.
+      .concat(process.env.NFL_TD_SGP_EXPERIMENTAL === 'false' ? [] : ['nfl_td_sgp'])),
     // Stage 2 cross-team prop pairs: additive band-top dependence charge.
     // q_fair = min(p1·p2 + φ·√(p1q1·p2q2), min(p1,p2)) with φ at the TOP of
     // the structurally-plausible band for cross-team binaries (shared park/
