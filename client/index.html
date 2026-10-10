@@ -5642,25 +5642,9 @@
     if (r.topEvents && r.topEvents.length) {
       html += '<div style="margin-top:20px;">';
       html += '<div style="font-size:12px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:8px;">Top 10 Events by Expected-Value Impact</div>';
-      html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-      html += '<tr style="color:var(--text3); text-align:left;">'
-        + '<th style="padding:5px 10px;"></th>'
-        + '<th style="padding:5px 10px;">Event</th>'
-        + '<th style="padding:5px 10px;">Sport</th>'
-        + '<th style="padding:5px 10px; text-align:right;">Positions</th>'
-        + '<th style="padding:5px 10px; text-align:right;">EV impact</th></tr>';
-      for (const e of r.topEvents) {
-        const rid = _rsKeyId('ev|' + e.key);
-        const isOpen = window._rsExpanded.has(rid);
-        html += '<tr style="border-top:1px solid var(--border); cursor:pointer;" onclick="_rsToggleRow(\'' + rid + '\')" title="Click to see the parlays behind this row">'
-          + '<td style="padding:5px 10px; color:var(--text3); width:1%;"><span id="' + rid + '-car">' + (isOpen ? '▾' : '▸') + '</span></td>'
-          + '<td style="padding:5px 10px;">' + escapeHtml(e.name) + '</td>'
-          + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
-          + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
-          + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + formatCls(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
-        html += _rsDetailRow('ev|' + e.key, e.parlays, e.ev, 5);
-      }
-      html += '</table>';
+      window._rsEvents = r.topEvents;
+      window._rsEventsState = window._rsEventsState || { col: null, dir: -1 };  // null = server order
+      html += '<div id="rs-events-container"></div>';
       html += '<div style="margin-top:6px; font-size:11px; color:var(--text3); line-height:1.5;">EV impact = each open position\'s expected value, summed by event; a multi-game parlay counts under each game it touches. Click a row to see the individual parlays behind it.</div>';
       html += '</div>';
     }
@@ -5710,10 +5694,53 @@
     html += '<div style="margin-top:10px; font-size:12px; color:var(--text3); text-align:center; line-height:1.5;">Simulates each market outcome once per trial; parlays with shared legs are correlated, opposite-side legs are anti-correlated. Uses live odds where available.</div>';
 
     el.innerHTML = html;
+    if (document.getElementById('rs-events-container')) window._rsRenderEvents();
     if (document.getElementById('rs-outcomes-container')) window._rsRenderOutcomes();
   }
 
   window.renderRiskSim = renderRiskSim;
+
+  // ---- Top-10 Events table: sortable columns (click a header; again reverses) ----
+  window._rsEventsSort = function (col) {
+    const st = window._rsEventsState || (window._rsEventsState = { col: null, dir: -1 });
+    if (st.col === col) st.dir = -st.dir;
+    else { st.col = col; st.dir = (col === 'ev' || col === 'n') ? -1 : 1; }
+    window._rsRenderEvents();
+  };
+  window._rsRenderEvents = function () {
+    const cont = document.getElementById('rs-events-container');
+    if (!cont) return;
+    const st = window._rsEventsState || { col: null, dir: -1 };
+    const clsOf = (v) => v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
+    const rows = (window._rsEvents || []).slice();
+    const d = st.dir;
+    if (st.col) rows.sort((a, b) => {
+      switch (st.col) {
+        case 'name': return d * String(a.name || '').localeCompare(String(b.name || ''));
+        case 'sport': return d * String(sportLabel(a.sport) || '').localeCompare(String(sportLabel(b.sport) || ''));
+        case 'n': return d * ((a.n || 0) - (b.n || 0));
+        case 'ev': default: return d * ((a.ev || 0) - (b.ev || 0));
+      }
+    });
+    const arrow = (col) => st.col === col ? (st.dir > 0 ? ' ▲' : ' ▼') : '';
+    const th = (col, label, align) => '<th style="padding:5px 10px; cursor:pointer; user-select:none; white-space:nowrap; text-align:' + (align || 'left') + ';" onclick="_rsEventsSort(\'' + col + '\')" title="Sort">' + label + arrow(col) + '</th>';
+    let h = '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+    h += '<tr style="color:var(--text3); text-align:left;"><th style="padding:5px 10px;"></th>'
+      + th('name', 'Event') + th('sport', 'Sport') + th('n', 'Positions', 'right') + th('ev', 'EV impact', 'right') + '</tr>';
+    for (const e of rows) {
+      const rid = _rsKeyId('ev|' + e.key);
+      const isOpen = window._rsExpanded.has(rid);
+      h += '<tr style="border-top:1px solid var(--border); cursor:pointer;" onclick="_rsToggleRow(\'' + rid + '\')" title="Click to see the parlays behind this row">'
+        + '<td style="padding:5px 10px; color:var(--text3); width:1%;"><span id="' + rid + '-car">' + (isOpen ? '▾' : '▸') + '</span></td>'
+        + '<td style="padding:5px 10px;">' + escapeHtml(e.name) + '</td>'
+        + '<td style="padding:5px 10px;">' + sportLabel(e.sport) + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-variant-numeric:tabular-nums;">' + e.n + '</td>'
+        + '<td style="padding:5px 10px; text-align:right; font-family:monospace;" class="' + clsOf(e.ev) + '">' + fmtPnl(e.ev) + '</td></tr>';
+      h += _rsDetailRow('ev|' + e.key, e.parlays, e.ev, 5);
+    }
+    h += '</table>';
+    cont.innerHTML = h;
+  };
 
   // ---- Outcomes-by-EV table: client-side filter + sort + pagination ----
   // Operates on window._rsOutcomes (full list, set in renderRiskSim). Only the
@@ -5751,55 +5778,80 @@
     if (car) car.textContent = open ? '▸' : '▾';
   };
   // Detail <tr>. Rendered collapsed unless the key is in _rsExpanded.
+  // Drill-down data + per-row sort state, keyed by the row id, so a header
+  // click re-renders just that drill-down (and the order survives parent
+  // re-sorts and pagination).
+  window._rsDetailData = window._rsDetailData || {};
+  window._rsDetailSortState = window._rsDetailSortState || {};
   function _rsDetailRow(key, parlays, totalEv, colspan) {
     const id = _rsKeyId(key);
-    const list = parlays || [];
+    window._rsDetailData[id] = { parlays: parlays || [], totalEv };
     const open = window._rsExpanded.has(id);
+    return '<tr id="' + id + '" style="display:' + (open ? '' : 'none') + ';">'
+      + '<td id="' + id + '-body" colspan="' + colspan + '" style="padding:0 10px 10px 10px; background:var(--surface2);">'
+      + _rsDetailBody(id) + '</td></tr>';
+  }
+  window._rsDetailSort = function (id, col) {
+    const st = window._rsDetailSortState[id] || {};
+    if (st.col === col) st.dir = -st.dir;
+    else { st.col = col; st.dir = (col === 'id' || col === 'legs') ? 1 : -1; }
+    window._rsDetailSortState[id] = st;
+    const td = document.getElementById(id + '-body');
+    if (td) td.innerHTML = _rsDetailBody(id);
+  };
+  function _rsDetailBody(id) {
+    const data = window._rsDetailData[id] || { parlays: [], totalEv: 0 };
+    const totalEv = data.totalEv;
     const cls = (v) => v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
     const money = (v) => (v < 0 ? '-$' : '$') + Math.abs(Number(v) || 0).toFixed(2);
-    let h = '<tr id="' + id + '" style="display:' + (open ? '' : 'none') + ';">'
-      + '<td colspan="' + colspan + '" style="padding:0 10px 10px 10px; background:var(--surface2);">';
-    if (!list.length) {
-      h += '<div style="padding:10px; color:var(--text3); font-size:12px;">No open parlays behind this row.</div></td></tr>';
-      return h;
+    const legText = (p) => (p.legs || []).join('  +  ') + (p.nPending > (p.legs || []).length ? '  +' + (p.nPending - (p.legs || []).length) + ' more' : '');
+    const list = (data.parlays || []).slice();
+    if (!list.length) return '<div style="padding:10px; color:var(--text3); font-size:12px;">No open parlays behind this row.</div>';
+    const st = window._rsDetailSortState[id] || {};
+    if (st.col) {
+      const num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : -Infinity);
+      const key = {
+        id: (p) => String(p.id || ''), legs: (p) => legText(p).toLowerCase(),
+        odds: (p) => num(p.odds), risk: (p) => num(p.risk), profit: (p) => num(p.profit), hit: (p) => num(p.hit),
+        ev: (p) => num(p.ev), share: (p) => (Math.abs(totalEv) > 1e-9 ? num(p.ev) / totalEv : 0),
+      }[st.col];
+      list.sort((a, b) => { const x = key(a), y = key(b); return st.dir * (typeof x === 'string' ? x.localeCompare(y) : (x - y)); });
     }
-    h += '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
+    const arrow = (col) => st.col === col ? (st.dir > 0 ? ' ▲' : ' ▼') : '';
+    // stopPropagation: a header click must sort, never toggle a row.
+    const th = (col, label, align) => '<th style="padding:4px 8px; cursor:pointer; user-select:none; white-space:nowrap; text-align:' + (align || 'left') + ';" onclick="event.stopPropagation(); _rsDetailSort(\'' + id + '\', \'' + col + '\')" title="Sort">' + label + arrow(col) + '</th>';
+    let h = '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
     h += '<tr style="color:var(--text3); text-align:left;">'
-      + '<th style="padding:4px 8px;">Parlay</th>'
-      + '<th style="padding:4px 8px;">Legs (pending)</th>'
-      + '<th style="padding:4px 8px; text-align:right;">Odds</th>'
-      + '<th style="padding:4px 8px; text-align:right;">Our risk</th>'
-      + '<th style="padding:4px 8px; text-align:right;">Bettor win</th>'
-      + '<th style="padding:4px 8px; text-align:right;">EV contribution</th>'
-      + '<th style="padding:4px 8px; text-align:right;">Share</th></tr>';
+      + th('id', 'Parlay') + th('legs', 'Legs (pending)') + th('odds', 'Odds', 'right') + th('risk', 'Our risk', 'right')
+      + th('profit', 'We win', 'right') + th('hit', 'Bettor win', 'right') + th('ev', 'EV contribution', 'right') + th('share', 'Share', 'right') + '</tr>';
     let sum = 0;
     for (const p of list) {
       sum += Number(p.ev) || 0;
       // Share is signed and can exceed 100% when a row mixes +EV and -EV
       // tickets. That is arithmetically right, not a bug — footnoted below.
       const share = Math.abs(totalEv) > 1e-9 ? (p.ev / totalEv) * 100 : null;
-      const legTxt = (p.legs || []).join('  +  ') + (p.nPending > (p.legs || []).length ? '  +' + (p.nPending - (p.legs || []).length) + ' more' : '');
+      const legTxt = legText(p);
       h += '<tr style="border-top:1px solid var(--border);">'
         + '<td style="padding:4px 8px; font-family:monospace; color:var(--text3);">' + escapeHtml(String(p.id || '').slice(0, 8)) + '</td>'
         + '<td style="padding:4px 8px;">' + escapeHtml(legTxt || '-')
         + (p.nLegs !== p.nPending ? ' <span style="color:var(--text3);">(' + p.nPending + ' of ' + p.nLegs + ' still live)</span>' : '') + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace;">' + (p.odds > 0 ? '+' : '') + (p.odds != null ? p.odds : '-') + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace;">' + money(p.risk) + '</td>'
+        + '<td style="padding:4px 8px; text-align:right; font-family:monospace;" class="positive">' + (p.profit != null ? money(p.profit) : '-') + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums;">' + (p.hit != null ? (p.hit * 100).toFixed(1) + '%' : '-') + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-family:monospace;" class="' + cls(p.ev) + '">' + money(p.ev) + '</td>'
         + '<td style="padding:4px 8px; text-align:right; font-variant-numeric:tabular-nums; color:var(--text2);">' + (share == null ? '-' : share.toFixed(1) + '%') + '</td></tr>';
     }
     h += '<tr style="border-top:2px solid var(--border); font-weight:600;">'
-      + '<td style="padding:4px 8px;" colspan="5">' + list.length + ' parlay' + (list.length === 1 ? '' : 's') + ' — row total</td>'
+      + '<td style="padding:4px 8px;" colspan="6">' + list.length + ' parlay' + (list.length === 1 ? '' : 's') + ' — row total</td>'
       + '<td style="padding:4px 8px; text-align:right; font-family:monospace;" class="' + cls(sum) + '">' + money(sum) + '</td>'
       + '<td style="padding:4px 8px; text-align:right; color:var(--text2);">100%</td></tr>';
     h += '</table>';
     h += '<div style="padding:6px 8px 0 8px; font-size:11px; color:var(--text3); line-height:1.5;">'
       + 'Each parlay\'s EV contribution is the same per-position value summed into the row total, so these tie out exactly. '
-      + 'Bettor win = probability the whole parlay hits (we lose our risk if it does). '
-      + 'Shares can exceed 100% or read negative when a row mixes +EV and −EV tickets.'
+      + 'We win = what we collect if the parlay misses (the bettor stake). Bettor win = probability the whole parlay hits (we lose our risk if it does). '
+      + 'Shares can exceed 100% or read negative when a row mixes +EV and −EV tickets. Click a column header to sort.'
       + '</div>';
-    h += '</td></tr>';
     return h;
   }
 
