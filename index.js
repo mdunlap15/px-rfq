@@ -1097,12 +1097,24 @@ function startStatusServer() {
   });
 
   // Health check — always returns 200 so Railway deployment succeeds
+  // Event-loop lag probe (2026-10-10): a stalled loop delays every
+  // /admin/offers/place. Summary per 60s window, published on /health.
+  const _eld = require('perf_hooks').monitorEventLoopDelay({ resolution: 20 });
+  _eld.enable();
+  let _loopLag = null;
+  setInterval(() => {
+    _loopLag = { p50_ms: Math.round(_eld.percentile(50) / 1e6), p99_ms: Math.round(_eld.percentile(99) / 1e6),
+      max_ms: Math.round(_eld.max / 1e6), window_s: 60, at: new Date().toISOString() };
+    _eld.reset();
+    log.info('LoopLag', `p50 ${_loopLag.p50_ms}ms p99 ${_loopLag.p99_ms}ms max ${_loopLag.max_ms}ms (60s)`);
+  }, 60 * 1000).unref();
   app.get('/health', (req, res) => {
     const ws = websocket.getState();
     let dbBrief = null;
     try { dbBrief = db.getHealth({ brief: true }); } catch (_) { /* never break the health check */ }
     res.json({
       ok: true,
+      loopLag: _loopLag,
       db: dbBrief,
       ready: serviceReady,
       uptime: Math.round((Date.now() - startTime) / 1000),

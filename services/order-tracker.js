@@ -6485,8 +6485,21 @@ async function checkLegResults() {
 
   let checked = 0, resolved = 0;
 
+  // Settled orders whose every leg already carries a result and whose
+  // last leg started >36h ago are final: re-grading them every 30s burned
+  // the event loop (2026-10-10: hundreds of 'Leg resolved' lines per pass,
+  // px-rfq /health at up to 8s). Only recent settled orders are re-checked.
+  const FINAL_MS = Number(process.env.RESULTS_FINAL_AFTER_MS || 36 * 3600 * 1000);
+  const _nowMs = Date.now();
+  let _iter = 0;
   for (const o of confirmed) {
+    if (++_iter % 50 === 0) await new Promise(r => setImmediate(r));
     const legs = o.meta?.legs || o.legs || [];
+    if (o.status !== 'confirmed' && legs.length && legs.every(l => {
+      if (!l.inferredResult && !l.settlementStatus && !l.settlement_status) return false;
+      const st = l.startTime || l.start_time; const ms = st ? new Date(st).getTime() : 0;
+      return ms > 0 && (_nowMs - ms) > FINAL_MS;
+    })) continue;
     for (const l of legs) {
       // Skip legs that have been manually overridden by an operator —
       // /admin/override-leg-result sets manuallyOverridden=true. Use case:
@@ -6890,9 +6903,10 @@ async function checkLegResults() {
       if (l.inferredResult && l.inferredResult !== freshResult) {
         log.warn('Results', `Overriding inferredResult for ${l.team} ${market}: stored=${l.inferredResult} → fresh=${freshResult} (${result.homeScore}-${result.awayScore}, startTime=${l.startTime})`);
       }
+      const _changed = l.inferredResult !== freshResult;
       l.inferredResult = freshResult;
 
-      if (l.inferredResult) {
+      if (l.inferredResult && _changed) {
         resolved++;
         // Clear liveFairProb so the dashboard stops rendering a frozen
         // in-game probability next to a resolved leg. The dashboard
