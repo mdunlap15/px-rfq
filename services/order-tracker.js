@@ -7660,10 +7660,11 @@ async function deleteOrdersByParlayIds(parlayIds) {
     if (allIds.length > 0) {
       const client = db.getClient ? db.getClient() : null;
       if (client) {
-        const { error } = await client
-          .from('parlay_orders')
-          .delete()
-          .in('parlay_id', allIds);
+        // Chunked at 150 ids (UND_ERR_HEADERS_OVERFLOW above ~350, see db-breaker).
+        let error = null;
+        for (let i = 0; i < allIds.length && !error; i += 150) {
+          ({ error } = await client.from('parlay_orders').delete().in('parlay_id', allIds.slice(i, i + 150)));
+        }
         if (error) {
           log.warn('Orders', `DB delete failed for ${allIds.length} parlay_ids: ${error.message}`);
         }

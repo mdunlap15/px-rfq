@@ -182,3 +182,23 @@ test('breaker keeps the undici err.cause code on a transport failure (diagnosis 
   assert.match(br.lastError, /fetch failed \[UND_ERR_SOCKET: other side closed\]/);
   assert.equal(br.totals.failureCauses.UND_ERR_SOCKET, 1);
 });
+
+test('UND_ERR_HEADERS_OVERFLOW is a request-shape error: it never trips the breaker (2026-10-11)', async () => {
+  const { DbCircuitBreaker: B } = require('../services/db-breaker');
+  const br = new B({ failThreshold: 3, fetchImpl: async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('Headers Overflow Error'), { code: 'UND_ERR_HEADERS_OVERFLOW' }); throw e; } });
+  for (let i = 0; i < 10; i++) await assert.rejects(br.fetch('http://db.test/rest/v1/parlay_orders?parlay_id=in.(x)', { method: 'GET' }));
+  assert.equal(br.state, 'closed', 'ten overflows on a healthy DB must not open the breaker');
+  assert.equal(br.totals.requestShapeErrors, 10);
+});
+
+test('order lookups chunk the IN filter at <=150 ids (Supabase echoes the URL; ~350+ overflows the headers)', async () => {
+  const { tr } = wire();
+  const ids = Array.from({ length: 400 }, (_, i) => `pid-${i}`);
+  await db.loadOrdersByParlayIdsChecked(ids);
+  const gets = tr.calls.filter(c => c.method === 'GET' && /parlay_orders/.test(c.url));
+  assert.equal(gets.length, 3);
+  for (const g of gets) {
+    const inList = (decodeURIComponent(g.url).match(/parlay_id=in\.\(([^)]*)\)/) || [])[1] || '';
+    assert.ok(inList.split(',').length <= 150, `chunk of ${inList.split(',').length}`);
+  }
+});

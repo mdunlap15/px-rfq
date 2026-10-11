@@ -1561,8 +1561,12 @@
           if (window._odvLastOrders) renderOrdersDailyVolume(window._odvLastOrders);
         }).catch(() => {});
         fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
+          // A PARTIAL series (order history still loading after a DB-down boot)
+          // would zero every historical day: keep the last good payload and
+          // retry on the next refresh instead (2026-10-11).
+          if (d && d.partial && window._dvDailyPnlPayload) return;
           window._dvDailyPnlPayload = d;
-          window._dvPnlFetchedAt = Date.now();
+          window._dvPnlFetchedAt = d && d.partial ? 0 : Date.now();
           if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
         }).catch(() => {});
       }

@@ -2680,8 +2680,10 @@ function startStatusServer() {
       // 3) Batch-fetch parlay_orders.fair_parlay_prob keyed by parlay_id.
       const ids = Array.from(new Set(filtered.map(r => r.parlay_id).filter(Boolean)));
       const fairById = new Map();
-      for (let i = 0; i < ids.length; i += 500) {
-        const chunk = ids.slice(i, i + 500);
+      // 150, not 500: ~350+ ids overflow Node's 16 KB response-header limit
+      // (Supabase echoes the URL) — see db-breaker UND_ERR_HEADERS_OVERFLOW.
+      for (let i = 0; i < ids.length; i += 150) {
+        const chunk = ids.slice(i, i + 150);
         const { data, error } = await sb.from('parlay_orders')
           .select('parlay_id, fair_parlay_prob')
           .in('parlay_id', chunk);
@@ -4730,7 +4732,13 @@ function startStatusServer() {
       let daily = orderTracker.getDailyPnLFromMemory(days, groupBy);
       if (!daily.length) daily = await db.getDailyPnL(days, { groupBy });
       const totalPnL = await db.getTotalPnL();
-      res.json({ daily, totalPnL, groupBy });
+      // After a DB-down boot the order map holds only orders seen since boot
+      // until the deferred merge-load lands (2026-10-11 05:14-05:19Z: the
+      // dashboard showed $0 for every day but today). Flag it so clients keep
+      // their last good series instead of overwriting it with a partial one.
+      const hyd = orderTracker.getDbHydrationState ? orderTracker.getDbHydrationState() : null;
+      const partial = !!(hyd && (hyd.state === 'pending' || hyd.state === 'failed-retrying'));
+      res.json({ daily, totalPnL, groupBy, partial, hydration: hyd ? hyd.state : null });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

@@ -323,6 +323,19 @@ class DbCircuitBreaker {
       // — 45 trips on 2026-10-06 all read "fetch failed" and nothing more.
       const cause = err && err.cause;
       const code = cause ? String(cause.code || cause.name || 'cause') : null;
+      // A REQUEST-SHAPE error, not an outage (2026-10-11). Supabase echoes the
+      // request URL in a response header, so an `in.(...)` filter over ~350
+      // ids pushes the response headers past Node's 16 KB limit and undici
+      // throws "fetch failed [UND_ERR_HEADERS_OVERFLOW]" — reproduced at 400
+      // ids, fine at 300. Counting it tripped the breaker on a healthy DB and
+      // darkened every read/write (10/11 boot: 33/33 failures were this; the
+      // 10/6 "fetch failed" bursts fit the same pattern). The caller still gets
+      // the error; the breaker does not.
+      if (code === 'UND_ERR_HEADERS_OVERFLOW') {
+        this.totals.requestShapeErrors = (this.totals.requestShapeErrors || 0) + 1;
+        if (decision === 'probe') this.probeInFlight = false;
+        throw err;
+      }
       if (code) {
         this.totals.failureCauses = this.totals.failureCauses || {};
         this.totals.failureCauses[code] = (this.totals.failureCauses[code] || 0) + 1;

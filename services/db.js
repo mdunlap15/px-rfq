@@ -761,8 +761,10 @@ async function loadOrdersByParlayIdsChecked(parlayIds) {
   if (!client || !parlayIds || parlayIds.length === 0) return { rows: {}, checked };
 
   const result = {};
-  // Supabase IN filter has practical limits; chunk to 500
-  const CHUNK = 500;
+  // Chunk the IN filter at 150: Supabase echoes the URL in a response header,
+  // and ~350+ parlay ids overflow Node's 16 KB header limit (fetch failed
+  // UND_ERR_HEADERS_OVERFLOW — measured 2026-10-11: 300 ok, 400 fails).
+  const CHUNK = 150;
   try {
     for (let i = 0; i < parlayIds.length; i += CHUNK) {
       const chunk = parlayIds.slice(i, i + CHUNK);
