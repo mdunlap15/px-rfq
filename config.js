@@ -987,6 +987,15 @@ const config = {
     // meta.cfbWidenArm records 'widen'/'control' whether or not it fires.
     // Widen arm: offered implied prob x (1 + relPct/100) — LESS generous to the
     // bettor, applied after every floor. Ships DARK (percent 0).
+    // 2-LEG WIDEN A/B (2026-10-12, operator: "build the 2-leg widen A/B").
+    // Scope: exactly 2 legs, joint fair in [TWO_LEG_WIDEN_MIN_FAIR,
+    // TWO_LEG_WIDEN_MAX_FAIR) (0.30 / 0.50). Arm = md5('2lw:'+parlayId) mod 100
+    // < TWO_LEG_WIDEN_PERCENT (default 0 = dark); widen arm offered prob x (1 +
+    // TWO_LEG_WIDEN_REL_PCT/100) (default 7). meta.twoLegWiden*. Runtime keys.
+    twoLegWidenPercent: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
+    twoLegWidenRelPct: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_REL_PCT); return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 7; })(),
+    twoLegWidenMinFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.30; })(),
+    twoLegWidenMaxFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MAX_FAIR); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.50; })(),
     cfbWidenPercent: (() => {
       const v = parseInt(process.env.CFB_WIDEN_PERCENT);
       if (!Number.isFinite(v) || v < 0) return 0;

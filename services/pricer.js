@@ -3715,6 +3715,47 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // 2-LEG WIDEN A/B (2026-10-12) — see config.pricing.twoLegWidenPercent.
+  //
+  // The measured leak: on 90 days to 10/11, 2-leg parlays with joint fair in
+  // [30%, 50%) hit 412 vs 354.2 expected (+16%, z 2.48, -$27.9K — more than the
+  // whole book's -$16.1K), every month 1.14-1.21, across sports. Legs picked
+  // into that shape won 4.8% more than their fair (z 2.35) while ALL 9,472
+  // unique legs graded 0.996 — so the prices are calibrated and the loss is
+  // leg SELECTION in this shape, which our ~5.5% margin there does not cover.
+  // Widen arm = offered implied prob x (1 + twoLegWidenRelPct/100), same
+  // mechanics and guarantees as the CFB widen above (after every floor, before
+  // the theo-edge gate, fair untouched, arm a pure function of parlayId).
+  // A ticket the CFB widen already widened is not widened twice.
+  // -------------------------------------------------------------------
+  const _twoLegWiden = { arm: null, applied: false, preProb: null, relPct: null };
+  {
+    const lo = config.pricing.twoLegWidenMinFair != null ? config.pricing.twoLegWidenMinFair : 0.30;
+    const hi = config.pricing.twoLegWidenMaxFair != null ? config.pricing.twoLegWidenMaxFair : 0.50;
+    const inScope = pricedLegs.length === 2 && fairParlayProb >= lo && fairParlayProb < hi && !_cfbWiden.applied;
+    const _pct = config.pricing.twoLegWidenPercent || 0;
+    if (inScope && opts.parlayId && _pct > 0) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('2lw:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _twoLegWiden.arm = inArm ? 'widen' : 'control';
+      if (inArm && offeredImpliedProb > 0 && offeredImpliedProb < 0.99) {
+        const rel = config.pricing.twoLegWidenRelPct || 7;
+        const widened = Math.min(0.99, offeredImpliedProb * (1 + rel / 100));
+        if (widened > offeredImpliedProb) {
+          _twoLegWiden.preProb = offeredImpliedProb;
+          _twoLegWiden.applied = true;
+          _twoLegWiden.relPct = rel;
+          log.debug('Pricing', `2-leg widen: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(widened * 100).toFixed(3)}% (+${rel}% rel, fair ${(fairParlayProb * 100).toFixed(3)}%)`);
+          offeredImpliedProb = widened;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
   //
   // After all pricing adjustments, edge = (offered − fair) / fair × 100.
@@ -4326,6 +4367,12 @@ function priceParlay(legs, opts = {}) {
       cfbWidenApplied: _cfbWiden.applied,
       cfbWidenPreProb: _cfbWiden.preProb != null ? Math.round(_cfbWiden.preProb * 100000) / 100000 : null,
       cfbWidenRelPct: _cfbWiden.relPct,
+      // 2-leg widen A/B: arm null = out of scope / dark; 'control' / 'widen'
+      // in scope (2 legs, fair in [min, max)). PreProb = the control price.
+      twoLegWidenArm: _twoLegWiden.arm,
+      twoLegWidenApplied: _twoLegWiden.applied,
+      twoLegWidenPreProb: _twoLegWiden.preProb != null ? Math.round(_twoLegWiden.preProb * 100000) / 100000 : null,
+      twoLegWidenRelPct: _twoLegWiden.relPct,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.
