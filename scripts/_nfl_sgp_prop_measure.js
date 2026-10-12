@@ -184,6 +184,29 @@ games.forEach((G, gi) => {
     _q = t[0].q * t[1].q * t[2].q;
     add(cls, gi, t[0].hit * t[1].hit * t[2].hit, t[0].p * t[1].p * t[2].p, 0, 0, 0, 0);
   }
+  // PHASE 2 grid: k = 1..3 TD legs + ONE game leg. Side: class by how many of
+  // the k scorers play for the side's team ("own"). Total: by over/under.
+  {
+    const tk = td.filter(x => x.team);
+    const subsets = [];
+    for (let i = 0; i < tk.length; i++) {
+      subsets.push([tk[i]]);
+      for (let j = i + 1; j < tk.length; j++) {
+        subsets.push([tk[i], tk[j]]);
+        for (let k = j + 1; k < tk.length; k++) subsets.push([tk[i], tk[j], tk[k]]);
+      }
+    }
+    for (const S of subsets) {
+      const hitAll = S.every(x => x.hit) ? 1 : 0, pP = S.reduce((m, x) => m * x.p, 1), qP = S.reduce((m, x) => m * x.q, 1);
+      for (const sd of sides) {
+        const own = S.filter(x => x.team === sd.team).length;
+        _q = qP * sd.p;
+        add(`P2 k=${S.length} ${sd.kind} own=${own}`, gi, hitAll * sd.hit, pP * sd.p, 0, 0, 0, 0);
+      }
+      for (const t of totals) { _q = qP * t.p; add(`P2 k=${S.length} ${t.kind}`, gi, hitAll * t.hit, pP * t.p, 0, 0, 0, 0); }
+    }
+    _q = null;
+  }
   // TD x4 (any split) and TD + TD + a side (the 3-leg shapes bettors send)
   const tdk = td.filter(x => x.team);
   for (let i = 0; i < tdk.length; i++) for (let j = i + 1; j < tdk.length; j++) {

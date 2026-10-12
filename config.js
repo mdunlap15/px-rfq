@@ -1589,6 +1589,12 @@ const config = {
     // per ticket, daily budget, weekly stop-loss auto-dark). Independent of
     // FOOTBALL_SGP_ENABLED. Runtime key nflTdSgpEnabled.
     nflTdSgpEnabled: process.env.NFL_TD_SGP_ENABLED !== 'false',
+    // Phase 2 (operator 2026-10-11): 1-3 anytime-TD legs + ONE full-game ML /
+    // spread / total on the same NFL game, priced at the measured factor
+    // (pricer.js NFL_TD_GAME_FACTORS). Experimental combo 'nfl_td_game_sgp'.
+    // NFL_TD_GAME_SGP_FACTORS = JSON override of the table (floored at 1.00).
+    nflTdGameSgpEnabled: process.env.NFL_TD_GAME_SGP_ENABLED !== 'false',
+    nflTdGameSgpFactors: (() => { try { return process.env.NFL_TD_GAME_SGP_FACTORS ? JSON.parse(process.env.NFL_TD_GAME_SGP_FACTORS) : null; } catch (_) { return null; } })(),
     nflTdSgpMaxLegs: (() => { const v = parseInt(process.env.NFL_TD_SGP_MAX_LEGS, 10); return Number.isFinite(v) && v >= 2 ? Math.min(v, 4) : 4; })(),
     // TOA set-market sourcing (services/toa-tennis-sets.js). These are the
     // *_set_* keys (h2h_s1 / alternate_set_totals / alternate_set_spreads),
@@ -1847,7 +1853,8 @@ const config = {
     ).split(',').map(s => s.trim()).filter(Boolean)
       // nfl_td_sgp launches experimental whatever SGP_EXPERIMENTAL_COMBOS says;
       // NFL_TD_SGP_EXPERIMENTAL=false graduates it to ordinary caps.
-      .concat(process.env.NFL_TD_SGP_EXPERIMENTAL === 'false' ? [] : ['nfl_td_sgp'])),
+      .concat(process.env.NFL_TD_SGP_EXPERIMENTAL === 'false' ? [] : ['nfl_td_sgp'])
+      .concat(process.env.NFL_TD_GAME_SGP_EXPERIMENTAL === 'false' ? [] : ['nfl_td_game_sgp'])),
     // Stage 2 cross-team prop pairs: additive band-top dependence charge.
     // q_fair = min(p1·p2 + φ·√(p1q1·p2q2), min(p1,p2)) with φ at the TOP of
     // the structurally-plausible band for cross-team binaries (shared park/

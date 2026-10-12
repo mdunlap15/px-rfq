@@ -9,8 +9,10 @@
  * Sources (both free, keyless, verified live 2026-06-12):
  *  - MLB: statsapi.mlb.com — ALL active players w/ currentTeam in ONE call
  *    (~1,200 rows) + one teams call for id→name.
- *  - NBA/WNBA: ESPN site API per-team rosters (site.api.espn.com), ~30
- *    calls per league, same host espn-scores.js already uses.
+ *  - NBA/WNBA/NFL: ESPN site API per-team rosters (site.api.espn.com), ~30
+ *    calls per league, same host espn-scores.js already uses. NFL rosters
+ *    come GROUPED by unit ({position:'offense', items:[...]}) and include IR
+ *    + practice squad (added 2026-10-11 for NFL TD + side same-game pricing).
  *
  * Design rules:
  *  - SYNC lookups against an in-memory map (the pricer hot path calls this
@@ -85,7 +87,13 @@ async function _refreshEspnLeague(sportPath, leaguePath) {
   for (const t of teams) {
     try {
       const ros = await fetch(`${base}/teams/${t.id}/roster`, { timeout: 15000 }).then(r => r.json());
+      // NFL groups athletes by unit; NBA/WNBA return a flat list.
+      const flat = [];
       for (const a of (ros.athletes || [])) {
+        if (a && Array.isArray(a.items)) flat.push(...a.items); else flat.push(a);
+      }
+      for (const a of flat) {
+        if (!a) continue;
         const name = a.fullName || a.displayName;
         if (!name) continue;
         const key = _norm(name);
@@ -111,6 +119,7 @@ async function refresh() {
     ['baseball_mlb', _refreshMlb],
     ['basketball_nba', () => _refreshEspnLeague('basketball', 'nba')],
     ['basketball_wnba', () => _refreshEspnLeague('basketball', 'wnba')],
+    ['americanfootball_nfl', () => _refreshEspnLeague('football', 'nfl')],
   ];
   for (const [sport, fn] of jobs) {
     try {
@@ -191,10 +200,25 @@ function getPlayerTeam(sport, playerName) {
   // a wedged refresh must degrade to declines, never to pre-trade teams.
   const goodAt = _lastGoodRefreshAt[sport];
   if (!goodAt || (Date.now() - goodAt) > MAX_AGE_HOURS * 3600 * 1000) return null;
-  const hit = map.get(_norm(playerName));
+  let hit = map.get(_norm(playerName));
+  // NFL: PX and ESPN disagree on generational suffixes ("Kenneth Walker" vs
+  // "Kenneth Walker III"). Fall back to the suffix-stripped name ONLY when
+  // every roster player sharing that base name is on ONE team; otherwise null.
+  if (!hit && sport === 'americanfootball_nfl') {
+    const base = _stripSuffix(_norm(playerName));
+    let team = null, n = 0;
+    for (const [k, v] of map) {
+      if (_stripSuffix(k) !== base) continue;
+      n++;
+      if (v.ambiguous || (team && team !== v.teamName)) return null;
+      team = v.teamName;
+    }
+    return n ? team : null;
+  }
   if (!hit || hit.ambiguous) return null;
   return hit.teamName;
 }
+function _stripSuffix(k) { return String(k).replace(/\s+(jr|sr|ii|iii|iv|v)$/, '').trim(); }
 
 /**
  * SYNC: resolve which SIDE of a game a player is on. Matches the roster
