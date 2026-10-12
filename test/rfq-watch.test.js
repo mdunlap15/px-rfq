@@ -16,6 +16,7 @@ function idx(now) {
     f1: { pxEventId: 30, sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', homeTeam: 'A', awayTeam: 'B', startTime: far },
     p1: { pxEventId: 40, sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', homeTeam: 'C', awayTeam: 'D', startTime: past },
     q1: { pxEventId: 50, sport: 'icehockey_nhl', oddsApiSport: 'icehockey_nhl', homeTeam: 'E', awayTeam: 'F', startTime: soon },
+    t1: { pxEventId: 70, sport: 'tennis', oddsApiSport: 'tennis', homeTeam: 'Jannik Sinner', awayTeam: 'Carlos Alcaraz', startTime: soon },
     g1: { pxEventId: 60, sport: 'golf_matchups', oddsApiSport: 'golf_matchups', homeTeam: 'G', awayTeam: 'H', startTime: soon },
   };
 }
@@ -27,7 +28,7 @@ test('only events quoted recently, starting within the horizon, in a guarded spo
   lineManager.__debugGetLineIndex = () => I;
   rfqWatch.__resetForTest();
   try {
-    rfqWatch.touch([I.n1, I.s1, I.f1, I.p1, I.g1]);     // q1 (event 50) never quoted
+    rfqWatch.touch([I.n1, I.s1, I.f1, I.p1, I.g1, I.t1]);     // q1 (event 50) never quoted
     const w = rfqWatch.build(now);
     assert.deepStrictEqual(Object.keys(w.nhl), ['10']);
     assert.deepStrictEqual(w.nhl['10'].l, ['n1', 'n2'], 'every registered line of the event, not just the quoted one');
@@ -35,6 +36,7 @@ test('only events quoted recently, starting within the horizon, in a guarded spo
     assert.deepStrictEqual(Object.keys(w.soccer), ['20']);
     assert.deepStrictEqual(Object.keys(w.mlb), [], 'beyond the horizon / already started are excluded');
     assert.ok(!('golf' in w), 'golf has no guard profile');
+    assert.deepStrictEqual(Object.keys(w.tennis), ['70'], 'tennis is watched (tennis_line_guard)');
   } finally { lineManager.__debugGetLineIndex = orig; }
 });
 
@@ -54,5 +56,6 @@ test('profile mapping', () => {
   assert.strictEqual(rfqWatch.PROFILE_OF('soccer_usa_mls'), 'soccer');
   assert.strictEqual(rfqWatch.PROFILE_OF('americanfootball_ncaaf'), 'cfb');
   assert.strictEqual(rfqWatch.PROFILE_OF('americanfootball_nfl'), 'nfl');
-  assert.strictEqual(rfqWatch.PROFILE_OF('tennis'), null);
+  assert.strictEqual(rfqWatch.PROFILE_OF('tennis'), 'tennis');
+  assert.strictEqual(rfqWatch.PROFILE_OF('golf_matchups'), null);
 });
