@@ -3707,9 +3707,10 @@ function getRoiWindow(days = 15) {
  * under two days, so the client cannot build a 30-day curve. Same reason
  * getRoiWindow exists.
  *
- * Only parlays carrying a finite expectedValue contribute to EITHER series, so
- * the two lines always cover the same ticket set and the gap stays meaningful.
- * `skipped` reports how many settled parlays were left out for lacking one.
+ * EVERY settled parlay contributes to BOTH series (since 2026-10-11), so the
+ * realized line always equals the book's P&L for the window. A ticket with no
+ * stored expectedValue gets EV estimated from its fair + odds (`evEstimated`),
+ * else EV 0 (`evMissing`, its P&L in `missingPnl`); `skipped` = no stored EV.
  */
 /**
  * Rolling VOID-ADJUSTED calibration over settled parlays — the standing health
