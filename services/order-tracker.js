@@ -3767,15 +3767,34 @@ function getVoidAdjustedCalibration(days = 30) {
 function getEvCurve(days = 30, maxPoints = 1200) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const rows = [];
-  let skipped = 0;
+  let skipped = 0, evEstimated = 0, evMissing = 0, missingPnl = 0;
   let varSum = 0;
   for (const o of Object.values(orders)) {
     if (!o.status || !String(o.status).startsWith('settled_')) continue;
     const t = o.settledAt ? new Date(o.settledAt).getTime() : NaN;
     if (Number.isNaN(t) || t < cutoff) continue;
-    const ev = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
-    if (!Number.isFinite(ev)) { skipped++; continue; }
+    // REALIZED P&L COUNTS EVERY SETTLED TICKET (2026-10-11). Tickets with no
+    // stored EV (restored / PX-backfilled rows) used to be SKIPPED — P&L and
+    // all — so the realized line silently dropped real losses: the 30d view
+    // showed +$7,548 while the book was -$1,957 (94 such tickets, -$11.4K,
+    // two 9/25 PX-restored tickets alone -$9.9K). Now: EV is estimated from the
+    // stored fair + odds when it is missing, else counted as 0; P&L always
+    // counts. `skipped` keeps its name but now means "EV not stored".
+    let ev = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
     const risk = Number(o.confirmedStake) || 0;
+    if (!Number.isFinite(ev)) {
+      skipped++;
+      const fp0 = Number(o.fairParlayProb);
+      const od0 = Number(o.confirmedOdds || o.offeredOdds);
+      if (fp0 > 0 && fp0 < 1 && risk > 0 && Number.isFinite(od0) && od0 !== 0) {
+        ev = (1 - fp0) * (risk * 100 / Math.abs(od0)) - fp0 * risk;
+        evEstimated++;
+      } else {
+        ev = 0;
+        evMissing++;
+        missingPnl += Number(o.pnl) || 0;
+      }
+    }
     rows.push({ t, pnl: Number(o.pnl) || 0, ev, stake: risk });
 
     // Variance of THIS ticket's outcome: we win +W with prob (1-fp) and lose
@@ -3827,6 +3846,9 @@ function getEvCurve(days = 30, maxPoints = 1200) {
     days,
     n: rows.length,
     skipped,
+    evEstimated,
+    evMissing,
+    missingPnl: r2(missingPnl),
     realized: r2(cumPnl),
     evBanked: r2(cumEv),
     luck: r2(cumPnl - cumEv),          // >0 = ran hot vs the model, <0 = ran cold

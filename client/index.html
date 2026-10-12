@@ -14150,7 +14150,9 @@
       + j.n + ' settled parlays &middot; $' + (j.stake || 0).toFixed(0) + ' risked &middot; realized ROI '
       + (j.realizedRoi == null ? '-' : (j.realizedRoi >= 0 ? '+' : '') + j.realizedRoi.toFixed(2) + '%')
       + ' vs EV ROI ' + (j.evRoi == null ? '-' : (j.evRoi >= 0 ? '+' : '') + j.evRoi.toFixed(2) + '%')
-      + (j.skipped ? ' &middot; ' + j.skipped + ' skipped (no stored EV)' : '')
+      + (j.skipped ? ' &middot; ' + j.skipped + ' without stored EV, P&amp;L included ('
+        + (j.evEstimated || 0) + ' EV estimated from fair + odds'
+        + (j.evMissing ? ', ' + j.evMissing + ' at EV $0 (no fair) carrying ' + money(j.missingPnl || 0) + ' realized' : '') + ')' : '')
       + '<br>' + verdict + '</div>';
     el.innerHTML = svg;
   }
