@@ -6933,7 +6933,12 @@ function startStatusServer() {
       const sports = [];
       let totalGaps = 0;
       for (const sport of Object.keys(EXPECTED_MARKETS_BY_SPORT)) {
-        const expected = EXPECTED_MARKETS_BY_SPORT[sport];
+        // A sport restricted by SPORT_MARKET_ALLOWLIST (e.g. the Champions League
+        // is totals-only, operator 2026-09-09) only "expects" the markets it is
+        // allowed to register — otherwise the banner flags a permanent gap that
+        // is policy, not a fault (operator 2026-10-12: "Why are we missing these?").
+        const _allow = config.pricing && config.pricing.sportMarketAllowlist && config.pricing.sportMarketAllowlist[sport];
+        const expected = EXPECTED_MARKETS_BY_SPORT[sport].filter(m => !Array.isArray(_allow) || _allow.includes(m));
         const matrix = sportMatrix[sport] || {};
         const eventCount = (sportEvents[sport] && sportEvents[sport].size) || 0;
         const totalLines = Object.values(matrix).reduce((s, n) => s + n, 0);
