@@ -1267,7 +1267,10 @@ function priceParlay(legs, opts = {}) {
       }
       gsRelay.noteUsed();
       fairProbs[i] = g.fair;
-      s.bookPriceOverride = null;
+      // Leg margin is the board's own (gsRelay.offeredProb: YES leg = 1.10*fair_yes,
+      // NO leg = 1 - fair_yes/1.10). Quoted as a bookPriceOverride so the
+      // per-leg/parlay-level vig over vigLegs is NOT charged again on this leg.
+      s.bookPriceOverride = g.offered;
       s.fairBasis = 'gs_relay_fd_dk';
       continue;
     }

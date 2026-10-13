@@ -25,6 +25,18 @@ const _stats = { polls: 0, pollErrors: 0, lastError: null, entries: 0, used: 0, 
 
 function enabled() { return process.env.GS_RELAY_ENABLED !== 'false'; }
 function maxAgeSec() { return Number(process.env.GS_RELAY_MAX_AGE_SEC) || 600; }
+// Leg margin (operator 2026-10-13: "Use the same 10% YES margin in the RFQ feed"),
+// matching the single-leg board (gs_auto/gs_lib.py):
+//   bettor takes YES (we hold NO): offered = GS_BOOK_MARGIN * fair_yes (= the books' avg YES)
+//   bettor takes NO  (we hold YES): offered = 1 - fair_yes / (1 + GS_LEG_YES_EV)
+function bookMargin() { const v = Number(process.env.GS_BOOK_MARGIN); return v > 0 ? v : 1.10; }
+function legYesEv() { const r = process.env.GS_LEG_YES_EV; const v = Number(r); return (r != null && r !== '' && Number.isFinite(v) && v >= 0) ? v : 0.10; }
+function clampP(p) { return Math.min(0.999, Math.max(0.001, p)); }
+function offeredProb(fairYes, side) {
+  if (side === 'yes') return clampP(fairYes * bookMargin());
+  if (side === 'no') return clampP(1 - fairYes / (1 + legYesEv()));
+  return null;
+}
 
 function _tsSec(ts) {
   if (ts == null) return NaN;
@@ -54,7 +66,8 @@ function getFair(lineId, nowMs = Date.now()) {
   if (side === 'yes') fair = fy;
   else if (side === 'no') fair = 1 - fy;
   else return { ok: false, reason: 'gs_bad_side', detail: String(e.side) };
-  return { ok: true, fair, side, player: e.player || null, eid: e.eid != null ? String(e.eid) : null, ageSec: Math.max(0, Math.round(age)) };
+  const offered = offeredProb(fy, side);
+  return { ok: true, fair, offered, side, player: e.player || null, eid: e.eid != null ? String(e.eid) : null, ageSec: Math.max(0, Math.round(age)) };
 }
 
 function isGoalscorerLine(li) {
@@ -103,4 +116,4 @@ function noteUsed() { _stats.used++; }
 function noteDeclined() { _stats.declined++; }
 function __setForTest(row) { _row = row; }
 
-module.exports = { KEY, getFair, isGoalscorerLine, poll, start, getStatus, noteUsed, noteDeclined, __setForTest };
+module.exports = { KEY, getFair, offeredProb, isGoalscorerLine, poll, start, getStatus, noteUsed, noteDeclined, __setForTest };

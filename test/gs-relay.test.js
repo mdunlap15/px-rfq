@@ -97,3 +97,39 @@ test('shouldDecline: goalscorer + that match result leg declines', () => {
   const d = pricer.shouldDecline([{ line_id: 'gs-a-yes' }, { line_id: 'ml-901' }], null);
   assert.equal(d && d.reason, 'goalscorer_same_match');
 });
+
+// ---- leg margin (operator 2026-10-13: same 10% YES margin as the single-leg board) ----
+test('getFair.offered: YES leg = 1.10*fair_yes, NO leg = 1 - fair_yes/1.10', () => {
+  gs.__setForTest(row(30, FAIRS));
+  assert.ok(Math.abs(gs.getFair('gs-a-yes', NOW).offered - 0.44) < 1e-12);
+  assert.ok(Math.abs(gs.getFair('gs-a-no', NOW).offered - (1 - 0.40 / 1.10)) < 1e-12);
+  assert.equal(gs.getFair('gs-a-yes', NOW).fair, 0.40); // fair unchanged
+});
+
+test('offeredProb: env override and clamp to (0,1)', () => {
+  const s1 = process.env.GS_BOOK_MARGIN, s2 = process.env.GS_LEG_YES_EV;
+  try {
+    process.env.GS_BOOK_MARGIN = '1.05'; process.env.GS_LEG_YES_EV = '0.20';
+    assert.ok(Math.abs(gs.offeredProb(0.40, 'yes') - 0.42) < 1e-12);
+    assert.ok(Math.abs(gs.offeredProb(0.40, 'no') - (1 - 0.40 / 1.20)) < 1e-12);
+    process.env.GS_BOOK_MARGIN = '3';
+    assert.ok(gs.offeredProb(0.5, 'yes') < 1);
+    assert.equal(gs.offeredProb(0.5, 'maybe'), null);
+  } finally {
+    if (s1 == null) delete process.env.GS_BOOK_MARGIN; else process.env.GS_BOOK_MARGIN = s1;
+    if (s2 == null) delete process.env.GS_LEG_YES_EV; else process.env.GS_LEG_YES_EV = s2;
+  }
+});
+
+test('priceParlay: goalscorer legs carry the board margin as an override, no extra per-leg vig', async () => {
+  if (!(config.pricing.maxRiskPerParlay >= 500)) config.pricing.maxRiskPerParlay = 500;
+  gs.__setForTest(row(30, FAIRS));
+  const r = await pricer.priceParlay(['gs-a-no', 'gs-b-yes']);
+  assert.ok(r && r.offer, JSON.stringify(pricer.priceParlay._lastFailure));
+  const legs = r.meta.legs || r.meta.legBreakdown || [];
+  const s = JSON.stringify(r.meta);
+  // both legs quoted as overrides (0.6364 NO, 0.55 YES) with legVig 0
+  assert.ok(/"bookPriceOverride":0\.6364/.test(s) && /"bookPriceOverride":0\.55\b/.test(s), s.slice(0, 2000));
+  assert.ok(!/"legVig":0\.0[1-9]/.test(s), 'no per-leg vig on goalscorer legs');
+  void legs;
+});
