@@ -1923,6 +1923,31 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
         // construction — leave those line_ids unknown so they decline.
         // Null-safe on the ctx line: a lineless anytime market defaults
         // to 0.5 so the byLine grouping below can never silently drop it.
+        // SOCCER GOALSCORER (operator 2026-10-13): register BOTH sides of any
+        // line the order book's px_gs_fairs relay prices (FD+DK avg / 1.10),
+        // independent of TOA coverage. Side = PX selection NAME, and it must
+        // agree with the relay's side or the line is not registered. Pricing
+        // (and the decline when the relay goes stale) is in pricer.js.
+        if (soccerProp && propType === 'goalscorer') {
+          const gsRelay = require('./gs-relay');
+          for (const sel of parsedProp) {
+            const nm = String(sel.outcomeName || sel.teamName || '').trim().toUpperCase();
+            if (!sel.lineId || (nm !== 'YES' && nm !== 'NO')) continue;
+            const g = gsRelay.getFair(sel.lineId);
+            if (!g.ok || g.side.toUpperCase() !== nm) continue;
+            setLine(sel.lineId, {
+              sport: sportKey, pxEventId: event.event_id, pxEventName: event.name,
+              marketType: _propMarketType(propType), marketName: market.name,
+              selection: nm === 'YES' ? 'over' : 'under', gsSide: nm.toLowerCase(),
+              teamName: playerName, line: 0.5, homeTeam: matchedHome, awayTeam: matchedAway,
+              oddsApiSport: _soccerPropToaSport(sportKey), oddsApiMarket: toaMarketKey,
+              oddsApiSelection: nm === 'YES' ? 'over' : 'under', startTime: event.scheduled || null,
+              playerName, propType, fairProb: g.fair, propSource: 'gs-relay', propFetchedAt: Date.now(),
+            });
+            totalLines++; matchedLines++;
+          }
+          continue;
+        }
         const linelessProp = soccerProp || footballProp;
         if (linelessProp) {
           parsedProp = parsedProp

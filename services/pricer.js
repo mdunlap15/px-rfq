@@ -10,6 +10,7 @@ const dkScraper = require('./dk-scraper');
 const seriesWindow = require('./series-window');
 const mlbSeriesConsensus = require('./mlb-series-consensus');
 const ufcMov = require('./ufc-mov');
+const gsRelay = require('./gs-relay');
 const nflConsensus = require('./nfl-consensus');
 const { footballSgpFactor } = require('./football-sgp-correlation');
 const { mlbSgpFactor } = require('./mlb-sgp-correlation');
@@ -1158,7 +1159,7 @@ function priceParlay(legs, opts = {}) {
     // and gets accepted. With it, the reprice fails with a non-churn reason
     // and the bounded fail-open rejects. Quote path unaffected (shouldDecline
     // already declined stale props before priceParlay runs).
-    if (/^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt) {
+    if (/^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt && !gsRelay.isGoalscorerLine(lineInfo)) {
       const propAgeMs = nowMs - lineInfo.propFetchedAt;
       const propStaleMs = (config.pricing.stalePropSeconds || 420) * 1000;
       if (propAgeMs > propStaleMs) {
@@ -1248,6 +1249,28 @@ function priceParlay(legs, opts = {}) {
 
   for (let i = 0; i < legStates.length; i++) {
     const s = legStates[i];
+    // SOCCER ANYTIME GOALSCORER (operator 2026-10-13): the ONLY source is the
+    // order book's px_gs_fairs relay (avg of FanDuel + DraftKings implied / 1.10;
+    // NO = 1 - fair_yes, side from PX's selection NAME). Missing/stale/unpriced
+    // => decline. Standard fair + vig path (any registration-time book-mirror
+    // override is dropped).
+    if (gsRelay.isGoalscorerLine(s.lineInfo)) {
+      const g = gsRelay.getFair(s.lineId);
+      if (!g.ok) {
+        gsRelay.noteDeclined();
+        priceParlay._lastFailure = {
+          reason: 'no_fair_value',
+          detail: `${s.lineInfo.playerName || s.lineInfo.teamName || '?'} goalscorer — ${g.reason}${g.detail ? ' (' + g.detail + ')' : ''}`,
+          blockerLeg: { team: s.lineInfo.playerName || s.lineInfo.teamName, market: s.lineInfo.marketType, sport: s.lineInfo.sport },
+        };
+        return null;
+      }
+      gsRelay.noteUsed();
+      fairProbs[i] = g.fair;
+      s.bookPriceOverride = null;
+      s.fairBasis = 'gs_relay_fd_dk';
+      continue;
+    }
     // Seeded book-price override (one-sided HR props): quote the book's posted
     // price + sweetener directly, bypassing de-vig+vig — same mechanism as the
     // series/golf overrides below. fairProb still drives EV/risk weighting.
@@ -5171,6 +5194,21 @@ function shouldDecline(legs, parlayId) {
       }
     }
 
+    // ---- SOCCER GOALSCORER: never same-match (operator 2026-10-13) --------
+    // Two scorers on one match, or a scorer with that match's result/total,
+    // are correlated; no measured factor exists, so decline rather than price
+    // them as independent.
+    for (const a of legInfos.filter(li => gsRelay.isGoalscorerLine(li))) {
+      for (const b of legInfos) {
+        if (a === b || !a.pxEventId || String(a.pxEventId) !== String(b.pxEventId)) continue;
+        return {
+          declined: true,
+          reason: 'goalscorer_same_match',
+          detail: `goalscorer ${a.playerName || a.teamName} cannot be parlayed with another leg on the same match (${b.playerName || b.teamName || '?'} ${b.marketType})`,
+        };
+      }
+    }
+
     const movLegs = legInfos.filter(li => MOV_MARKET_TYPES.has(li.marketType));
     if (movLegs.length) {
       for (const a of movLegs) {
@@ -5799,7 +5837,7 @@ function shouldDecline(legs, parlayId) {
       // 420s — see config.js for the seed-snapshot arithmetic that floors
       // the safe value; ships as a package with the TOA prop cadence cut).
       const STALE_MS = (config.pricing.stalePropSeconds || 420) * 1000;
-      if (lineInfo.propFetchedAt && (Date.now() - lineInfo.propFetchedAt) > STALE_MS) {
+      if (lineInfo.propFetchedAt && !gsRelay.isGoalscorerLine(lineInfo) && (Date.now() - lineInfo.propFetchedAt) > STALE_MS) {
         const ageMin = Math.round((Date.now() - lineInfo.propFetchedAt) / 6000) / 10;
         return {
           declined: true,

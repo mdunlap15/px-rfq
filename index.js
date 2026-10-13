@@ -335,6 +335,7 @@ async function startup() {
   // Order-book fair relay (2026-10-06): poll px_rfq_relay so parlay legs on
   // lines the order book prices use the order book's fair. First read is
   // awaited (bounded by the DB breaker) so the first RFQs see it.
+  try { const gsRelay = require('./services/gs-relay'); await gsRelay.poll(); gsRelay.start(); log.info('Startup', `    ✓ Goalscorer relay (px_gs_fairs): ${gsRelay.getStatus().entries} line(s), age ${gsRelay.getStatus().ageSec}s`); } catch (err) { log.warn('Startup', `    ✗ Goalscorer relay start failed: ${err.message}`); }
   try { const obRelay = require('./services/ob-relay'); await obRelay.poll(); obRelay.start(); log.info('Startup', `    ✓ Order-book relay: ${obRelay.getStatus().fresh} fresh fair(s)`); } catch (err) { log.warn('Startup', `    ✗ Order-book relay start failed: ${err.message}`); }
   try { require('./services/rfq-watch').start(); } catch (err) { log.warn('Startup', `    ✗ RFQ watch publisher start failed: ${err.message}`); }
   // Near-start refresh: keep inputs inside the freshness-gate window <= ~60s old.
@@ -1252,6 +1253,7 @@ function startStatusServer() {
       // Note the defaults differ on purpose: golfOutrightsParlay and mlbSeries
       // default ON, everything else defaults OFF.
       // Order-book fair relay + fill-drift measurement (2026-10-06).
+      gsRelay: (() => { try { return require('./services/gs-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
       obRelay: (() => { try { return require('./services/ob-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
       fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
