@@ -2132,6 +2132,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                     source: 'toa-one-sided',
                     impliedOver: toaOs.fairProbOver,  // overround-adjusted (drives EV/risk)
                     rawImpliedOver: (toaOs.oneSidedRawAvgImplied != null ? toaOs.oneSidedRawAvgImplied : toaOs.fairProbOver), // raw posted avg (book-mirror basis)
+                    bestRawOver: toaOs.oneSidedBestRawOver != null ? toaOs.oneSidedBestRawOver : null,
                     books: toaOs.books || [],
                     fetchedAt: toaOs.fetchedAt || Date.now(),
                   };
@@ -2152,6 +2153,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                         source: 'dk-scraper-one-sided',
                         impliedOver: dkOver,  // raw DK implied
                         rawImpliedOver: dkOver, // raw DK posted (book-mirror basis)
+                        bestRawOver: dkOver,
                         books: ['draftkings'],
                         fetchedAt: dkOs.fetchedAt || Date.now(),
                       };
@@ -2250,6 +2252,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                 booksWithBothSides: 0,
                 bookPriceOverride: overBookPriceOverride,
                 propBooks: oneSidedHit.books,
+                propBestRaw: _propBestRaw(oneSidedHit.bestRawOver, null),
                 propSource: oneSidedHit.source,
                 propFetchedAt: oneSidedHit.fetchedAt || Date.now(),
               });
@@ -2304,6 +2307,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
               fairProbUnder: lookup.fairProbUnder,
               booksWithBothSides: lookup.booksWithBothSides,
               propBooks: lookup.books,
+              propBestRaw: _propBestRaw(lookup.bestRawOver, lookup.bestRawUnder),
               propSource: lookup.source || 'theoddsapi',
               propFetchedAt: lookup.fetchedAt || Date.now(),
             });
@@ -2325,7 +2329,15 @@ const _propSeedCtx = new Map();
 // The pricing fields a prop line carries from its TOA fetch. Everything else
 // (ids, routing, market, line, side) is registration and never touched here.
 const _PROP_PRICE_FIELDS = ['fairProb', 'fairProbOver', 'fairProbUnder', 'booksWithBothSides',
-  'bookPriceOverride', 'propBooks', 'propSource', 'propFetchedAt'];
+  'bookPriceOverride', 'propBooks', 'propBestRaw', 'propSource', 'propFetchedAt'];
+// Most generous raw implied any book posts per side at the registered line
+// ({over, under}, null when no book posts that side) — the prop-book cap's
+// reference (pricer.js, config.pricing.propBookCapPercent).
+function _propBestRaw(over, under) {
+  const ok = v => (Number.isFinite(v) && v > 0 && v < 1) ? Math.round(v * 1e6) / 1e6 : null;
+  const o = ok(over), u = ok(under);
+  return (o == null && u == null) ? null : { over: o, under: u };
+}
 const _sameLine = (a, b) => !!a && !!b && a.marketType === b.marketType
   && a.selection === b.selection && a.line === b.line && a.pxEventId === b.pxEventId;
 function _keepNewerPropPricing(staged, live) {
@@ -4961,6 +4973,7 @@ async function resolveUnknownLine(rfqLeg) {
                     fairProbUnder: lookup.fairProbUnder,
                     booksWithBothSides: lookup.booksWithBothSides,
                     propBooks: lookup.books,
+                    propBestRaw: _propBestRaw(lookup.bestRawOver, lookup.bestRawUnder),
                     propSource: 'theoddsapi',
                     propFetchedAt: lookup.fetchedAt || Date.now(),
                   };
@@ -4989,6 +5002,7 @@ async function resolveUnknownLine(rfqLeg) {
                         impliedOver: _toaOs.fairProbOver,
                         rawImpliedOver: _toaOs.oneSidedRawAvgImplied != null
                           ? _toaOs.oneSidedRawAvgImplied : _toaOs.fairProbOver,
+                        bestRawOver: _toaOs.oneSidedBestRawOver != null ? _toaOs.oneSidedBestRawOver : null,
                         books: _toaOs.books || [],
                         fetchedAt: _toaOs.fetchedAt || Date.now(),
                       };
@@ -5013,6 +5027,7 @@ async function resolveUnknownLine(rfqLeg) {
                               source: 'dk-scraper-one-sided',
                               impliedOver: _dkOver,
                               rawImpliedOver: _dkOver,
+                              bestRawOver: _dkOver,
                               books: ['draftkings'],
                               fetchedAt: _dkOs.fetchedAt || Date.now(),
                             };
@@ -5058,6 +5073,7 @@ async function resolveUnknownLine(rfqLeg) {
                       booksWithBothSides: 0,
                       bookPriceOverride: _bookPriceOverride,
                       propBooks: _oneSidedHit.books,
+                      propBestRaw: _propBestRaw(_oneSidedHit.bestRawOver, null),
                       propSource: _oneSidedHit.source,
                       propFetchedAt: _oneSidedHit.fetchedAt || Date.now(),
                     };

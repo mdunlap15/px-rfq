@@ -182,6 +182,8 @@ const REGISTRY = [
   { key: 'obRelayMaxAgeSec', path: 'obRelayMaxAgeSec', type: 'number', min: 30, max: 3600, group: 'pricing', env: 'OB_RELAY_MAX_AGE_SEC', label: 'Order-book relay: max fair age, seconds' },
   { key: 'obRelayMaxGapPp', path: 'obRelayMaxGapPp', type: 'number', min: 0.005, max: 0.5, group: 'pricing', env: 'OB_RELAY_MAX_GAP_PP', label: 'Order-book relay: own fair wins if more adverse by more than (prob)' },
   { key: 'confirmAdverseDriftThreshold', path: 'confirmAdverseDriftThreshold', type: 'number', min: 0, max: 1, group: 'pricing', env: 'CONFIRM_ADVERSE_DRIFT', label: 'Confirm: reject if fair moved against us by more than (fraction; 0 = off)' },
+  { key: 'propBookCapPercent', path: 'propBookCapPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'PROP_BOOK_CAP_PERCENT', label: 'Prop book cap A/B % (0 = dark)' },
+  { key: 'propBookCapRelPct', path: 'propBookCapRelPct', type: 'number', min: 0, max: 20, group: 'pricing', env: 'PROP_BOOK_CAP_REL_PCT', label: 'Prop book cap: max % more generous than the best book' },
   { key: 'twoLegWidenPercent', path: 'twoLegWidenPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'TWO_LEG_WIDEN_PERCENT', label: '2-leg (fair 30-50%) widen A/B % (0 = dark)' },
   { key: 'twoLegWidenRelPct', path: 'twoLegWidenRelPct', type: 'number', min: 0.1, max: 20, group: 'pricing', env: 'TWO_LEG_WIDEN_REL_PCT', label: '2-leg widen arm: relative price add, %' },
   { key: 'twoLegWidenMinFair', path: 'twoLegWidenMinFair', type: 'number', min: 0, max: 1, group: 'pricing', env: 'TWO_LEG_WIDEN_MIN_FAIR', label: '2-leg widen scope: min joint fair' },

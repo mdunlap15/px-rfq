@@ -11601,12 +11601,22 @@ async function lookupTheOddsApiPlayerProp(sport, marketKey, pxEventInfo, playerN
     }
   }
 
+  // PROP BOOK CAP (2026-10-13): the most generous price any book posts on each
+  // side at THIS line (lowest raw implied), whether or not it posts the other
+  // side. pricer.js caps the cap-arm quote at no more than
+  // propBookCapRelPct % more generous than it.
+  const _rawSide = (byBook) => {
+    const ps = Object.values(byBook).map(m => americanToImpliedProb(m.price)).filter(p => p > 0 && p < 1);
+    return ps.length ? Math.min(...ps) : null;
+  };
   return {
     matchedRows: matched,
     fieldYesByBook,
     books,
     fairProbOver,
     fairProbUnder,
+    bestRawOver: _rawSide(overByBook),
+    bestRawUnder: _rawSide(underByBook),
     booksWithBothSides: method === 'count_dist' ? distBooks : fairProbsOver.length,
     method,
     impliedMean,
@@ -11755,6 +11765,8 @@ async function lookupTheOddsApiPlayerPropOneSided(sport, marketKey, pxEventInfo,
     oneSidedSource: 'toa-one-sided',
     oneSidedBookCount: books.length,
     oneSidedRawAvgImplied: avgImp,
+    // Most generous book on the OVER (lowest raw implied) — the prop-book cap's reference.
+    oneSidedBestRawOver: Math.min(...overImps),
     oneSidedAssumedVig: cf ? null : assumedVig,
     oneSidedFieldNormalized: !!cf,
     oneSidedFieldSum: cf ? cf.avgFieldSum : null,

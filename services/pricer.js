@@ -3692,6 +3692,79 @@ function priceParlay(legs, opts = {}) {
     }
   }
 
+  // Per-leg offered implied prob — the same MAX-gated payout-vig + favourite
+  // markups priceParlay applies per leg (a book-mirror leg is its override).
+  // Parlay-level ramps have no per-leg attribution and are excluded. Used by
+  // the prop-book cap below and stored as meta.legs[].legOfferedProb.
+  const _estLegOffered = (l) => {
+    if (l.bookPriceOverride != null) return l.bookPriceOverride;
+    if (!(l.fairProb > 0 && l.fairProb < 1)) return null;
+    const _fp = l.fairProb;
+    const _v = getEffectiveVig(_fp, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0);
+    let _off = 1 / (1 + (1 / _fp - 1) * (1 - _v)); // payout-vig
+    if (fairMult > 0) { const m = _fp * (1 + fairMult); if (m > _off && m < 0.99) _off = m; }
+    if (heavyFavMarkup > 0 && _fp > heavyFavThreshold) { const m = _fp * (1 + heavyFavMarkup); if (m > _off && m < 0.99) _off = m; }
+    // Mirror the MMA additive favorite markup (same gate as the pricing side).
+    if (mmaFavAdd > 0 && l.lineInfo.sport === 'mma_mixed_martial_arts'
+        && (l.lineInfo.marketType || '') === 'moneyline'
+        && _fp >= mmaFavAddMin && _fp <= mmaFavAddMax) {
+      const m = _fp + mmaFavAdd; if (m > _off && m < 0.99) _off = m;
+    }
+    return Math.min(0.99, _off);
+  };
+
+  // -------------------------------------------------------------------
+  // PROP BOOK CAP A/B (2026-10-13) — see config.pricing.propBookCapPercent.
+  //
+  // Operator: "build the 2% cap as a split test". Measured 10/13 on 176 prop
+  // fills (TOA historical snapshots at confirm): 44% of prop legs were quoted
+  // MORE generously than the most generous sportsbook on that side and line
+  // (median parlay gap 3.4%, p90 8.2%), while the fair prices grade calibrated.
+  // Cap arm: no prop leg may be more than propBookCapRelPct % more generous
+  // than the best book's raw price for its side - leg target
+  // bestRaw / (1 + rel); the parlay's offered prob is lifted by the product of
+  // max(1, target / leg offered) over the prop legs that have a book price.
+  // Scope = any parlay with at least one such leg; arm = md5('pbc:'+parlayId),
+  // recorded whether or not the cap binds. Only ever tightens (offered prob
+  // up); applied after every floor/trim and before the widen tests, which
+  // stack on top. Fair untouched, so confirm drift lands in the same arm.
+  // -------------------------------------------------------------------
+  const _propCap = { arm: null, applied: false, preProb: null, relPct: null, legsBound: 0 };
+  {
+    const rel = config.pricing.propBookCapRelPct != null ? config.pricing.propBookCapRelPct : 2;
+    let ratio = 1, legsWithBook = 0, bound = 0;
+    for (const l of pricedLegs) {
+      const li = l.lineInfo || {};
+      if (!/^player_/.test(li.marketType || '') || !li.propBestRaw) continue;
+      const best = li.propBestRaw[String(li.selection || '').toLowerCase()];
+      const off = _estLegOffered(l);
+      if (!(best > 0 && best < 1) || !(off > 0 && off < 1)) continue;
+      legsWithBook++;
+      const target = best / (1 + rel / 100);
+      if (target > off) { ratio *= target / off; bound++; }
+    }
+    const _pct = config.pricing.propBookCapPercent || 0;
+    if (legsWithBook > 0 && opts.parlayId && _pct > 0) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('pbc:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _propCap.arm = inArm ? 'cap' : 'control';
+      if (inArm && ratio > 1 && offeredImpliedProb > 0 && offeredImpliedProb < 0.99) {
+        const capped = Math.min(0.99, offeredImpliedProb * ratio);
+        if (capped > offeredImpliedProb) {
+          _propCap.preProb = offeredImpliedProb;
+          _propCap.applied = true;
+          _propCap.relPct = rel;
+          _propCap.legsBound = bound;
+          log.debug('Pricing', `Prop book cap: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(capped * 100).toFixed(3)}% (${bound} leg(s) > ${rel}% over best book)`);
+          offeredImpliedProb = capped;
+        }
+      }
+    }
+  }
+
   // -------------------------------------------------------------------
   // CFB MARGIN-WIDEN A/B (2026-10-05) — see config.pricing.cfbWidenPercent.
   //
@@ -4241,23 +4314,9 @@ function priceParlay(legs, opts = {}) {
         // so the stored value equals our real per-leg contribution.
         // Parlay-level ramps (longshot, leg-count) have no per-leg
         // attribution and are intentionally excluded.
-        let legOfferedProb = null;
-        if (l.bookPriceOverride != null) {
-          legOfferedProb = l.bookPriceOverride;
-        } else if (l.fairProb > 0 && l.fairProb < 1) {
-          const _fp = l.fairProb;
-          const _v = getEffectiveVig(_fp, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0);
-          let _off = 1 / (1 + (1 / _fp - 1) * (1 - _v)); // payout-vig
-          if (fairMult > 0) { const m = _fp * (1 + fairMult); if (m > _off && m < 0.99) _off = m; }
-          if (heavyFavMarkup > 0 && _fp > heavyFavThreshold) { const m = _fp * (1 + heavyFavMarkup); if (m > _off && m < 0.99) _off = m; }
-          // Mirror the MMA additive favorite markup (same gate as the pricing side).
-          if (mmaFavAdd > 0 && l.lineInfo.sport === 'mma_mixed_martial_arts'
-              && (l.lineInfo.marketType || '') === 'moneyline'
-              && _fp >= mmaFavAddMin && _fp <= mmaFavAddMax) {
-            const m = _fp + mmaFavAdd; if (m > _off && m < 0.99) _off = m;
-          }
-          legOfferedProb = Math.min(0.99, _off);
-        }
+        const legOfferedProb = _estLegOffered(l);
+        // Most generous book on this leg's side (props only) - prop-book cap reference.
+        const _pbr = l.lineInfo.propBestRaw ? l.lineInfo.propBestRaw[String(l.lineInfo.selection || '').toLowerCase()] : null;
         return {
           lineId: l.lineId,
           team,
@@ -4271,6 +4330,7 @@ function priceParlay(legs, opts = {}) {
           // True per-leg offered implied (payout-vig + favorite markup, MAX-gated).
           // The Single-Leg chart prefers this over reconstructing from legVig.
           legOfferedProb: legOfferedProb != null ? Math.round(legOfferedProb * 100000) / 100000 : null,
+          bookBestRaw: _pbr != null ? _pbr : null,
           // RULE 2 reconciling per-leg prob: Π(legConfirmProb) === parlay implied prob.
           // Sent to PX in the confirmation so per-leg probs multiply to the parlay odds.
           legConfirmProb: l._legConfirmProb != null ? Math.round(l._legConfirmProb * 1000000) / 1000000 : null,
@@ -4393,6 +4453,13 @@ function priceParlay(legs, opts = {}) {
       cfbWidenApplied: _cfbWiden.applied,
       cfbWidenPreProb: _cfbWiden.preProb != null ? Math.round(_cfbWiden.preProb * 100000) / 100000 : null,
       cfbWidenRelPct: _cfbWiden.relPct,
+      // Prop book cap A/B: arm null = no prop leg with a book price / dark;
+      // 'control' / 'cap'. PreProb = the uncapped price.
+      propBookCapArm: _propCap.arm,
+      propBookCapApplied: _propCap.applied,
+      propBookCapPreProb: _propCap.preProb != null ? Math.round(_propCap.preProb * 100000) / 100000 : null,
+      propBookCapRelPct: _propCap.relPct,
+      propBookCapLegsBound: _propCap.legsBound,
       // 2-leg widen A/B: arm null = out of scope / dark; 'control' / 'widen'
       // in scope (2 legs, fair in [min, max)). PreProb = the control price.
       twoLegWidenArm: _twoLegWiden.arm,
