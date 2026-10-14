@@ -58,4 +58,5 @@ test('profile mapping', () => {
   assert.strictEqual(rfqWatch.PROFILE_OF('americanfootball_nfl'), 'nfl');
   assert.strictEqual(rfqWatch.PROFILE_OF('tennis'), 'tennis');
   assert.strictEqual(rfqWatch.PROFILE_OF('golf_matchups'), null);
+  assert.strictEqual(rfqWatch.PROFILE_OF('basketball_nba'), 'nba');
 });

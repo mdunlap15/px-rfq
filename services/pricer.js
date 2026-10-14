@@ -932,6 +932,25 @@ function _legInputAgeSec(lineInfo) {
   } catch (_) { return null; }
 }
 
+// Compact per-leg fair provenance stored as meta.legs[].provenance (see the call site).
+function _legProvenance(l) {
+  const li = l.lineInfo || {};
+  const p = {};
+  if (l.fairBasis) p.basis = l.fairBasis;
+  if (l.bookPriceOverride != null) p.mirror = Math.round(l.bookPriceOverride * 100000) / 100000;
+  if (l.calib) p.calib = { mult: l.calib.mult, preFair: Math.round(l.calib.preFair * 100000) / 100000 };
+  if (/^player_/.test(li.marketType || '')) {
+    if (li.propMethod) p.method = li.propMethod;
+    if (li.propSource) p.source = li.propSource;
+    const nb = Array.isArray(li.propBooks) ? li.propBooks.length : (Number.isFinite(li.propBooks) ? li.propBooks : null);
+    if (nb != null) p.books = nb;
+    if (li.booksWithBothSides != null) p.twoSided = li.booksWithBothSides;
+    if (li.propExactLineFair != null) p.exactLineFair = li.propExactLineFair;
+    if (li.propImpliedMean != null) p.mean = li.propImpliedMean;
+  }
+  return Object.keys(p).length ? p : null;
+}
+
 function priceParlay(legs, opts = {}) {
   priceParlay._lastFailure = null; // clear any prior failure
   // Latency diagnostic — captures function entry to surface in _timings.
@@ -1994,6 +2013,7 @@ function priceParlay(legs, opts = {}) {
         const adj = Math.min(0.999, Math.max(0.0001, fairProb * mult));
         if (adj !== fairProb) {
           propFairCalibs.push({ leg: legLabel, from: Math.round(fairProb * 10000) / 10000, to: Math.round(adj * 10000) / 10000, mult });
+          legStates[legIdx]._calib = { preFair: fairProb, mult };
           fairProb = adj;
         }
       }
@@ -2004,6 +2024,8 @@ function priceParlay(legs, opts = {}) {
       lineInfo,
       fairProb,
       fairSource,
+      fairBasis: legStates[legIdx].fairBasis || null,
+      calib: legStates[legIdx]._calib || null,
       relayHit: relayHit ? { fair: relayHit.fair, own: relayHit.own, ageSec: relayHit.ageSec, via: relayHit.via, source: relayHit.source } : null,
       bookPriceOverride: effectiveBookPriceOverride,
       manualOddsApplied,
@@ -4360,6 +4382,13 @@ function priceParlay(legs, opts = {}) {
           // book's (relay); 'rfq_adverse_over_ob' = ours, more adverse by > gap.
           fairSource: l.fairSource || 'rfq',
           obRelay: l.relayHit || null,
+          // FAIR PROVENANCE (2026-10-14 EV audit): how this leg's fair was built,
+          // so a family's calibration can be split by method instead of guessed.
+          // Props carry the TOA lookup's method (exact_line_devig /
+          // count_dist / poster_* / toa-one-sided ...), book counts and fetch
+          // source; calib = the PROP_FAIR_CALIBRATION multiplier and the fair
+          // before it; fairBasis = the special-market source (series, MoV, ...).
+          provenance: _legProvenance(l),
           bookPriceOverride: l.bookPriceOverride != null ? Math.round(l.bookPriceOverride * 10000) / 10000 : null,
           displayFairProb: l.displayFairProb ? Math.round(l.displayFairProb * 10000) / 10000 : null,
           pinnacleOdds: l.pinnacleOdds || null,

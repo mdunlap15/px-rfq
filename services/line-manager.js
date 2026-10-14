@@ -2260,6 +2260,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                 bookPriceOverride: overBookPriceOverride,
                 propBooks: oneSidedHit.books,
                 propBestRaw: _propBestRaw(oneSidedHit.bestRawOver, null),
+                propMethod: oneSidedHit.source === 'dk-scraper-one-sided' ? 'dk_one_sided' : 'one_sided_assumed_overround',
                 propSource: oneSidedHit.source,
                 propFetchedAt: oneSidedHit.fetchedAt || Date.now(),
               });
@@ -2315,6 +2316,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
               booksWithBothSides: lookup.booksWithBothSides,
               propBooks: lookup.books,
               propBestRaw: _propBestRaw(lookup.bestRawOver, lookup.bestRawUnder),
+              ..._propFairMeta(lookup, sel.selection),
               propSource: lookup.source || 'theoddsapi',
               propFetchedAt: lookup.fetchedAt || Date.now(),
             });
@@ -2336,7 +2338,21 @@ const _propSeedCtx = new Map();
 // The pricing fields a prop line carries from its TOA fetch. Everything else
 // (ids, routing, market, line, side) is registration and never touched here.
 const _PROP_PRICE_FIELDS = ['fairProb', 'fairProbOver', 'fairProbUnder', 'booksWithBothSides',
-  'bookPriceOverride', 'propBooks', 'propBestRaw', 'propSource', 'propFetchedAt'];
+  'bookPriceOverride', 'propBooks', 'propBestRaw', 'propSource', 'propFetchedAt',
+  'propMethod', 'propExactLineFair', 'propImpliedMean'];
+// How a two-sided prop fair was built (fair provenance, 2026-10-14 EV audit):
+// the lookup's method, the exact-line de-vig fair for THIS side (differs from
+// fairProb when the count-distribution fair was used) and the implied mean.
+function _propFairMeta(lookup, selection) {
+  if (!lookup) return {};
+  const ex = lookup.exactLineFairOver;
+  const exSide = Number.isFinite(ex) ? (String(selection).toLowerCase() === 'under' ? 1 - ex : ex) : null;
+  return {
+    propMethod: lookup.method || null,
+    propExactLineFair: exSide != null ? Math.round(exSide * 1e5) / 1e5 : null,
+    propImpliedMean: Number.isFinite(lookup.impliedMean) ? Math.round(lookup.impliedMean * 1000) / 1000 : null,
+  };
+}
 // Most generous raw implied any book posts per side at the registered line
 // ({over, under}, null when no book posts that side) — the prop-book cap's
 // reference (pricer.js, config.pricing.propBookCapPercent).
@@ -4981,6 +4997,7 @@ async function resolveUnknownLine(rfqLeg) {
                     booksWithBothSides: lookup.booksWithBothSides,
                     propBooks: lookup.books,
                     propBestRaw: _propBestRaw(lookup.bestRawOver, lookup.bestRawUnder),
+                    ..._propFairMeta(lookup, matchingProp.selection),
                     propSource: 'theoddsapi',
                     propFetchedAt: lookup.fetchedAt || Date.now(),
                   };
@@ -5081,6 +5098,7 @@ async function resolveUnknownLine(rfqLeg) {
                       bookPriceOverride: _bookPriceOverride,
                       propBooks: _oneSidedHit.books,
                       propBestRaw: _propBestRaw(_oneSidedHit.bestRawOver, null),
+                      propMethod: _oneSidedHit.source === 'dk-scraper-one-sided' ? 'dk_one_sided' : 'one_sided_assumed_overround',
                       propSource: _oneSidedHit.source,
                       propFetchedAt: _oneSidedHit.fetchedAt || Date.now(),
                     };

@@ -6,7 +6,7 @@
  * ~60 s we publish, per guard profile, the events RFQ has been quoting in the
  * last RFQ_WATCH_ACTIVE_MIN minutes that start within RFQ_WATCH_HOURS:
  *
- *   kv px_rfq_watch_<soccer|nhl|mlb|cfb|nfl|tennis> =
+ *   kv px_rfq_watch_<soccer|nhl|mlb|cfb|nfl|tennis|nba> =
  *     { ts, events: { <pxEventId>: { s: oddsApiSport, h: home, a: away, t: startIso, l: [lineIds] } } }
  *
  * h / a are the Odds API's OWN team names (the names our odds feed matched),
@@ -33,9 +33,12 @@ const PROFILE_OF = (sport) => {
   // order book's tennis_line_guard (exchange fair for match / 1st-set ML, TOA
   // for games / sets), same ~20 s passes as its own resting offers.
   if (sport.startsWith('tennis')) return 'tennis';
+  // NBA (2026-10-14 EV audit, season opens 10/21): read by multi_line_guard
+  // --profile nba once its runner entry carries --rfq-watch.
+  if (sport === 'basketball_nba') return 'nba';
   return null;
 };
-const PROFILES = ['soccer', 'nhl', 'mlb', 'cfb', 'nfl', 'tennis'];
+const PROFILES = ['soccer', 'nhl', 'mlb', 'cfb', 'nfl', 'tennis', 'nba'];
 
 const _active = new Map();      // pxEventId -> last quoted ms
 const _activeAll = new Map();   // same, EVERY sport (near-start refresh priority)
