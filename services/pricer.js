@@ -1140,7 +1140,9 @@ function priceParlay(legs, opts = {}) {
     // Check if prices are stale for this sport. Uses per-sport threshold:
     // MMA/boxing/NFL have tighter windows because they move on news;
     // NCAAB/tennis have looser windows because they only refresh on full cycles.
-    if (isStaleCached(lineInfo.sport, lineInfo.startTime)) {
+    // opts.fairOnly (game-time EV snapshot, services/gametime-ev.js): staleness
+    // is RECORDED (fairOnly result carries each leg's input age), not declined.
+    if (!opts.fairOnly && isStaleCached(lineInfo.sport, lineInfo.startTime)) {
       const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
       const threshold = oddsFeed.getStaleThreshold(lineInfo.sport);
       log.debug('Pricing', `Declined: stale prices for ${lineInfo.sport} (${ageMin}min old, threshold ${threshold}m)`);
@@ -1159,7 +1161,7 @@ function priceParlay(legs, opts = {}) {
     // and gets accepted. With it, the reprice fails with a non-churn reason
     // and the bounded fail-open rejects. Quote path unaffected (shouldDecline
     // already declined stale props before priceParlay runs).
-    if (/^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt && !gsRelay.isGoalscorerLine(lineInfo)) {
+    if (!opts.fairOnly && /^player_/.test(lineInfo.marketType || '') && lineInfo.propFetchedAt && !gsRelay.isGoalscorerLine(lineInfo)) {
       const propAgeMs = nowMs - lineInfo.propFetchedAt;
       const propStaleMs = (config.pricing.stalePropSeconds || 420) * 1000;
       if (propAgeMs > propStaleMs) {
@@ -1183,7 +1185,7 @@ function priceParlay(legs, opts = {}) {
     // odds-feed cache entry ⇒ getCacheAge is Infinity ⇒ this would decline every
     // outright leg once the tournament is within 30 min of tee-off. Their own
     // board-age guards cover freshness and fail closed.
-    if (lineInfo.sport !== 'golf_outrights' && oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
+    if (!opts.fairOnly && lineInfo.sport !== 'golf_outrights' && oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
       const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
       log.info('Pricing', `Declined pre-game: ${legLabel} starts soon, cache ${ageMin}m old (limit 2m)`);
       priceParlay._lastFailure = {
@@ -1202,7 +1204,7 @@ function priceParlay(legs, opts = {}) {
     const lineupStatus = oddsFeed.checkLineupFreshness(
       lineInfo.sport, lineInfo.homeTeam, lineInfo.awayTeam, lineInfo.startTime
     );
-    if (lineupStatus) {
+    if (lineupStatus && !opts.fairOnly) {
       const ageSec = Math.round(lineupStatus.ageMs / 1000);
       log.info('Pricing', `Declined: lineup change ${ageSec}s ago for ${legLabel} — ${lineupStatus.detail}`);
       priceParlay._lastFailure = {
@@ -1957,7 +1959,7 @@ function priceParlay(legs, opts = {}) {
     // freshGateMaxAgeSec old: a fresh order-book relay fair counts (its own
     // age), else our feed's age for THIS leg (prop fetch / main cache / alt-line
     // cache). Unknown age = decline. Slow-moving markets are exempt.
-    if (config.pricing.freshGateEnabled !== false) {
+    if (config.pricing.freshGateEnabled !== false && !opts.fairOnly) {
       const _st = Date.parse(lineInfo.startTime || '');
       const _ttsMin = Number.isFinite(_st) ? (_st - Date.now()) / 60000 : null;
       const _mt = String(lineInfo.marketType || ''), _sp = String(lineInfo.sport || '');
@@ -2021,6 +2023,21 @@ function priceParlay(legs, opts = {}) {
   }
 
   // Order-book guards watch the events RFQ is actively quoting (rfq-watch.js).
+  // FAIR-ONLY MODE (2026-10-13, game-time EV): every leg's fair exactly as the
+  // quote path resolves it (order-book relay, calibration, mirrors), with the
+  // age of the odds it came from — and NOTHING parlay-level (no vig, floors,
+  // caps, guards, exposure, rfq-watch activity). Staleness gates are skipped
+  // above so a stale input is reported with its age rather than dropped.
+  if (opts.fairOnly) {
+    return {
+      fairOnly: true,
+      legs: pricedLegs.map(l => {
+        let ageSec = null;
+        try { ageSec = l.relayHit ? l.relayHit.ageSec : oddsFeed.getLegOddsAgeSec(l.lineInfo); } catch (_) { ageSec = null; }
+        return { lineId: l.lineId, fairProb: l.fairProb, fairSource: l.fairSource || null, mirror: l.bookPriceOverride != null, ageSec };
+      }),
+    };
+  }
   rfqWatch.touch(pricedLegs.map(l => l.lineInfo));
 
   // Sanity check — if fair parlay prob is extremely small OR not finite,

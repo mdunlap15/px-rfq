@@ -340,6 +340,8 @@ async function startup() {
   try { require('./services/rfq-watch').start(); } catch (err) { log.warn('Startup', `    ✗ RFQ watch publisher start failed: ${err.message}`); }
   // Near-start refresh: keep inputs inside the freshness-gate window <= ~60s old.
   try { require('./services/near-start-refresh').start(); } catch (err) { log.warn('Startup', `    ✗ near-start refresh start failed: ${err.message}`); }
+  // Game-time EV: each open fill's legs re-read just before their own start.
+  try { require('./services/gametime-ev').start(); } catch (err) { log.warn('Startup', `    ✗ game-time EV start failed: ${err.message}`); }
 
   // Step 4: Connect WebSocket
   log.info('Startup', '4/5 Connecting to ProphetX WebSocket...');
@@ -1258,6 +1260,7 @@ function startStatusServer() {
       fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
       nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      gameTimeEv: (() => { try { return require('./services/gametime-ev').getStatus(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {
         mlbSeries: {
           on: config.pricing.mlbSeriesEnabled !== false,
@@ -4529,7 +4532,8 @@ function startStatusServer() {
   app.get('/ev-curve', (req, res) => {
     try {
       const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
-      res.json({ ok: true, ...orderTracker.getEvCurve(days) });
+      // ?exclude=closed drops shapes we no longer write (orderTracker.closedHoleOf).
+      res.json({ ok: true, ...orderTracker.getEvCurve(days, 1200, { excludeClosed: req.query.exclude === 'closed' }) });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 

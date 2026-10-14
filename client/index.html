@@ -1041,6 +1041,7 @@
                 <button class="btn" data-evdays="7" onclick="setEvCurveDays(7)" style="padding:1px 6px; font-size:10px;">7d</button>
                 <button class="btn primary" data-evdays="30" onclick="setEvCurveDays(30)" style="padding:1px 6px; font-size:10px;">30d</button>
                 <button class="btn" data-evdays="90" onclick="setEvCurveDays(90)" style="padding:1px 6px; font-size:10px;">90d</button>
+                <button class="btn" id="ev-exclude-closed" onclick="toggleEvExcludeClosed()" title="Hide tickets in shapes we no longer write: CFB blowout SGPs, strikeout props, blocked-sport SGPs, blocked creators" style="padding:1px 6px; font-size:10px; margin-left:6px;">Excl. closed holes</button>
               </span>
             </span>
           </div>
@@ -13972,7 +13973,7 @@
   // Data comes from GET /ev-curve because /orders only ships ~100 rows —
   // under two days at current volume — so a 30-day curve cannot be built
   // client-side. Same constraint that put the 15-day ROI stat on the server.
-  let _evCurveCache = { at: 0, data: null, days: 30, inflight: false };
+  let _evCurveCache = { at: 0, data: null, days: 30, inflight: false, excludeClosed: false };
   const EV_CURVE_TTL_MS = 60 * 1000;
 
   function renderChartEvBanked(force) {
@@ -13983,7 +13984,7 @@
     if (fresh && !force) { _paintEvBanked(_evCurveCache.data); return; }
     if (_evCurveCache.inflight) return;
     _evCurveCache.inflight = true;
-    fetch(BASE + '/ev-curve?days=' + _evCurveCache.days, { credentials: 'include' })
+    fetch(BASE + '/ev-curve?days=' + _evCurveCache.days + (_evCurveCache.excludeClosed ? '&exclude=closed' : ''), { credentials: 'include' })
       .then(r => r.json())
       .then(j => {
         _evCurveCache.inflight = false;
@@ -13998,6 +13999,15 @@
           el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Could not load /ev-curve</div></div>';
         }
       });
+  }
+
+  function toggleEvExcludeClosed() {
+    _evCurveCache.excludeClosed = !_evCurveCache.excludeClosed;
+    _evCurveCache.data = null;
+    _evCurveCache.at = 0;
+    const b = document.getElementById('ev-exclude-closed');
+    if (b) b.classList.toggle('primary', _evCurveCache.excludeClosed);
+    renderChartEvBanked(true);
   }
 
   function setEvCurveDays(days) {
@@ -14039,7 +14049,7 @@
     // ONE shared $ axis — the whole point is reading the two series against
     // each other, so a dual axis (what the old chart did) would destroy the
     // comparison.
-    const vals = pts.flatMap(p => [p.pnl, p.ev]).filter(Number.isFinite);
+    const vals = pts.flatMap(p => [p.pnl, p.ev, p.gt]).filter(Number.isFinite);
     const rawLo = Math.min(0, ...vals), rawHi = Math.max(0, ...vals);
     const vPad = (rawHi - rawLo) * 0.1 || 1;
     const lo = rawLo - vPad, hi = rawHi + vPad;
@@ -14098,6 +14108,16 @@
     pts.forEach((p, i) => { evPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.ev); });
     svg += `<path d="${evPath}" fill="none" stroke="#d29922" stroke-width="2.2" />`;
 
+    // EV AT GAME TIME (2026-10-13): each ticket's EV with its legs re-read just
+    // before their own start (meta.gameTime), else the closing snapshot, else
+    // the fill EV — so where coverage is thin this line sits ON the orange one.
+    const hasGt = pts.some(p => Number.isFinite(p.gt));
+    if (hasGt) {
+      let gtPath = '';
+      pts.forEach((p, i) => { gtPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(Number.isFinite(p.gt) ? p.gt : p.ev); });
+      svg += `<path d="${gtPath}" fill="none" stroke="#58a6ff" stroke-width="1.8" stroke-dasharray="5,3" />`;
+    }
+
     // Realized line (green/red by where it ended)
     let pnlPath = '';
     pts.forEach((p, i) => { pnlPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.pnl); });
@@ -14110,6 +14130,9 @@
     svg += svgCircle(scaleX(last.t), scaleY(last.ev), 3.2, '#d29922');
     svg += svgText(W - pad.r + 6, scaleY(last.pnl) + 3, money(last.pnl), { anchor: 'start', size: 10, fill: pnlColor });
     svg += svgText(W - pad.r + 6, scaleY(last.ev) + 3, money(last.ev), { anchor: 'start', size: 10, fill: '#d29922' });
+    if (hasGt && Number.isFinite(last.gt) && Math.abs(scaleY(last.gt) - scaleY(last.ev)) > 10) {
+      svg += svgText(W - pad.r + 6, scaleY(last.gt) + 3, money(last.gt), { anchor: 'start', size: 10, fill: '#58a6ff' });
+    }
 
     // Legend
     svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
@@ -14121,6 +14144,10 @@
     svg += svgText(238, 4, 'running hot', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '<rect x="312" y="-4" width="14" height="8" fill="rgba(248,81,73,0.16)"/>';
     svg += svgText(332, 4, 'running cold', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    if (hasGt) {
+      svg += '<line x1="410" y1="0" x2="428" y2="0" stroke="#58a6ff" stroke-width="1.8" stroke-dasharray="5,3"/>';
+      svg += svgText(434, 4, 'EV at game time', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    }
     svg += '</g>';
 
     svg += '</svg>';
@@ -14153,6 +14180,11 @@
       + (j.skipped ? ' &middot; ' + j.skipped + ' without stored EV, P&amp;L included ('
         + (j.evEstimated || 0) + ' EV estimated from fair + odds'
         + (j.evMissing ? ', ' + j.evMissing + ' at EV $0 (no fair) carrying ' + money(j.missingPnl || 0) + ' realized' : '') + ')' : '')
+      + (j.gameTimeSources ? '<br>EV at game time ' + money(j.gameTimeEv || 0) + ' &middot; source: '
+        + (j.gameTimeSources.gametime || 0) + ' re-read at start, ' + (j.gameTimeSources.close || 0) + ' closing line, '
+        + (j.gameTimeSources.fill || 0) + ' no game-time read (fill EV used)' : '')
+      + (j.excluded ? '<br>Excluding closed holes: ' + j.excluded.n + ' tickets, realized ' + money(j.excluded.pnl) + ' vs EV ' + money(j.excluded.ev) + ' ('
+        + Object.entries(j.excluded.byHole || {}).map(([k, v]) => k.replace(/_/g, ' ') + ' ' + v.n + ' / ' + money(v.pnl)).join(', ') + ')' : '')
       + '<br>' + verdict + '</div>';
     el.innerHTML = svg;
   }

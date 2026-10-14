@@ -3509,6 +3509,17 @@ function isOrderStalePhantom(order) {
  * (e.g. "any leg has started"), in-play games disappear from the dashboard
  * the moment they tip off — hiding real live risk.
  */
+/** Live confirmed (open, non-phantom) orders — services/gametime-ev.js walks these. */
+function getOpenConfirmedOrders() {
+  const out = [];
+  for (const order of Object.values(orders)) {
+    if (order.status !== 'confirmed' || !(order.confirmedStake > 0)) continue;
+    if (isOrderStalePhantom(order)) continue;
+    out.push(order);
+  }
+  return out;
+}
+
 function getTotalPortfolioRisk() {
   let total = 0;
   for (const order of Object.values(orders)) {
@@ -3765,15 +3776,60 @@ function getVoidAdjustedCalibration(days = 30) {
   };
 }
 
-function getEvCurve(days = 30, maxPoints = 1200) {
+/**
+ * CLOSED HOLES (2026-10-13, operator: chart toggle to show the book as it is
+ * priced today). A settled ticket belongs to a closed hole when it is a shape we
+ * NO LONGER WRITE, decided against the CURRENT config so a re-opened shape stops
+ * counting as closed:
+ *   cfb_blowout_sgp   all-CFB same-game with a spread leg |line| >= footballSgpMaxSpreadNcaaf (declines since 2026-09-25)
+ *   strikeout_props   any player_strikeouts leg while pitcherKPropsEnabled is off (off since 2026-08-24)
+ *   blocked_sport_sgp a same-game ticket in a sport listed in sgpBlockedSports (NHL since 2026-09-28)
+ *   blocked_creator   the creator is on the blocklist now
+ * Returns the hole key or null.
+ */
+function closedHoleOf(o) {
+  const config = require('../config').config;
+  const legs = o.legs || (o.meta && o.meta.legs) || [];
+  if (!legs.length) return null;
+  const ev = new Set(); let sameGame = false;
+  for (const l of legs) { if (l.pxEventId == null) continue; const k = String(l.pxEventId); if (ev.has(k)) sameGame = true; ev.add(k); }
+  const maxSpread = config.pricing.footballSgpMaxSpreadNcaaf;
+  if (sameGame && maxSpread > 0 && legs.every(l => l.sport === 'americanfootball_ncaaf')
+      && legs.some(l => /spread/.test(l.market || l.marketType || '') && Math.abs(Number(l.line)) >= maxSpread)) return 'cfb_blowout_sgp';
+  if (!config.pricing.pitcherKPropsEnabled && legs.some(l => (l.market || l.marketType) === 'player_strikeouts')) return 'strikeout_props';
+  if (sameGame) {
+    const blocked = new Set(config.pricing.sgpBlockedSports || []);
+    const evSport = {};
+    for (const l of legs) { const k = String(l.pxEventId); (evSport[k] = evSport[k] || []).push(l.sport); }
+    if (Object.values(evSport).some(ss => ss.length >= 2 && blocked.has(String(ss[0] || '').toLowerCase()))) return 'blocked_sport_sgp';
+  }
+  try {
+    const cr = (o.meta && o.meta.creatorId) || o.creatorId;
+    if (cr && require('./creator-blocklist').isBlocked(cr)) return 'blocked_creator';
+  } catch (_) { /* blocklist unavailable -> not classified */ }
+  return null;
+}
+
+function getEvCurve(days = 30, maxPoints = 1200, opts = {}) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const rows = [];
   let skipped = 0, evEstimated = 0, evMissing = 0, missingPnl = 0;
   let varSum = 0;
+  const gametime = require('./gametime-ev');
+  const gtSources = { gametime: 0, close: 0, fill: 0 };
+  const excluded = { n: 0, pnl: 0, ev: 0, byHole: {} };
   for (const o of Object.values(orders)) {
     if (!o.status || !String(o.status).startsWith('settled_')) continue;
     const t = o.settledAt ? new Date(o.settledAt).getTime() : NaN;
     if (Number.isNaN(t) || t < cutoff) continue;
+    const hole = opts.excludeClosed ? closedHoleOf(o) : null;
+    if (hole) {
+      const _ev = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
+      excluded.n++; excluded.pnl += Number(o.pnl) || 0; if (Number.isFinite(_ev)) excluded.ev += _ev;
+      const h = excluded.byHole[hole] || (excluded.byHole[hole] = { n: 0, pnl: 0, ev: 0 });
+      h.n++; h.pnl += Number(o.pnl) || 0; if (Number.isFinite(_ev)) h.ev += _ev;
+      continue;
+    }
     // REALIZED P&L COUNTS EVERY SETTLED TICKET (2026-10-11). Tickets with no
     // stored EV (restored / PX-backfilled rows) used to be SKIPPED — P&L and
     // all — so the realized line silently dropped real losses: the 30d view
@@ -3796,7 +3852,11 @@ function getEvCurve(days = 30, maxPoints = 1200) {
         missingPnl += Number(o.pnl) || 0;
       }
     }
-    rows.push({ t, pnl: Number(o.pnl) || 0, ev, stake: risk });
+    // Game-time EV: the leg fairs re-read at each leg's start (meta.gameTime),
+    // else the closing snapshot, else the fill EV — source counted.
+    const g = gametime.gameTimeEvFor(o, ev);
+    gtSources[g.source]++;
+    rows.push({ t, pnl: Number(o.pnl) || 0, ev, gt: Number.isFinite(g.ev) ? g.ev : ev, stake: risk });
 
     // Variance of THIS ticket's outcome: we win +W with prob (1-fp) and lose
     // -R with prob fp, so Var = fp(1-fp)(W+R)^2. Summing gives the SD of the
@@ -3811,10 +3871,10 @@ function getEvCurve(days = 30, maxPoints = 1200) {
   }
   rows.sort((a, b) => a.t - b.t);
 
-  let cumPnl = 0, cumEv = 0, cumStake = 0;
+  let cumPnl = 0, cumEv = 0, cumStake = 0, cumGt = 0;
   const all = rows.map(r => {
-    cumPnl += r.pnl; cumEv += r.ev; cumStake += r.stake;
-    return { t: r.t, pnl: cumPnl, ev: cumEv };
+    cumPnl += r.pnl; cumEv += r.ev; cumStake += r.stake; cumGt += r.gt;
+    return { t: r.t, pnl: cumPnl, ev: cumEv, gt: cumGt };
   });
 
   // Downsample for transport only. The series is cumulative, so dropping
@@ -3858,7 +3918,14 @@ function getEvCurve(days = 30, maxPoints = 1200) {
     stake: r2(cumStake),
     realizedRoi: cumStake > 0 ? r2((cumPnl / cumStake) * 100) : null,
     evRoi: cumStake > 0 ? r2((cumEv / cumStake) * 100) : null,
-    points: points.map(p => ({ t: p.t, pnl: r2(p.pnl), ev: r2(p.ev) })),
+    points: points.map(p => ({ t: p.t, pnl: r2(p.pnl), ev: r2(p.ev), gt: r2(p.gt) })),
+    gameTimeEv: r2(cumGt),
+    gameTimeSources: gtSources,
+    excludeClosed: !!opts.excludeClosed,
+    excluded: opts.excludeClosed ? {
+      n: excluded.n, pnl: r2(excluded.pnl), ev: r2(excluded.ev),
+      byHole: Object.fromEntries(Object.entries(excluded.byHole).map(([k, v]) => [k, { n: v.n, pnl: r2(v.pnl), ev: r2(v.ev) }])),
+    } : null,
   };
 }
 
@@ -8276,6 +8343,7 @@ module.exports = {
   deleteUnknownSettledOrders,
   deleteOrdersByParlayIds,
   findByParlayId,
+  getOpenConfirmedOrders,
   getCreatorLegStackCount,
   findByOrderUuid,
   overrideLegResult,
@@ -8329,6 +8397,7 @@ module.exports = {
   _rollupDailyPnL,
   _rollupDailyVolume,
   getEvCurve,
+  closedHoleOf,
   getVoidAdjustedCalibration,
   getStats,
   getPnLBySport,
