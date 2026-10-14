@@ -1731,9 +1731,14 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
         if (mt === 'moneyline' && snap.markets?.h2h) {
           closeImpl = sel === 'home' ? snap.markets.h2h.home : snap.markets.h2h.away;
         } else if (mt === 'spread' && snap.markets?.spreads) {
-          // Only count CLV when the leg's line matches the snapshot's primary
+          // Only count CLV when the leg's line matches the snapshot's primary.
+          // The snapshot line is the HOME team's point; the leg carries its OWN
+          // side's point (away +3.5 = home -3.5). Comparing abs() values let an
+          // opposite-sign close through (home +3 read a home -3 close) — 15 of
+          // 165 spread legs in the 10/14 audit. Compare signed, home-relative.
+          const _legHomeLine = sel === 'home' ? Number(leg.line) : -Number(leg.line);
           if (leg.line != null && snap.markets.spreads.line != null
-              && Math.abs(Math.abs(leg.line) - Math.abs(snap.markets.spreads.line)) < 0.01) {
+              && Math.abs(_legHomeLine - Number(snap.markets.spreads.line)) < 0.01) {
             closeImpl = sel === 'home' ? snap.markets.spreads.home : snap.markets.spreads.away;
           }
         } else if (mt === 'total' && snap.markets?.totals) {

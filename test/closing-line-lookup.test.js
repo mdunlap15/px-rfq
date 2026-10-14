@@ -120,3 +120,24 @@ test('settlement stamps each leg with its own game\'s close and clvDelta', () =>
   assert.strictEqual(o1.clvDelta, 0.05);
   assert.strictEqual(o2.clvDelta, 0.03);
 });
+
+// 2026-10-14 audit: the snapshot's spread line is the HOME team's point while a
+// leg carries its OWN side's point. Matching on abs() let a home +3 leg read a
+// home -3 close (the favourite flipped) — 15 of 165 spread legs.
+test('spread CLV matches the signed, home-relative line — never the opposite-sign close', () => {
+  const S = '__clv_spread';
+  const G = '2026-10-04T17:00:00Z';
+  const ev = { homeTeam: HOME, awayTeam: AWAY, commenceTime: G, eventId: 'toa-sp',
+    markets: { spreads: { line: -3, home: { fairProb: 0.52 }, away: { fairProb: 0.48 } } } };
+  captureAt(S, plus(G, 5 * MIN), [ev]);
+  const settle = (id, selection, line) => {
+    const leg = { sport: S, homeTeam: HOME, awayTeam: AWAY, market: 'spread', selection, line, pxEventId: 'px-sp-' + id, startTime: G };
+    ot.recordQuote(id, [leg], 150, 100, 0.4, { offeredImpliedProb: 0.5 });
+    ot.recordConfirmation(id, 'uuid-' + id, 150, 100);
+    return ot.recordSettlement('uuid-' + id, 'won', null, { trusted: true });
+  };
+  assert.strictEqual(settle('sp-home-3', 'home', -3).legs[0].closingImpliedProb, 0.52, 'home -3 reads the home -3 close');
+  assert.strictEqual(settle('sp-away+3', 'away', 3).legs[0].closingImpliedProb, 0.48, 'away +3 is the same market');
+  assert.strictEqual(settle('sp-home+3', 'home', 3).legs[0].closingImpliedProb, undefined, 'home +3 is NOT the home -3 market');
+  assert.strictEqual(settle('sp-away-3', 'away', -3).legs[0].closingImpliedProb, undefined, 'away -3 is NOT the away +3 market');
+});

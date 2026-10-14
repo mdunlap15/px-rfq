@@ -628,3 +628,14 @@ test('seed: football main-only — spread 1pt off main is dropped, total within 
   assert.ok(!idx['sp-ari'] && !idx['sp-car'], 'PX -2.5 is 1pt from the -3.5 main and is not registered');
   assert.ok(idx['tot-o'] && idx['tot-u'], 'PX 43.5 is the unique point within 0.5 of a 44 main');
 });
+
+// 2026-10-14 audit: the substring fallback must match at a WORD START — "LAD"
+// sits inside "phiLADelphia", so a Dodgers team total at Philadelphia was
+// registered as the Phillies' total.
+test('team-total side: abbreviation inside another team\'s name never matches', () => {
+  const f = require('../services/line-manager')._resolveTeamTotalSide;
+  assert.strictEqual(f('LAD', 'Philadelphia Phillies', 'Los Angeles Dodgers'), 'away');
+  assert.strictEqual(f('PHI', 'Philadelphia Phillies', 'Los Angeles Dodgers'), 'home');
+  assert.strictEqual(f('Dodgers', 'Philadelphia Phillies', 'Los Angeles Dodgers'), 'away');
+  assert.strictEqual(f('CAR', 'Carolina Panthers', 'Arizona Cardinals'), 'home');
+});

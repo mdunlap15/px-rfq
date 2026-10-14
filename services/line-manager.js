@@ -1001,9 +1001,16 @@ function resolveTeamTotalSide(hint, homeTeam, awayTeam) {
   // fall through to the abbreviation strategies below (more specific — they
   // resolve CAR→Carolina via first-word prefix); if nothing disambiguates,
   // the final return null fails the line closed instead of guessing.
+  //
+  // WORD-START only (2026-10-14 audit): a bare includes() matched "LAD" inside
+  // "phiLADelphia", so a Dodgers team total at Philadelphia priced as the
+  // Phillies. The hint must begin a word of the team name ("car" still hits
+  // both "CARolina" and "CARdinals" and falls through, as before).
   {
-    const homeSub = normHome.includes(normHint) || normHint.includes(normHome);
-    const awaySub = normAway.includes(normHint) || normHint.includes(normAway);
+    const _esc = normHint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const _startsWord = (name) => new RegExp('(^|\\s)' + _esc).test(name);
+    const homeSub = _startsWord(normHome) || normHint.includes(normHome);
+    const awaySub = _startsWord(normAway) || normHint.includes(normAway);
     if (homeSub && !awaySub) return 'home';
     if (awaySub && !homeSub) return 'away';
   }
