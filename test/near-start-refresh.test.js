@@ -259,3 +259,40 @@ test('runOnce stops at a TOA cooldown and is single-flight', async () => {
     release(); await p1;
   } finally { Date.now = realNow; }
 });
+
+// 2026-10-14: a game-time read caught a tennis spread priced off 599 s-old
+// odds 1.4 min before start — the alt-line cache (spreads / totals off the
+// main point) was never refreshed near start, only on an RFQ after 7 min.
+test('plan lists events with spread/total lines (incl. F5) for the alt-line refresh; props/ML-only events are not', () => {
+  const p = nsr.plan(idx(), { settings: S, exempt: [], activeEvents: new Map() }, NOW);
+  // idx(): E2 has an F5 total; E8 is ML only; the rest are props
+  assert.deepEqual(p.alts.map(g => g.pxEventId), ['E2']);
+});
+
+test('runOnce refreshes an existing alt-line entry older than the target age, inside the budget', async () => {
+  nsr.__resetForTest();
+  const calls = [];
+  const fakeOdds = {
+    _toaCooldownRemainingMs: () => 0, getCacheAge: () => 0.1, fetchOddsForSport: async () => {},
+    refreshPropOddsForEvent: async () => ({ ok: true, requests: 0 }), refreshNearStartSupplements: async () => ({ requests: 0 }),
+    refreshAltLinesForEvent: async (sp, h, a, st, o) => { calls.push([sp, o.maxAgeMs]); return { requests: 1, ok: true }; },
+  };
+  const fakeLm = { __debugGetLineIndex: () => idx(), refreshPropsForEvent: async () => ({}) };
+  const realNow = Date.now; Date.now = () => NOW;
+  try {
+    const out = await nsr.runOnce({ settings: S, oddsFeed: fakeOdds, lineManager: fakeLm, activeEvents: new Map() });
+    assert.deepEqual(calls, [['baseball_mlb', S.targetAgeSec * 1000]]);
+    assert.equal(out.altEvents, 1);
+  } finally { Date.now = realNow; }
+});
+
+test('refreshAltLinesForEvent: no entry -> no request; fresh -> no request; stale -> one fetch, single-flight', async () => {
+  const H = 'NSR Home', A = 'NSR Away';
+  assert.deepEqual(await oddsFeed.refreshAltLinesForEvent('tennis', H, A, null), { requests: 0, skipped: 'no alt entry' });
+  const ek = oddsFeed.normalizeEventKey(H, A);
+  oddsFeed.__setAltLinesCacheForTest(ek, { fetchedAt: Date.now() - 10e3 });
+  assert.equal((await oddsFeed.refreshAltLinesForEvent('tennis', H, A, null, { maxAgeMs: 60e3 })).skipped, 'fresh');
+  oddsFeed.__setAltLinesCacheForTest(ek, { fetchedAt: Date.now() - 600e3, refreshing: true });
+  assert.equal((await oddsFeed.refreshAltLinesForEvent('tennis', H, A, null, { maxAgeMs: 60e3 })).skipped, 'refreshing');
+  oddsFeed.__setAltLinesCacheForTest(ek, null);
+});

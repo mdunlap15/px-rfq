@@ -8132,6 +8132,35 @@ const _H1_KEYS = ['h2h_h1', 'spreads_h1', 'totals_h1', 'h2h_q1', 'spreads_q1', '
  * sweep (force past their "already attached" skips / TTLs), so the parse and
  * de-vig are unchanged; only the cadence is. Returns the request count.
  */
+/**
+ * NEAR-START ALT LINES (2026-10-14). The per-event alt-line cache (spreads /
+ * totals off the main point, incl. F5/H1 alts) refreshes only when an RFQ finds
+ * it 7+ min old and is served for up to ALT_LINES_TTL_MS (10 min) — a game-time
+ * read caught a tennis spread priced off 599 s-old odds 1.4 min before start.
+ * Re-fetches an EXISTING entry older than opts.maxAgeMs (default 60 s); no
+ * entry = no alt line in use for the event = no request. Single-flight per
+ * event via the entry's `refreshing` flag (shared with the RFQ refresh-ahead).
+ * A failed fetch keeps the old entry (it still ages out at the TTL).
+ */
+async function refreshAltLinesForEvent(sport, homeTeam, awayTeam, startTime, opts = {}) {
+  const key = normalizeEventKey(homeTeam, awayTeam);
+  const c = altLinesCache[key];
+  if (!c) return { requests: 0, skipped: 'no alt entry' };
+  const maxAgeMs = opts.maxAgeMs != null ? opts.maxAgeMs : 60000;
+  if (Number.isFinite(c.fetchedAt) && Date.now() - c.fetchedAt <= maxAgeMs) return { requests: 0, skipped: 'fresh' };
+  if (c.refreshing) return { requests: 0, skipped: 'refreshing' };
+  c.refreshing = true;
+  try {
+    const r = await _doAltLinesFetch(sport, homeTeam, awayTeam, startTime, key);
+    return { requests: 1, ok: !!r };
+  } catch (err) {
+    return { requests: 1, ok: false, reason: err.message };
+  } finally {
+    const x = altLinesCache[key];
+    if (x) x.refreshing = false;
+  }
+}
+
 async function refreshNearStartSupplements(sport, homeTeam, awayTeam, startTime, marketKeys, opts = {}) {
   const ev = _rawCacheEvent(sport, homeTeam, awayTeam, startTime);
   if (!ev) return { ok: false, reason: 'no_cache_event', requests: 0, done: [] };
@@ -12154,6 +12183,8 @@ module.exports = {
   getLegOddsAgeSec,
   refreshPropOddsForEvent,
   refreshNearStartSupplements,
+  refreshAltLinesForEvent,
+  __setAltLinesCacheForTest: (key, v) => { if (v == null) delete altLinesCache[key]; else altLinesCache[key] = v; },
   LEG_AGE_BULK_MARKETS,
   __rawCacheEventForTest: (...a) => _rawCacheEvent(...a),
   isStale,

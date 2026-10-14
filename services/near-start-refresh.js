@@ -60,6 +60,7 @@ function plan(index, deps, nowMs = Date.now()) {
   const sports = new Set();
   const props = new Map();   // pxEventId -> { sport, homeTeam, awayTeam, startTime, markets:Set, oldest }
   const supps = new Map();   // sport|home|away|start -> { sport, homeTeam, awayTeam, startTime, markets:Set, pxEventId }
+  const alts = new Map();    // sport|home|away|start -> events with spread/total lines (their off-main points read the alt-line cache)
   for (const li of Object.values(index || {})) {
     if (!li || !li.startTime) continue;
     const st = li.startTimeMs || Date.parse(li.startTime);
@@ -77,7 +78,16 @@ function plan(index, deps, nowMs = Date.now()) {
       g.markets.add(om);
       g.oldest = Math.min(g.oldest, li.propFetchedAt || 0);
       props.set(k, g);
-    } else if (SUPP_KEYS.has(om)) {
+      continue;
+    }
+    // Any spread / total (incl. F5 / H1 / Q1) off its main point prices from the
+    // event's alt-line cache — refreshed in step 4 of runOnce.
+    if (/^(spreads|totals)(_(f5|h1|q1))?$/.test(om)) {
+      const k = [oSport, li.homeTeam, li.awayTeam, li.startTime].join('|');
+      if (!alts.has(k)) alts.set(k, { pxEventId: String(li.pxEventId || ''), sport: oSport, homeTeam: li.homeTeam,
+        awayTeam: li.awayTeam, startTime: li.startTime, startMs: st });
+    }
+    if (SUPP_KEYS.has(om)) {
       const k = [oSport, li.homeTeam, li.awayTeam, li.startTime].join('|');
       const g = supps.get(k) || { pxEventId: String(li.pxEventId || ''), sport: oSport, homeTeam: li.homeTeam,
         awayTeam: li.awayTeam, startTime: li.startTime, startMs: st, markets: new Set() };
@@ -93,7 +103,8 @@ function plan(index, deps, nowMs = Date.now()) {
     .filter(g => !(nowMs - g.oldest <= s.targetAgeSec * 1000))
     .sort((a, b) => prio(a) - prio(b) || a.oldest - b.oldest || a.startMs - b.startMs);
   const suppList = [...supps.values()].sort((a, b) => prio(a) - prio(b) || a.startMs - b.startMs);
-  return { sports: [...sports], props: propList, supps: suppList };
+  const altList = [...alts.values()].sort((a, b) => prio(a) - prio(b) || a.startMs - b.startMs);
+  return { sports: [...sports], props: propList, supps: suppList, alts: altList };
 }
 
 let _inFlight = false;
@@ -105,7 +116,7 @@ async function runOnce(deps = {}) {
   const t0 = Date.now();
   const oddsFeed = deps.oddsFeed || require('./odds-feed');
   const lineManager = deps.lineManager || require('./line-manager');
-  const out = { mainSports: [], propEvents: 0, propLinesUpdated: 0, suppEvents: 0, requests: 0, budgetHit: false, cooldown: false };
+  const out = { mainSports: [], propEvents: 0, propLinesUpdated: 0, suppEvents: 0, altEvents: 0, requests: 0, budgetHit: false, cooldown: false };
   try {
     let activeEvents = deps.activeEvents;
     if (!activeEvents) { try { activeEvents = require('./rfq-watch').activeEvents(); } catch (_) { activeEvents = new Map(); } }
@@ -155,6 +166,19 @@ async function runOnce(deps = {}) {
       out.requests += r.requests || 0;
       if (r.requests) { out.suppEvents++; stats.totals.suppFetches += r.requests; }
     }
+
+    // 4. ALT LINES (2026-10-14) — the per-event alt cache that prices spreads /
+    //    totals off the main point; refreshed only where an entry exists (an
+    //    alt line is in use) and is older than the target age.
+    if (typeof oddsFeed.refreshAltLinesForEvent === 'function') {
+      for (const g of (p.alts || [])) {
+        if (budgetLeft() <= 0) { out.budgetHit = true; break; }
+        if (coolingDown()) break;
+        const r = await oddsFeed.refreshAltLinesForEvent(g.sport, g.homeTeam, g.awayTeam, g.startTime, { maxAgeMs: s.targetAgeSec * 1000 });
+        out.requests += r.requests || 0;
+        if (r.requests) { out.altEvents++; stats.totals.altFetches = (stats.totals.altFetches || 0) + r.requests; }
+      }
+    }
   } catch (err) {
     stats.lastError = err.message;
     log.warn('NearStart', `pass failed: ${err.message}`);
@@ -168,7 +192,7 @@ async function runOnce(deps = {}) {
     stats.totals.propLinesUpdated += out.propLinesUpdated;
     if (out.budgetHit) stats.totals.budgetHits++;
     if (out.requests > 0) {
-      log.info('NearStart', `pass: ${out.requests} TOA req — main [${out.mainSports.join(',')}], props ${out.propEvents} events / ${out.propLinesUpdated} lines re-priced, supplements ${out.suppEvents} events${out.budgetHit ? ' (BUDGET HIT)' : ''}${out.cooldown ? ' (TOA cooldown)' : ''} in ${stats.lastPassMs}ms`);
+      log.info('NearStart', `pass: ${out.requests} TOA req — main [${out.mainSports.join(',')}], props ${out.propEvents} events / ${out.propLinesUpdated} lines re-priced, supplements ${out.suppEvents} events, alt lines ${out.altEvents} events${out.budgetHit ? ' (BUDGET HIT)' : ''}${out.cooldown ? ' (TOA cooldown)' : ''} in ${stats.lastPassMs}ms`);
     }
   }
   return out;
