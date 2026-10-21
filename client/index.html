@@ -4293,6 +4293,9 @@
         case 'ev':
           va = computeParlayEdge(a).evDollar ?? -Infinity;
           vb = computeParlayEdge(b).evDollar ?? -Infinity; break;
+        case 'evlive':
+          va = (a.meta && a.meta.evLive && Number.isFinite(a.meta.evLive.ev)) ? a.meta.evLive.ev : -Infinity;
+          vb = (b.meta && b.meta.evLive && Number.isFinite(b.meta.evLive.ev)) ? b.meta.evLive.ev : -Infinity; break;
         case 'winprob':
           const wpCalcPos = (o) => {
             const ls2 = o.meta?.legs || o.legs || [];
@@ -4381,6 +4384,28 @@
         + '</div>';
     }
 
+    // EV FILL vs EV LIVE (2026-10-21, operator: "start calculating EV at fill and
+    // EV live as we do for the order book"). EV fill = EV at confirm; EV live =
+    // the legs re-graded every 5 min (every tick inside 30 min of start), each
+    // leg frozen 90 s before its own start — services/gametime-ev.js.
+    {
+      let _evF = 0, _evL = 0, _evFG = 0, _nG = 0, _nAll = 0;
+      for (const o of filtered) {
+        const ef = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
+        if (!Number.isFinite(ef)) continue;
+        _nAll++; _evF += ef;
+        const lv = o.meta && o.meta.evLive;
+        if (lv && Number.isFinite(lv.ev) && lv.coverage > 0) { _nG++; _evL += lv.ev; _evFG += ef; }
+      }
+      const _d = _evL - _evFG;
+      html += '<div style="padding:6px 12px; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border);">'
+        + 'Open book: <b>EV fill</b> ' + fmtPnl(_evF) + ' &middot; <b>EV live</b> ' + (_nG ? fmtPnl(_evL) : '-')
+        + (_nG ? ' vs ' + fmtPnl(_evFG) + ' at fill on the same ' + _nG + ' graded fills &middot; <span class="' + (_d >= 0 ? 'positive' : 'negative') + '">'
+          + fmtPnl(_d) + (_evFG ? ' (' + (_d >= 0 ? '+' : '') + (100 * _d / Math.abs(_evFG)).toFixed(1) + '%)' : '') + ' since fill</span>' : '')
+        + (_nAll - _nG > 0 ? ' &middot; ' + (_nAll - _nG) + ' not yet graded' : '')
+        + '</div>';
+    }
+
     html += `<div style="overflow-x:auto;"><table>
       <tr>
         <th ${pSortClick('time')}>Confirmed${pSortArrow('time')}</th>
@@ -4393,7 +4418,8 @@
         <th ${pSortClick('stake', 'right')}>My Risk${pSortArrow('stake')}</th>
         <th ${pSortClick('towin', 'right')}>To Win${pSortArrow('towin')}</th>
         <th ${pSortClick('edge', 'right')} title="Theoretical edge per $ wagered = 1 - (fair / bettor_implied)">Theo Edge${pSortArrow('edge')}</th>
-        <th ${pSortClick('ev', 'right')} title="Theoretical expected value in dollars from SP perspective = (1 - fairProb) × toWin - fairProb × risk">EV $${pSortArrow('ev')}</th>
+        <th ${pSortClick('ev', 'right')} title="EV FILL: expected value in dollars from SP perspective at the fill = (1 - fairProb) × toWin - fairProb × risk">EV fill${pSortArrow('ev')}</th>
+        <th ${pSortClick('evlive', 'right')} title="EV LIVE: the same EV with every leg re-graded at current prices (every 5 min; every tick inside 30 min of start). Each leg freezes 90 s before its own start — never graded in-play. Frozen on every leg = EV at game time.">EV live${pSortArrow('evlive')}</th>
         <th ${pSortClick('winprob', 'right')} title="Probability you win (at least one bettor leg fails)">Win Prob${pSortArrow('winprob')}</th>
         <th ${pSortClick('status')} title="Game status">Status${pSortArrow('status')}</th>
       </tr>`;
@@ -4418,6 +4444,19 @@
       const { edge: posEdge, evDollar: posEv } = computeParlayEdge(order);
       const posEdgeStr = fmtEdge(posEdge);
       const posEvStr = posEv != null ? fmtPnl(posEv) : '-';
+      // EV live cell: value, change vs EV fill in the tooltip, frozen legs marked.
+      const _lv = order.meta && order.meta.evLive;
+      let posEvLiveHtml = '<span style="color:var(--text3);">-</span>', posEvLiveTitle = 'Not graded yet (EV live re-grades every 5 min)';
+      if (_lv && Number.isFinite(_lv.ev) && _lv.coverage > 0) {
+        const _ef = Number(order.expectedValue != null ? order.expectedValue : (order.meta && order.meta.expectedValue));
+        const _dl = Number.isFinite(_ef) ? _lv.ev - _ef : null;
+        const _legsN = Object.keys(_lv.legs || {}).length, _frozenN = Object.values(_lv.legs || {}).filter(x => x && x.frozen).length;
+        posEvLiveHtml = '<span class="' + (_lv.ev >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(_lv.ev) + '</span>'
+          + (_lv.frozenAt ? ' <span style="color:var(--text3); font-size:10px;" title="Frozen at game time">&#10074;&#10074;</span>' : '');
+        posEvLiveTitle = 'EV live ' + fmtPnl(_lv.ev) + (_dl != null ? ' (' + fmtPnl(_dl) + ' vs fill)' : '')
+          + ' · updated ' + (_lv.updatedAt ? new Date(_lv.updatedAt).toLocaleTimeString() : '?')
+          + ' · ' + Math.round(100 * (_lv.coverage || 0)) + '% of legs re-read · ' + _frozenN + '/' + _legsN + ' legs frozen';
+      }
       const posEdgeCls = edgeColorClass(posEdge);
 
       // Calculate game status based on leg start times.
@@ -4518,11 +4557,12 @@
         <td style="text-align:right; font-weight:600; color:var(--green);">${toWin}</td>
         <td style="text-align:right" class="${posEdgeCls}">${posEdgeStr}</td>
         <td style="text-align:right" class="${posEdgeCls}">${posEvStr}</td>
+        <td style="text-align:right" title="${posEvLiveTitle}">${posEvLiveHtml}</td>
         <td style="text-align:right">${posWpLabel}</td>
         <td title="${gameStatus.title}"><span style="color:${gameStatus.color}; font-weight:600; font-size:11px;">${gameStatus.label}</span></td>
       </tr>
       <tr id="${rowKey}" style="display:${expanded ? 'table-row' : 'none'}; background: var(--surface3);">
-        <td colspan="13" style="padding: 12px 16px;">
+        <td colspan="14" style="padding: 12px 16px;">
           <div style="font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 8px;">PARLAY LEGS</div>
           ${buildLegTable(legs, { vig: order.meta?.vig || order.vig || 0 })}
           <div style="margin-top: 8px; font-size: 11px; color: var(--text3);">
@@ -4740,7 +4780,8 @@
     html += '<th style="text-align:right; color:var(--green);">DK</th>';
     html += '<th ' + sSortClick('stake', 'right') + '>My Risk' + sSortArrow('stake') + '</th>';
     html += '<th ' + sSortClick('edge', 'right') + ' title="Theoretical edge per $ wagered = 1 - (fair / bettor_implied)">Theo Edge' + sSortArrow('edge') + '</th>';
-    html += '<th ' + sSortClick('ev', 'right') + ' title="Theoretical expected value in dollars from SP perspective at quote time = (1 - fairProb) × toWin - fairProb × risk">EV $' + sSortArrow('ev') + '</th>';
+    html += '<th ' + sSortClick('ev', 'right') + ' title="EV FILL: expected value in dollars from SP perspective at the fill = (1 - fairProb) × toWin - fairProb × risk">EV fill' + sSortArrow('ev') + '</th>';
+    html += '<th style="text-align:right" title="EV at GAME TIME: EV live frozen 90 s before each leg\'s start (fills after 2026-10-14). The change from EV fill is what the market gave or took after we filled.">EV game</th>';
     html += '<th ' + sSortClick('result') + ' title="Settlement outcome from our (SP) perspective">SP Result' + sSortArrow('result') + '</th>';
     html += '<th ' + sSortClick('pnl', 'right') + '>P&L' + sSortArrow('pnl') + '</th>';
     html += '<th style="text-align:right">Cumul.</th>';
@@ -4804,12 +4845,18 @@
       html += '<td style="text-align:right">' + stake + '</td>';
       html += '<td style="text-align:right" class="' + stlEdgeCls + '">' + stlEdgeStr + '</td>';
       html += '<td style="text-align:right" class="' + stlEdgeCls + '">' + stlEvStr + '</td>';
+      {
+        const _gt = order.meta && order.meta.gameTime;
+        const _gtOk = _gt && _gt.finalizedAt && Number.isFinite(_gt.ev);
+        html += '<td style="text-align:right" title="' + (_gtOk ? 'EV at game time ' + fmtPnl(_gt.ev) + ' · ' + Math.round(100 * (_gt.coverage || 0)) + '% of legs re-read' : 'No game-time read') + '">'
+          + (_gtOk ? '<span class="' + (_gt.ev >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(_gt.ev) + '</span>' : '<span style="color:var(--text3);">-</span>') + '</td>';
+      }
       html += '<td title="' + resultTitle + '"><span class="' + resultCls + '">' + resultText + '</span></td>';
       html += '<td style="text-align:right">' + pnlHtml + '</td>';
       html += '<td style="text-align:right">' + cumulHtml + '</td>';
       html += '</tr>';
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
-      html += '<td colspan="13" style="padding:12px 16px;">';
+      html += '<td colspan="14" style="padding:12px 16px;">';
       html += buildLegTable(sLegs.length > 0 ? sLegs : legs, { pad: '2px 6px', vig: order.meta?.vig || order.vig || 0 });
       html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '</div>';
       html += '</td></tr>';

@@ -368,6 +368,33 @@ function getOrderTracker() {
 //               teamName, line, homeTeam, awayTeam,
 //               oddsApiSport, oddsApiMarket, oddsApiSelection } }
 const lineIndex = {};
+// TENNIS REGISTRATION HELPERS (2026-10-21 review of the tennis guard).
+// pxEventId -> last seed (ms) at which the event matched a TOA odds event. A TOA
+// per-tournament fetch that fails for one cycle drops the whole tournament from
+// the cache; inside this grace a recently-matched match keeps the lines it
+// ALREADY has (nothing new registers), instead of flapping PX's supported set.
+const _tennisMatchedAt = new Map();
+const TENNIS_MATCH_GRACE_MS = () => (Number(process.env.TENNIS_MATCH_GRACE_MIN) || 30) * 60000;
+function _tennisRecentlyMatched(eventId, nowMs = Date.now()) {
+  const t = _tennisMatchedAt.get(String(eventId));
+  return Number.isFinite(t) && nowMs - t <= TENNIS_MATCH_GRACE_MS();
+}
+// The TOA set-markets overlay (toa-tennis-sets) is re-applied each cycle and can
+// be momentarily absent from the cached event after a cache replace; the board it
+// remembers (within 2x its TTL) is the evidence a SET market is priceable.
+function _tennisSetsBoardHas(home, away, oddsApiMarket) {
+  const key = { first_set_moneyline: 'firstSetMl', total_sets: 'totalSets', set_win_at_least_one: 'atLeastOneSet' }[oddsApiMarket];
+  if (!key) return false;
+  try {
+    const src = require('./toa-tennis-sets');
+    const b = src.getLastBoard();
+    const ttl = (Number(config.pricing.tennisSetsTtlSeconds) || 300) * 1000;
+    if (!b || !Array.isArray(b.games) || !(Date.now() - (b.fetchedAt || 0) <= 2 * ttl)) return false;
+    const sn = src.__surname;
+    const pair = [sn(home), sn(away)].sort().join('|');
+    return b.games.some(g => g && g.sets && g.sets[key] && [sn(g.homeTeam), sn(g.awayTeam)].sort().join('|') === pair);
+  } catch (_) { return false; }
+}
 
 // Cold-start gate for Supabase hydration. Flipped true after the first
 // seedAllLines completes. Hydration only runs on cold boot (when
@@ -2797,6 +2824,7 @@ async function seedAllLines(gen) {
           matchedAway = tryAway;
           matchedOddsEvent = oddsEvt;
           sportKey = tryKey; // Use the sport key that matched
+          if (tryKey === 'tennis') _tennisMatchedAt.set(String(event.event_id), Date.now());
           break;
         }
       }
@@ -2868,7 +2896,11 @@ async function seedAllLines(gen) {
         sportKey = 'golf_matchups';
         golfTrace.bypassFired++;
         log.info('Lines', `[golf-debug] Event-level bypass fired: ${event.name} → home="${matchedHome}" away="${matchedAway}" sportKey="${sportKey}"`);
-      } else if (_isNearTerm && possibleSportKeys.length === 1 && sportKey && homeComp.name && awayComp.name) {
+      } else if (_isNearTerm && possibleSportKeys.length === 1 && sportKey && homeComp.name && awayComp.name
+          // Tennis under TENNIS_TOA_ONLY: an unmatched match is one TOA does not
+          // list (Challenger/ITF), not a cache glitch — no source can ever price
+          // it, so registering it only advertises lines we decline (PX Rule 2).
+          && !(sportKey === 'tennis' && config.pricing.tennisToaOnly !== false && !_tennisRecentlyMatched(event.event_id))) {
         // Single-key sports only (baseball_mlb, tennis, mma, boxing): a
         // multi-key sport_name (Basketball → nba/wnba/ncaab, Soccer → many)
         // can't be safely keyed without an odds-cache match, and a wrong key
@@ -3638,11 +3670,28 @@ async function seedAllLines(gen) {
         // odds behind them means lines PX advertises that we decline 100% of
         // the time — exactly the supported-lines-sync compliance violation
         // (PX Rule 2) the 5b33e36 work closed. Fail closed at registration.
+        // 2026-10-21 (perf review): the same rule for EVERY tennis market. 226 of
+        // 234 registered tennis moneylines and all 432 first-set / total-sets
+        // lines carried no odds behind them (0 quotes in 1,738 RFQ appearances)
+        // — Challenger/ITF matches TOA does not list, registered by the
+        // deferred-match fallback, plus set markets no source now feeds under
+        // TENNIS_TOA_ONLY. A tennis line registers only when the matched odds
+        // event carries the exact market it prices against; it self-heals on
+        // the next seed when the block appears.
         if (sportKey === 'tennis'
-            && (oddsApiMarket === 'spreads' || oddsApiMarket === 'totals')
-            && !(oddsEvt && oddsEvt.markets && oddsEvt.markets[oddsApiMarket])) {
+            && !(oddsEvt && oddsEvt.markets && oddsEvt.markets[oddsApiMarket])
+            && !_tennisSetsBoardHas(matchedHome, matchedAway, oddsApiMarket)
+            && !(_tennisRecentlyMatched(event.event_id) && lineIndex[sel.lineId])) {
           continue;
         }
+        // set_win_at_least_one is priced per PLAYER: the block existing is not
+        // enough, the selection's own side must be priced. Total sets: the pricer
+        // refuses anything but 2.5 (best-of-3), so only 2.5 registers.
+        if (sportKey === 'tennis' && oddsApiMarket === 'set_win_at_least_one' && oddsEvt && oddsEvt.markets && oddsEvt.markets.set_win_at_least_one) {
+          const _side = String(oddsApiSelection || '').split('_')[0];
+          if (!oddsEvt.markets.set_win_at_least_one[_side]) continue;
+        }
+        if (sportKey === 'tennis' && oddsApiMarket === 'total_sets' && sel.line != null && Math.abs(Number(sel.line) - 2.5) > 1e-9) continue;
         // ...and (2026-10-06, operator option A) only when that block came from
         // TOA: the pricer declines a tennis spread/total off the Pinnacle-direct
         // (~15 min CDN snapshot), Bovada or DK scrapes (tennis_source_not_fresh),
@@ -4499,8 +4548,10 @@ async function resolveUnknownLine(rfqLeg) {
     for (const tourKey of tennisTourKeys) {
       const uniqueTeams = [...new Set(oddsApiEvents.filter(e => e.sport === tourKey).flatMap(e => [e.homeTeam, e.awayTeam]))];
       if (uniqueTeams.length === 0) continue;
-      const tryHome = matchTeamName(homeComp.name, uniqueTeams, tryKey);
-      const tryAway = matchTeamName(awayComp.name, uniqueTeams, tryKey);
+      // tourKey, not the outer loop's tryKey (out of scope here -> ReferenceError
+      // on every unmatched tennis leg; 2026-10-21 review).
+      const tryHome = matchTeamName(homeComp.name, uniqueTeams, tourKey);
+      const tryAway = matchTeamName(awayComp.name, uniqueTeams, tourKey);
       if (!tryHome || !tryAway) continue;
       const pxTime = event.scheduled || null;
       const oddsEvt = oddsFeed.getEventMarkets(tourKey, tryHome, tryAway, pxTime)

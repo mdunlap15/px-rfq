@@ -340,8 +340,10 @@ async function startup() {
   try { require('./services/rfq-watch').start(); } catch (err) { log.warn('Startup', `    ✗ RFQ watch publisher start failed: ${err.message}`); }
   // Near-start refresh: keep inputs inside the freshness-gate window <= ~60s old.
   try { require('./services/near-start-refresh').start(); } catch (err) { log.warn('Startup', `    ✗ near-start refresh start failed: ${err.message}`); }
-  // Game-time EV: each open fill's legs re-read just before their own start.
+  // EV live / game-time EV: each open fill's legs re-graded until 90 s before their own start.
   try { require('./services/gametime-ev').start(); } catch (err) { log.warn('Startup', `    ✗ game-time EV start failed: ${err.message}`); }
+  // Per-leg drift table + adverse-only family corrections (services/leg-drift.js).
+  try { require('./services/leg-drift').start(); } catch (err) { log.warn('Startup', `    ✗ leg-drift start failed: ${err.message}`); }
 
   // Step 4: Connect WebSocket
   log.info('Startup', '4/5 Connecting to ProphetX WebSocket...');
@@ -1261,6 +1263,8 @@ function startStatusServer() {
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
       nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
       gameTimeEv: (() => { try { return require('./services/gametime-ev').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      legDrift: (() => { try { const t = require('./services/leg-drift').getTable(); return { builtAt: t.builtAt, days: t.days, rows: t.rows, families: Object.keys(t.families || {}).length, activeCorrections: t.corrections }; } catch (e) { return { error: e.message }; } })(),
+      matchedRowUpdates: (() => { try { return db.getMatchedUpdateStats(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {
         mlbSeries: {
           on: config.pricing.mlbSeriesEnabled !== false,
@@ -4529,6 +4533,16 @@ function startStatusServer() {
   // current volume) so the client cannot build a 30-day curve itself — the
   // same constraint that put the 15-day ROI stat on the server.
   //   ?days=30 (1-365)
+  // RFQ EV leak (2026-10-21): EV at fill vs EV at game time (+ the +30 min
+  // re-price drift), by sport x prop/game — the RFQ twin of the order book's
+  // EV-filled vs EV-live. ?days=7 (1-90).
+  app.get('/rfq-ev-leak', (req, res) => {
+    try {
+      const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
+      res.json({ ok: true, ...orderTracker.getEvLeakSummary(days) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.get('/ev-curve', (req, res) => {
     try {
       const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));

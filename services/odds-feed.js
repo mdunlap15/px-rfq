@@ -221,7 +221,19 @@ function _toaRelease() {
   setTimeout(_drainToaQueue, _TOA_MIN_INTERVAL_MS);
 }
 
+// NO REAL NETWORK UNDER TEST (2026-10-21 review: a seed-harness test reached
+// the-odds-api.com with the PRODUCTION key from .env). Same test-run detection as
+// services/db.js. Only the NATIVE fetch is refused — a test that stubs
+// globalThis.fetch to simulate TOA still gets its stub.
+const _nativeFetchAtLoad = globalThis.fetch;
+const _entryOF = (require.main && require.main.filename) || process.argv[1] || '';
+const _IS_TEST_RUN_OF = !!process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test'
+  || process.execArgv.includes('--test') || /[\\/]test[\\/][^\\/]+\.test\.js$/i.test(_entryOF);
+
 async function abortableFetch(url, options, timeoutMs) {
+  if (_IS_TEST_RUN_OF && globalThis.fetch === _nativeFetchAtLoad && typeof url === 'string' && !/^https?:\/\/(localhost|127\.0\.0\.1)/.test(url)) {
+    throw new Error('network disabled under test: ' + url.split('?')[0]);
+  }
   const isToa = typeof url === 'string' && url.includes('the-odds-api.com');
   const t = timeoutMs != null ? timeoutMs : ODDS_API_FETCH_TIMEOUT_MS;
 

@@ -29,32 +29,75 @@ test('combine: ticket fair = fill fair x product(game-time / fill) over captured
   assert.ok(Math.abs(gametime.evAt(o, 0.30) - ((0.7) * S - 0.3 * 700)) < 1e-9);
 });
 
-test('tick: a leg is read inside the lead window, a leg past start+grace is recorded missed, then the ticket finalizes', async () => {
+test('EV live: periodic reads, fast lane near start, freeze 90 s before each leg, never in-play, then game time', async () => {
   const now = Date.parse('2026-10-13T20:00:00Z');
   const o = order([
-    { lineId: 'L1', fairProb: 0.50, startTime: new Date(now + 60e3).toISOString() },        // starts in 1 min -> read now
-    { lineId: 'L2', fairProb: 0.40, startTime: new Date(now + 2 * 3600e3).toISOString() },  // 2h -> later
+    { lineId: 'L1', fairProb: 0.50, startTime: new Date(now + 60e3).toISOString() },        // starts in 1 min -> inside the 90 s freeze lead
+    { lineId: 'L2', fairProb: 0.40, startTime: new Date(now + 2 * 3600e3).toISOString() },  // 2h out -> live
   ], 0.20);
-  const saved = { open: ot.getOpenConfirmedOrders, price: pricer.priceParlay };
-  ot.getOpenConfirmedOrders = () => [o];
+  const saved = { open: ot.getOpenConfirmedOrders, cand: ot.getEvLiveCandidates, price: pricer.priceParlay };
+  let l2 = 0.40, reads = { L1: 0, L2: 0 };
+  ot.getOpenConfirmedOrders = () => [o]; ot.getEvLiveCandidates = () => [o];
   pricer.priceParlay = (ids, opts) => {
-    assert.ok(opts && opts.fairOnly, 'game-time reads use fairOnly');
-    return { fairOnly: true, legs: [{ lineId: ids[0], fairProb: ids[0] === 'L1' ? 0.56 : 0.40, fairSource: 'ob_direct', ageSec: 12 }] };
+    assert.ok(opts && opts.fairOnly, 'EV-live reads use fairOnly');
+    reads[ids[0]]++;
+    return { fairOnly: true, legs: [{ lineId: ids[0], fairProb: ids[0] === 'L1' ? 0.56 : l2, fairSource: 'ob_direct', ageSec: 12 }] };
   };
   try {
     await gametime.tick(now);
-    assert.strictEqual(o.meta.gameTime.legs.L1.fair, 0.56);
-    assert.strictEqual(o.meta.gameTime.legs.L1.src, 'ob_direct');
-    assert.ok(!o.meta.gameTime.legs.L2, 'not yet inside the lead window');
-    assert.ok(!o.meta.gameTime.finalizedAt);
-    // the trader "was down" across L2's start: first seen 10 min after it
-    await gametime.tick(now + 2 * 3600e3 + 10 * 60e3);
-    assert.strictEqual(o.meta.gameTime.legs.L2.fair, null);
-    assert.match(o.meta.gameTime.legs.L2.reason, /missed/);
-    assert.ok(o.meta.gameTime.finalizedAt, 'finalized once every leg has an entry');
-    assert.ok(Math.abs(o.meta.gameTime.fairProb - 0.20 * 0.56 / 0.50) < 1e-6);
+    assert.strictEqual(o.meta.evLive.legs.L1.frozen, true, 'L1 inside the freeze lead: read once and frozen');
+    assert.strictEqual(o.meta.evLive.legs.L1.fair, 0.56);
+    assert.strictEqual(o.meta.evLive.legs.L2.frozen, false, 'L2 2h out: live');
+    assert.ok(Math.abs(o.meta.evLive.fairProb - 0.20 * 0.56 / 0.50) < 1e-6, 'EV live combines the reads so far');
+    assert.ok(!o.meta.gameTime || !o.meta.gameTime.finalizedAt);
+    await gametime.tick(now + 60e3);
+    assert.deepStrictEqual(reads, { L1: 1, L2: 1 }, 'not due: no re-read inside 300 s; a frozen leg is never re-read');
+    l2 = 0.42;
+    await gametime.tick(now + 6 * 60e3);
+    assert.strictEqual(o.meta.evLive.legs.L2.fair, 0.42, 're-read every 300 s');
+    l2 = 0.43;
+    const st2 = now + 2 * 3600e3;
+    await gametime.tick(st2 - 20 * 60e3);
+    await gametime.tick(st2 - 19 * 60e3);
+    assert.strictEqual(reads.L2, 4, 'fast lane: every tick inside 30 min of start');
+    l2 = 0.99;                                       // the in-play price must never land
+    await gametime.tick(st2 - 60e3);
+    assert.strictEqual(o.meta.evLive.legs.L2.frozen, true);
+    assert.strictEqual(o.meta.evLive.legs.L2.fair, 0.43, 'frozen at the last pre-start read, no new read at freeze');
+    await gametime.tick(st2 + 30 * 60e3);
+    assert.strictEqual(o.meta.evLive.legs.L2.fair, 0.43, 'never graded in-play');
+    assert.ok(o.meta.gameTime && o.meta.gameTime.finalizedAt, 'all legs frozen -> game time');
+    assert.ok(Math.abs(o.meta.gameTime.fairProb - 0.20 * (0.56 / 0.50) * (0.43 / 0.40)) < 1e-6);
+    assert.strictEqual(o.meta.gameTime.coverage, 1);
+    assert.strictEqual(o.meta.gameTime.legs.L2.fillFair, 0.40);
+  } finally { ot.getOpenConfirmedOrders = saved.open; ot.getEvLiveCandidates = saved.cand; pricer.priceParlay = saved.price; }
+});
+
+test('EV live: a leg first seen after start + grace is missed and counts at its fill fair', async () => {
+  const now = Date.parse('2026-10-13T20:00:00Z');
+  const o = order([{ lineId: 'M1', fairProb: 0.5, startTime: new Date(now - 10 * 60e3).toISOString() },
+    { lineId: 'M2', fairProb: 0.5, startTime: new Date(now + 30e3).toISOString() }], 0.25);
+  const saved = { open: ot.getOpenConfirmedOrders, cand: ot.getEvLiveCandidates, price: pricer.priceParlay };
+  ot.getOpenConfirmedOrders = () => [o]; ot.getEvLiveCandidates = () => [o];
+  pricer.priceParlay = (ids) => ({ fairOnly: true, legs: [{ lineId: ids[0], fairProb: 0.6 }] });
+  try {
+    await gametime.tick(now);
+    assert.match(o.meta.evLive.legs.M1.reason, /missed/);
+    assert.ok(o.meta.gameTime.finalizedAt);
     assert.strictEqual(o.meta.gameTime.coverage, 0.5);
-  } finally { ot.getOpenConfirmedOrders = saved.open; pricer.priceParlay = saved.price; }
+    assert.ok(Math.abs(o.meta.gameTime.fairProb - 0.25 * 0.6 / 0.5) < 1e-6);
+  } finally { ot.getOpenConfirmedOrders = saved.open; ot.getEvLiveCandidates = saved.cand; pricer.priceParlay = saved.price; }
+});
+
+test('openBookSummary: EV fill vs EV live over open fills that have been graded', () => {
+  const a = order([{ lineId: 'S1', fairProb: 0.5 }], 0.3); a.expectedValue = 40; a.meta.evLive = { ev: 25, coverage: 1, legs: {} };
+  const b = order([{ lineId: 'S2', fairProb: 0.5 }], 0.3); b.expectedValue = 10;                       // not graded yet
+  const saved = ot.getOpenConfirmedOrders;
+  ot.getOpenConfirmedOrders = () => [a, b];
+  try {
+    const s = gametime.openBookSummary();
+    assert.deepStrictEqual([s.openFills, s.graded, s.unread, s.evFill, s.evFillGraded, s.evLive, s.change], [2, 1, 1, 50, 40, 25, -15]);
+  } finally { ot.getOpenConfirmedOrders = saved; }
 });
 
 test('gameTimeEvFor precedence: re-read at start > closing line > fill EV', () => {
@@ -133,4 +176,48 @@ test('getEvCurve: excludeClosed drops closed-hole tickets and reports them; game
   assert.ok(Math.abs((all.realized - ex.realized) - ex.excluded.pnl) < 0.01, 'excluded P&L accounts for the difference');
   assert.ok(all.gameTimeSources && Number.isFinite(all.gameTimeEv));
   assert.ok(all.points.every(p => Number.isFinite(p.gt)));
+});
+
+test('getEvLeakSummary: per-leg families with each leg OWN $ move, coverage, and open-book EV fill vs EV live', () => {
+  const id = 'leak-' + Date.now(), uuid = id + '-u';
+  const legs = [
+    { lineId: id + 'p', team: 'P', market: 'player_shots_on_goal', sport: 'icehockey_nhl', selection: 'over', fairProb: 0.5, pxEventId: 'LK1', startTime: new Date(Date.now() + 3600e3).toISOString() },
+    { lineId: id + 'g', team: 'G', market: 'moneyline', sport: 'icehockey_nhl', selection: 'home', fairProb: 0.6, pxEventId: 'LK2', startTime: new Date(Date.now() + 3600e3).toISOString() }];
+  ot.recordQuote(id, legs, 300, 5000, 0.3, { legs });
+  ot.recordConfirmation(id, uuid, -300, 900);
+  const o = ot.findByParlayId(id);
+  o.expectedValue = 30; o.meta.expectedValue = 30;
+  // only the prop leg moved; the game leg did not
+  o.meta.gameTime = { finalizedAt: new Date().toISOString(), ev: 10, coverage: 1, legs: { [id + 'p']: { fair: 0.55, evDelta: 20, frozen: true }, [id + 'g']: { fair: 0.6, evDelta: 0, frozen: true } } };
+  const s = ot.getEvLeakSummary(1);
+  assert.ok(s.finalized >= 1);
+  const prop = s.families.find(f => f.key === 'icehockey_nhl|player_shots_on_goal|over|near');
+  const game = s.families.find(f => f.key === 'icehockey_nhl|moneyline|fav|near');
+  assert.ok(prop && game, JSON.stringify(s.families.map(f => f.key)));
+  assert.strictEqual(prop.evLeak, 20, 'the leg that moved carries the $');
+  assert.strictEqual(game.evLeak, 0, 'a leg that never moved is not blamed');
+  assert.strictEqual(prop.meanDriftPct, 10);
+  assert.ok(s.fullCoverage.tickets >= 1);
+  assert.ok(s.openBook && 'evLive' in s.openBook);
+});
+
+test('EV live keeps grading a ticket that settled EARLY (bettor already lost) until its last leg freezes', async () => {
+  const id = 'early-' + Date.now(), uuid = id + '-u';
+  const now = Date.now();
+  const legs = [
+    { lineId: id + 'a', team: 'A', market: 'moneyline', sport: 'icehockey_nhl', selection: 'home', fairProb: 0.5, pxEventId: 'EA', startTime: new Date(now - 3 * 3600e3).toISOString() },
+    { lineId: id + 'b', team: 'B', market: 'moneyline', sport: 'icehockey_nhl', selection: 'home', fairProb: 0.4, pxEventId: 'EB', startTime: new Date(now + 10 * 60e3).toISOString() }];
+  ot.recordQuote(id, legs, 400, 5000, 0.2, { legs, offeredImpliedProb: 0.21 });
+  ot.recordConfirmation(id, uuid, -400, 500);
+  ot.recordLegSettlement(uuid, { line_id: id + 'a', settlement_status: 'lost' }, { persist: false });
+  ot.recordSettlement(uuid, 'won', 125, { trusted: true });          // settled early: leg b has not started
+  const o = ot.findByParlayId(id);
+  assert.ok(String(o.status).startsWith('settled_'));
+  assert.ok(ot.getEvLiveCandidates(now).includes(o), 'a recently settled, not-finalized ticket is still an EV-live candidate');
+  const savedPrice = pricer.priceParlay;
+  pricer.priceParlay = (ids) => ({ fairOnly: true, legs: [{ lineId: ids[0], fairProb: 0.44 }] });
+  try {
+    await gametime.tick(now);
+    assert.strictEqual(o.meta.evLive.legs[id + 'b'].fair, 0.44, 'the late leg is graded after the early settlement');
+  } finally { pricer.priceParlay = savedPrice; }
 });

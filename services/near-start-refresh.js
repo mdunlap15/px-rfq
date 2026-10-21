@@ -35,8 +35,27 @@ function settings() {
     targetAgeSec: num(process.env.NEAR_START_TARGET_AGE_SEC, 60),
     maxRequests: num(process.env.NEAR_START_REFRESH_MAX_REQUESTS, 30),
     windowMin: (config.pricing && config.pricing.freshGateWindowMin) || 180,
+    // ACTIVE-EVENT PROPS BEYOND THE WINDOW (2026-10-21 perf review; operator:
+    // "We need our RFQs lines just as accurate" as the order book's). Prop legs
+    // filled off inputs > 120 s old moved +1.64% toward the bettor within 30 min
+    // (z 2.4) vs 0.06-0.15% for <= 60 s inputs — and outside the start window a
+    // prop's only refresh was the seed's TOA_PROP_TTL (900 s). Props on events
+    // RFQ priced in the last RFQ_WATCH_ACTIVE_MIN are now kept <= this target
+    // age out to ACTIVE_PROP_HOURS before start, AFTER the near-start work in
+    // the same per-pass request budget. 0 hours disables.
+    // Runtime keys (no restart): nearStartActivePropHours / nearStartActivePropTargetAgeSec /
+    // nearStartActivePropMaxEvents. The far work runs LAST (step 5, after
+    // supplements and alt lines), is capped per pass, and never spends the last
+    // `reserve` requests — it can never starve the near-start window.
+    activePropHours: (() => { const v = config.pricing && config.pricing.nearStartActivePropHours; return Number.isFinite(v) && v >= 0 ? v : 24; })(),
+    activePropTargetAgeSec: (config.pricing && config.pricing.nearStartActivePropTargetAgeSec) || 120,
+    activePropMaxEvents: (config.pricing && config.pricing.nearStartActivePropMaxEvents) || 8,
   };
 }
+// pxEventId -> last far refresh ATTEMPT (ms). A far event whose oldest line a
+// TOA batch cannot advance (a book that dropped the market, a non-TOA source)
+// would otherwise sort first and be re-fetched every pass.
+const _farAttempt = new Map();
 
 const EXEMPT = () => (config.pricing && config.pricing.freshGateExempt) || [];
 const SUPP_KEYS = new Set(['h2h_f5', 'spreads_f5', 'totals_f5', 'h2h_h1', 'spreads_h1', 'totals_h1',
@@ -55,6 +74,7 @@ const stats = {
 function plan(index, deps, nowMs = Date.now()) {
   const s = deps.settings || settings();
   const horizon = nowMs + s.windowMin * 60000;
+  const activeHorizon = nowMs + (s.activePropHours || 0) * 3600e3;
   const exempt = deps.exempt || EXEMPT();
   const active = deps.activeEvents || new Map();
   const sports = new Set();
@@ -64,17 +84,22 @@ function plan(index, deps, nowMs = Date.now()) {
   for (const li of Object.values(index || {})) {
     if (!li || !li.startTime) continue;
     const st = li.startTimeMs || Date.parse(li.startTime);
-    if (!Number.isFinite(st) || st <= nowMs || st > horizon) continue;
+    if (!Number.isFinite(st) || st <= nowMs) continue;
     const mt = String(li.marketType || ''), sp = String(li.sport || '');
+    // Beyond the near-start window only PROPS of RFQ-active events qualify.
+    const far = st > horizon;
+    if (far && !(/^player_/.test(mt) && st <= activeHorizon && li.pxEventId != null && active.has(String(li.pxEventId)))) continue;
     if (exempt.some(x => mt.startsWith(x) || sp === x || sp.startsWith(x))) continue;
     if (sp.startsWith('golf')) continue;    // DataGolf snapshots: no faster source to pull
     const oSport = li.oddsApiSport || li.sport;
     const om = String(li.oddsApiMarket || '');
     if (/^player_/.test(mt)) {
       if (!li.pxEventId || !om) continue;
+      // Lines priced from a relay (soccer goalscorer: px_gs_fairs) gain nothing from a TOA prop fetch.
+      if (li.propSource === 'gs-relay' || mt === 'player_goal_scorer' && String(sp).startsWith('soccer')) continue;
       const k = String(li.pxEventId);
       const g = props.get(k) || { pxEventId: k, sport: oSport, homeTeam: li.homeTeam, awayTeam: li.awayTeam,
-        startTime: li.startTime, startMs: st, markets: new Set(), oldest: Infinity };
+        startTime: li.startTime, startMs: st, markets: new Set(), oldest: Infinity, far };
       g.markets.add(om);
       g.oldest = Math.min(g.oldest, li.propFetchedAt || 0);
       props.set(k, g);
@@ -99,12 +124,19 @@ function plan(index, deps, nowMs = Date.now()) {
     }
   }
   const prio = (g) => (active.has(g.pxEventId) ? 0 : 1);
-  const propList = [...props.values()]
-    .filter(g => !(nowMs - g.oldest <= s.targetAgeSec * 1000))
-    .sort((a, b) => prio(a) - prio(b) || a.oldest - b.oldest || a.startMs - b.startMs);
+  const _farTarget = (s.activePropTargetAgeSec || 120) * 1000;
+  const fresh = (g) => (g.far
+    ? nowMs - Math.max(g.oldest, (deps.farAttempt || _farAttempt).get(g.pxEventId) || 0) <= _farTarget
+    : nowMs - g.oldest <= s.targetAgeSec * 1000);
+  const byAge = (a, b) => prio(a) - prio(b) || a.oldest - b.oldest || a.startMs - b.startMs;
+  const groups = [...props.values()].filter(g => !fresh(g));
+  const propList = groups.filter(g => !g.far).sort(byAge);
+  // Far (beyond-window, RFQ-active) props: their own list, run LAST and capped.
+  const farProps = groups.filter(g => g.far).sort((a, b) => a.oldest - b.oldest || a.startMs - b.startMs)
+    .slice(0, s.activePropMaxEvents || 8);
   const suppList = [...supps.values()].sort((a, b) => prio(a) - prio(b) || a.startMs - b.startMs);
   const altList = [...alts.values()].sort((a, b) => prio(a) - prio(b) || a.startMs - b.startMs);
-  return { sports: [...sports], props: propList, supps: suppList, alts: altList };
+  return { sports: [...sports], props: propList, supps: suppList, alts: altList, farProps };
 }
 
 let _inFlight = false;
@@ -179,6 +211,28 @@ async function runOnce(deps = {}) {
         if (r.requests) { out.altEvents++; stats.totals.altFetches = (stats.totals.altFetches || 0) + r.requests; }
       }
     }
+
+    // 5. ACTIVE-EVENT PROPS BEYOND THE WINDOW (2026-10-21) — LAST, so the
+    //    near-start work above always has first call on the budget; capped per
+    //    pass (plan), and never spends the final quarter of the budget, so a
+    //    later pass's near-start work cannot be crowded out by a far wave.
+    const farReserve = Math.ceil(s.maxRequests / 4);
+    const farAttempt = deps.farAttempt || _farAttempt;
+    for (const g of (p.farProps || [])) {
+      if (budgetLeft() <= farReserve) break;
+      if (coolingDown()) break;
+      farAttempt.set(g.pxEventId, Date.now());
+      const r = await oddsFeed.refreshPropOddsForEvent(g.sport,
+        { homeTeam: g.homeTeam, awayTeam: g.awayTeam, startTime: g.startTime }, [...g.markets]);
+      out.requests += r.requests || 0;
+      if (!r.ok) continue;
+      out.farPropEvents = (out.farPropEvents || 0) + 1;
+      try {
+        const u = await lineManager.refreshPropsForEvent(g.pxEventId);
+        out.propLinesUpdated += u.updated || 0;
+      } catch (err) { log.warn('NearStart', `re-price ${g.pxEventId}: ${err.message}`); }
+    }
+    if (farAttempt.size > 2000) { const cut = Date.now() - 6 * 3600e3; for (const [k, t] of farAttempt) if (t < cut) farAttempt.delete(k); }
   } catch (err) {
     stats.lastError = err.message;
     log.warn('NearStart', `pass failed: ${err.message}`);
@@ -192,7 +246,7 @@ async function runOnce(deps = {}) {
     stats.totals.propLinesUpdated += out.propLinesUpdated;
     if (out.budgetHit) stats.totals.budgetHits++;
     if (out.requests > 0) {
-      log.info('NearStart', `pass: ${out.requests} TOA req — main [${out.mainSports.join(',')}], props ${out.propEvents} events / ${out.propLinesUpdated} lines re-priced, supplements ${out.suppEvents} events, alt lines ${out.altEvents} events${out.budgetHit ? ' (BUDGET HIT)' : ''}${out.cooldown ? ' (TOA cooldown)' : ''} in ${stats.lastPassMs}ms`);
+      log.info('NearStart', `pass: ${out.requests} TOA req — main [${out.mainSports.join(',')}], props ${out.propEvents} near-start events + ${out.farPropEvents || 0} active beyond the window / ${out.propLinesUpdated} lines re-priced, supplements ${out.suppEvents} events, alt lines ${out.altEvents} events${out.budgetHit ? ' (BUDGET HIT)' : ''}${out.cooldown ? ' (TOA cooldown)' : ''} in ${stats.lastPassMs}ms`);
     }
   }
   return out;

@@ -296,3 +296,57 @@ test('refreshAltLinesForEvent: no entry -> no request; fresh -> no request; stal
   assert.equal((await oddsFeed.refreshAltLinesForEvent('tennis', H, A, null, { maxAgeMs: 60e3 })).skipped, 'refreshing');
   oddsFeed.__setAltLinesCacheForTest(ek, null);
 });
+
+// 2026-10-21 (operator: "We need our RFQs lines just as accurate"): props on
+// RFQ-ACTIVE events are refreshed beyond the start window too, out to
+// activePropHours, at a 120 s target, after the near-start work.
+test('plan: props of RFQ-active events beyond the window qualify (120 s target, after near-start); inactive / game lines do not', () => {
+  const S2 = Object.assign({}, S, { activePropHours: 24, activePropTargetAgeSec: 120 });
+  const at = (m) => new Date(NOW + m * 60e3).toISOString();
+  const L2 = (id, o) => [id, Object.assign({ lineId: id, sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', homeTeam: 'H' + o.pxEventId, awayTeam: 'A' + o.pxEventId }, o)];
+  const ix = Object.fromEntries([
+    L2('n1', { pxEventId: 'N1', marketType: 'player_hitter_hits', oddsApiMarket: 'batter_hits', startTime: at(60), propFetchedAt: NOW - 300e3 }),
+    L2('fa', { pxEventId: 'FA', marketType: 'player_hitter_hits', oddsApiMarket: 'batter_hits', startTime: at(600), propFetchedAt: NOW - 600e3 }),
+    L2('fb', { pxEventId: 'FB', marketType: 'player_hitter_hits', oddsApiMarket: 'batter_hits', startTime: at(600), propFetchedAt: NOW - 90e3 }),   // 90 s: fresh at 120 s target
+    L2('fi', { pxEventId: 'FI', marketType: 'player_hitter_hits', oddsApiMarket: 'batter_hits', startTime: at(600), propFetchedAt: NOW - 900e3 }),  // not active
+    L2('fz', { pxEventId: 'FZ', marketType: 'player_hitter_hits', oddsApiMarket: 'batter_hits', startTime: at(30 * 60), propFetchedAt: 0 }),    // 30h: beyond 24h
+    L2('fg', { pxEventId: 'FA', marketType: 'moneyline', oddsApiMarket: 'h2h', startTime: at(600) }),                                             // game line, far
+  ]);
+  const active = new Map([['FA', NOW], ['FB', NOW], ['FZ', NOW]]);
+  const p = nsr.plan(ix, { settings: S2, exempt: [], activeEvents: active, farAttempt: new Map() }, NOW);
+  assert.deepEqual(p.props.map(g => g.pxEventId), ['N1'], 'near-start list only');
+  assert.deepEqual(p.farProps.map(g => g.pxEventId), ['FA'], 'far list: FB fresh at 120 s; FI inactive; FZ beyond 24h');
+  assert.deepEqual(p.sports, [], 'a far game line never triggers a main refresh');
+  const off = nsr.plan(ix, { settings: Object.assign({}, S2, { activePropHours: 0 }), exempt: [], activeEvents: active, farAttempt: new Map() }, NOW);
+  assert.deepEqual(off.farProps, [], 'activePropHours 0 = off');
+  const tried = nsr.plan(ix, { settings: S2, exempt: [], activeEvents: active, farAttempt: new Map([['FA', NOW - 30e3]]) }, NOW);
+  assert.deepEqual(tried.farProps, [], 'a far event attempted 30 s ago is not retried before its 120 s target');
+});
+
+test('runOnce: far props run LAST, capped, and never starve near-start supplements / alt lines (review 10/21 repro)', async () => {
+  nsr.__resetForTest();
+  const at = (m) => new Date(NOW + m * 60e3).toISOString();
+  const ix = { near_f5: { lineId: 'near_f5', pxEventId: 'NR', sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', marketType: 'first_5_innings_total', oddsApiMarket: 'totals_f5', homeTeam: 'HN', awayTeam: 'AN', startTime: at(40) },
+    near_sp: { lineId: 'near_sp', pxEventId: 'NR', sport: 'baseball_mlb', oddsApiSport: 'baseball_mlb', marketType: 'spread', oddsApiMarket: 'spreads', homeTeam: 'HN', awayTeam: 'AN', startTime: at(40) } };
+  const active = new Map();
+  for (let i = 0; i < 40; i++) {
+    ix['far' + i] = { lineId: 'far' + i, pxEventId: 'F' + i, sport: 'basketball_nba', oddsApiSport: 'basketball_nba', marketType: 'player_points', oddsApiMarket: 'player_points', homeTeam: 'H' + i, awayTeam: 'A' + i, startTime: at(600), propFetchedAt: 0 };
+    active.set('F' + i, NOW);
+  }
+  const calls = { main: 0, supp: 0, alt: 0, far: 0 };
+  const fakeOdds = { _toaCooldownRemainingMs: () => 0, getCacheAge: () => 9, fetchOddsForSport: async () => { calls.main++; },
+    refreshPropOddsForEvent: async () => { calls.far++; return { ok: true, requests: 1 }; },
+    refreshNearStartSupplements: async () => { calls.supp++; return { requests: 1 }; },
+    refreshAltLinesForEvent: async () => { calls.alt++; return { requests: 1 }; } };
+  const fakeLm = { __debugGetLineIndex: () => ix, refreshPropsForEvent: async () => ({ updated: 1 }) };
+  const realNow = Date.now; Date.now = () => NOW;
+  try {
+    const S3 = Object.assign({}, S, { maxRequests: 30, activePropHours: 24, activePropTargetAgeSec: 120, activePropMaxEvents: 8 });
+    const out = await nsr.runOnce({ settings: S3, oddsFeed: fakeOdds, lineManager: fakeLm, activeEvents: active, farAttempt: new Map() });
+    assert.equal(calls.supp, 1, 'near-start F5 supplement refreshed');
+    assert.equal(calls.alt, 1, 'near-start alt-line cache refreshed');
+    assert.equal(calls.far, 8, 'far props capped per pass');
+    assert.equal(out.farPropEvents, 8);
+    assert.equal(out.requests, 11, '1 main + 1 supplement + 1 alt + 8 far');
+  } finally { Date.now = realNow; }
+});

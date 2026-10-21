@@ -847,12 +847,76 @@ async function saveMatchedParlay(entry) {
       outcome: entry.outcome,
       matched_at: entry.matchedAt,
     };
+    // Kept on the entry so updateMatchedParlayOutcome can find a still-spooled row.
+    try { Object.defineProperty(entry, '_mpRow', { value: row, enumerable: false, configurable: true, writable: true }); } catch (_) { /* frozen entry */ }
     return await _insertMatchedRow(row, {});
   } catch (err) {
     log.error('DB', `saveMatchedParlay error: ${err.message}`);
     return 'error';
   }
 }
+
+/**
+ * UPDATE an already-recorded matched_parlays row's outcome in place (2026-10-21
+ * perf review + review fixes). The canonical win (reconcileMatchedWin) and the
+ * restart backfill (backfillOurOddsFromDb) used to re-run saveMatchedParlay,
+ * which INSERTS — 98.4% of our fills carried TWO rows (contest share inflated
+ * 1.76x; /lost-analysis counted ~2,000 wins as tie-losses). Order of attempts:
+ *   1. the original row is still in the retry SPOOL -> mutate it there (the
+ *      spool replays the live object), no extra write;
+ *   2. the original insert is IN FLIGHT -> wait for it (bounded) first;
+ *   3. PATCH matched on parlay_id + matched_at + matched_stake (a parlay PX split
+ *      across makers has one row per fill; a NULL stake matches IS NULL);
+ *   4. transient failure / breaker open -> retry the UPDATE later (it is
+ *      idempotent) instead of inserting a copy;
+ *   5. 0 rows matched -> insert, the only path that can still double (counted).
+ */
+const _mpStats = { updated: 0, spoolMutated: 0, insertFallback: 0, deferred: 0, errors: 0 };
+async function updateMatchedParlayOutcome(entry, _attempt = 0) {
+  const db = getClient();
+  if (!db || !entry || !entry.parlayId) return 'disabled';
+  const fields = { outcome: entry.outcome, we_quoted: !!entry.weQuoted, our_odds: _intOdds(entry.ourAmericanOdds) };
+  const spooled = () => {
+    const row = entry._mpRow;
+    if (row && row.__spoolKey && _spool.has(row.__spoolKey)) { Object.assign(row, fields); _mpStats.spoolMutated++; return true; }
+    return false;
+  };
+  if (spooled()) return 'spool-updated';
+  if (entry._mpSave) {
+    try { await Promise.race([entry._mpSave, new Promise(r => setTimeout(r, 10000))]); } catch (_) { /* fall through */ }
+    if (spooled()) return 'spool-updated';
+  }
+  const later = () => {
+    if (_attempt >= 3) { _mpStats.errors++; log.warn('DB', `matched_parlays outcome update for ${entry.parlayId} gave up after ${_attempt + 1} attempts`); return 'gave-up'; }
+    _mpStats.deferred++;
+    const t = setTimeout(() => { updateMatchedParlayOutcome(entry, _attempt + 1).catch(() => {}); }, 60000 * (_attempt + 1));
+    if (t.unref) t.unref();
+    return 'deferred';
+  };
+  if (!_breaker.canAttempt()) return later();
+  try {
+    let q = db.from('matched_parlays').update(fields).eq('parlay_id', entry.parlayId);
+    if (entry.matchedAt) q = q.eq('matched_at', entry.matchedAt);
+    const st = entry.matchedStake;
+    if (st == null || String(st).trim() === '') q = q.is('matched_stake', null);
+    else if (Number.isFinite(Number(st))) q = q.eq('matched_stake', Number(st));
+    const res = await q.select('id');
+    if (res.error) {
+      if (isTransientResult(res)) return later();
+      _mpStats.errors++;
+      log.warn('DB', `matched_parlays outcome update ${entry.parlayId}: ${res.error.message}`);
+      return 'error';
+    }
+    if (Array.isArray(res.data) && res.data.length > 0) { _mpStats.updated++; return 'updated'; }
+    _mpStats.insertFallback++;
+    return saveMatchedParlay(entry);
+  } catch (err) {
+    return later();
+  }
+}
+// Back-compat name (order-tracker reconcileMatchedWin).
+const markMatchedParlayWon = (entry) => updateMatchedParlayOutcome(entry);
+function getMatchedUpdateStats() { return { ..._mpStats }; }
 
 async function _insertMatchedRow(row, opts = {}) {
   const db = getClient();
@@ -2392,6 +2456,9 @@ module.exports = {
   loadFillBucketRowsSince,
   countOrders,
   saveMatchedParlay,
+  markMatchedParlayWon,
+  updateMatchedParlayOutcome,
+  getMatchedUpdateStats,
   loadMatchedParlays,
   loadMatchedParlaysSince,
   saveDecline,

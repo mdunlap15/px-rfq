@@ -997,6 +997,24 @@ const config = {
     // generous than the most generous sportsbook's raw price on its side/line.
     // Arm = md5('pbc:'+parlayId) mod 100 < PROP_BOOK_CAP_PERCENT (default 0 =
     // dark). meta.propBookCap*. Runtime keys.
+    // NBA EARLY-PROP TIMING A/B (2026-10-21 perf review): gate arm declines a
+    // parlay with an NBA prop leg more than NBA_PROP_EARLY_GATE_HOURS (8) before
+    // tip; arm = md5('nbap:'+parlayId) mod 100 < NBA_PROP_EARLY_GATE_PERCENT
+    // (default 0 = dark). meta.nbaPropGateArm. Runtime keys.
+    // NEAR-START REFRESH reach beyond the window for RFQ-active events' props (2026-10-21; runtime keys).
+    nearStartActivePropHours: (() => { const v = parseFloat(process.env.NEAR_START_ACTIVE_PROP_HOURS); return Number.isFinite(v) && v >= 0 ? v : 24; })(),
+    nearStartActivePropTargetAgeSec: (() => { const v = parseFloat(process.env.NEAR_START_ACTIVE_PROP_TARGET_AGE_SEC); return Number.isFinite(v) && v >= 30 ? v : 120; })(),
+    nearStartActivePropMaxEvents: (() => { const v = parseInt(process.env.NEAR_START_ACTIVE_PROP_MAX_EVENTS, 10); return Number.isFinite(v) && v >= 0 ? v : 8; })(),
+    // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js; runtime keys). Percent 0 = dark.
+    legDriftCorrectionPercent: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
+    legDriftCorrectionMinN: (() => { const v = parseInt(process.env.LEG_DRIFT_CORRECTION_MIN_N, 10); return Number.isFinite(v) && v >= 5 ? v : 30; })(),
+    legDriftCorrectionZ: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_Z); return Number.isFinite(v) && v > 0 ? v : 2; })(),
+    legDriftCorrectionMaxPct: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_MAX_PCT); return Number.isFinite(v) && v >= 0 ? Math.min(10, v) : 3; })(),
+    legDriftCorrectionPrior: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PRIOR); return Number.isFinite(v) && v >= 0 ? v : 30; })(),
+    legDriftCorrectionDays: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_DAYS); return Number.isFinite(v) && v >= 1 ? v : 21; })(),
+    legDriftCorrectionOverrides: (() => { try { const v = JSON.parse(process.env.LEG_DRIFT_CORRECTION_OVERRIDES || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch (_) { return {}; } })(),
+    nbaPropEarlyGatePercent: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
+    nbaPropEarlyGateHours: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_HOURS); return Number.isFinite(v) && v > 0 ? v : 8; })(),
     propBookCapPercent: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     propBookCapRelPct: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_REL_PCT); return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 2; })(),
     twoLegWidenPercent: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),

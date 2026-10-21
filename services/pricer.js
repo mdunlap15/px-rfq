@@ -11,6 +11,7 @@ const seriesWindow = require('./series-window');
 const mlbSeriesConsensus = require('./mlb-series-consensus');
 const ufcMov = require('./ufc-mov');
 const gsRelay = require('./gs-relay');
+const legDrift = require('./leg-drift');
 const nflConsensus = require('./nfl-consensus');
 const { footballSgpFactor } = require('./football-sgp-correlation');
 const { mlbSgpFactor } = require('./mlb-sgp-correlation');
@@ -977,6 +978,22 @@ function priceParlay(legs, opts = {}) {
   // startTime check below as a belt-and-suspenders guard (cheap with
   // startTimeMs pre-computed).
   const preResolved = opts.resolvedLineInfos; // Map<lineId, lineInfo> | undefined
+  // NBA early-prop timing A/B arm for this parlay (null = no NBA prop leg beyond the gate / dark).
+  let _nbaPropGateArm = null;
+  // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js). Arm drawn once
+  // per parlay; recorded only when some leg's family carries a correction.
+  let _ldcArm = null, _ldcInScope = false;
+  {
+    const _pct = config.pricing.legDriftCorrectionPercent || 0;
+    if (_pct > 0 && opts.parlayId && !opts.fairOnly) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('ldc:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _ldcArm = inArm ? 'correct' : 'control';
+    }
+  }
 
   // Look up and price each leg.
   //
@@ -1153,6 +1170,37 @@ function priceParlay(legs, opts = {}) {
           blockerLeg: legDescriptor,
         };
         return null;
+      }
+    }
+
+    // NBA EARLY-PROP TIMING A/B (2026-10-21 perf review). 83% of the NBA prop
+    // legs we filled were filled 8h+ before tip, none priced off the order book,
+    // median input age 604 s — while the order book lists NBA props only inside
+    // T-45. Earlier signals point the same way (spring early NBA props 1.43x,
+    // WNBA props 12h+ out 1.29x, z 2.5). Gate arm: a parlay with an NBA prop leg
+    // more than nbaPropEarlyGateHours before start DECLINES; control prices as
+    // today and records meta.nbaPropGateArm='control' so its fills can be graded.
+    // Arm = md5('nbap:'+parlayId) mod 100 < nbaPropEarlyGatePercent (0 = dark).
+    {
+      const _pct = config.pricing.nbaPropEarlyGatePercent || 0;
+      const _hrs = config.pricing.nbaPropEarlyGateHours || 8;
+      if (_pct > 0 && !opts.fairOnly && opts.parlayId && lineInfo.sport === 'basketball_nba'
+          && /^player_/.test(lineInfo.marketType || '') && startMs != null && !isNaN(startMs)
+          && (startMs - nowMs) / 3600000 > _hrs) {
+        let inArm = _pct >= 100;
+        if (!inArm) {
+          const h = crypto.createHash('md5').update('nbap:' + String(opts.parlayId)).digest();
+          inArm = (h.readUInt32BE(0) % 100) < _pct;
+        }
+        _nbaPropGateArm = inArm ? 'gate' : 'control';
+        if (inArm) {
+          priceParlay._lastFailure = {
+            reason: 'nba_prop_early_ab',
+            detail: `${legLabel} NBA prop ${((startMs - nowMs) / 3600000).toFixed(1)}h pre-tip (> ${_hrs}h, gate arm)`,
+            blockerLeg: legDescriptor,
+          };
+          return null;
+        }
       }
     }
 
@@ -2019,11 +2067,32 @@ function priceParlay(legs, opts = {}) {
       }
     }
 
+    // LEG-DRIFT CORRECTION (operator 2026-10-21: "correcting for cases where we
+    // consistently are" leaking). A family whose legs consistently move against
+    // us between our fill and their own start gets its fair (and book-mirror
+    // price) raised by the measured, shrunk, capped drift — 'correct' arm only;
+    // never below 1 (never more generous); never on fairOnly reads, which are the
+    // measurement itself. The pre-correction fair is kept so the drift that
+    // estimates the correction is always measured against it.
+    let legDriftCorr = null;
+    if (_ldcArm && fairProb > 0 && fairProb < 1) {
+      const _c = legDrift.correctionFor(lineInfo, fairProb, nowMs);
+      if (_c.mult > 1) {
+        _ldcInScope = true;
+        if (_ldcArm === 'correct') {
+          legDriftCorr = { key: _c.key, mult: _c.mult, preFair: Math.round(fairProb * 1e6) / 1e6, source: _c.source || null };
+          fairProb = Math.min(0.999, fairProb * _c.mult);
+          if (effectiveBookPriceOverride != null) effectiveBookPriceOverride = Math.min(0.99, effectiveBookPriceOverride * _c.mult);
+        }
+      }
+    }
+
     pricedLegs.push({
       lineId,
       lineInfo,
       fairProb,
       fairSource,
+      legDriftCorr,
       fairBasis: legStates[legIdx].fairBasis || null,
       calib: legStates[legIdx]._calib || null,
       relayHit: relayHit ? { fair: relayHit.fair, own: relayHit.own, ageSec: relayHit.ageSec, via: relayHit.via, source: relayHit.source } : null,
@@ -4389,6 +4458,8 @@ function priceParlay(legs, opts = {}) {
           // source; calib = the PROP_FAIR_CALIBRATION multiplier and the fair
           // before it; fairBasis = the special-market source (series, MoV, ...).
           provenance: _legProvenance(l),
+          // Leg-drift correction applied to this leg ({key, mult, preFair}) — 'correct' arm only.
+          legDriftCorr: l.legDriftCorr || null,
           bookPriceOverride: l.bookPriceOverride != null ? Math.round(l.bookPriceOverride * 10000) / 10000 : null,
           displayFairProb: l.displayFairProb ? Math.round(l.displayFairProb * 10000) / 10000 : null,
           pinnacleOdds: l.pinnacleOdds || null,
@@ -4499,6 +4570,10 @@ function priceParlay(legs, opts = {}) {
       cfbWidenApplied: _cfbWiden.applied,
       cfbWidenPreProb: _cfbWiden.preProb != null ? Math.round(_cfbWiden.preProb * 100000) / 100000 : null,
       cfbWidenRelPct: _cfbWiden.relPct,
+      // NBA early-prop timing A/B: null = no NBA prop leg beyond the gate / dark; 'control' priced normally.
+      nbaPropGateArm: _nbaPropGateArm,
+      // Leg-drift correction A/B: null = dark / no corrected family on the ticket; 'control' | 'correct'.
+      legDriftArm: _ldcInScope ? _ldcArm : null,
       // Prop book cap A/B: arm null = no prop leg with a book price / dark;
       // 'control' / 'cap'. PreProb = the uncapped price.
       propBookCapArm: _propCap.arm,

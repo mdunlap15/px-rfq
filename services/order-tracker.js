@@ -957,9 +957,17 @@ function getRecentLatencyRecords(limit = 500) {
 // verify + ghost/full reconcile recovery) — the latter would otherwise leave
 // wins stuck at tied_lost since it early-returns when status is already
 // 'confirmed' (a matched-first tie optimistically promotes status).
-function reconcileMatchedWin(parlayId) {
+function reconcileMatchedWin(parlayId, order) {
   if (!parlayId || matchedWonIds.has(parlayId)) return;
-  const mp = matchedParlays.find(e => e && e.parlayId === parlayId);
+  // PX can split one parlay across makers (one matched entry per fill). Pick
+  // OUR fill: the entry whose stake equals our confirmed risk, else whose price
+  // ties ours; only then fall back to the newest entry (2026-10-21 review).
+  const _cands = matchedParlays.filter(e => e && e.parlayId === parlayId);
+  const _ord = order || orders[parlayId];
+  const _risk = _ord && Number(_ord.confirmedStake);
+  const mp = (_risk > 0 && _cands.find(e => Math.abs(Number(e.matchedStake) - _risk) < 0.01))
+    || (_ord && _ord.offeredOdds != null && _cands.find(e => _isOddsTie(e.matchedAmericanOdds, _ord.offeredOdds)))
+    || _cands[0];
   if (!mp || mp.outcome === 'won') return;
   const prior = mp.outcome;
   mp.outcome = 'won';
@@ -975,7 +983,8 @@ function reconcileMatchedWin(parlayId) {
   } else if (prior === 'missed' && (marketStats.missedNoQuote || 0) > 0) {
     marketStats.missedNoQuote--;
   }
-  db.saveMatchedParlay(mp).catch(() => {});
+  // UPDATE the provisional row (never insert a second one) — see db.markMatchedParlayWon.
+  db.markMatchedParlayWon(mp).catch(() => {});
   log.debug('Market', `Reconciled matched ${parlayId.substring(0, 8)} ${prior} → won on canonical confirm`);
 }
 
@@ -1009,7 +1018,7 @@ function _countFillOnce(order, parlayId) {
   const legs = order.legs || (order.meta && order.meta.legs) || [];
   if (legs.length > 0) recordFillBucketFill(legs);
   // Reconcile market intel on the canonical win signal (fixes weWon).
-  reconcileMatchedWin(parlayId);
+  reconcileMatchedWin(parlayId, order);
   // Exposure — first real commit signal only (order.matched must not add).
   try { addExposure(order); } catch (err) {
     log.warn('Exposure', `addExposure on fill-count failed for ${parlayId}: ${err.message}`);
@@ -1274,7 +1283,8 @@ function importPxBookedOrder(parlayId, orderUuid, confirmedStake, confirmedOdds)
   // optimistically flipped status to 'confirmed', which makes this function
   // early-return 'already-confirmed' and would otherwise leave the
   // matched_parlays row stuck at 'tied_lost'. Idempotent + matchedWonIds-guarded.
-  reconcileMatchedWin(parlayId);
+  // PX's confirmed stake identifies OUR fill among split rows.
+  reconcileMatchedWin(parlayId, Object.assign({}, orders[parlayId] || {}, { confirmedStake: Number(confirmedStake) || (orders[parlayId] && orders[parlayId].confirmedStake) }));
   const order = orders[parlayId];
   if (!order) return { ok: false, reason: 'not-found' };
   if (order.status === 'confirmed') return { ok: false, reason: 'already-confirmed' };
@@ -1527,6 +1537,9 @@ function recordLegSettlement(orderUuid, legPayload, opts = {}) {
       }
     }
   }
+  // A leg that voids AFTER the parlay settled (early any_leg_lost settlement)
+  // must still reach the void-adjusted fair.
+  if (order.status && String(order.status).startsWith('settled_')) _refreshVoidAdjusted(order);
 
   if (opts.persist !== false) db.saveOrder(order).catch(() => {});
 }
@@ -1570,6 +1583,34 @@ function computeVoidAdjustedFairProb(rawFair, legs) {
   if (voidLegs === 0) return { prob: rawFair, voidLegs: 0 };
   if (!Number.isFinite(prob) || prob <= 0) return null;
   return { prob: Math.min(0.999999, prob), voidLegs };
+}
+
+/**
+ * (Re)stamp the void-adjusted fair from the legs' CURRENT settlement statuses.
+ * 2026-10-21 perf review: it was written once, inside recordSettlement — but a
+ * parlay that settles early on a lost leg (any_leg_lost) still has 'tbd' legs,
+ * and a leg that voids AFTERWARDS never reached it: 253 of 355 void-leg tickets
+ * carried a stale or missing value, stale in the direction of the outcome (the
+ * same bias the 2026-08-05 void artifact taught us to remove). Called at
+ * settlement AND whenever a leg result lands on a settled order.
+ */
+function _refreshVoidAdjusted(order) {
+  try {
+    const legs = order.legs || order.meta?.legs || [];
+    const raw = Number(order.fairParlayProb ?? order.meta?.fairParlayProb);
+    const adj = computeVoidAdjustedFairProb(raw, legs);
+    if (adj == null) return false;
+    const changed = order.voidAdjustedFairProb !== adj.prob || (order.meta && order.meta.voidLegCount !== adj.voidLegs);
+    order.voidAdjustedFairProb = adj.prob;
+    if (order.meta) {
+      order.meta.voidAdjustedFairProb = adj.prob;
+      order.meta.voidLegCount = adj.voidLegs;
+    }
+    return changed;
+  } catch (err) {
+    log.debug('Settle', `void-adjust failed for ${order && order.parlayId}: ${err.message}`);
+    return false;
+  }
 }
 
 function recordSettlement(orderUuid, result, payout, opts = {}) {
@@ -1780,20 +1821,7 @@ function recordSettlement(orderUuid, result, payout, opts = {}) {
     // book-wide carry a void leg, 22.6% in golf, 27.1% in soccer. Persist the
     // corrected figure at settlement so every downstream calibration reads it
     // instead of re-deriving (and re-inheriting) the bias.
-    try {
-      const legs = order.legs || order.meta?.legs || [];
-      const raw = Number(order.fairParlayProb ?? order.meta?.fairParlayProb);
-      const adj = computeVoidAdjustedFairProb(raw, legs);
-      if (adj != null) {
-        order.voidAdjustedFairProb = adj.prob;
-        if (order.meta) {
-          order.meta.voidAdjustedFairProb = adj.prob;
-          order.meta.voidLegCount = adj.voidLegs;
-        }
-      }
-    } catch (err) {
-      log.debug('Settle', `void-adjust failed for ${order.parlayId}: ${err.message}`);
-    }
+    _refreshVoidAdjusted(order);
 
     // Release exposure for settled parlay
     removeExposure(order);
@@ -2226,7 +2254,13 @@ function recordMatchedParlay(parlayId, matchedOdds, matchedStake, legs, lineMana
   // entirely Railway-restart artifacts.)
 
   matchedParlays.unshift(entry); // newest first
-  db.saveMatchedParlay(entry).catch(() => {});
+  // The provisional insert's promise rides on the entry (non-enumerable) so a
+  // later outcome update waits for it instead of racing it (2026-10-21 review).
+  {
+    const _p = db.saveMatchedParlay(entry);
+    try { Object.defineProperty(entry, '_mpSave', { value: _p, enumerable: false, configurable: true, writable: true }); } catch (_) { /* frozen */ }
+    if (_p && _p.catch) _p.catch(() => {});
+  }
   if (matchedParlays.length > 5000) matchedParlays.pop(); // cap memory
 
   // If decline reason is "not seen", try DB lookup to backfill the real reason
@@ -2325,8 +2359,9 @@ async function backfillOurOddsFromDb(entry) {
   }
   // Persist the updated record so the next /market-intel fetch (or the
   // next restart's reload) carries the backfilled values.
-  db.saveMatchedParlay(entry).catch(err =>
-    log.debug('Market', `saveMatchedParlay (backfill) failed for ${entry.parlayId}: ${err.message}`)
+  // UPDATE the row recordMatchedParlay already wrote — never insert a second copy.
+  db.updateMatchedParlayOutcome(entry).catch(err =>
+    log.debug('Market', `matched_parlays backfill update failed for ${entry.parlayId}: ${err.message}`)
   );
 }
 
@@ -3525,6 +3560,42 @@ function getOpenConfirmedOrders() {
   return out;
 }
 
+/**
+ * Orders EV live (services/gametime-ev.js) must keep grading: open fills AND
+ * fills settled in the last 48 h whose game time is not finalized. A parlay that
+ * settles early on a lost leg still has legs to freeze; dropping it (the first
+ * 10/21 build) left only tickets the bettor was still alive on in the leak
+ * sample — biased against us (2026-10-21 review).
+ */
+function getEvLiveCandidates(nowMs = Date.now()) {
+  const out = [];
+  const cut = nowMs - 48 * 3600e3;
+  for (const order of Object.values(orders)) {
+    if (!(order.confirmedStake > 0)) continue;
+    if (order.meta && order.meta.gameTime && order.meta.gameTime.finalizedAt) continue;
+    if (order.status === 'confirmed') { if (!isOrderStalePhantom(order)) out.push(order); continue; }
+    if (order.status && String(order.status).startsWith('settled_')) {
+      const st = Date.parse(order.settledAt || '');
+      if (Number.isFinite(st) && st >= cut) out.push(order);
+    }
+  }
+  return out;
+}
+
+/** Every real fill (confirmed or settled, phantoms excluded) confirmed at or after `sinceMs`. */
+function getConfirmedOrdersSince(sinceMs) {
+  const out = [];
+  for (const o of Object.values(orders)) {
+    if (!(o.confirmedStake > 0)) continue;
+    const t = Date.parse(o.confirmedAt || '');
+    if (!Number.isFinite(t) || t < sinceMs) continue;
+    if (o.status === 'confirmed' && isOrderStalePhantom(o)) continue;
+    if (o.meta && o.meta.phantom) continue;
+    out.push(o);
+  }
+  return out;
+}
+
 function getTotalPortfolioRisk() {
   let total = 0;
   for (const order of Object.values(orders)) {
@@ -3751,13 +3822,12 @@ function getVoidAdjustedCalibration(days = 30) {
     if (Number.isNaN(t) || t < cutoff) continue;
     const raw = Number(o.fairParlayProb ?? o.meta?.fairParlayProb);
     if (!(raw > 0 && raw < 1)) continue;
-    // prefer the persisted adjusted value; fall back to computing it live so
-    // rows settled before this shipped still count.
-    let adj = Number(o.voidAdjustedFairProb ?? o.meta?.voidAdjustedFairProb);
-    if (!(adj > 0 && adj < 1)) {
-      const c = computeVoidAdjustedFairProb(raw, o.legs || o.meta?.legs || []);
-      adj = c ? c.prob : raw;
-    }
+    // Recompute from the legs' current statuses (2026-10-21): the persisted
+    // value was stale on ~70% of void-leg tickets settled early; the stored
+    // figure is only the fallback when the legs cannot be read.
+    const _c = computeVoidAdjustedFairProb(raw, o.legs || o.meta?.legs || []);
+    let adj = _c ? _c.prob : Number(o.voidAdjustedFairProb ?? o.meta?.voidAdjustedFairProb);
+    if (!(adj > 0 && adj < 1)) adj = raw;
     rows.push({ raw, adj, bettorWon: o.status === 'settled_lost' });
   }
   const n = rows.length;
@@ -3813,6 +3883,61 @@ function closedHoleOf(o) {
     if (cr && require('./creator-blocklist').isBlocked(cr)) return 'blocked_creator';
   } catch (_) { /* blocklist unavailable -> not classified */ }
   return null;
+}
+
+/**
+ * RFQ EV LEAK — EV at fill vs EV at game time (2026-10-21; per-leg rework after
+ * the 10/21 review). Operator: "We need to be closely watching how much value we
+ * leak or gain from fill till gametime" ... "make sure we are not leaking much
+ * value on any legs and correcting for cases where we consistently are."
+ *   tickets   — every fill (phantoms excluded) confirmed in the window; EV at
+ *               fill vs EV at game time on the ones whose legs are all frozen
+ *               (meta.gameTime, each leg frozen 90 s before ITS OWN start, never
+ *               in-play). Since the 10/21 fix early-settled tickets keep being
+ *               graded, so the sample is no longer only tickets the bettor was
+ *               alive on. coverageFull = the subset where every leg was re-read.
+ *   families  — PER LEG (services/leg-drift.js): sport | market | side | near/far,
+ *               each leg counted once; mean drift (> 0 = moved against us), z,
+ *               $ leak = sum of each leg's OWN evDelta, and any active correction.
+ *   openBook  — EV fill vs EV live over open fills right now.
+ */
+function getEvLeakSummary(days = 7) {
+  const nowMs = Date.now();
+  const cutoff = nowMs - days * 864e5;
+  const r2 = v => Math.round(v * 100) / 100;
+  const t = { fills: 0, finalized: 0, settledEarly: 0, evFill: 0, evGame: 0, risk: 0, covRisk: 0, fullN: 0, fullFill: 0, fullGame: 0 };
+  const list = getConfirmedOrdersSince(cutoff);
+  for (const o of list) {
+    const m = o.meta || {};
+    t.fills++;
+    const gt = m.gameTime && m.gameTime.finalizedAt && Number.isFinite(m.gameTime.ev) ? m.gameTime : null;
+    const evFill = Number(o.expectedValue != null ? o.expectedValue : m.expectedValue);
+    if (!gt || !Number.isFinite(evFill)) continue;
+    t.finalized++;
+    if (o.status && String(o.status).startsWith('settled_') && o.settledAt && Date.parse(gt.finalizedAt) > Date.parse(o.settledAt)) t.settledEarly++;
+    t.evFill += evFill; t.evGame += gt.ev; t.risk += o.confirmedStake; t.covRisk += o.confirmedStake * (gt.coverage || 0);
+    if (gt.coverage === 1) { t.fullN++; t.fullFill += evFill; t.fullGame += gt.ev; }
+  }
+  let families = {}, corrections = {};
+  try {
+    const ld = require('./leg-drift');
+    const p = (require('../config').config.pricing) || {};
+    const s = ld.summarize(ld.collectRows(list, days, nowMs), { minN: p.legDriftCorrectionMinN, zMin: p.legDriftCorrectionZ, maxPct: p.legDriftCorrectionMaxPct, prior: p.legDriftCorrectionPrior });
+    families = s.families; corrections = s.corrections;
+  } catch (err) { log.debug('EvLeak', `leg families failed: ${err.message}`); }
+  let openBook = null;
+  try { openBook = require('./gametime-ev').openBookSummary(); } catch (_) { openBook = null; }
+  const famRows = Object.entries(families).map(([key, f]) => ({ key, ...f }))
+    .sort((a, b) => (b.evLeak || 0) - (a.evLeak || 0));
+  return {
+    days, fills: t.fills, finalized: t.finalized, finalizedAfterEarlySettle: t.settledEarly,
+    evAtFill: r2(t.evFill), evAtGameTime: r2(t.evGame), leak: r2(t.evFill - t.evGame),
+    leakPctOfEv: t.evFill ? r2(100 * (t.evFill - t.evGame) / Math.abs(t.evFill)) : null,
+    leakPctOfRisk: t.risk > 0 ? r2(100 * (t.evFill - t.evGame) / t.risk) : null,
+    riskWeightedCoverage: t.risk > 0 ? r2(t.covRisk / t.risk) : null,
+    fullCoverage: { tickets: t.fullN, evAtFill: r2(t.fullFill), evAtGameTime: r2(t.fullGame), leak: r2(t.fullFill - t.fullGame) },
+    families: famRows, activeCorrections: corrections, openBook,
+  };
 }
 
 function getEvCurve(days = 30, maxPoints = 1200, opts = {}) {
@@ -6246,6 +6371,27 @@ async function pollOrderSettlements(px) {
           order.pxProfit = pxProfit;
           db.saveOrder(order).catch(() => {});
         }
+        // LATE LEG RESULTS on an already-settled order (2026-10-21 review): a parlay
+        // settled early on a lost leg keeps 'tbd' legs; when PX later voids one,
+        // apply it so the void-adjusted fair updates. Only legs whose status
+        // CHANGED are applied, and the order is saved only when that moved the
+        // void-adjusted fair — never every poll.
+        try {
+          const _stored = new Map();
+          for (const l of (order.meta && order.meta.legs) || order.legs || []) _stored.set(l.lineId || l.line_id, l.settlementStatus || l.settlement_status || null);
+          const _beforeVA = order.meta ? order.meta.voidAdjustedFairProb : order.voidAdjustedFairProb;
+          let _applied = 0;
+          for (const pl of pxOrder.legs || []) {
+            const lid = pl.line_id || pl.lineId, st = pl.settlement_status || pl.status;
+            if (!lid || !st || st === 'tbd' || !_stored.has(lid) || _stored.get(lid) === st) continue;
+            recordLegSettlement(uuid, pl, { persist: false });
+            _applied++;
+          }
+          const _afterVA = order.meta ? order.meta.voidAdjustedFairProb : order.voidAdjustedFairProb;
+          if (_applied && _afterVA !== _beforeVA) db.saveOrder(order).catch(() => {});
+        } catch (err) {
+          log.debug('Poll', `late leg results for ${order.parlayId}: ${err.message}`);
+        }
         continue;
       }
 
@@ -8287,6 +8433,7 @@ module.exports = {
   recordFinalized,
   recordSettlement,
   computeVoidAdjustedFairProb,
+  __refreshVoidAdjustedForTest: _refreshVoidAdjusted,
   recordLegSettlement,
   pollOrderSettlements,
   checkSettlementDrift,
@@ -8349,6 +8496,8 @@ module.exports = {
   deleteOrdersByParlayIds,
   findByParlayId,
   getOpenConfirmedOrders,
+  getEvLiveCandidates,
+  getConfirmedOrdersSince,
   getCreatorLegStackCount,
   findByOrderUuid,
   overrideLegResult,
@@ -8402,6 +8551,7 @@ module.exports = {
   _rollupDailyPnL,
   _rollupDailyVolume,
   getEvCurve,
+  getEvLeakSummary,
   closedHoleOf,
   getVoidAdjustedCalibration,
   getStats,
