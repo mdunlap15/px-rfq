@@ -49,6 +49,20 @@ function familyKey(sport, market, selection, fillFair, hrsToStart) {
   return `${sport || '?'}|${market || '?'}|${sideOf(market, selection, fillFair)}|${hz}`;
 }
 
+/**
+ * The EV this leg alone moved its ticket (> 0 = we lost EV), for game-time legs
+ * finalized before 2026-10-21, which stored the fair but not evDelta — the same
+ * formula gametime-ev applies at finalization. 0 when the order lacks stake/odds.
+ */
+function _legEvDelta(order, leg, gtFair) {
+  const { evAt } = require('./gametime-ev');
+  const fillP = Number(order.fairParlayProb != null ? order.fairParlayProb : order.meta && order.meta.fairParlayProb);
+  if (!(fillP > 0 && fillP < 1) || !(leg.fairProb > 0) || !(gtFair > 0)) return 0;
+  const evFill = evAt(order, fillP);
+  const evOne = evAt(order, Math.min(0.999, fillP * gtFair / leg.fairProb));
+  return Number.isFinite(evFill) && Number.isFinite(evOne) ? Math.round((evFill - evOne) * 100) / 100 : 0;
+}
+
 /** Leg drift rows from orders (pure). One row per fill-leg that has a frozen game-time fair. */
 function collectRows(orders, days, nowMs = Date.now()) {
   const cutoff = nowMs - days * 864e5;
@@ -70,7 +84,7 @@ function collectRows(orders, days, nowMs = Date.now()) {
       const hrs = Number.isFinite(g.hrsToStartAtFill) ? g.hrsToStartAtFill : (Number.isFinite(st) ? (st - t) / 3600000 : NaN);
       rows.push({
         lineId: l.lineId, key: familyKey(l.sport, l.market || l.marketType, l.selection, fillFair, hrs),
-        drift: g.fair / fillFair - 1, evDelta: Number.isFinite(g.evDelta) ? g.evDelta : 0,
+        drift: g.fair / fillFair - 1, evDelta: Number.isFinite(g.evDelta) ? g.evDelta : _legEvDelta(o, l, g.fair),
         fairSource: g.fairSourceAtFill || l.fairSource || null, inputAge: g.inputAgeAtFill != null ? g.inputAgeAtFill : (l.inputAgeSec != null ? l.inputAgeSec : null),
         mirror: l.bookPriceOverride != null,
       });

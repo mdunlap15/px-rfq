@@ -35,6 +35,26 @@ test('each leg counts ONCE (a leg filled in many parlays is one sample); drift s
   assert.strictEqual(f.meanDriftPct, 10);
 });
 
+test('game-time legs finalized before evDelta was stored: the leg EV effect is rebuilt from the stored fair (same formula as finalization)', () => {
+  const gt = require('../services/gametime-ev');
+  const conf = new Date(NOW - 24 * 3600e3).toISOString();
+  // 2 legs, fill fairs 0.5 x 0.6 = 0.30; offered q 0.33; our risk 1000. Leg a moved 0.50 -> 0.55 (against us).
+  const o = { confirmedStake: 1000, confirmedAt: conf, fairParlayProb: 0.30,
+    meta: { offeredImpliedProb: 0.33, fairParlayProb: 0.30, legs: [
+      { lineId: 'a', sport: 'icehockey_nhl', market: 'moneyline', selection: 'home', fairProb: 0.5, startTime: new Date(NOW - 20 * 3600e3).toISOString() },
+      { lineId: 'b', sport: 'icehockey_nhl', market: 'moneyline', selection: 'home', fairProb: 0.6, startTime: new Date(NOW - 20 * 3600e3).toISOString() }],
+    gameTime: { finalizedAt: 'x', legs: { a: { fair: 0.55 }, b: { fair: 0.6, evDelta: 7 } } } } };   // old schema on a, new on b
+  const rows = ld.collectRows([o], 7, NOW);
+  const a = rows.find(r => r.lineId === 'a'), b = rows.find(r => r.lineId === 'b');
+  const want = gt.evAt(o, 0.30) - gt.evAt(o, 0.30 * 0.55 / 0.5);
+  assert.ok(want > 0, 'moving against us costs EV');
+  assert.ok(Math.abs(a.evDelta - Math.round(want * 100) / 100) < 1e-9, `rebuilt ${a.evDelta} vs ${want}`);
+  assert.strictEqual(b.evDelta, 7, 'a stored evDelta is used as is');
+  // no stake/odds on the order -> 0, never NaN
+  const bare = JSON.parse(JSON.stringify(o)); delete bare.meta.offeredImpliedProb;
+  assert.strictEqual(ld.collectRows([bare], 7, NOW).find(r => r.lineId === 'a').evDelta, 0);
+});
+
 test('correction: only a consistent ADVERSE leak qualifies; shrunk toward 0 and capped', () => {
   const mk = (n, base, spread, sel = 'over') => Array.from({ length: n }, (_, i) =>
     fill(i, [{ lineId: `${sel}-${base}-${i}`, fill: 0.5, gt: 0.5 * (1 + base + ((i % 2) ? spread : -spread)), sel }]));
