@@ -3911,6 +3911,8 @@
           va = a.confirmedStake && a.offeredOdds ? calcBettorWager(a.confirmedStake, a.offeredOdds) : (a.confirmedStake || 0);
           vb = b.confirmedStake && b.offeredOdds ? calcBettorWager(b.confirmedStake, b.offeredOdds) : (b.confirmedStake || 0); break;
           case 'pnl': va = a.pnl || 0; vb = b.pnl || 0; break;
+          case 'evfill': va = _vEvFill(a) ?? -Infinity; vb = _vEvFill(b) ?? -Infinity; break;
+          case 'evlive': va = _vEvGame(a) ?? -Infinity; vb = _vEvGame(b) ?? -Infinity; break;
           case 'odds': va = a.offeredOdds || 0; vb = b.offeredOdds || 0; break;
           case 'edge':
             va = computeParlayEdge(a).edge ?? -Infinity;
@@ -4052,12 +4054,15 @@
       return;
     }
 
+    html += _vEvSettledBookHtml(filtered);
     html += '<div style="overflow-x:auto;"><table>';
     html += '<tr>';
     html += '<th ' + sSortClick('settled') + '>Settled' + sSortArrow('settled') + '</th>';
     html += '<th>Selections</th>';
     html += '<th ' + sSortClick('odds') + '>Odds' + sSortArrow('odds') + '</th>';
     html += '<th ' + sSortClick('stake', 'right') + '>My Risk' + sSortArrow('stake') + '</th>';
+    html += '<th ' + sSortClick('evfill', 'right') + ' title="EV FILL: expected value (our side) at the fill">EV fill' + sSortArrow('evfill') + '</th>';
+    html += '<th ' + sSortClick('evlive', 'right') + ' title="EV LIVE at game time: the final EV live, every leg frozen 90 s before its own start">EV live' + sSortArrow('evlive') + '</th>';
     html += '<th ' + sSortClick('result') + ' title="Settlement outcome from our (SP) perspective">SP Result' + sSortArrow('result') + '</th>';
     html += '<th ' + sSortClick('pnl', 'right') + '>P&L' + sSortArrow('pnl') + '</th>';
     html += '<th style="text-align:right">Cumul.</th>';
@@ -4115,12 +4120,13 @@
       html += '<td style="max-width:290px; white-space:nowrap;" title="' + teams + '"><span style="display:inline-block; max-width:250px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle;">' + teamsShort + '</span>' + sgpBadge(legs) + propBadge(legs) + '</td>';
       html += '<td style="font-weight:600;">' + offeredAm + '</td>';
       html += '<td style="text-align:right">' + stake + '</td>';
+      html += _vEvSettledCells(order);
       html += '<td title="' + resultTitle + '"><span class="' + resultCls + '">' + resultText + '</span></td>';
       html += '<td style="text-align:right">' + pnlHtml + '</td>';
       html += '<td style="text-align:right">' + cumulHtml + '</td>';
       html += '</tr>';
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
-      html += '<td colspan="7" style="padding:12px 16px;">';
+      html += '<td colspan="9" style="padding:12px 16px;">';
       html += buildLegTable(sLegs.length > 0 ? sLegs : legs, { pad: '2px 6px', vig: order.meta?.vig || order.vig || 0, hideBookOdds: true });
       html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '</div>';
       html += '</td></tr>';
@@ -7697,6 +7703,36 @@
     const lv = o.meta && o.meta.evLive;
     const t = l == null ? 'Not graded yet' : ('EV live ' + fmtPnl(l) + (f != null ? ' (' + fmtPnl(l - f) + ' vs fill)' : '') + ' · updated ' + (lv.updatedAt ? new Date(lv.updatedAt).toLocaleTimeString() : '?'));
     return '<td style="text-align:right">' + cell(f) + '</td><td style="text-align:right" title="' + t + '">' + cell(l) + '</td>';
+  }
+  // EV live at game time for a settled ticket: meta.gameTime (every leg frozen
+  // 90 s before its own start), else a fully frozen meta.evLive.
+  function _vEvGame(o) {
+    const gt = o.meta && o.meta.gameTime;
+    if (gt && gt.finalizedAt && Number.isFinite(gt.ev)) return gt.ev;
+    const lv = o.meta && o.meta.evLive;
+    return lv && lv.frozenAt && Number.isFinite(lv.ev) ? lv.ev : null;
+  }
+  function _vEvSettledCells(o) {
+    const f = _vEvFill(o), g = _vEvGame(o);
+    const cell = (v) => v == null ? '<span style="color:var(--text3);">-</span>' : '<span class="' + (v >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(v) + '</span>';
+    return '<td style="text-align:right">' + cell(f) + '</td><td style="text-align:right" title="' + (g == null ? 'No game-time read' : 'EV live at game time' + (f != null ? ' (' + fmtPnl(g - f) + ' vs fill)' : '')) + '">' + cell(g) + '</td>';
+  }
+  // Settled book: EV fill vs EV live (game time) vs realized P&L on the SAME tickets.
+  function _vEvSettledBookHtml(list) {
+    let n = 0, evF = 0, evG = 0, pnl = 0, nAll = 0, pnlAll = 0, evFAll = 0;
+    for (const o of list) {
+      const f = _vEvFill(o); if (f == null || o.pnl == null) continue;
+      nAll++; evFAll += f; pnlAll += Number(o.pnl) || 0;
+      const g = _vEvGame(o); if (g == null) continue;
+      n++; evF += f; evG += g; pnl += Number(o.pnl) || 0;
+    }
+    if (!nAll) return '';
+    const c = (v) => '<span class="' + (v >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(v) + '</span>';
+    let h = '<div style="padding:6px 12px; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border); line-height:1.6;">';
+    if (n) h += 'On ' + n + ' tickets with a game-time read: <b>EV fill</b> ' + c(evF) + ' &middot; <b>EV live</b> ' + c(evG)
+      + ' (' + c(evG - evF) + ' fill&rarr;game) &middot; <b>P&amp;L</b> ' + c(pnl) + ' (' + c(pnl - evG) + ' vs EV live)<br>';
+    h += 'All ' + nAll + ' settled in view: EV fill ' + c(evFAll) + ' &middot; P&amp;L ' + c(pnlAll) + (n < nAll ? ' &middot; ' + (nAll - n) + ' without a game-time read' : '');
+    return h + '</div>';
   }
   function _vEvBookHtml(list) {
     let evF = 0, evL = 0, evFG = 0, nG = 0, nAll = 0;
