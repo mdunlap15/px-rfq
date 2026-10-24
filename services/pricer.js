@@ -3874,6 +3874,69 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // FOOTBALL MULTI-LEG MARGIN CEILING A/B (2026-10-24) — see
+  // config.pricing.footballCeilingPercent. Operator: "narrow our margins on the
+  // sports where we are losing ... just as long as we are still getting positive
+  // EV". Measured 10/17-10/24 on 52,551 network fills: on NFL / CFB cross-game
+  // game-line parlays of 3+ legs the winning price sat at fair +1.3-2.2% (3 legs),
+  // +3.0-5.0% (4-5) and +7.9-11.8% (6+) while ours sat at +5.5-5.7% / +10-12% /
+  // +39-41% — the leg-count ladder (x2 at 5 legs, x2.75 at 6) multiplies the
+  // whole accumulated margin. Our own settled fills there ran in our favour
+  // since 6/26 (hits/expected 0.58-0.99) and drifted only ~+1% fill -> game time.
+  // Ceiling arm: offered implied <= fair x (1 + ceiling[legs]); it can only make
+  // the quote MORE generous, never below fair x (1 + footballCeilingMinEdgePct).
+  // Scope: every leg the same sport, NFL or CFB; no two legs on one event (not
+  // SGP); 3+ legs; game lines only (no player props). SAFETY: the per-leg
+  // consensus floor it overrides doubles as a guard against fair-prob plumbing
+  // bugs, so the ceiling applies only when EVERY leg has a Pin/FD/DK consensus
+  // and its fair sits within footballCeilingMaxLegGapPp of it (a normal -110
+  // leg is ~2.4pp under the raw implied; a flipped selection is 10pp+).
+  // Arm = md5('fbc:'+parlayId), recorded whether or not it binds.
+  // -------------------------------------------------------------------
+  const _fbCeil = { arm: null, applied: false, preProb: null, pct: null, skip: null };
+  {
+    const _pct = config.pricing.footballCeilingPercent || 0;
+    const _sport = pricedLegs.length ? (pricedLegs[0].lineInfo && pricedLegs[0].lineInfo.sport) : null;
+    const _inScope = _pct > 0 && opts.parlayId && !opts.fairOnly
+      && pricedLegs.length >= 3 && !isSGPParlay
+      && (_sport === 'americanfootball_nfl' || _sport === 'americanfootball_ncaaf')
+      && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === _sport && !l.lineInfo.playerName && !/^player_/.test(String(l.lineInfo.marketType || '')));
+    if (_inScope) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('fbc:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _fbCeil.arm = inArm ? 'ceiling' : 'control';
+      if (inArm && fairParlayProb > 0 && offeredImpliedProb > fairParlayProb) {
+        const n = pricedLegs.length;
+        const cap = n >= 6 ? (config.pricing.footballCeiling6LegPct ?? 10)
+          : n >= 4 ? (config.pricing.footballCeiling45LegPct ?? 6)
+          : (config.pricing.footballCeiling3LegPct ?? 4);
+        const minEdge = Math.max(1, config.pricing.footballCeilingMinEdgePct ?? 2);
+        const gapPp = config.pricing.footballCeilingMaxLegGapPp ?? 4;
+        let guardOk = true;
+        for (const l of pricedLegs) {
+          const ci = getConsensusImplied(l.lineInfo);
+          if (ci == null || !(l.fairProb > 0) || ci - l.fairProb > gapPp / 100) { guardOk = false; break; }
+        }
+        if (!guardOk) {
+          _fbCeil.skip = 'consensus_guard';
+        } else {
+          const ceiling = fairParlayProb * (1 + Math.max(cap, minEdge) / 100);
+          if (ceiling < offeredImpliedProb) {
+            _fbCeil.preProb = offeredImpliedProb;
+            _fbCeil.applied = true;
+            _fbCeil.pct = Math.max(cap, minEdge);
+            log.debug('Pricing', `Football ceiling[${n}L]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(ceiling * 100).toFixed(3)}% (fair ${(fairParlayProb * 100).toFixed(3)}% +${_fbCeil.pct}%)`);
+            offeredImpliedProb = ceiling;
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // CFB MARGIN-WIDEN A/B (2026-10-05) — see config.pricing.cfbWidenPercent.
   //
   // The opposite direction to the trims above: the widen arm makes the quote
@@ -3899,7 +3962,8 @@ function priceParlay(legs, opts = {}) {
       : pricedLegs.length >= 4 ? 'legs4plus'
       : null;
     const _pct = config.pricing.cfbWidenPercent || 0;
-    if (_scope && opts.parlayId && _pct > 0) {
+    // Never widen a quote the football ceiling just narrowed (opposite experiments).
+    if (_scope && opts.parlayId && _pct > 0 && !_fbCeil.applied) {
       let inArm = _pct >= 100;
       if (!inArm) {
         const h = crypto.createHash('md5').update('cfbw:' + String(opts.parlayId)).digest();
@@ -4565,6 +4629,12 @@ function priceParlay(legs, opts = {}) {
       // 'widen' in scope (scope 'sgp' | 'legs4plus'). cfbWidenPreProb is the
       // un-widened offered prob, so the control-price counterfactual is
       // recoverable from every widen-arm row.
+      // Football multi-leg ceiling A/B: null out of scope / dark; 'control' | 'ceiling'.
+      fbCeilArm: _fbCeil.arm,
+      fbCeilApplied: _fbCeil.applied,
+      fbCeilPreProb: _fbCeil.preProb != null ? Math.round(_fbCeil.preProb * 100000) / 100000 : null,
+      fbCeilPct: _fbCeil.pct,
+      fbCeilSkip: _fbCeil.skip,
       cfbWidenArm: _cfbWiden.arm,
       cfbWidenScope: _cfbWiden.scope,
       cfbWidenApplied: _cfbWiden.applied,
