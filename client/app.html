@@ -313,8 +313,22 @@
     .parlay-detail .footer { display: flex; justify-content: space-between; padding-top: 6px; margin-top: 6px; border-top: 1px solid var(--border); color: var(--text2); }
     .parlay-detail .footer a { color: var(--accent); text-decoration: none; }
     /* EV fill / EV live (2026-10-22) */
-    .ev-book { padding: 8px; font-size: 12px; color: var(--text2); line-height: 1.5; }
-    .ev-book b { color: var(--text); font-weight: 600; }
+    /* Summary row under the Open / Settled tabs (2026-10-26), styled like the order book's positions summary */
+    .parlay-sum {
+      display: flex; flex-wrap: wrap; gap: 2px 14px;
+      margin: 0 12px; padding: 7px 10px; min-height: 30px;
+      font-size: 12px; color: var(--text2); line-height: 1.45;
+      background: var(--surface2); border: 1px solid var(--border); border-bottom: none;
+      font-variant-numeric: tabular-nums;
+    }
+    .parlay-sum:empty { display: none; }
+    .parlay-sum .sk { white-space: nowrap; }
+    .parlay-sum .sv { color: var(--text); font-weight: 600; margin-left: 4px; }
+    .parlay-sum .sv.ev-pos { color: var(--green); }
+    .parlay-sum .sv.ev-neg { color: var(--red); }
+    .parlay-sum .sv.ev-dim { color: var(--text2); font-weight: 400; }
+    .parlay-sum .note { white-space: nowrap; opacity: 0.75; }
+    .parlay-sum .grp { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 2px 14px; }
     .ev-pos { color: var(--green); }
     .ev-neg { color: var(--red); }
     .ev-dim { color: var(--text2); }
@@ -743,6 +757,7 @@
             Settled <span class="count" id="tab-count-settled">0</span>
           </button>
         </div>
+        <div class="parlay-sum" id="parlay-sum"></div>
         <div class="parlay-table-wrap" id="parlay-table-wrap" style="margin:0 12px 0;border-radius:0 0 8px 8px;">
           <div class="empty">Loading...</div>
         </div>
@@ -1231,6 +1246,15 @@
 
     // --- Sport filter chips ---
     let _activeSportFilter = 'all';
+    const _SPORT_LABELS = { all: 'All', basketball_nba: 'NBA', icehockey_nhl: 'NHL', baseball_mlb: 'MLB', tennis: 'Tennis', soccer: 'Soccer', mma_mixed_martial_arts: 'MMA', golf_matchups: 'Golf', basketball_wnba: 'WNBA', basketball_ncaab: 'NCAAB' };
+    // The April 2026 PX backfill rows name their sport in plain words; fold them into the same keys as every other
+    // row so one sport is one chip (2026-10-26, found while adding the summary row: 'Ice Hockey' had its own chip).
+    const _SPORT_FOLD = { 'ice hockey': 'icehockey_nhl', baseball: 'baseball_mlb', nba: 'basketball_nba', golf: 'golf_matchups', tennis: 'tennis', soccer: 'soccer' };
+    function _legSport(l) {
+      const s = l && l.sport;
+      if (!s) return null;
+      return _SPORT_FOLD[String(s).toLowerCase()] || s;
+    }
     function renderSportFilter(orders) {
       const sportCounts = { all: 0 };
       for (const o of orders) {
@@ -1238,11 +1262,11 @@
         if (o.meta && o.meta.phantom) continue;
         sportCounts.all++;
         const legs = o.legs || (o.meta && o.meta.legs) || [];
-        const sports = new Set(legs.map(l => l.sport).filter(Boolean));
+        const sports = new Set(legs.map(_legSport).filter(Boolean));
         for (const s of sports) sportCounts[s] = (sportCounts[s] || 0) + 1;
       }
       const sports = Object.keys(sportCounts).filter(k => k !== 'all').sort((a, b) => sportCounts[b] - sportCounts[a]);
-      const labels = { all: 'All', basketball_nba: 'NBA', icehockey_nhl: 'NHL', baseball_mlb: 'MLB', tennis: 'Tennis', soccer: 'Soccer', mma_mixed_martial_arts: 'MMA', golf_matchups: 'Golf', basketball_wnba: 'WNBA', basketball_ncaab: 'NCAAB' };
+      const labels = _SPORT_LABELS;
       const chips = ['all', ...sports].map(s => {
         const lbl = labels[s] || s.replace(/_/g, ' ');
         const cls = s === _activeSportFilter ? 'sport-chip active' : 'sport-chip';
@@ -1386,7 +1410,7 @@
     function parlayMatchesSport(o, sport) {
       if (sport === 'all') return true;
       const legs = o.legs || (o.meta && o.meta.legs) || [];
-      return legs.some(l => l.sport === sport);
+      return legs.some(l => _legSport(l) === sport);
     }
 
     // EV FILL / EV LIVE (2026-10-22, operator asked to see them on mobile).
@@ -1416,34 +1440,97 @@
     }
     function _evGame(o) {
       const gt = o.meta && o.meta.gameTime;
-      return gt && gt.finalizedAt && Number.isFinite(gt.ev) ? { ev: gt.ev, coverage: gt.coverage } : null;
+      if (gt && gt.finalizedAt && Number.isFinite(gt.ev)) return { ev: gt.ev, coverage: gt.coverage };
+      // Same rule as the viewer's Settled tab: an EV live with every leg frozen IS the game-time read.
+      const lv = o.meta && o.meta.evLive;
+      return lv && lv.frozenAt && Number.isFinite(lv.ev) ? { ev: lv.ev, coverage: lv.coverage } : null;
     }
     function _etTime(iso) {
       if (!iso) return '?';
       try { return new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }); } catch { return '?'; }
     }
-    // Open-book line: EV fill on every open fill; EV live vs EV fill on the SAME graded fills.
-    function _evBookHtml(openList) {
-      let evF = 0, evL = 0, evFG = 0, nG = 0, nAll = 0;
-      for (const o of openList) {
-        const ef = _evFill(o);
-        if (ef == null) continue;
-        nAll++; evF += ef;
-        const lv = _evLive(o);
-        if (lv) { nG++; evL += lv.ev; evFG += ef; }
+    // SUMMARY ROW (2026-10-26, operator: "Replace it with something similar to the summary stats row on the order
+    // book app's Resting/Filled/Settled tabs ... stats that dynamically update to include only the stats for filtered
+    // positions"). Replaces the "Open book: EV fill ... since fill" line. Same rules as the order book's row:
+    //  - every figure sums the parlays the tab holds after the sport chip and the search, ALL pages (not only the
+    //    rows drawn so far);
+    //  - EV fill and EV live are LIKE FOR LIKE: summed over the SAME parlays (those carrying both, with at least one
+    //    leg re-read), each shown as $ and as % of those parlays' risk, on their own line, led by "On N graded:" when
+    //    some parlays carry no grade yet. On Settled that line also carries the realized P&L of those same parlays
+    //    (review 2026-10-26: all-time P&L since April beside EV on the ~6% graded since 10/14 invited a false read);
+    //  - Open: EV live = the current re-grade (meta.evLive). Settled: EV live = the game-time read (_evGame);
+    //  - our side throughout: risk = confirmed stake, P&L > 0 = we won.
+    function _sumMoney(v, signed) {
+      if (v == null || !Number.isFinite(v)) return '-';
+      const x = Math.abs(v), dec = x < 100 ? 2 : 0;
+      const a = '$' + x.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+      return v < 0 ? '−' + a : (signed && v > 0 ? '+' + a : a);
+    }
+    function _sumPct(e) {
+      if (e == null || !Number.isFinite(e)) return '';
+      return (e < 0 ? '−' : '+') + Math.abs(100 * e).toFixed(1) + '%';
+    }
+    function _sumCell(label, val, cls, title) {
+      return '<span class="sk"' + (title ? ' title="' + title + '"' : '') + '>' + label
+        + '<span class="sv' + (cls ? ' ' + cls : '') + '">' + val + '</span></span>';
+    }
+    function _sumDate(iso) {
+      if (!iso) return null;
+      try { return new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric' }); } catch { return null; }
+    }
+    function _parlaySummary(list, tab) {
+      const settled = tab === 'settled';
+      let risk = 0, toWin = 0, pnl = 0, pnlN = 0, oldest = null;
+      let efAll = 0, efAllBase = 0, efAllN = 0;          // EV fill on every parlay that has one
+      let ef = 0, ev = 0, evBase = 0, evN = 0, pnlG = 0; // EV fill, EV live and P&L on the SAME graded parlays
+      for (const o of list) {
+        const stake = Number(o.confirmedStake) || 0;
+        const p = Number(o.pnl), hasPnl = o.pnl != null && Number.isFinite(p);
+        risk += stake;
+        if (!settled) toWin += calcToWin(stake, o.confirmedOdds || o.offeredOdds);
+        if (settled) {
+          if (hasPnl) { pnl += p; pnlN++; }
+          const t = o.settledAt || o.confirmedAt;
+          if (t && (!oldest || t < oldest)) oldest = t;
+        }
+        const f = _evFill(o);
+        if (f == null) continue;
+        efAll += f; efAllBase += stake; efAllN++;
+        const g = settled ? _evGame(o) : _evLive(o);
+        // graded = at least one leg actually re-read (coverage > 0), on both tabs; a settled one also needs its P&L
+        if (!g || !(g.coverage > 0) || (settled && !hasPnl)) continue;
+        ef += f; ev += g.ev; evBase += stake; evN++;
+        if (settled) pnlG += p;
       }
-      if (!nAll) return '';
-      const d = evL - evFG;
-      let h = '<div class="ev-book"><b>Open book</b> &middot; EV fill <span class="' + _evCls(evF) + '">' + _evMoney(evF) + '</span>';
-      if (nG) {
-        h += ' &middot; EV live <span class="' + _evCls(evL) + '">' + _evMoney(evL) + '</span>'
-          + '<br>vs ' + _evMoney(evFG) + ' at fill on the same ' + nG + ' graded &middot; <span class="' + _evCls(d) + '">' + _evMoney(d)
-          + (evFG ? ' (' + (d >= 0 ? '+' : '') + (100 * d / Math.abs(evFG)).toFixed(1) + '%)' : '') + ' since fill</span>';
-      } else {
-        h += ' &middot; EV live: not graded yet';
+      const n = list.length;
+      const cnt = (x) => x.toLocaleString('en-US');
+      const pct = (amt, base) => base > 0 ? ' ' + _sumPct(amt / base) : '';
+      const sportLbl = _activeSportFilter !== 'all' ? (_SPORT_LABELS[_activeSportFilter] || _activeSportFilter.replace(/_/g, ' ')) : null;
+      // line 1: what is in view
+      let h = _sumCell('Parlays', cnt(n));
+      if (sportLbl) h += '<span class="note">any ' + sportLbl + ' leg</span>';
+      if (settled && oldest) h += '<span class="note">since ' + _sumDate(oldest) + '</span>';
+      h += _sumCell('Risk', _sumMoney(risk));
+      if (!settled) h += _sumCell('To win', _sumMoney(toWin));
+      const partial = evN > 0 && evN < n;
+      if (settled && pnlN) h += _sumCell((partial ? 'P&amp;L (all)' : 'P&amp;L') + (pnlN < n ? ' ' + cnt(pnlN) : ''), _sumMoney(pnl, true), _evCls(pnl));
+      // line 2: EV fill vs EV live (and, settled, the P&L) on the SAME graded parlays
+      const liveTitle = settled ? 'EV live at game time: every leg frozen 90 s before its own start'
+        : 'EV live: every leg re-graded at current prices, each frozen 90 s before its own start';
+      let g2 = '';
+      if (evN) {
+        if (partial) g2 += '<span class="note">On ' + cnt(evN) + ' graded:</span>';
+        g2 += _sumCell('EV (filled)', _sumMoney(ef, true) + pct(ef, evBase), _evCls(ef), 'EV at confirm');
+        g2 += _sumCell('EV (live)', _sumMoney(ev, true) + pct(ev, evBase), _evCls(ev), liveTitle);
+        if (settled) g2 += _sumCell('P&amp;L', _sumMoney(pnlG, true) + pct(pnlG, evBase), _evCls(pnlG), 'Realized P&L on the same graded parlays');
+      } else if (efAllN) {
+        // Nothing graded yet, so there is nothing to compare: EV fill alone, on the parlays that carry it.
+        if (efAllN < n) g2 += '<span class="note">On ' + cnt(efAllN) + ' with EV:</span>';
+        g2 += _sumCell('EV (filled)', _sumMoney(efAll, true) + pct(efAll, efAllBase), _evCls(efAll), 'EV at confirm');
+        g2 += _sumCell('EV (live)', settled ? 'no game-time read' : 'not graded yet', 'ev-dim', liveTitle);
       }
-      if (nAll - nG > 0) h += ' &middot; ' + (nAll - nG) + ' not yet graded';
-      return h + '</div>';
+      if (g2) h += '<span class="grp">' + g2 + '</span>';
+      return h;
     }
 
     function renderParlays(orders) {
@@ -1474,6 +1561,9 @@
       if (sectionBadge) sectionBadge.textContent = `${openList.length} open · ${settledList.length} settled`;
 
       const fullList = _activeParlayTab === 'open' ? openList : settledList;
+
+      const sumEl = document.getElementById('parlay-sum');
+      if (sumEl) sumEl.innerHTML = fullList.length ? _parlaySummary(fullList, _activeParlayTab) : '';
 
       if (fullList.length === 0) {
         el.innerHTML = '<div class="empty">No ' + _activeParlayTab + ' parlays' + (_parlaySearch ? ' matching "' + _parlaySearch + '"' : '') + '</div>';
@@ -1604,7 +1694,7 @@
         return row;
       }).join('');
 
-      el.innerHTML = (_activeParlayTab === 'open' ? _evBookHtml(openList) : '') + html;
+      el.innerHTML = html;
     }
 
     // --- Daily Volume & P&L (chart + month→day→parlay table) ---
