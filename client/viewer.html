@@ -3842,6 +3842,7 @@
         <td colspan="9" style="padding: 12px 16px;">
           <div style="font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 8px;">PARLAY LEGS</div>
           ${buildLegTable(legs, { vig: order.meta?.vig || order.vig || 0, hideBookOdds: true })}
+          ${evBreakdownHtml(order, false)}
           <div style="margin-top: 8px; font-size: 11px; color: var(--text3);">
             Vig: ${((order.meta?.vig || order.vig || 0) * 100).toFixed(1)}% · Max Risk: $${order.maxRisk || '-'} · Decimal: ${order.meta?.decimalOdds || '-'}x · ID: ${order.parlayId || '-'}
           </div>
@@ -4128,6 +4129,7 @@
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface3);">';
       html += '<td colspan="9" style="padding:12px 16px;">';
       html += buildLegTable(sLegs.length > 0 ? sLegs : legs, { pad: '2px 6px', vig: order.meta?.vig || order.vig || 0, hideBookOdds: true });
+      html += evBreakdownHtml(order, true);
       html += '<div style="margin-top:4px; font-size:10px; color:var(--text3);">ID: ' + (order.parlayId || '-') + '</div>';
       html += '</td></tr>';
     }
@@ -7748,6 +7750,68 @@
     return '<div style="padding:6px 12px; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border);">'
       + 'Open book: <b>EV fill</b> ' + fmtPnl(evF) + roi(evF, rF)
       + ' &middot; <b>EV live</b> ' + (nG ? fmtPnl(evL) + roi(evL, rL) : '-') + '</div>';
+  }
+  // EV FILL -> EV LIVE BREAKDOWN (2026-10-27, operator: "I need in the dashboard more transparency on what has
+  // caused changes in the EV live; or what each leg's contribution is to the overall EV"). One row per leg: fair at
+  // fill vs fair now (open: meta.evLive; settled: game time, meta.gameTime else a frozen evLive), the move, and the
+  // leg's share of the EV change. EV is linear in the parlay fair (dEV/dfair = (EV live - EV fill) / (fair live -
+  // fair fill), i.e. -(our risk + bettor stake)) and the parlay fair is fill fair x product of (leg live / leg fill),
+  // so leg i's impact = dEV/dfair x fill fair x (ratio_i - 1); what is left is the legs moving TOGETHER (the
+  // cross-term), shown on its own row so the rows always sum to the total. A leg not re-read counts at its fill fair.
+  function evBreakdownHtml(o, settled) {
+    const m = o.meta || {};
+    const evF = Number(o.expectedValue != null ? o.expectedValue : m.expectedValue);
+    let rec = null;
+    if (settled) {
+      const gt = m.gameTime, lv = m.evLive;
+      if (gt && gt.finalizedAt && Number.isFinite(gt.ev) && gt.legs) rec = gt;
+      else if (lv && lv.frozenAt && Number.isFinite(lv.ev) && lv.legs) rec = lv;
+    } else {
+      const lv = m.evLive;
+      if (lv && Number.isFinite(lv.ev) && lv.coverage > 0 && lv.legs) rec = lv;
+    }
+    const F0 = Number(m.fairParlayProb), F1 = rec ? Number(rec.fairProb) : NaN;
+    if (!rec || !Number.isFinite(evF) || !(F0 > 0) || !(F1 > 0)) return '';
+    const dTot = rec.ev - evF;
+    const K = Math.abs(F1 - F0) > 1e-9 ? dTot / (F1 - F0) : 0;
+    const fillMeta = {};
+    for (const ml of (m.legs || [])) if (ml && ml.lineId) fillMeta[ml.lineId] = ml;
+    const SRC = { rfq: 'odds feed', ob_direct: 'order book', ob_complement: 'order book', rfq_adverse_over_ob: 'odds feed (worse than OB)' };
+    const srcTxt = (s, age, mirror) => (mirror ? 'book mirror' : (SRC[s] || s || '?')) + (Number.isFinite(age) ? ' · ' + Math.round(age) + 's old' : '');
+    const pct = (p) => Number.isFinite(p) ? (100 * p).toFixed(1) + '%' : '-';
+    const money = (v) => '<span class="' + (v >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(v) + '</span>';
+    const td = 'padding:2px 8px;', tdr = 'padding:2px 8px; text-align:right;';
+    let sum = 0, rows = '';
+    const scored = (o.legs || []).map(l => {
+      const id = l.lineId, g = rec.legs[id], fm = fillMeta[id] || l;
+      const f0 = Number((g && g.fillFair) || l.fairProb || fm.fairProb);
+      const f1 = g && Number.isFinite(g.fair) ? g.fair : null;
+      const r = f1 != null && f0 > 0 ? f1 / f0 : 1;
+      const imp = K * F0 * (r - 1);
+      sum += imp;
+      return { l, g, fm, f0, f1, imp };
+    }).sort((a, b) => a.imp - b.imp);
+    for (const { l, g, fm, f0, f1, imp } of scored) {
+      const sel = (l.team || l.selection || '?') + (l.line != null ? ' ' + ((/spread/.test(l.market || '') && l.line > 0) ? '+' : '') + l.line : '');
+      const ctx = [l.marketName || l.market, l.pxEventName].filter(Boolean).join(' · ');
+      const mv = f1 != null && f0 > 0 ? 100 * (f1 - f0) : null;
+      const fillAge = Number(fm.inputAgeSec != null ? fm.inputAgeSec : (g && g.inputAgeAtFill));
+      const fillSrc = srcTxt(fm.fairSource || (g && g.fairSourceAtFill), fillAge, fm.bookPriceOverride != null);
+      rows += '<tr><td style="' + td + '"><b>' + sel + '</b> <span style="color:var(--text3); font-size:10px;">' + ctx + '</span></td>'
+        + '<td style="' + tdr + '">' + pct(f0) + ' <span style="color:var(--text3); font-size:10px;">' + fillSrc + '</span></td>'
+        + '<td style="' + tdr + '">' + (f1 != null ? pct(f1) + ' <span style="color:var(--text3); font-size:10px;">' + srcTxt(g.src, g.ageSec, g.mirror) + (g.frozen ? ' · frozen' : '') + '</span>' : '<span style="color:var(--text3);">not re-read</span>') + '</td>'
+        + '<td style="' + tdr + '" class="' + (mv == null ? '' : (mv > 0.05 ? 'negative' : (mv < -0.05 ? 'positive' : ''))) + '">' + (mv == null ? '-' : (mv >= 0 ? '+' : '') + mv.toFixed(1) + 'pp') + '</td>'
+        + '<td style="' + tdr + '">' + money(imp) + '</td></tr>';
+    }
+    const resid = dTot - sum;
+    if (Math.abs(resid) >= 0.01) rows += '<tr><td style="' + td + ' color:var(--text3);" colspan="4">Legs moving together (combined effect beyond each leg alone)</td><td style="' + tdr + '">' + money(resid) + '</td></tr>';
+    const liveLbl = settled ? 'Fair at game time' : 'Fair live';
+    return '<div style="margin-top:10px; font-size:12px; font-weight:600; color:var(--text2);">EV FILL &rarr; ' + (settled ? 'EV AT GAME TIME' : 'EV LIVE') + ': '
+      + money(evF) + ' &rarr; ' + money(rec.ev) + ' (' + money(dTot) + ')</div>'
+      + '<div style="font-size:10px; color:var(--text3); margin:2px 0 4px;">Parlay fair ' + pct(F0) + ' &rarr; ' + pct(F1)
+      + (K ? ' · each +1pp on the parlay fair = ' + fmtPnl(K / 100) + ' of EV' : '') + '. A leg\'s fair rising (red) = the bettor\'s side got likelier = EV lost for us.</div>'
+      + '<table style="width:100%; font-size:12px;"><tr style="color:var(--text3);"><th style="' + td + ' text-align:left;">Leg (bettor side)</th><th style="' + tdr + '">Fair at fill</th><th style="' + tdr + '">' + liveLbl + '</th><th style="' + tdr + '">Move</th><th style="' + tdr + '">EV impact</th></tr>'
+      + rows + '</table>';
   }
   function fmtPnl(n) { return n != null && !isNaN(n) ? (n >= 0 ? '+$' : '-$') + fmt(Math.abs(n)) : '-'; }
 
