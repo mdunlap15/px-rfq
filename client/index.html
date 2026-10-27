@@ -4389,20 +4389,20 @@
     // the legs re-graded every 5 min (every tick inside 30 min of start), each
     // leg frozen 90 s before its own start — services/gametime-ev.js.
     {
-      let _evF = 0, _evL = 0, _evFG = 0, _nG = 0, _nAll = 0;
+      // EV fill and EV live, each as $ and as % of its own fills' risk (the order book's table format).
+      let _evF = 0, _evL = 0, _rF = 0, _rL = 0, _nG = 0;
       for (const o of filtered) {
         const ef = Number(o.expectedValue != null ? o.expectedValue : (o.meta && o.meta.expectedValue));
         if (!Number.isFinite(ef)) continue;
-        _nAll++; _evF += ef;
+        const stake = Number(o.confirmedStake) || 0;
+        _evF += ef; _rF += stake;
         const lv = o.meta && o.meta.evLive;
-        if (lv && Number.isFinite(lv.ev) && lv.coverage > 0) { _nG++; _evL += lv.ev; _evFG += ef; }
+        if (lv && Number.isFinite(lv.ev) && lv.coverage > 0) { _nG++; _evL += lv.ev; _rL += stake; }
       }
-      const _d = _evL - _evFG;
+      const _roi = (ev, r) => r > 0 ? ' (' + (ev >= 0 ? '+' : '') + (100 * ev / r).toFixed(1) + '%)' : '';
       html += '<div style="padding:6px 12px; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border);">'
-        + 'Open book: <b>EV fill</b> ' + fmtPnl(_evF) + ' &middot; <b>EV live</b> ' + (_nG ? fmtPnl(_evL) : '-')
-        + (_nG ? ' vs ' + fmtPnl(_evFG) + ' at fill on the same ' + _nG + ' graded fills &middot; <span class="' + (_d >= 0 ? 'positive' : 'negative') + '">'
-          + fmtPnl(_d) + (_evFG ? ' (' + (_d >= 0 ? '+' : '') + (100 * _d / Math.abs(_evFG)).toFixed(1) + '%)' : '') + ' since fill</span>' : '')
-        + (_nAll - _nG > 0 ? ' &middot; ' + (_nAll - _nG) + ' not yet graded' : '')
+        + 'Open book: <b>EV fill</b> ' + fmtPnl(_evF) + _roi(_evF, _rF)
+        + ' &middot; <b>EV live</b> ' + (_nG ? fmtPnl(_evL) + _roi(_evL, _rL) : '-')
         + '</div>';
     }
 

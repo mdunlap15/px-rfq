@@ -7734,20 +7734,20 @@
     h += 'All ' + nAll + ' settled in view: EV fill ' + c(evFAll) + ' &middot; P&amp;L ' + c(pnlAll) + (n < nAll ? ' &middot; ' + (nAll - n) + ' without a game-time read' : '');
     return h + '</div>';
   }
+  // Open book: EV fill and EV live, each as $ and as % of its own fills' risk (the order book's table format).
   function _vEvBookHtml(list) {
-    let evF = 0, evL = 0, evFG = 0, nG = 0, nAll = 0;
+    let evF = 0, evL = 0, rF = 0, rL = 0, nG = 0, nAll = 0;
     for (const o of list) {
       const f = _vEvFill(o); if (f == null) continue;
-      nAll++; evF += f;
-      const l = _vEvLive(o); if (l != null) { nG++; evL += l; evFG += f; }
+      const stake = Number(o.confirmedStake) || 0;
+      nAll++; evF += f; rF += stake;
+      const l = _vEvLive(o); if (l != null) { nG++; evL += l; rL += stake; }
     }
     if (!nAll) return '';
-    const d = evL - evFG;
+    const roi = (ev, r) => r > 0 ? ' (' + (ev >= 0 ? '+' : '') + (100 * ev / r).toFixed(1) + '%)' : '';
     return '<div style="padding:6px 12px; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border);">'
-      + 'Open book: <b>EV fill</b> ' + fmtPnl(evF) + ' &middot; <b>EV live</b> ' + (nG ? fmtPnl(evL) : '-')
-      + (nG ? ' vs ' + fmtPnl(evFG) + ' at fill on the same ' + nG + ' graded &middot; <span class="' + (d >= 0 ? 'positive' : 'negative') + '">' + fmtPnl(d)
-        + (evFG ? ' (' + (d >= 0 ? '+' : '') + (100 * d / Math.abs(evFG)).toFixed(1) + '%)' : '') + ' since fill</span>' : '')
-      + (nAll - nG > 0 ? ' &middot; ' + (nAll - nG) + ' not yet graded' : '') + '</div>';
+      + 'Open book: <b>EV fill</b> ' + fmtPnl(evF) + roi(evF, rF)
+      + ' &middot; <b>EV live</b> ' + (nG ? fmtPnl(evL) + roi(evL, rL) : '-') + '</div>';
   }
   function fmtPnl(n) { return n != null && !isNaN(n) ? (n >= 0 ? '+$' : '-$') + fmt(Math.abs(n)) : '-'; }
 
