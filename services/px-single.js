@@ -185,8 +185,12 @@ async function fetchBalance() {
 
 // Bulk place wagers — PX accepts up to 20 per call. Caller is responsible
 // for batching; this function makes ONE API call per batch.
-// orders shape: [{ line_id, odds (american int), stake (number), external_id (string) }, ...]
+// orders shape: [{ line_id, odds (american int), stake (number), external_id (string), order_strategy? }, ...]
+// order_strategy (v4 only): 'ALO' = Add Liquidity Only -- PX never lets the order TAKE; an order that would match on
+// entry is cancelled (open -> wiped) instead of filling, so every fill is a MAKER fill (maker fee, not the 3.5x taker
+// fee from 2026-11-05/12). 'fillOrKill' is the other documented value. Anything else is dropped here.
 // Returns { succeed_wagers: [...], failed_wagers: [...] }.
+const ORDER_STRATEGIES = new Set(['ALO', 'fillOrKill']);
 async function placeMultipleWagers(orders) {
   if (!Array.isArray(orders) || orders.length === 0) return { succeed_wagers: [], failed_wagers: [] };
   if (orders.length > 20) throw new Error('px-single.placeMultipleWagers: max 20 per call');
@@ -201,6 +205,7 @@ async function placeMultipleWagers(orders) {
       price: o.odds,
       quantity: o.stake,
       external_id: o.external_id,
+      ...(ORDER_STRATEGIES.has(o.order_strategy) ? { order_strategy: o.order_strategy } : {}),
     } : {
       line_id: o.line_id,
       odds: o.odds,

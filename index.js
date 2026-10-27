@@ -6627,6 +6627,7 @@ function startStatusServer() {
       if (!Number.isInteger(o && o.odds)) errs.push(`offer[${i}]: odds must be an integer`);
       if (!(Number.isFinite(o && o.stake) && o.stake > 0)) errs.push(`offer[${i}]: stake must be > 0`);
       else if (o.stake > MANUAL_OFFER_MAX_STAKE) errs.push(`offer[${i}]: stake ${o.stake} > cap ${MANUAL_OFFER_MAX_STAKE}`);
+      if (o && o.order_strategy != null && !['ALO', 'fillOrKill'].includes(o.order_strategy)) errs.push(`offer[${i}]: order_strategy must be ALO or fillOrKill`);
       if (!o || typeof o.external_id !== 'string' || !o.external_id) errs.push(`offer[${i}]: missing external_id`);
       else if (seen.has(o.external_id)) errs.push(`offer[${i}]: duplicate external_id`);
       else seen.add(o.external_id);
@@ -6671,7 +6672,8 @@ function startStatusServer() {
       const succeed = []; const failed = [];
       for (let i = 0; i < offers.length; i += 20) {
         await _msleep(MANUAL_PACE_MS); // stay under PX's ~2 req/s order limit (and space from the balance read)
-        const batch = offers.slice(i, i + 20).map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id }));
+        const batch = offers.slice(i, i + 20).map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id,
+          ...(o.order_strategy ? { order_strategy: o.order_strategy } : {}) }));
         let r = null;
         for (let attempt = 0; attempt < 3; attempt++) {
           try { r = await pxs.placeMultipleWagers(batch); break; }
