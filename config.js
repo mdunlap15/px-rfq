@@ -1021,6 +1021,11 @@ const config = {
     twoLegWidenRelPct: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_REL_PCT); return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 7; })(),
     twoLegWidenMinFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.30; })(),
     twoLegWidenMaxFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MAX_FAIR); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.50; })(),
+    // 2-LEG SELECTION FACTOR A/B (2026-10-26, pricer.js). Percent 0 = dark.
+    twoLegFactorPercent: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
+    twoLegFactorMult: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MULT); return Number.isFinite(v) && v >= 1 ? Math.min(1.5, v) : 1.10; })(),
+    twoLegFactorMinFair: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.30; })(),
+    twoLegFactorMaxFair: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MAX_FAIR); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.50; })(),
     // FOOTBALL MULTI-LEG MARGIN CEILING A/B (2026-10-24, pricer.js). Percent 0 = dark.
     footballCeilingPercent: (() => { const v = parseFloat(process.env.FOOTBALL_CEILING_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     footballCeiling3LegPct: (() => { const v = parseFloat(process.env.FOOTBALL_CEILING_3LEG_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(50, v) : 4; })(),

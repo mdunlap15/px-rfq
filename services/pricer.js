@@ -3893,6 +3893,43 @@ function priceParlay(legs, opts = {}) {
   // leg is ~2.4pp under the raw implied; a flipped selection is 10pp+).
   // Arm = md5('fbc:'+parlayId), recorded whether or not it binds.
   // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // 2-LEG SELECTION FACTOR A/B (2026-10-26) — see config.pricing.twoLegFactorPercent.
+  // Operator: "Build it as a 50/50 test at 1.10." Measured 9/25-10/24 on our own
+  // settled fills (blocked creators out): 2-leg parlays with joint fair in
+  // [30%, 50%) hit 1.15x the product of their leg fairs (z 2.2, -$9.8K, -9.8%
+  // ROI on $100K risk), across 292 accounts (1.14x without the worst five),
+  // while 3+ leg parlays graded 1.00 and single legs ~0.996. The leg prices are
+  // right; bettors SELECT 2-leg combinations that win more often than an
+  // independent product says. Factor arm: fair AND offered x mult, so the EV at
+  // fill / EV live / game-time EV carry the measured selection, and the margin
+  // over that honest fair is unchanged. Arm = md5('2lf:'+parlayId), recorded
+  // whether or not it binds; the confirm reprice lands in the same arm, so the
+  // drift check compares like with like. meta.twoLegFactorPreFair keeps the raw
+  // product for calibration.
+  // -------------------------------------------------------------------
+  const _2lf = { arm: null, applied: false, mult: null, preFair: null, preProb: null };
+  {
+    const _pct = config.pricing.twoLegFactorPercent || 0;
+    const lo = config.pricing.twoLegFactorMinFair ?? 0.30, hi = config.pricing.twoLegFactorMaxFair ?? 0.50;
+    if (_pct > 0 && opts.parlayId && !opts.fairOnly && pricedLegs.length === 2
+        && fairParlayProb >= lo && fairParlayProb < hi) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('2lf:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _2lf.arm = inArm ? 'factor' : 'control';
+      const mult = Math.min(1.5, Math.max(1, config.pricing.twoLegFactorMult ?? 1.10));
+      if (inArm && mult > 1 && offeredImpliedProb > 0) {
+        _2lf.preFair = fairParlayProb; _2lf.preProb = offeredImpliedProb; _2lf.mult = mult; _2lf.applied = true;
+        fairParlayProb = Math.min(0.99, fairParlayProb * mult);
+        offeredImpliedProb = Math.min(0.99, offeredImpliedProb * mult);
+        log.debug('Pricing', `2-leg factor x${mult}: fair ${(100 * _2lf.preFair).toFixed(3)}% -> ${(100 * fairParlayProb).toFixed(3)}%, offered ${(100 * _2lf.preProb).toFixed(3)}% -> ${(100 * offeredImpliedProb).toFixed(3)}%`);
+      }
+    }
+  }
+
   const _fbCeil = { arm: null, applied: false, preProb: null, pct: null, skip: null };
   {
     const _pct = config.pricing.footballCeilingPercent || 0;
@@ -4003,7 +4040,7 @@ function priceParlay(legs, opts = {}) {
   {
     const lo = config.pricing.twoLegWidenMinFair != null ? config.pricing.twoLegWidenMinFair : 0.30;
     const hi = config.pricing.twoLegWidenMaxFair != null ? config.pricing.twoLegWidenMaxFair : 0.50;
-    const inScope = pricedLegs.length === 2 && fairParlayProb >= lo && fairParlayProb < hi && !_cfbWiden.applied;
+    const inScope = pricedLegs.length === 2 && fairParlayProb >= lo && fairParlayProb < hi && !_cfbWiden.applied && !_2lf.applied;
     const _pct = config.pricing.twoLegWidenPercent || 0;
     if (inScope && opts.parlayId && _pct > 0) {
       let inArm = _pct >= 100;
@@ -4629,6 +4666,12 @@ function priceParlay(legs, opts = {}) {
       // 'widen' in scope (scope 'sgp' | 'legs4plus'). cfbWidenPreProb is the
       // un-widened offered prob, so the control-price counterfactual is
       // recoverable from every widen-arm row.
+      // 2-leg selection factor A/B: null out of scope / dark; 'control' | 'factor'.
+      twoLegFactorArm: _2lf.arm,
+      twoLegFactorApplied: _2lf.applied,
+      twoLegFactorMult: _2lf.mult,
+      twoLegFactorPreFair: _2lf.preFair != null ? Math.round(_2lf.preFair * 1e6) / 1e6 : null,
+      twoLegFactorPreProb: _2lf.preProb != null ? Math.round(_2lf.preProb * 1e5) / 1e5 : null,
       // Football multi-leg ceiling A/B: null out of scope / dark; 'control' | 'ceiling'.
       fbCeilArm: _fbCeil.arm,
       fbCeilApplied: _fbCeil.applied,
