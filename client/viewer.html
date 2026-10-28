@@ -8793,6 +8793,30 @@
     // settle events on our wins), so summing it overstates P&L as gross-wins.
     // Zero buffer pnl/settled, then set net pnl per day from the Supabase series.
     // Mirrors index.html renderChartDailyVolume so /viewer matches the main app.
+    // Fills / My Risk / To Win for days the loaded orders do not reach (2026-10-28,
+    // operator: the app's Analytics tab must keep "historic daily P&L" beyond 30
+    // days, day totals only when the wagers themselves are not loaded). Source:
+    // GET /daily-volume, the server-side rollup over every fill. Fills a day with
+    // no loaded orders, or that the loaded orders cover only in part (a capped
+    // /orders payload holds the most recent ~800 settled tickets, so older days
+    // come through short). Uses the rollup's REAL-fill fields (fills / fillRisk /
+    // fillToWin: settled, or confirmed with an orderUuid and not a phantom) — the
+    // same filter as this chart — so a fully loaded day reads identically.
+    const _dvVol = (window._dvDailyVolumePayload && Array.isArray(window._dvDailyVolumePayload.daily)) ? window._dvDailyVolumePayload.daily : null;
+    if (_dvVol && _dvVol.length) {
+      for (const row of _dvVol) {
+        const day = row.date;
+        if (!day) continue;
+        if (dvFromMs && new Date(day + 'T23:59:59.999').getTime() < dvFromMs) continue;
+        if (dvToMs && new Date(day + 'T00:00:00').getTime() > dvToMs) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        const d = byDay[day];
+        if (row.fills != null && row.fills > (d.count || 0)) {
+          d.count = row.fills; d.risk = row.fillRisk; d.toWin = row.fillToWin;
+        }
+      }
+    }
+
     const _dvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
     // Empty-array guard: a timed-out /daily-pnl is a truthy [] that would zero
     // pnl/settled and never repopulate (blank $0). Keep the buffer pnl then.
@@ -8860,9 +8884,9 @@
     for (let i = 0; i < days.length; i++) cumulMap[days[i]] = cumul[i];
 
     // Y axis must accommodate positive (risk, +P&L, +cumul) and negative (-P&L, -cumul)
-    const maxRisk = Math.max(0, ...days.map(d => byDay[d].risk));
-    const maxPnlPos = Math.max(0, ...days.map(d => byDay[d].pnl));
-    const minPnlNeg = Math.min(0, ...days.map(d => byDay[d].pnl));
+    const maxRisk = Math.max(0, ...days.map(d => byBucket[d].risk));
+    const maxPnlPos = Math.max(0, ...days.map(d => byBucket[d].pnl));
+    const minPnlNeg = Math.min(0, ...days.map(d => byBucket[d].pnl));
     const maxCumul = Math.max(0, ...cumul);
     const minCumul = Math.min(0, ...cumul);
     const yMax = Math.max(1, maxRisk, maxPnlPos, maxCumul);
@@ -9147,6 +9171,7 @@
             svg += '</td></tr>';
           }
         }
+        if (!rows.length) svg += '<tr><td colspan="7" style="padding:6px 10px; color:var(--text3);">Day totals only. Individual wagers for this day are not loaded in the app; the full list is on the desktop dashboard.</td></tr>';
         svg += '</table></td></tr>';
       }
       svg += '</table></td></tr>';
@@ -14037,6 +14062,23 @@
     const ordersP   = fetchJSON(_viewerNeedFull ? '/orders' : '/orders?settled=800').catch(err => ({ _err: err }));
     window._viewerOrdersCapped = !_viewerNeedFull;
     const bankrollP = fetchBankroll().catch(() => null);
+    // Daily history for the Analytics chart + table (2026-10-28). These two
+    // fetches lived only in refreshDashboard, which the viewer never runs (it
+    // throws on a missing #refresh-indicator), so the viewer's Analytics tab
+    // only ever saw the capped /orders payload: ~30 days. Server-side rollups
+    // over the full order history; throttled to >= 90 s like the desktop app.
+    if (!window._dvDailyPnlPayload || (Date.now() - (window._dvPnlFetchedAt || 0)) > 90000) {
+      window._dvPnlFetchedAt = Date.now();
+      const _dvRerender = () => { if (_lastViewerOrders) safeRender(() => renderChartDailyVolume(_lastViewerOrders.recentOrders || []), 'chartDailyVolume(history)'); };
+      fetchJSON('/daily-volume?days=400').then(v => { window._dvDailyVolumePayload = v; _dvRerender(); }).catch(() => {});
+      fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
+        // Partial series (history still loading after a DB-down boot): keep the
+        // last good payload and retry on the next refresh (2026-10-11).
+        if (d && d.partial) { window._dvPnlFetchedAt = 0; if (window._dvDailyPnlPayload) return; }
+        window._dvDailyPnlPayload = d;
+        _dvRerender();
+      }).catch(() => { window._dvPnlFetchedAt = 0; });
+    }
 
     let statusOk = false, ordersOk = false;
     try {

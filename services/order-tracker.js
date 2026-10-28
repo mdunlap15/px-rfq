@@ -3738,7 +3738,7 @@ function _rollupDailyVolume(list, days = 400) {
     const ms = new Date(ts).getTime();
     if (!Number.isFinite(ms) || ms < cutoff) continue;
     const day = new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    if (!byDay[day]) byDay[day] = { date: day, count: 0, risk: 0, toWin: 0 };
+    if (!byDay[day]) byDay[day] = { date: day, count: 0, risk: 0, toWin: 0, fills: 0, fillRisk: 0, fillToWin: 0 };
     const d = byDay[day];
     d.count++;
     const stake = Number(o.confirmedStake || 0);
@@ -3747,7 +3747,16 @@ function _rollupDailyVolume(list, days = 400) {
     // at American odds it is stake × 100 / |odds|. Sub-100 odds are not a real
     // PX price and contribute 0 rather than a divide-by-tiny blowup.
     const odds = Math.abs(Number(o.offeredOdds || 0));
-    if (stake && odds >= 100) d.toWin += stake * 100 / odds;
+    const toWin = (stake && odds >= 100) ? stake * 100 / odds : 0;
+    d.toWin += toWin;
+    // fills / fillRisk / fillToWin: REAL fills only, the Analytics chart's
+    // filter (settled, or confirmed with an orderUuid and not a phantom). The
+    // chart takes a day's totals from these when the loaded orders do not
+    // cover it (2026-10-28: the viewer loads ~30 days of orders, and April
+    // carries 1,311 phantom confirms that count/risk include).
+    const real = String(o.status).startsWith('settled_')
+      || (!!o.orderUuid && !isOrderStalePhantom(o));
+    if (real) { d.fills++; d.fillRisk += stake; d.fillToWin += toWin; }
   }
   return Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date));
 }

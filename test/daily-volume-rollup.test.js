@@ -116,3 +116,16 @@ test('output is sorted ascending by date', () => {
   ], WIDE);
   assert.deepEqual(rows.map(r => r.date), ['2026-08-10', '2026-08-11', '2026-08-12']);
 });
+
+test('fills / fillRisk / fillToWin count REAL fills only (the Analytics chart filter)', () => {
+  const rows = _rollupDailyVolume([
+    mk({ status: 'settled_won' }),                                   // real
+    mk({ orderUuid: 'u1', confirmedStake: 200, legs: [{ startTime: new Date(Date.now() + 3600e3).toISOString() }] }), // real, open
+    mk({ orderUuid: 'u2', meta: { phantom: true } }),                // PX-flagged phantom
+    mk({}),                                                          // no orderUuid, >10 min old
+  ], WIDE);
+  assert.equal(rows[0].count, 4, 'count keeps every confirmed/settled row (Orders-tab table)');
+  assert.equal(rows[0].fills, 2);
+  assert.equal(rows[0].fillRisk, 300);
+  assert.ok(Math.abs(rows[0].fillToWin - 150) < 1e-9, 'fillToWin was ' + rows[0].fillToWin);
+});

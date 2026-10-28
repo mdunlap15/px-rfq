@@ -1560,6 +1560,7 @@
         fetchJSON('/daily-volume?days=400').then(v => {
           window._dvDailyVolumePayload = v;
           if (window._odvLastOrders) renderOrdersDailyVolume(window._odvLastOrders);
+          if (window._dvLastOrders) renderChartDailyVolume(window._dvLastOrders);
         }).catch(() => {});
         fetchJSON('/daily-pnl?days=400&groupBy=settled_at').then(d => {
           // A PARTIAL series (order history still loading after a DB-down boot)
@@ -10164,6 +10165,30 @@
     // net pnl per day from the Supabase series. Mirrors the mobile app. Risk /
     // volume / drill-down stay from the buffer (only filled in from Supabase for
     // historical days the buffer doesn't carry).
+    // Fills / My Risk / To Win for days the loaded orders do not reach (2026-10-28,
+    // operator: the app's Analytics tab must keep "historic daily P&L" beyond 30
+    // days, day totals only when the wagers themselves are not loaded). Source:
+    // GET /daily-volume, the server-side rollup over every fill. Fills a day with
+    // no loaded orders, or that the loaded orders cover only in part (a capped
+    // /orders payload holds the most recent ~800 settled tickets, so older days
+    // come through short). Uses the rollup's REAL-fill fields (fills / fillRisk /
+    // fillToWin: settled, or confirmed with an orderUuid and not a phantom) — the
+    // same filter as this chart — so a fully loaded day reads identically.
+    const _dvVol = (window._dvDailyVolumePayload && Array.isArray(window._dvDailyVolumePayload.daily)) ? window._dvDailyVolumePayload.daily : null;
+    if (_dvVol && _dvVol.length) {
+      for (const row of _dvVol) {
+        const day = row.date;
+        if (!day) continue;
+        if (dvFromMs && new Date(day + 'T23:59:59.999').getTime() < dvFromMs) continue;
+        if (dvToMs && new Date(day + 'T00:00:00').getTime() > dvToMs) continue;
+        if (!byDay[day]) byDay[day] = { volume: 0, risk: 0, toWin: 0, pnl: 0, count: 0, settled: 0, orders: [] };
+        const d = byDay[day];
+        if (row.fills != null && row.fills > (d.count || 0)) {
+          d.count = row.fills; d.risk = row.fillRisk; d.toWin = row.fillToWin;
+        }
+      }
+    }
+
     const _dvSeries = (window._dvDailyPnlPayload && Array.isArray(window._dvDailyPnlPayload.daily)) ? window._dvDailyPnlPayload.daily : null;
     // Only override when the payload actually carries rows. An empty [] (e.g. a
     // timed-out /daily-pnl) is truthy — zeroing then repopulating from nothing
