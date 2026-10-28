@@ -8593,7 +8593,10 @@
   // _dvCfg.tappedDay: ETday string of the bar currently shown in the detail
   //   card above the chart. Tap a bar → set + show. Tap same bar / close → clear.
   // =====================================================================
-  if (!window._dvCfg) window._dvCfg = { range: '30d', agg: 'auto', tappedDay: null };
+  // Default = ALL days, DAILY bars (2026-10-28, operator: "daily performance going
+  // back as far as possible"). The table lists every day back to the first fill;
+  // days whose wagers are not loaded show day totals from /daily-pnl + /daily-volume.
+  if (!window._dvCfg) window._dvCfg = { range: 'all', agg: 'daily', tappedDay: null };
 
   const DV_RANGE_DAYS = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
   function _dvApplyRange() {
@@ -8866,7 +8869,7 @@
     const W = 760, H = 320, pad = { l: 56, r: 56, t: 30, b: 76 };
     const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
     const colW = chartW / days.length;
-    const barGroupW = Math.min(80, colW - 4);
+    const barGroupW = Math.max(1, Math.min(80, colW > 8 ? colW - 4 : colW * 0.8));
     // Overlaid bars: wider risk bar in back, narrower P&L bar centered in front
     const riskBarW = barGroupW * 0.85;
     const pnlBarW = barGroupW * 0.45;
@@ -8974,7 +8977,13 @@
     // shred readability; skip labels using the same _dvShowLabelAt rule
     // that drives the value-on-bar labels. Per-bar tooltip carries the
     // date for any bar without a visible x-axis label.
+    const _dvMonthTick = (i) => days.length > 30 && (i === 0 || days[i].substring(0, 7) !== days[i - 1].substring(0, 7));
     for (let i = 0; i < days.length; i++) {
+      if (_dvMonthTick(i)) {
+        const mx = pad.l + i * colW;
+        svg += svgLine(mx, pad.t, mx, H - pad.b, 'var(--border)', 0.4);
+        svg += `<text x="${mx + 2}" y="${H - pad.b + 14}" font-size="10" fill="var(--text2)" text-anchor="start">${new Date(days[i] + 'T12:00:00').toLocaleDateString([], { month: 'short' })}</text>`;
+      }
       if (!showXTickAt(i)) continue;
       const cx = pad.l + (i + 0.5) * colW;
       const dayLabel = days[i].substring(5); // MM-DD
