@@ -1034,7 +1034,7 @@
              Expanded by default — this is the headline diagnostic. -->
         <div class="card">
           <div class="card-header" onclick="if(event.target.tagName!=='BUTTON'){const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');}">
-            <span><span class="toggle-icon">&#9660;</span>Rolling P&L vs EV Banked</span>
+            <span><span class="toggle-icon">&#9660;</span>Rolling P&L vs EV Live</span>
             <span style="display:flex; align-items:center; gap:10px;">
               <span id="ev-banked-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
               <span style="display:flex; gap:3px;">
@@ -1046,6 +1046,27 @@
             </span>
           </div>
           <div class="card-body" id="chart-ev-banked">
+            <div class="empty-state"><div class="icon">-</div><div>Loading…</div></div>
+          </div>
+        </div>
+
+        <!-- EV fill vs EV live (2026-10-28, operator: "closely track how EV live
+             is performing relative to EV filled over time"). Cumulative by fill
+             time over every fill, open and settled; the gap is value gained or
+             leaked between the fill and each leg's start. GET /ev-fill-live. -->
+        <div class="card">
+          <div class="card-header" onclick="if(event.target.tagName!=='BUTTON'){const b=this.nextElementSibling; b.classList.toggle('collapsed'); this.querySelector('.toggle-icon').classList.toggle('collapsed');}">
+            <span><span class="toggle-icon">&#9660;</span>EV Fill vs EV Live</span>
+            <span style="display:flex; align-items:center; gap:10px;">
+              <span id="ev-filllive-summary" style="color: var(--text3); font-weight: 400; font-size: 12px;"></span>
+              <span style="display:flex; gap:3px;">
+                <button class="btn" data-efldays="7" onclick="setEvFillLiveDays(7)" style="padding:1px 6px; font-size:10px;">7d</button>
+                <button class="btn primary" data-efldays="30" onclick="setEvFillLiveDays(30)" style="padding:1px 6px; font-size:10px;">30d</button>
+                <button class="btn" data-efldays="90" onclick="setEvFillLiveDays(90)" style="padding:1px 6px; font-size:10px;">90d</button>
+              </span>
+            </span>
+          </div>
+          <div class="card-body" id="chart-ev-filllive">
             <div class="empty-state"><div class="icon">-</div><div>Loading…</div></div>
           </div>
         </div>
@@ -9620,6 +9641,7 @@
     renderChartCumulPnlRoi(settled);
     renderChartCumulPnlByType(settled);
     renderChartEvBanked(false);
+    renderChartEvFillLive(false);
     renderChartEvDaily(settled);
     renderChartPnlSport(settled);
     renderChartPnlLegs(settled);
@@ -14160,7 +14182,14 @@
     const el = document.getElementById('chart-ev-banked');
     const sumEl = document.getElementById('ev-banked-summary');
     if (!el) return;
-    const pts = (j.points || []).filter(p => p && Number.isFinite(p.t));
+    // EV LINE = EV LIVE (2026-10-28, operator: the EV line should "use EV live
+    // (not EV filled)"). p.gt is each ticket's game-time EV (every leg frozen 90 s
+    // before its own start), else its closing snapshot, else its fill EV. The
+    // luck band, verdict and z all read against it. EV fill vs EV live has its
+    // own chart below.
+    const pts = (j.points || []).filter(p => p && Number.isFinite(p.t))
+      .map(p => ({ t: p.t, pnl: p.pnl, ev: Number.isFinite(p.gt) ? p.gt : p.ev }));
+    if (j.gameTimeEv != null) { j = Object.assign({}, j, { evFillBanked: j.evBanked, evBanked: j.gameTimeEv, luck: j.luckLive != null ? j.luckLive : j.luck, z: j.zLive !== undefined ? j.zLive : j.z, evRoi: j.evLiveRoi != null ? j.evLiveRoi : j.evRoi }); }
     if (pts.length < 2) {
       el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Need 2+ settled parlays in the last ' + j.days + ' days (have ' + (j.n || 0) + ')</div></div>';
       if (sumEl) sumEl.textContent = '';
@@ -14168,12 +14197,13 @@
     }
 
     const money = v => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+    const _evFillTotal = j.evFillBanked;
     if (sumEl) {
       const rCls = j.realized >= 0 ? 'positive' : 'negative';
       const lCls = j.luck >= 0 ? 'positive' : 'negative';
       sumEl.innerHTML =
         j.days + 'd realized <span class="' + rCls + '">' + money(j.realized) + '</span>'
-        + ' &middot; EV banked <span style="color:var(--orange,#d29922);">' + money(j.evBanked) + '</span>'
+        + ' &middot; EV live <span style="color:var(--orange,#d29922);">' + money(j.evBanked) + '</span>'
         // money() already carries the sign; do NOT strip it — a negative luck
         // figure rendered as a bare "$14,282" reads as running HOT when we ran cold.
         + ' &middot; luck <span class="' + lCls + '">' + (j.luck >= 0 ? '+' : '') + money(j.luck) + '</span>';
@@ -14185,7 +14215,7 @@
     // ONE shared $ axis — the whole point is reading the two series against
     // each other, so a dual axis (what the old chart did) would destroy the
     // comparison.
-    const vals = pts.flatMap(p => [p.pnl, p.ev, p.gt]).filter(Number.isFinite);
+    const vals = pts.flatMap(p => [p.pnl, p.ev]).filter(Number.isFinite);
     const rawLo = Math.min(0, ...vals), rawHi = Math.max(0, ...vals);
     const vPad = (rawHi - rawLo) * 0.1 || 1;
     const lo = rawLo - vPad, hi = rawHi + vPad;
@@ -14244,16 +14274,6 @@
     pts.forEach((p, i) => { evPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.ev); });
     svg += `<path d="${evPath}" fill="none" stroke="#d29922" stroke-width="2.2" />`;
 
-    // EV AT GAME TIME (2026-10-13): each ticket's EV with its legs re-read just
-    // before their own start (meta.gameTime), else the closing snapshot, else
-    // the fill EV — so where coverage is thin this line sits ON the orange one.
-    const hasGt = pts.some(p => Number.isFinite(p.gt));
-    if (hasGt) {
-      let gtPath = '';
-      pts.forEach((p, i) => { gtPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(Number.isFinite(p.gt) ? p.gt : p.ev); });
-      svg += `<path d="${gtPath}" fill="none" stroke="#58a6ff" stroke-width="1.8" stroke-dasharray="5,3" />`;
-    }
-
     // Realized line (green/red by where it ended)
     let pnlPath = '';
     pts.forEach((p, i) => { pnlPath += (i ? ' L' : 'M') + scaleX(p.t) + ',' + scaleY(p.pnl); });
@@ -14266,24 +14286,17 @@
     svg += svgCircle(scaleX(last.t), scaleY(last.ev), 3.2, '#d29922');
     svg += svgText(W - pad.r + 6, scaleY(last.pnl) + 3, money(last.pnl), { anchor: 'start', size: 10, fill: pnlColor });
     svg += svgText(W - pad.r + 6, scaleY(last.ev) + 3, money(last.ev), { anchor: 'start', size: 10, fill: '#d29922' });
-    if (hasGt && Number.isFinite(last.gt) && Math.abs(scaleY(last.gt) - scaleY(last.ev)) > 10) {
-      svg += svgText(W - pad.r + 6, scaleY(last.gt) + 3, money(last.gt), { anchor: 'start', size: 10, fill: '#58a6ff' });
-    }
 
     // Legend
     svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
     svg += '<line x1="0" y1="0" x2="18" y2="0" stroke="' + pnlColor + '" stroke-width="2.2"/>';
     svg += svgText(24, 4, 'Realized P&L', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '<line x1="112" y1="0" x2="130" y2="0" stroke="#d29922" stroke-width="2.2"/>';
-    svg += svgText(136, 4, 'EV banked', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += svgText(136, 4, 'EV live', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '<rect x="218" y="-4" width="14" height="8" fill="rgba(63,185,80,0.16)"/>';
     svg += svgText(238, 4, 'running hot', { anchor: 'start', size: 10, fill: 'var(--text2)' });
     svg += '<rect x="312" y="-4" width="14" height="8" fill="rgba(248,81,73,0.16)"/>';
     svg += svgText(332, 4, 'running cold', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    if (hasGt) {
-      svg += '<line x1="410" y1="0" x2="428" y2="0" stroke="#58a6ff" stroke-width="1.8" stroke-dasharray="5,3"/>';
-      svg += svgText(434, 4, 'EV at game time', { anchor: 'start', size: 10, fill: 'var(--text2)' });
-    }
     svg += '</g>';
 
     svg += '</svg>';
@@ -14294,7 +14307,7 @@
     const zTxt = z == null ? '' : ' (z=' + z.toFixed(2) + (j.sd ? ', 1SD=' + money(j.sd) : '') + ')';
     let verdict;
     if (ev <= 0) {
-      verdict = 'EV banked is <b>' + money(ev) + '</b> — the model is not booking a positive edge on these tickets at all. That is a PRICING problem, not luck.';
+      verdict = 'EV live is <b>' + money(ev) + '</b> — the model is not booking a positive edge on these tickets at all. That is a PRICING problem, not luck.';
     } else if (z != null && z <= -2) {
       verdict = 'Priced for <b>' + money(ev) + '</b>, realized <b>' + money(j.realized) + '</b>' + zTxt
         + ' — that shortfall is <b>too large to be variance</b>. The model is over-stating its own edge somewhere; check per-sport calibration.';
@@ -14312,16 +14325,152 @@
     svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:6px; line-height:1.5;">'
       + j.n + ' settled parlays &middot; $' + (j.stake || 0).toFixed(0) + ' risked &middot; realized ROI '
       + (j.realizedRoi == null ? '-' : (j.realizedRoi >= 0 ? '+' : '') + j.realizedRoi.toFixed(2) + '%')
-      + ' vs EV ROI ' + (j.evRoi == null ? '-' : (j.evRoi >= 0 ? '+' : '') + j.evRoi.toFixed(2) + '%')
+      + ' vs EV live ROI ' + (j.evRoi == null ? '-' : (j.evRoi >= 0 ? '+' : '') + j.evRoi.toFixed(2) + '%')
       + (j.skipped ? ' &middot; ' + j.skipped + ' without stored EV, P&amp;L included ('
         + (j.evEstimated || 0) + ' EV estimated from fair + odds'
         + (j.evMissing ? ', ' + j.evMissing + ' at EV $0 (no fair) carrying ' + money(j.missingPnl || 0) + ' realized' : '') + ')' : '')
-      + (j.gameTimeSources ? '<br>EV at game time ' + money(j.gameTimeEv || 0) + ' &middot; source: '
+      + (j.gameTimeSources ? '<br>EV live ' + money(j.gameTimeEv || 0) + ' (EV fill ' + money(_evFillTotal) + ') &middot; source: '
         + (j.gameTimeSources.gametime || 0) + ' re-read at start, ' + (j.gameTimeSources.close || 0) + ' closing line, '
         + (j.gameTimeSources.fill || 0) + ' no game-time read (fill EV used)' : '')
       + (j.excluded ? '<br>Excluding closed holes: ' + j.excluded.n + ' tickets, realized ' + money(j.excluded.pnl) + ' vs EV ' + money(j.excluded.ev) + ' ('
         + Object.entries(j.excluded.byHole || {}).map(([k, v]) => k.replace(/_/g, ' ') + ' ' + v.n + ' / ' + money(v.pnl)).join(', ') + ')' : '')
       + '<br>' + verdict + '</div>';
+    el.innerHTML = svg;
+  }
+
+  // EV FILL vs EV LIVE (2026-10-28). Two cumulative lines by fill time over
+  // every fill in the window (open + settled): EV fill = meta.expectedValue at
+  // confirm; EV live = the frozen game-time EV, else the current EV live on an
+  // open fill, else the closing snapshot, else the fill EV (no read: the lines
+  // coincide for that ticket). Green band = EV live above fill (value gained
+  // after the fill), red = below (leaked).
+  let _evFillLiveCache = { at: 0, data: null, days: 30, inflight: false };
+
+  function renderChartEvFillLive(force) {
+    const el = document.getElementById('chart-ev-filllive');
+    if (!el) return;
+    const fresh = _evFillLiveCache.data && (Date.now() - _evFillLiveCache.at) < EV_CURVE_TTL_MS;
+    if (fresh && !force) { _paintEvFillLive(_evFillLiveCache.data); return; }
+    if (_evFillLiveCache.inflight) return;
+    _evFillLiveCache.inflight = true;
+    fetch(BASE + '/ev-fill-live?days=' + _evFillLiveCache.days, { credentials: 'include' })
+      .then(r => r.json())
+      .then(j => {
+        _evFillLiveCache.inflight = false;
+        if (!j || !j.ok) return;
+        _evFillLiveCache.at = Date.now();
+        _evFillLiveCache.data = j;
+        _paintEvFillLive(j);
+      })
+      .catch(() => {
+        _evFillLiveCache.inflight = false;
+        if (!_evFillLiveCache.data) el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Could not load /ev-fill-live</div></div>';
+      });
+  }
+
+  function setEvFillLiveDays(days) {
+    _evFillLiveCache.days = days;
+    _evFillLiveCache.data = null;
+    _evFillLiveCache.at = 0;
+    document.querySelectorAll('[data-efldays]').forEach(b => {
+      b.classList.toggle('primary', Number(b.getAttribute('data-efldays')) === days);
+    });
+    renderChartEvFillLive(true);
+  }
+
+  function _paintEvFillLive(j) {
+    const el = document.getElementById('chart-ev-filllive');
+    const sumEl = document.getElementById('ev-filllive-summary');
+    if (!el) return;
+    const pts = (j.points || []).filter(p => p && Number.isFinite(p.t));
+    if (pts.length < 2) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">-</div><div>Need 2+ fills in the last ' + j.days + ' days (have ' + (j.n || 0) + ')</div></div>';
+      if (sumEl) sumEl.textContent = '';
+      return;
+    }
+    const money = v => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+    const pct = v => v == null ? '-' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+    const cCls = j.change >= 0 ? 'positive' : 'negative';
+    if (sumEl) {
+      sumEl.innerHTML = j.days + 'd EV fill <span style="color:#d29922;">' + money(j.evFill) + '</span>'
+        + ' &middot; EV live <span style="color:#58a6ff;">' + money(j.evLive) + '</span>'
+        + ' &middot; <span class="' + cCls + '">' + (j.change >= 0 ? '+' : '') + money(j.change) + '</span>';
+    }
+
+    const W = 720, H = 300, pad = { l: 68, r: 70, t: 24, b: 42 };
+    const chartW = W - pad.l - pad.r, chartH = H - pad.t - pad.b;
+    const vals = pts.flatMap(p => [p.f, p.l]).filter(Number.isFinite);
+    const rawLo = Math.min(0, ...vals), rawHi = Math.max(0, ...vals);
+    const vPad = (rawHi - rawLo) * 0.1 || 1;
+    const lo = rawLo - vPad, hi = rawHi + vPad;
+    const tMin = pts[0].t, tMax = pts[pts.length - 1].t;
+    const tRange = Math.max(1, tMax - tMin);
+    const scaleX = t => pad.l + ((t - tMin) / tRange) * chartW;
+    const scaleY = v => pad.t + chartH - ((v - lo) / (hi - lo)) * chartH;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; max-height:360px;">`;
+    const step = niceStep((hi - lo) / 5);
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      const y = scaleY(v);
+      svg += svgLine(pad.l, y, W - pad.r, y, 'var(--border)', 0.3);
+      svg += svgText(pad.l - 8, y + 3, (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(0), { anchor: 'end', size: 9, fill: v >= 0 ? 'var(--green)' : 'var(--red)' });
+    }
+    svg += svgLine(pad.l, scaleY(0), W - pad.r, scaleY(0), 'var(--text3)', 0.8);
+    const spanDays = tRange / 86400000;
+    const tickMs = spanDays <= 3 ? 12 * 3600000 : spanDays <= 14 ? 86400000 : spanDays <= 45 ? 7 * 86400000 : 14 * 86400000;
+    const fmt = d => d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
+    for (let t = Math.ceil(tMin / tickMs) * tickMs; t <= tMax; t += tickMs) {
+      const x = scaleX(t);
+      svg += svgLine(x, pad.t, x, pad.t + chartH, 'var(--border)', 0.25);
+      svg += svgText(x, pad.t + chartH + 14, fmt(new Date(t)), { size: 9, fill: 'var(--text3)' });
+    }
+
+    // Gain / leak band between the lines, one polygon per same-sign run.
+    let runStart = 0;
+    const signAt = i => (pts[i].l - pts[i].f) >= 0 ? 1 : -1;
+    for (let i = 1; i <= pts.length; i++) {
+      if (i < pts.length && signAt(i) === signAt(runStart)) continue;
+      const seg = pts.slice(runStart, Math.min(i + 1, pts.length));
+      if (seg.length >= 2) {
+        let d = 'M' + scaleX(seg[0].t) + ',' + scaleY(seg[0].l);
+        for (const p of seg) d += ' L' + scaleX(p.t) + ',' + scaleY(p.l);
+        for (let k = seg.length - 1; k >= 0; k--) d += ' L' + scaleX(seg[k].t) + ',' + scaleY(seg[k].f);
+        svg += `<path d="${d} Z" fill="${signAt(runStart) > 0 ? 'rgba(63,185,80,0.16)' : 'rgba(248,81,73,0.16)'}" stroke="none" />`;
+      }
+      runStart = i;
+    }
+    const path = key => pts.map((p, i) => (i ? 'L' : 'M') + scaleX(p.t) + ',' + scaleY(p[key])).join(' ');
+    svg += `<path d="${path('f')}" fill="none" stroke="#d29922" stroke-width="2.2" />`;
+    svg += `<path d="${path('l')}" fill="none" stroke="#58a6ff" stroke-width="2.2" />`;
+
+    const last = pts[pts.length - 1];
+    svg += svgCircle(scaleX(last.t), scaleY(last.f), 3.2, '#d29922');
+    svg += svgCircle(scaleX(last.t), scaleY(last.l), 3.2, '#58a6ff');
+    let yF = scaleY(last.f) + 3, yL = scaleY(last.l) + 3;
+    if (Math.abs(yF - yL) < 11) { if (yL <= yF) yL = yF - 11; else yL = yF + 11; }
+    svg += svgText(W - pad.r + 6, yF, money(last.f), { anchor: 'start', size: 10, fill: '#d29922' });
+    svg += svgText(W - pad.r + 6, yL, money(last.l), { anchor: 'start', size: 10, fill: '#58a6ff' });
+
+    svg += '<g transform="translate(' + (pad.l + 10) + ',' + (pad.t + 12) + ')">';
+    svg += '<line x1="0" y1="0" x2="18" y2="0" stroke="#d29922" stroke-width="2.2"/>';
+    svg += svgText(24, 4, 'EV fill', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<line x1="80" y1="0" x2="98" y2="0" stroke="#58a6ff" stroke-width="2.2"/>';
+    svg += svgText(104, 4, 'EV live', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<rect x="160" y="-4" width="14" height="8" fill="rgba(63,185,80,0.16)"/>';
+    svg += svgText(180, 4, 'gained after fill', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '<rect x="272" y="-4" width="14" height="8" fill="rgba(248,81,73,0.16)"/>';
+    svg += svgText(292, 4, 'leaked after fill', { anchor: 'start', size: 10, fill: 'var(--text2)' });
+    svg += '</g></svg>';
+
+    const s = j.sources || {};
+    svg += '<div style="font-size:11px; color:var(--text3); text-align:center; margin-top:6px; line-height:1.5;">'
+      + j.n + ' fills (' + (j.open || 0) + ' open) &middot; $' + (j.risk || 0).toFixed(0) + ' risked &middot; EV fill ROI ' + pct(j.evFillRoi)
+      + ' vs EV live ROI ' + pct(j.evLiveRoi) + ' &middot; change <span class="' + cCls + '">' + (j.change >= 0 ? '+' : '') + money(j.change)
+      + '</span> (' + pct(j.changePctOfEvFill) + ' of EV fill)'
+      + '<br>EV live source: ' + (s.gametime || 0) + ' frozen at game time, ' + (s.live || 0) + ' live (open, legs not all started), '
+      + (s.close || 0) + ' closing line, ' + (s.fill || 0) + ' no read (fill EV used)'
+      + (j.skipped ? ' &middot; ' + j.skipped + ' fills without stored EV left out' : '')
+      + '</div>';
     el.innerHTML = svg;
   }
 

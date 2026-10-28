@@ -221,3 +221,29 @@ test('EV live keeps grading a ticket that settled EARLY (bettor already lost) un
     assert.strictEqual(o.meta.evLive.legs[id + 'b'].fair, 0.44, 'the late leg is graded after the early settlement');
   } finally { pricer.priceParlay = savedPrice; }
 });
+
+test('getEvFillLiveCurve: cumulative EV fill vs EV live by fill time; game-time, then live, then fill EV', () => {
+  const base = ot.getEvFillLiveCurve(1);
+  const mk = (tag, ev) => {
+    const id = 'efl-' + tag + '-' + Date.now();
+    const legs = [{ lineId: id + 'a', team: 'A', market: 'moneyline', sport: 'icehockey_nhl', selection: 'home', fairProb: 0.5, pxEventId: 'EFL' + tag }];
+    ot.recordQuote(id, legs, 150, 1000, 0.4, { legs });
+    ot.recordConfirmation(id, id + '-u', -150, 500);
+    const o = ot.findByParlayId(id);
+    o.expectedValue = ev; o.meta.expectedValue = ev;
+    return o;
+  };
+  mk('gt', 20).meta.gameTime = { finalizedAt: new Date().toISOString(), ev: 12, coverage: 1, legs: {} };
+  mk('lv', 30).meta.evLive = { ev: 35, coverage: 1, legs: {} };
+  mk('none', 10);
+  const c = ot.getEvFillLiveCurve(1);
+  assert.strictEqual(c.n - base.n, 3);
+  assert.ok(Math.abs((c.evFill - base.evFill) - 60) < 0.01);
+  assert.ok(Math.abs((c.evLive - base.evLive) - 57) < 0.01, 'gametime 12 + live 35 + fill fallback 10');
+  assert.strictEqual(c.sources.gametime - base.sources.gametime, 1);
+  assert.strictEqual(c.sources.live - base.sources.live, 1);
+  const last = c.points[c.points.length - 1];
+  assert.strictEqual(last.f, c.evFill);
+  assert.strictEqual(last.l, c.evLive);
+  for (let i = 1; i < c.points.length; i++) assert.ok(c.points[i].t >= c.points[i - 1].t, 'ordered by fill time');
+});

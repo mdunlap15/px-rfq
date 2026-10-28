@@ -4551,6 +4551,14 @@ function startStatusServer() {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // EV fill vs EV live, cumulative by confirm time over every fill (open + settled).
+  app.get('/ev-fill-live', (req, res) => {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+      res.json({ ok: true, ...orderTracker.getEvFillLiveCurve(days) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   // Void-adjusted rolling calibration — the standing health metric that P&L
   // cannot be at 0.56 sigma/30d. `adjusted` grades against the fair of the
   // parlay that ACTUALLY settled (void legs removed); `raw` is the biased

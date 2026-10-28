@@ -4059,12 +4059,72 @@ function getEvCurve(days = 30, maxPoints = 1200, opts = {}) {
     evRoi: cumStake > 0 ? r2((cumEv / cumStake) * 100) : null,
     points: points.map(p => ({ t: p.t, pnl: r2(p.pnl), ev: r2(p.ev), gt: r2(p.gt) })),
     gameTimeEv: r2(cumGt),
+    // Realized vs EV LIVE (the game-time EV): the chart's EV line since 2026-10-28.
+    luckLive: r2(cumPnl - cumGt),
+    zLive: sd > 0 ? r2((cumPnl - cumGt) / sd) : null,
+    evLiveRoi: cumStake > 0 ? r2((cumGt / cumStake) * 100) : null,
     gameTimeSources: gtSources,
     excludeClosed: !!opts.excludeClosed,
     excluded: opts.excludeClosed ? {
       n: excluded.n, pnl: r2(excluded.pnl), ev: r2(excluded.ev),
       byHole: Object.fromEntries(Object.entries(excluded.byHole).map(([k, v]) => [k, { n: v.n, pnl: r2(v.pnl), ev: r2(v.ev) }])),
     } : null,
+  };
+}
+
+/**
+ * EV FILL vs EV LIVE over time (2026-10-28, operator: "closely track how EV live
+ * is performing relative to EV filled over time"). One point per fill, ordered
+ * by CONFIRM time, over every real fill in the window (open and settled), both
+ * series cumulative:
+ *   evFill  meta.expectedValue at confirm
+ *   evLive  meta.gameTime.ev when every leg is frozen (source 'gametime'), else
+ *           the current meta.evLive (open fill, 'live'), else every leg's closing
+ *           snapshot ('close'), else the fill EV ('fill' — no read, the two lines
+ *           coincide for that ticket).
+ * The gap between the lines = value gained (+) or leaked (-) between fill and
+ * game time. Fills with no stored EV are skipped (counted).
+ */
+function getEvFillLiveCurve(days = 30, maxPoints = 1200) {
+  const cutoff = Date.now() - days * 864e5;
+  const gametime = require('./gametime-ev');
+  const sources = { gametime: 0, live: 0, close: 0, fill: 0 };
+  const rows = [];
+  let skipped = 0, risk = 0, openN = 0;
+  for (const o of getConfirmedOrdersSince(cutoff)) {
+    const m = o.meta || {};
+    const evF = Number(o.expectedValue != null ? o.expectedValue : m.expectedValue);
+    if (!Number.isFinite(evF)) { skipped++; continue; }
+    let evL, src;
+    const gt = m.gameTime;
+    const lv = m.evLive;
+    if (gt && gt.finalizedAt && Number.isFinite(gt.ev)) { evL = gt.ev; src = 'gametime'; }
+    else if (lv && Number.isFinite(lv.ev) && lv.coverage > 0) { evL = lv.ev; src = 'live'; }
+    else { const g = gametime.gameTimeEvFor(o, evF); evL = Number.isFinite(g.ev) ? g.ev : evF; src = g.source === 'close' ? 'close' : 'fill'; }
+    sources[src]++;
+    if (o.status === 'confirmed') openN++;
+    const stake = Number(o.confirmedStake) || 0;
+    risk += stake;
+    rows.push({ t: Date.parse(o.confirmedAt), evF, evL, stake });
+  }
+  rows.sort((a, b) => a.t - b.t);
+  let cf = 0, cl = 0;
+  const all = rows.map(r => { cf += r.evF; cl += r.evL; return { t: r.t, f: cf, l: cl }; });
+  let points = all;
+  if (all.length > maxPoints) {
+    const step = Math.ceil(all.length / maxPoints);
+    points = all.filter((_, i) => i % step === 0);
+    if (points[points.length - 1] !== all[all.length - 1]) points.push(all[all.length - 1]);
+  }
+  const r2 = v => Math.round(v * 100) / 100;
+  return {
+    days, n: rows.length, open: openN, skipped, risk: r2(risk),
+    evFill: r2(cf), evLive: r2(cl), change: r2(cl - cf),
+    changePctOfEvFill: cf ? r2(100 * (cl - cf) / Math.abs(cf)) : null,
+    evFillRoi: risk > 0 ? r2(100 * cf / risk) : null,
+    evLiveRoi: risk > 0 ? r2(100 * cl / risk) : null,
+    sources,
+    points: points.map(p => ({ t: p.t, f: r2(p.f), l: r2(p.l) })),
   };
 }
 
@@ -8507,6 +8567,7 @@ module.exports = {
   getOpenConfirmedOrders,
   getEvLiveCandidates,
   getConfirmedOrdersSince,
+  getEvFillLiveCurve,
   getCreatorLegStackCount,
   findByOrderUuid,
   overrideLegResult,
