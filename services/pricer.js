@@ -3974,6 +3974,59 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // NBA MULTI-LEG MARGIN CEILING A/B (2026-10-28) — see
+  // config.pricing.nbaCeilingPercent. The football ceiling above, applied to NBA
+  // cross-game game-line parlays. Measured 10/21-10/27 on network fills: the
+  // winning price sat at fair +0.4% (3 legs, $368K/wk), +1.4% (4-5, $364K/wk)
+  // and +3.0% (6+, $800K/wk) while ours sat at +5.0% / +7.9% / +22.6% — the same
+  // leg-count ladder — and we won 9 contests all week. Season just started, so
+  // there is NO NBA calibration yet: scope starts at nbaCeilingMinLegs (4) and the
+  // same consensus guard applies. Arm = md5('nbac:'+parlayId), independent of
+  // the football arm (the scopes are disjoint anyway).
+  // -------------------------------------------------------------------
+  const _nbaCeil = { arm: null, applied: false, preProb: null, pct: null, skip: null };
+  {
+    const _pct = config.pricing.nbaCeilingPercent || 0;
+    const _minLegs = Math.max(3, config.pricing.nbaCeilingMinLegs ?? 4);
+    const _inScope = _pct > 0 && opts.parlayId && !opts.fairOnly
+      && pricedLegs.length >= _minLegs && !isSGPParlay
+      && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'basketball_nba' && !l.lineInfo.playerName && !/^player_/.test(String(l.lineInfo.marketType || '')));
+    if (_inScope) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('nbac:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _nbaCeil.arm = inArm ? 'ceiling' : 'control';
+      if (inArm && fairParlayProb > 0 && offeredImpliedProb > fairParlayProb) {
+        const n = pricedLegs.length;
+        const cap = n >= 6 ? (config.pricing.nbaCeiling6LegPct ?? 8)
+          : n >= 4 ? (config.pricing.nbaCeiling45LegPct ?? 4)
+          : (config.pricing.nbaCeiling3LegPct ?? 3);
+        const minEdge = Math.max(1, config.pricing.nbaCeilingMinEdgePct ?? 2);
+        const gapPp = config.pricing.nbaCeilingMaxLegGapPp ?? 4;
+        let guardOk = true;
+        for (const l of pricedLegs) {
+          const ci = getConsensusImplied(l.lineInfo);
+          if (ci == null || !(l.fairProb > 0) || ci - l.fairProb > gapPp / 100) { guardOk = false; break; }
+        }
+        if (!guardOk) {
+          _nbaCeil.skip = 'consensus_guard';
+        } else {
+          const ceiling = fairParlayProb * (1 + Math.max(cap, minEdge) / 100);
+          if (ceiling < offeredImpliedProb) {
+            _nbaCeil.preProb = offeredImpliedProb;
+            _nbaCeil.applied = true;
+            _nbaCeil.pct = Math.max(cap, minEdge);
+            log.debug('Pricing', `NBA ceiling[${n}L]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(ceiling * 100).toFixed(3)}% (fair ${(fairParlayProb * 100).toFixed(3)}% +${_nbaCeil.pct}%)`);
+            offeredImpliedProb = ceiling;
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // CFB MARGIN-WIDEN A/B (2026-10-05) — see config.pricing.cfbWidenPercent.
   //
   // The opposite direction to the trims above: the widen arm makes the quote
@@ -4678,6 +4731,12 @@ function priceParlay(legs, opts = {}) {
       fbCeilPreProb: _fbCeil.preProb != null ? Math.round(_fbCeil.preProb * 100000) / 100000 : null,
       fbCeilPct: _fbCeil.pct,
       fbCeilSkip: _fbCeil.skip,
+      // NBA multi-leg ceiling A/B: null out of scope / dark; 'control' | 'ceiling'.
+      nbaCeilArm: _nbaCeil.arm,
+      nbaCeilApplied: _nbaCeil.applied,
+      nbaCeilPreProb: _nbaCeil.preProb != null ? Math.round(_nbaCeil.preProb * 100000) / 100000 : null,
+      nbaCeilPct: _nbaCeil.pct,
+      nbaCeilSkip: _nbaCeil.skip,
       cfbWidenArm: _cfbWiden.arm,
       cfbWidenScope: _cfbWiden.scope,
       cfbWidenApplied: _cfbWiden.applied,

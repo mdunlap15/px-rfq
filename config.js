@@ -1033,6 +1033,14 @@ const config = {
     footballCeiling6LegPct: (() => { const v = parseFloat(process.env.FOOTBALL_CEILING_6LEG_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(100, v) : 10; })(),
     footballCeilingMinEdgePct: (() => { const v = parseFloat(process.env.FOOTBALL_CEILING_MIN_EDGE_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(20, v) : 2; })(),
     footballCeilingMaxLegGapPp: (() => { const v = parseFloat(process.env.FOOTBALL_CEILING_MAX_LEG_GAP_PP); return Number.isFinite(v) && v > 0 ? Math.min(10, v) : 4; })(),
+    // NBA MULTI-LEG MARGIN CEILING A/B (2026-10-28, pricer.js). Percent 0 = dark.
+    nbaCeilingPercent: (() => { const v = parseFloat(process.env.NBA_CEILING_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
+    nbaCeilingMinLegs: (() => { const v = parseInt(process.env.NBA_CEILING_MIN_LEGS); return Number.isFinite(v) && v >= 3 ? Math.min(12, v) : 4; })(),
+    nbaCeiling3LegPct: (() => { const v = parseFloat(process.env.NBA_CEILING_3LEG_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(50, v) : 3; })(),
+    nbaCeiling45LegPct: (() => { const v = parseFloat(process.env.NBA_CEILING_45LEG_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(50, v) : 4; })(),
+    nbaCeiling6LegPct: (() => { const v = parseFloat(process.env.NBA_CEILING_6LEG_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(100, v) : 8; })(),
+    nbaCeilingMinEdgePct: (() => { const v = parseFloat(process.env.NBA_CEILING_MIN_EDGE_PCT); return Number.isFinite(v) && v >= 1 ? Math.min(20, v) : 2; })(),
+    nbaCeilingMaxLegGapPp: (() => { const v = parseFloat(process.env.NBA_CEILING_MAX_LEG_GAP_PP); return Number.isFinite(v) && v > 0 ? Math.min(10, v) : 4; })(),
     cfbWidenPercent: (() => {
       const v = parseInt(process.env.CFB_WIDEN_PERCENT);
       if (!Number.isFinite(v) || v < 0) return 0;
