@@ -980,6 +980,7 @@ function priceParlay(legs, opts = {}) {
   const preResolved = opts.resolvedLineInfos; // Map<lineId, lineInfo> | undefined
   // NBA early-prop timing A/B arm for this parlay (null = no NBA prop leg beyond the gate / dark).
   let _nbaPropGateArm = null;
+  let _nhlPropGateArm = null;
   // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js). Arm drawn once
   // per parlay; recorded only when some leg's family carries a correction.
   let _ldcArm = null, _ldcInScope = false;
@@ -1197,6 +1198,37 @@ function priceParlay(legs, opts = {}) {
           priceParlay._lastFailure = {
             reason: 'nba_prop_early_ab',
             detail: `${legLabel} NBA prop ${((startMs - nowMs) / 3600000).toFixed(1)}h pre-tip (> ${_hrs}h, gate arm)`,
+            blockerLeg: legDescriptor,
+          };
+          return null;
+        }
+      }
+    }
+
+    // NHL EARLY-PROP TIMING A/B (2026-11-01). The NBA gate above, for NHL. The
+    // Counterparty Performance rebuild surfaced creator 5d7881da: 17 NHL
+    // shots-on-goal parlays filled 9-19h before puck drop, the fair moved +29%
+    // toward the bettor by game time (z 9.1), 16 of 17 negative EV live, SP
+    // -$4.9K. The leg-drift families agreed (NHL SOG / points far legs +1-5%).
+    // Gate arm: a parlay with an NHL prop leg more than nhlPropEarlyGateHours
+    // before start DECLINES; control prices as today and is tagged.
+    // Arm = md5('nhlp:'+parlayId) mod 100 < nhlPropEarlyGatePercent.
+    {
+      const _pct = config.pricing.nhlPropEarlyGatePercent || 0;
+      const _hrs = config.pricing.nhlPropEarlyGateHours || 8;
+      if (_pct > 0 && !opts.fairOnly && opts.parlayId && lineInfo.sport === 'icehockey_nhl'
+          && /^player_/.test(lineInfo.marketType || '') && startMs != null && !isNaN(startMs)
+          && (startMs - nowMs) / 3600000 > _hrs) {
+        let inArm = _pct >= 100;
+        if (!inArm) {
+          const h = crypto.createHash('md5').update('nhlp:' + String(opts.parlayId)).digest();
+          inArm = (h.readUInt32BE(0) % 100) < _pct;
+        }
+        _nhlPropGateArm = inArm ? 'gate' : 'control';
+        if (inArm) {
+          priceParlay._lastFailure = {
+            reason: 'nhl_prop_early_ab',
+            detail: `${legLabel} NHL prop ${((startMs - nowMs) / 3600000).toFixed(1)}h pre-puck (> ${_hrs}h, gate arm)`,
             blockerLeg: legDescriptor,
           };
           return null;
@@ -4744,6 +4776,8 @@ function priceParlay(legs, opts = {}) {
       cfbWidenRelPct: _cfbWiden.relPct,
       // NBA early-prop timing A/B: null = no NBA prop leg beyond the gate / dark; 'control' priced normally.
       nbaPropGateArm: _nbaPropGateArm,
+      // NHL early-prop timing A/B: same shape as the NBA arm.
+      nhlPropGateArm: _nhlPropGateArm,
       // Leg-drift correction A/B: null = dark / no corrected family on the ticket; 'control' | 'correct'.
       legDriftArm: _ldcInScope ? _ldcArm : null,
       // Prop book cap A/B: arm null = no prop leg with a book price / dark;

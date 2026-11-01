@@ -192,6 +192,8 @@ const REGISTRY = [
   { key: 'legDriftCorrectionOverrides', path: 'legDriftCorrectionOverrides', type: 'numMap', min: 0, max: 1.1, group: 'pricing', env: 'LEG_DRIFT_CORRECTION_OVERRIDES', label: 'Leg-drift correction overrides {family key: multiplier | 0}' },
   { key: 'nbaPropEarlyGatePercent', path: 'nbaPropEarlyGatePercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'NBA_PROP_EARLY_GATE_PERCENT', label: 'NBA early-prop timing A/B % (0 = dark)' },
   { key: 'nbaPropEarlyGateHours', path: 'nbaPropEarlyGateHours', type: 'number', min: 0.5, max: 48, group: 'pricing', env: 'NBA_PROP_EARLY_GATE_HOURS', label: 'NBA early-prop gate: hours before tip' },
+  { key: 'nhlPropEarlyGatePercent', path: 'nhlPropEarlyGatePercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'NHL_PROP_EARLY_GATE_PERCENT', label: 'NHL early-prop timing A/B % (0 = dark)' },
+  { key: 'nhlPropEarlyGateHours', path: 'nhlPropEarlyGateHours', type: 'number', min: 0.5, max: 48, group: 'pricing', env: 'NHL_PROP_EARLY_GATE_HOURS', label: 'NHL early-prop gate: hours before puck drop' },
   { key: 'propBookCapPercent', path: 'propBookCapPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'PROP_BOOK_CAP_PERCENT', label: 'Prop book cap A/B % (0 = dark)' },
   { key: 'propBookCapRelPct', path: 'propBookCapRelPct', type: 'number', min: 0, max: 20, group: 'pricing', env: 'PROP_BOOK_CAP_REL_PCT', label: 'Prop book cap: max % more generous than the best book' },
   { key: 'twoLegWidenPercent', path: 'twoLegWidenPercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'TWO_LEG_WIDEN_PERCENT', label: '2-leg (fair 30-50%) widen A/B % (0 = dark)' },

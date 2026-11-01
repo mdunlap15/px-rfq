@@ -30,7 +30,7 @@ function stub(extra = {}) {
   oddsFeed.isStaleForEvent = () => false;
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
   Object.assign(config.pricing, { maxRiskPerParlay: 6000, maxRiskPerParlayWithProp: 6000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
-    propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, legDriftCorrectionPercent: 0, legDriftCorrectionOverrides: {} }, extra);
+    propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, nhlPropEarlyGatePercent: 0, legDriftCorrectionPercent: 0, legDriftCorrectionOverrides: {} }, extra);
   ld.__setTableForTest({ corrections: { [KEY]: 1.02 } });
 }
 function restore() {

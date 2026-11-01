@@ -40,7 +40,7 @@ function stub(extra = {}) {
   oddsFeed.getFairProb = () => 0.55;
   oddsFeed.isStaleForEvent = () => false;
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
-  Object.assign(config.pricing, { maxRiskPerParlay: 6000, maxRiskPerParlayWithProp: 6000, maxOdds: 50000, obRelayEnabled: false,
+  Object.assign(config.pricing, { maxRiskPerParlay: 6000, maxRiskPerParlayWithProp: 6000, maxOdds: 50000, obRelayEnabled: false, nhlPropEarlyGatePercent: 0,
     freshGateEnabled: false, propBookCapPercent: 0, propBookCapRelPct: 2, twoLegWidenPercent: 0, cfbWidenPercent: 0 }, extra);
 }
 function restore() {

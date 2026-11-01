@@ -1015,6 +1015,10 @@ const config = {
     legDriftCorrectionOverrides: (() => { try { const v = JSON.parse(process.env.LEG_DRIFT_CORRECTION_OVERRIDES || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch (_) { return {}; } })(),
     nbaPropEarlyGatePercent: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     nbaPropEarlyGateHours: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_HOURS); return Number.isFinite(v) && v > 0 ? v : 8; })(),
+    // NHL early-prop timing A/B (2026-11-01, pricer.js) — the NBA gate for NHL.
+    // Default 50 (LIVE at deploy, operator: "build the NHL gate"); 0 = dark.
+    nhlPropEarlyGatePercent: (() => { const v = parseFloat(process.env.NHL_PROP_EARLY_GATE_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 50; })(),
+    nhlPropEarlyGateHours: (() => { const v = parseFloat(process.env.NHL_PROP_EARLY_GATE_HOURS); return Number.isFinite(v) && v > 0 ? v : 8; })(),
     propBookCapPercent: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     propBookCapRelPct: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_REL_PCT); return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 2; })(),
     twoLegWidenPercent: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
