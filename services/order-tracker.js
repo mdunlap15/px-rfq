@@ -2890,6 +2890,17 @@ async function refreshPersistentRollup7d() {
       log.info('Market', `7d rollup refreshed via RPC: ${cachedRollup7d.declines.total} declines, ${cachedRollup7d.missedVolume.totalMissed} missed fills, $${cachedRollup7d.missedVolume.totalStake.toFixed(2)} stake`);
       return;
     }
+    // RPC failed. The in-Node fallback below pages up to 200k decline rows
+    // (with leg JSON) plus 50k matched parlays into memory every 10 minutes.
+    // It runs exactly when Supabase is already slow (that is why the RPC
+    // failed), so it deepened the DB timeouts and burned the event loop that
+    // every Order Book placement waits on (2026-11-01: loop p50 300-475ms at
+    // the 1pm NFL kickoff). Keep the last good rollup instead; this is a
+    // dashboard statistic. ROLLUP_JS_FALLBACK=1 restores the old behaviour.
+    if (process.env.ROLLUP_JS_FALLBACK !== '1') {
+      log.warn('Market', `7d rollup RPC failed -> keeping the last rollup${cachedRollup7d.refreshedAt ? ' from ' + cachedRollup7d.refreshedAt : ' (none yet)'}; JS fallback is off`);
+      return;
+    }
     const [declines, matched] = await Promise.all([
       db.loadDeclinesSince(fromIso),
       db.loadMatchedParlaysSince(fromIso),

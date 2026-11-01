@@ -82,7 +82,24 @@ const cache = {};
 // Last-poll times so the poller can decide which sports are due.
 const lastPolledAt = {}; // sport → ms
 
+// Memoized (2026-11-01): getEspnGameResult re-normalizes every cached game's
+// team names for every leg it resolves, ~6% of production CPU in a profile.
+// Pure string functions, so a bounded cache is exact.
+const _normTeamCache = new Map();
+const _wordSetCache = new Map();
+const _NAME_CACHE_MAX = 20000;
+function _memo(cache, key, fn) {
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  const v = fn(key);
+  if (cache.size >= _NAME_CACHE_MAX) cache.clear();
+  cache.set(key, v);
+  return v;
+}
 function _normalizeTeam(name) {
+  return _memo(_normTeamCache, String(name || ''), _normalizeTeamUncached);
+}
+function _normalizeTeamUncached(name) {
   return String(name || '')
     .toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -100,7 +117,7 @@ function _normalizeTeam(name) {
 // Congo World Cup prop leg never resolved because getEspnGameResult
 // couldn't match "DR Congo" (PX) against ESPN's "Congo DR".
 function _wordSetKey(normalized) {
-  return String(normalized || '').split(' ').filter(Boolean).sort().join(' ');
+  return _memo(_wordSetCache, String(normalized || ''), s => s.split(' ').filter(Boolean).sort().join(' '));
 }
 
 // ESPN's `competition.status.type.state` values:

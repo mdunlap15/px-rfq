@@ -11,6 +11,7 @@ require('./services/httpClient');
 
 const { config, validate, getBankroll } = require('./config');
 const log = require('./services/logger');
+const cpuProfile = require('./services/cpu-profile');
 const px = require('./services/prophetx');
 const oddsFeed = require('./services/odds-feed');
 const lineManager = require('./services/line-manager');
@@ -1112,7 +1113,18 @@ function startStatusServer() {
       max_ms: Math.round(_eld.max / 1e6), window_s: 60, at: new Date().toISOString() };
     _eld.reset();
     log.info('LoopLag', `p50 ${_loopLag.p50_ms}ms p99 ${_loopLag.p99_ms}ms max ${_loopLag.max_ms}ms (60s)`);
+    try { cpuProfile.maybeAuto(_loopLag); } catch (_) { /* diagnostics never break the loop */ }
   }, 60 * 1000).unref();
+  // CPU profile (2026-11-01): auto-captured on high loop lag; on demand here.
+  app.get('/admin/cpuprofile', (req, res) => res.json({ ok: true, recent: cpuProfile.recent() }));
+  app.post('/admin/cpuprofile', async (req, res) => {
+    try {
+      const sec = Math.min(120, Math.max(2, Number(req.query.sec) || 20));
+      const s = await cpuProfile.capture(sec, 'manual');
+      cpuProfile.logSummary(s, 10);
+      res.json({ ok: true, profile: s });
+    } catch (e) { res.status(409).json({ ok: false, error: e.message }); }
+  });
   app.get('/health', (req, res) => {
     const ws = websocket.getState();
     let dbBrief = null;

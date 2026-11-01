@@ -11270,8 +11270,22 @@ async function _getTheOddsApiPropOdds(sport, eventId, marketKey) {
 //   base-name substring fallback could never see the difference).
 // - D/ST rows ("49ers D/ST") are team units, not players — they match
 //   nothing (parts = null).
+// Memoized (2026-11-01): a CPU profile of production put 12-16% of ALL
+// px-rfq CPU in this function, because lookupTheOddsApiPlayerProp
+// re-normalizes every book outcome's name on every lookup. Results are
+// frozen (callers only read .base/.gen) and the cache is cleared at a cap.
+const _normNameCache = new Map();
+const _NORM_NAME_CACHE_MAX = 50000;
 function _normPlayerNameParts(s) {
   const raw = String(s || '');
+  const hit = _normNameCache.get(raw);
+  if (hit !== undefined) return hit;
+  const res = _normPlayerNamePartsUncached(raw);
+  if (_normNameCache.size >= _NORM_NAME_CACHE_MAX) _normNameCache.clear();
+  _normNameCache.set(raw, res);
+  return res;
+}
+function _normPlayerNamePartsUncached(raw) {
   if (/d\s*\/\s*st/i.test(raw)) return null;
   const base = raw.normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase()
@@ -11290,7 +11304,7 @@ function _normPlayerNameParts(s) {
     if (/^(ii|iii|iv|v)$/.test(last)) { gen = last; words.pop(); continue; }
     break;
   }
-  return { base: words.join(' '), gen };
+  return Object.freeze({ base: words.join(' '), gen });
 }
 // Accepts raw strings or pre-computed parts (pass parts for the hot side of
 // a loop so the PX name is normalized once).
