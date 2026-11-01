@@ -2509,7 +2509,7 @@ function startStatusServer() {
             confirmedAt: r.confirmed_at || null,
             quotedAt: r.quoted_at || null,
             settledAt: r.settled_at || null,
-            stake: Number(r.confirmed_stake) || 0,
+            stake: Number(r.confirmed_stake) || 0, // OUR risk
             offeredOdds: r.offered_odds != null ? Number(r.offered_odds) : null,
             fairParlayProb: r.fair_parlay_prob != null ? Number(r.fair_parlay_prob) : null,
             status: r.status,
@@ -2529,8 +2529,9 @@ function startStatusServer() {
             pushes: 0,
             totalStake: 0,
             pnl: 0,
+            bettorStake: 0, // Σ the BETTOR's stake = our risk / (decimal − 1)
             bettorEv: 0,   // Σ bettor EV at our fair model (negative = we hold edge)
-            evStake: 0,    // stake over parlays that had valid EV inputs (for EV ROI)
+            evStake: 0,    // bettor stake over parlays that had valid EV inputs (for EV ROI)
             evCount: 0,
             firstSeen: r.confirmed_at,
             lastSeen: r.confirmed_at,
@@ -2538,17 +2539,24 @@ function startStatusServer() {
           byCreator.set(cid, agg);
         }
         agg.fills++;
+        // confirmed_stake is OUR RISK (payout liability), NOT the bettor's stake.
+        // totalStake keeps that meaning for back-compat; the UI labels it "Our risk".
         const stake = Number(r.confirmed_stake) || 0;
         agg.totalStake += stake;
-        // Counterparty (bettor) EV at our fair model: stake × (fairProb × decimal − 1).
-        // Known at bet time, so computed over every confirmed parlay with valid
-        // inputs (not just settled ones). offered_odds is AMERICAN.
+        // Counterparty (bettor) EV at our fair model: bettorStake × (fairProb × decimal − 1),
+        // bettorStake = our risk / (decimal − 1). Until 2026-11-01 this used OUR RISK as
+        // the bettor's stake, overstating EV by risk/stake — 2.8x at +281, ~50x at
+        // +5000 (90-day total read −$105.8K; the true figure was ~8x smaller). It is
+        // exactly −(our EV at fill). Known at bet time, so computed over every
+        // confirmed parlay with valid inputs. offered_odds is the bettor's AMERICAN price.
         const evAmer = r.offered_odds != null ? Number(r.offered_odds) : NaN;
         const evFair = r.fair_parlay_prob != null ? Number(r.fair_parlay_prob) : NaN;
-        if (isFinite(evAmer) && evAmer !== 0 && evFair > 0 && evFair < 1 && stake > 0) {
-          const dec = evAmer >= 0 ? 1 + evAmer / 100 : 1 + 100 / (-evAmer);
-          agg.bettorEv += stake * (evFair * dec - 1);
-          agg.evStake += stake;
+        const dec = isFinite(evAmer) && evAmer !== 0 ? (evAmer >= 0 ? 1 + evAmer / 100 : 1 + 100 / (-evAmer)) : NaN;
+        const bStake = dec > 1 && stake > 0 ? stake / (dec - 1) : 0;
+        agg.bettorStake += bStake;
+        if (bStake > 0 && evFair > 0 && evFair < 1) {
+          agg.bettorEv += bStake * (evFair * dec - 1);
+          agg.evStake += bStake;
           agg.evCount++;
         }
         if (r.pnl != null) {
@@ -2570,8 +2578,9 @@ function startStatusServer() {
       const creators = [];
       for (const agg of byCreator.values()) {
         if (agg.fills < minFills) continue;
-        const roi = agg.totalStake > 0 ? agg.pnl / agg.totalStake : null;
-        const bettorRoi = roi != null ? -roi : null;
+        const roi = agg.totalStake > 0 ? agg.pnl / agg.totalStake : null; // SP P&L / our risk
+        // Bettor ROI is on the bettor's OWN stake (was −P&L / our risk until 2026-11-01).
+        const bettorRoi = agg.bettorStake > 0 ? -agg.pnl / agg.bettorStake : null;
         const bettorHitRate = (agg.wins + agg.losses) > 0 ? agg.losses / (agg.wins + agg.losses) : null;
         const blockedEntry = blocklist ? blocklist.getEntry(agg.creatorId) : null;
         creators.push({
@@ -2579,6 +2588,7 @@ function startStatusServer() {
           roi,                    // SP's ROI on this creator (negative = good for us)
           bettorRoi,              // Bettor's ROI (positive = sharp)
           bettorEv: agg.bettorEv, // Bettor's total EV at our fair model ($, negative = our edge)
+          ourEv: -agg.bettorEv,   // the same, from our side ($, positive = our edge)
           bettorEvRoi: agg.evStake > 0 ? agg.bettorEv / agg.evStake : null, // EV as a fraction of staked
           evCount: agg.evCount,   // parlays with valid EV inputs
           bettorHitRate,          // Fraction of settled parlays the bettor won
@@ -2595,7 +2605,9 @@ function startStatusServer() {
         totalFills: creators.reduce((s, c) => s + c.fills, 0),
         totalStake: creators.reduce((s, c) => s + c.totalStake, 0),
         totalPnl:   creators.reduce((s, c) => s + c.pnl, 0),
+        totalBettorStake: creators.reduce((s, c) => s + (c.bettorStake || 0), 0),
         totalBettorEv: creators.reduce((s, c) => s + (c.bettorEv || 0), 0),
+        totalOurEv: -creators.reduce((s, c) => s + (c.bettorEv || 0), 0),
         untagged,
         windowDays: days,
       };

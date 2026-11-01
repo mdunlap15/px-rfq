@@ -966,7 +966,7 @@
             <div id="creators-table"><div class="empty-state"><div class="icon">-</div><div>Expand to load counterparty data</div></div></div>
             <div style="font-size:10px; color:var(--text3); margin-top:10px; line-height:1.5;">
               <b>creator_id</b> is the only counterparty identifier PX exposes (per Alec). Forward-captured on every RFQ since 2026-05-19 (live deploy); backfilled for ~30-45 days of historical rows from PX REST. Older parlay_orders predate PX's retention window and can't be tagged retroactively — they appear as "untagged" in the summary.
-              <br><b>SP P&amp;L</b> = our profit (positive) or loss (negative). <b>Bettor ROI</b> = -P&amp;L / stake from the bettor's perspective; positive means this counterparty is beating us. <b>Bettor hit rate</b> = fraction of their settled parlays the bettor won. Rows sorted by bettor ROI descending — sharps at the top. Cached 60s server-side.
+              <br><b>SP P&amp;L</b> = our profit (positive) or loss (negative). <b>Our risk</b> = our max loss on the fill; the bettor's own stake is our risk / (decimal odds − 1). <b>Bettor ROI</b> = -P&amp;L / the bettor's stake; positive means this counterparty is beating us. <b>Bettor hit rate</b> = fraction of their settled parlays the bettor won. Rows sorted by bettor ROI descending — sharps at the top. Cached 60s server-side.
             </div>
           </div>
         </div>
@@ -13043,9 +13043,10 @@
       headEl.innerHTML = '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
         + chip('Creators tracked',  (t.creators || 0).toLocaleString())
         + chip('Total fills',       (t.totalFills || 0).toLocaleString())
-        + chip('Total stake',       fmtMoney(t.totalStake))
+        + chip('Our risk',          fmtMoney(t.totalStake), null, 'Σ our max loss (payout liability) on these fills.')
+        + chip('Bettor stake',      fmtMoney(t.totalBettorStake), null, 'Σ what the counterparties actually staked = our risk / (decimal odds − 1).')
         + chip('Net SP P&L',        fmtMoney(t.totalPnl), (t.totalPnl || 0) >= 0 ? 'var(--green)' : 'var(--red)')
-        + chip('Bettor EV',         fmtMoney(t.totalBettorEv), (t.totalBettorEv || 0) <= 0 ? 'var(--green)' : 'var(--red)', 'Total EV all tracked counterparties received at our fair model (Σ stake × (fairProb × decimal − 1)). Negative = our cumulative expected edge; compare to Net SP P&L to gauge luck vs edge.')
+        + chip('Our EV',            fmtMoney(t.totalOurEv), (t.totalOurEv || 0) >= 0 ? 'var(--green)' : 'var(--red)', 'Our expected value at fill on these fills, at our fair model = minus the counterparties EV (Σ bettor stake × (fairProb × decimal − 1)). Positive = our edge; compare to Net SP P&L to gauge luck vs edge.')
         + chip('Untagged fills',    (t.untagged || 0).toLocaleString(), 'var(--text3)', 'Pre-2026-05-19 rows that could not be backfilled — PX retains only ~30-45 days of orders.')
         + '</div>';
     }
@@ -13097,6 +13098,7 @@
         case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
         case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
         case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
+        case 'ourEv':         return dir * (num(a.ourEv) - num(b.ourEv));
         case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
         default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
       }
@@ -13111,7 +13113,7 @@
     let filt = '<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:10px; font-size:11px; color:var(--text3);">';
     filt += '<input type="text" id="creators-filter-search" placeholder="Creator ID…" value="' + escapeHtml(st.search) + '" oninput="creatorsState.search=this.value; rerenderWithFocus(()=>creatorsRerender())" style="' + fSel + ' width:140px; font-family:monospace;" title="Creator ID prefix">';
     filt += '<span>Fills</span>' + rangeFilterHtml('creatorsState', 'fillsMin', 'fillsMax', st, 'creatorsRerender()', fSel, { title: 'Fills', width: '52px', step: '1' });
-    filt += '<span>Stake $</span>' + rangeFilterHtml('creatorsState', 'stakeMin', 'stakeMax', st, 'creatorsRerender()', fSel, { title: 'Total stake', width: '64px' });
+    filt += '<span>Our risk $</span>' + rangeFilterHtml('creatorsState', 'stakeMin', 'stakeMax', st, 'creatorsRerender()', fSel, { title: 'Our total risk', width: '64px' });
     filt += '<span>SP P&L $</span>' + rangeFilterHtml('creatorsState', 'pnlMin', 'pnlMax', st, 'creatorsRerender()', fSel, { title: 'SP P&L', width: '64px' });
     filt += '<span>Bettor ROI %</span>' + rangeFilterHtml('creatorsState', 'broiMin', 'broiMax', st, 'creatorsRerender()', fSel, { title: 'Bettor ROI %', width: '52px' });
     filt += '<span>Hit %</span>' + rangeFilterHtml('creatorsState', 'hitMin', 'hitMax', st, 'creatorsRerender()', fSel, { title: 'Bettor hit %', width: '52px' });
@@ -13129,10 +13131,10 @@
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'settled\')" title="Sort by settled count">Settled' + sArrow('settled') + '</th>'
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'spwl\')" title="Sort by SP win rate">SP W/L' + sArrow('spwl') + '</th>'
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorHitRate\')" title="Sort by bettor hit %">Bettor Hit %' + sArrow('bettorHitRate') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'totalStake\')" title="Sort by stake">Stake' + sArrow('totalStake') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'totalStake\')" title="Our risk (max loss) on this creator\'s fills. Sort by it.">Our risk' + sArrow('totalStake') + '</th>'
       + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'pnl\')" title="Sort by SP P&L">SP P&L' + sArrow('pnl') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorRoi\')" title="Sort by bettor ROI">Bettor ROI' + sArrow('bettorRoi') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorEv\')" title="Total EV the bettor received at our fair model (Σ stake × (fairProb × decimal − 1)). Negative = we hold edge; near-0 or positive flags a sharp regardless of how their luck landed. Sort by it.">Bettor EV' + sArrow('bettorEv') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorRoi\')" title="Bettor ROI = minus SP P&L / the bettor\'s own stake. Sort by it.">Bettor ROI' + sArrow('bettorRoi') + '</th>'
+      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'ourEv\')" title="Our EV at fill on this creator\'s fills, at our fair model = minus their EV. Positive = we hold the edge; near-0 or negative flags a sharp regardless of how their luck landed. Sort by it.">Our EV' + sArrow('ourEv') + '</th>'
       + '<th style="text-align:left;  '  + thBase + '" onclick="creatorsSort(\'lastSeen\')" title="Sort by last seen">First / Last seen' + sArrow('lastSeen') + '</th>'
       + '<th style="text-align:center; padding:6px 8px;">Block</th>'
       + '</tr></thead><tbody>';
@@ -13142,10 +13144,10 @@
       // Bettor ROI: positive = sharp winning. Red emphasis when > 1%.
       const broiColor = c.bettorRoi == null ? 'var(--text3)' : (c.bettorRoi > 0.01 ? 'var(--red)' : (c.bettorRoi < -0.01 ? 'var(--green)' : 'var(--text)'));
       const hitColor  = c.bettorHitRate == null ? 'var(--text3)' : (c.bettorHitRate > 0.55 ? 'var(--red)' : 'var(--text)');
-      // Bettor EV: negative = we hold edge (good, green). Positive = bettor is
-      // +EV against our fair model (alarming, red). Tooltip carries EV-as-%-of-stake.
-      const evColor = (c.bettorEv == null || !Number.isFinite(c.bettorEv)) ? 'var(--text3)' : (c.bettorEv > 0 ? 'var(--red)' : (c.bettorEv < 0 ? 'var(--green)' : 'var(--text)'));
-      const evTip   = (c.bettorEvRoi != null && Number.isFinite(c.bettorEvRoi)) ? ('EV ROI ' + (c.bettorEvRoi * 100).toFixed(2) + '% over ' + (c.evCount || 0) + ' parlays') : 'no EV inputs';
+      // Our EV: positive = we hold edge (green). Negative = the bettor is +EV
+      // against our fair model (alarming, red). Tooltip carries their EV as % of their stake.
+      const evColor = (c.ourEv == null || !Number.isFinite(c.ourEv)) ? 'var(--text3)' : (c.ourEv < 0 ? 'var(--red)' : (c.ourEv > 0 ? 'var(--green)' : 'var(--text)'));
+      const evTip   = (c.bettorEvRoi != null && Number.isFinite(c.bettorEvRoi)) ? ('Bettor EV ' + (c.bettorEvRoi * 100).toFixed(2) + '% of their $' + Math.round(c.bettorStake || 0).toLocaleString() + ' stake over ' + (c.evCount || 0) + ' parlays') : 'no EV inputs';
       const firstSeen = c.firstSeen ? c.firstSeen.slice(0, 10) : '';
       const lastSeen  = c.lastSeen ? c.lastSeen.slice(0, 10)   : '';
       // Blocked rows get a faint red tint so they're scannable even with
@@ -13176,7 +13178,7 @@
       html += '<td style="padding:5px 8px; text-align:right;">' + fmtMoney(c.totalStake) + '</td>';
       html += '<td style="padding:5px 8px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(c.pnl) + '</td>';
       html += '<td style="padding:5px 8px; text-align:right; color:' + broiColor + '; font-weight:600;">' + fmtPct(c.bettorRoi) + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right; color:' + evColor + '; font-weight:600;" title="' + escapeHtml(evTip) + '">' + fmtMoney(c.bettorEv) + '</td>';
+      html += '<td style="padding:5px 8px; text-align:right; color:' + evColor + '; font-weight:600;" title="' + escapeHtml(evTip) + '">' + fmtMoney(c.ourEv) + '</td>';
       html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
       html += '<td style="padding:5px 8px; text-align:center;">' + btn + '</td>';
       html += '</tr>';
@@ -13307,7 +13309,7 @@
     h += '<div style="overflow-x:auto;"><table style="width:100%; font-size:11px; border-collapse:collapse;">';
     h += '<tr style="color:var(--text3); border-bottom:1px solid var(--border);">'
       + '<th style="text-align:left; padding:3px 6px;">Date</th>'
-      + '<th style="text-align:right; padding:3px 6px;">Stake</th>'
+      + '<th style="text-align:right; padding:3px 6px;">Our risk</th>'
       + '<th style="text-align:right; padding:3px 6px;">Offered Odds</th>'
       + '<th style="text-align:center; padding:3px 6px;">Status</th>'
       + '<th style="text-align:right; padding:3px 6px;">P&L</th>'
@@ -13368,13 +13370,14 @@
         case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
         case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
         case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
+        case 'ourEv':         return dir * (num(a.ourEv) - num(b.ourEv));
         case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
         default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
       }
     });
     const headers = ['Creator ID', 'Fills', 'Settled', 'SP Wins', 'SP Losses', 'Pushes',
-      'Bettor Hit %', 'Total Stake', 'SP P&L', 'SP ROI %', 'Bettor ROI %',
-      'Bettor EV', 'Bettor EV ROI %',
+      'Bettor Hit %', 'Our Risk', 'Bettor Stake', 'SP P&L', 'SP ROI %', 'Bettor ROI %',
+      'Our EV', 'Bettor EV ROI %',
       'First Seen', 'Last Seen', 'Blocked', 'Blocked Reason'];
     const csvRows = [headers.join(',')];
     const pct = v => (v == null || !Number.isFinite(v)) ? '' : (v * 100).toFixed(2);
@@ -13384,9 +13387,10 @@
         c.fills, c.settled, c.wins, c.losses, c.pushes || 0,
         pct(c.bettorHitRate),
         (c.totalStake != null ? Number(c.totalStake).toFixed(2) : ''),
+        (c.bettorStake != null ? Number(c.bettorStake).toFixed(2) : ''),
         (c.pnl != null ? Number(c.pnl).toFixed(2) : ''),
         pct(c.roi), pct(c.bettorRoi),
-        (c.bettorEv != null ? Number(c.bettorEv).toFixed(2) : ''), pct(c.bettorEvRoi),
+        (c.ourEv != null ? Number(c.ourEv).toFixed(2) : ''), pct(c.bettorEvRoi),
         csvEscape((c.firstSeen || '').slice(0, 10)),
         csvEscape((c.lastSeen || '').slice(0, 10)),
         c.blocked ? 'yes' : 'no',
