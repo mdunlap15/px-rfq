@@ -1029,7 +1029,7 @@
         // from Supabase and matches the dashboard's view.
         const [statusResp, ordersResp, pxPnLResp, dailyPnlResp, bankrollResp] = await Promise.all([
           fetch(BASE + '/status'),
-          fetch(BASE + '/orders'),
+          fetch(BASE + '/orders?settled=800'),
           fetch(BASE + '/px-pnl').catch(() => null),
           fetch(BASE + '/daily-pnl?days=30').catch(() => null),
           fetch(BASE + '/bankroll').catch(() => null),
@@ -2076,7 +2076,7 @@
       // count, not the list, so we cross-reference against orders.
       if (!_expState.teamParlayCache[teamKey]) {
         try {
-          const r = await fetch(BASE + '/orders');
+          const r = await fetch(BASE + '/orders?settled=800');
           const data = await r.json();
           const orders = data.recentOrders || [];
           // Match parlays whose any leg has a matching teamKey. Team key
@@ -2309,7 +2309,7 @@
         const [expResp, flowResp, ordersResp] = await Promise.all([
           fetch(BASE + '/player-exposure'),
           fetch(BASE + '/prop-flow?limit=200').catch(() => null),
-          fetch(BASE + '/orders').catch(() => null),
+          fetch(BASE + '/orders?settled=800').catch(() => null),
         ]);
         const exp = await expResp.json();
         const flow = flowResp ? await flowResp.json().catch(() => null) : null;
