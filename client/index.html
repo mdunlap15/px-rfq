@@ -5311,6 +5311,13 @@
     };
     // eventLabel: the matchup, or '—' when there's no two-team game.
     const _evLabel = (l) => (l.homeTeam && l.awayTeam) ? (l.awayTeam + ' @ ' + l.homeTeam) : '—';
+    // Drill-down leg label: a total's outcome label ("Under 43.5") names no game,
+    // so a parlay of totals read as "Under 43.5 + Under 43.5". Add the matchup.
+    const _ocLegLabel = (l) => {
+      const oc = _ocLabel(l);
+      const mkt = String(l.market || l.marketType || '').toLowerCase();
+      return (/total/.test(mkt) && /^(over|under)\b/i.test(oc) && l.homeTeam && l.awayTeam) ? oc + ' (' + _evLabel(l) + ')' : oc;
+    };
     let lockedPnl = 0;
     let lockedOrderCount = 0;
     for (const o of confirmed) {
@@ -5381,7 +5388,7 @@
         nLegs: legs.length,
         nPending: pendingLegs.length,
         odds: o.offeredOdds,
-        legs: pendingLegs.map(l => _ocLabel(l)).slice(0, 8),
+        legs: pendingLegs.map(l => _ocLegLabel(l)).slice(0, 8),
       };
       const evSeen = new Set();
       for (const l of pendingLegs) {
