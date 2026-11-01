@@ -4579,18 +4579,36 @@ function startStatusServer() {
   // poll (?settled=400) is never cached, so open-position live state stays fresh.
   // ORDERS_FULL_CACHE_MS (default 60000; 0 disables). This endpoint reads the
   // in-memory order book, not Supabase.
-  const _ordersFullCache = { at: 0, key: null, body: null };
+  //
+  // EVERY VARIANT CACHED (2026-11-01). Deep capped calls were never cached: the
+  // portfolio-tracker's ?settled=40000 (~121MB, the whole history) rebuilt on
+  // every pull and froze the event loop for 30-61s at the NFL 1pm kickoff, while
+  // the dashboard + app + viewer each re-serialized their own capped poll. Now
+  // each (limit, settled) variant is cached: deep ones (no cap, or a cap above
+  // ORDERS_DEEP_SETTLED) for ORDERS_FULL_CACHE_MS, shallow live polls for
+  // ORDERS_CAPPED_CACHE_MS (default 10000 — open-position live state at most
+  // 10s old, the dashboard's own poll interval). The handler is synchronous, so
+  // a request arriving during a build is served from the cache the build fills.
+  const _ordersCache = new Map(); // key -> { at, body }
   const _ordersFullCacheMs = (() => {
     const v = parseInt(process.env.ORDERS_FULL_CACHE_MS, 10);
     return Number.isFinite(v) && v >= 0 ? v : 60000;
   })();
+  const _ordersCappedCacheMs = (() => {
+    const v = parseInt(process.env.ORDERS_CAPPED_CACHE_MS, 10);
+    return Number.isFinite(v) && v >= 0 ? v : 10000;
+  })();
+  const _ordersDeepSettled = parseInt(process.env.ORDERS_DEEP_SETTLED, 10) || 2000;
   app.get('/orders', (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
-    const _cacheable = req.query.settled == null && _ordersFullCacheMs > 0;
-    if (_cacheable && _ordersFullCache.body && _ordersFullCache.key === limit
-        && Date.now() - _ordersFullCache.at < _ordersFullCacheMs) {
+    const _settled = req.query.settled != null ? parseInt(req.query.settled, 10) : null;
+    const _deep = !(Number.isFinite(_settled) && _settled > 0) || _settled > _ordersDeepSettled;
+    const _ttl = _deep ? _ordersFullCacheMs : _ordersCappedCacheMs;
+    const _key = limit + '|' + (Number.isFinite(_settled) ? _settled : 'all');
+    const _hit = _ttl > 0 ? _ordersCache.get(_key) : null;
+    if (_hit && Date.now() - _hit.at < _ttl) {
       res.set('X-Orders-Cache', 'hit');
-      return res.type('application/json').send(_ordersFullCache.body);
+      return res.type('application/json').send(_hit.body);
     }
     // Stamp each order with isStalePhantom computed server-side so the
     // client has a single truth-flag for "is this a real open position?"
@@ -4638,16 +4656,18 @@ function startStatusServer() {
       // chart tabs that need it). The main dashboard passes settled=400 on
       // its fast poll and drops the cap only while a chart tab is active.
       recentOrders: orderTracker.getRecentOrders(limit, {
-        settledLimit: req.query.settled != null ? parseInt(req.query.settled, 10) : null,
+        settledLimit: _settled,
       }).map(stamp),
     };
-    if (_cacheable) {
-      const body = JSON.stringify(_payload);
-      _ordersFullCache.at = Date.now(); _ordersFullCache.key = limit; _ordersFullCache.body = body;
-      res.set('X-Orders-Cache', 'miss');
-      return res.type('application/json').send(body);
+    const body = JSON.stringify(_payload);
+    if (_ttl > 0) {
+      _ordersCache.delete(_key); // re-insert so Map order = least recently built first
+      _ordersCache.set(_key, { at: Date.now(), body });
+      // A handful of clients use a handful of variants; drop the oldest past 8.
+      if (_ordersCache.size > 8) _ordersCache.delete(_ordersCache.keys().next().value);
     }
-    res.json(_payload);
+    res.set('X-Orders-Cache', 'miss');
+    res.type('application/json').send(body);
   });
 
   // --- Straight (single-leg) wager passthroughs (READ-ONLY) ----------------
