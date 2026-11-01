@@ -2492,6 +2492,24 @@ function startStatusServer() {
 
       // Aggregate by creator_id. Skip rows where meta.creatorId is absent
       // (pre-2026-05-19 rows outside PX's retention window can't be backfilled).
+      // EV of a fill from OUR side. fill = meta.expectedValue (EV at confirm).
+      // live = the frozen game-time EV once every leg has started (meta.gameTime),
+      // else the current EV live (meta.evLive), else none. Fair drift = live fair /
+      // fill fair - 1: > 0 means the market moved TOWARD the bettor after the fill —
+      // the signature of a counterparty who picks lines before they move (a sharp),
+      // visible long before P&L is.
+      const evOf = (r) => {
+        const m = r.meta || {};
+        const fill = Number.isFinite(Number(m.expectedValue)) ? Number(m.expectedValue) : null;
+        const gt = m.gameTime && Number.isFinite(m.gameTime.ev) ? m.gameTime : null;
+        const lv = !gt && m.evLive && Number.isFinite(m.evLive.ev) ? m.evLive : null;
+        const src = gt ? 'gametime' : lv ? 'live' : null;
+        const live = gt ? gt.ev : lv ? lv.ev : null;
+        const fillFair = Number(r.fair_parlay_prob);
+        const liveFair = gt ? Number(gt.fairProb) : lv ? Number(lv.fairProb) : NaN;
+        const drift = fillFair > 0 && fillFair < 1 && liveFair > 0 && liveFair < 1 ? liveFair / fillFair - 1 : null;
+        return { fill, live, src, drift, liveFair: Number.isFinite(liveFair) ? liveFair : null };
+      };
       const byCreator = new Map();
       const detailByCreator = new Map(); // creatorId -> [ {parlayId, ...} ]
       let untagged = 0;
@@ -2501,6 +2519,7 @@ function startStatusServer() {
         // Collect drill-down detail for this row (capped per creator).
         let detail = detailByCreator.get(cid);
         if (!detail) { detail = []; detailByCreator.set(cid, detail); }
+        const ev = evOf(r);
         if (detail.length < MAX_PARLAYS_PER_CREATOR) {
           const rawLegs = Array.isArray(r.legs) ? r.legs : [];
           const legs = rawLegs.slice(0, MAX_LEGS_PER_PARLAY).map(slimLeg).filter(Boolean);
@@ -2514,6 +2533,11 @@ function startStatusServer() {
             fairParlayProb: r.fair_parlay_prob != null ? Number(r.fair_parlay_prob) : null,
             status: r.status,
             pnl: r.pnl != null ? Number(r.pnl) : null,
+            evFill: ev.fill,
+            evLive: ev.live,
+            evLiveSrc: ev.src,
+            fairLive: ev.liveFair,
+            drift: ev.drift,
             legCount: rawLegs.length,
             legs,
           });
@@ -2533,12 +2557,24 @@ function startStatusServer() {
             bettorEv: 0,   // Σ bettor EV at our fair model (negative = we hold edge)
             evStake: 0,    // bettor stake over parlays that had valid EV inputs (for EV ROI)
             evCount: 0,
+            evFill: 0,     // Σ our EV at fill (meta.expectedValue)
+            evLive: 0,     // Σ our EV live — tickets with no live read count at their fill EV
+            liveN: 0,      // tickets with a real live / game-time read
+            liveNeg: 0,    // ... of which our EV live is < 0
+            dSum: 0, dSq: 0, dN: 0, // fair drift fill -> live, per ticket
+            setPnl: 0, setEvLive: 0, // settled tickets only, for luck = P&L - EV live
             firstSeen: r.confirmed_at,
             lastSeen: r.confirmed_at,
           };
           byCreator.set(cid, agg);
         }
         agg.fills++;
+        if (ev.fill != null) agg.evFill += ev.fill;
+        const evL = ev.live != null ? ev.live : (ev.fill != null ? ev.fill : 0);
+        agg.evLive += evL;
+        if (ev.live != null) { agg.liveN++; if (ev.live < 0) agg.liveNeg++; }
+        if (ev.drift != null) { agg.dSum += ev.drift; agg.dSq += ev.drift * ev.drift; agg.dN++; }
+        if (r.pnl != null) { agg.setPnl += Number(r.pnl) || 0; agg.setEvLive += evL; }
         // confirmed_stake is OUR RISK (payout liability), NOT the bettor's stake.
         // totalStake keeps that meaning for back-compat; the UI labels it "Our risk".
         const stake = Number(r.confirmed_stake) || 0;
@@ -2583,12 +2619,29 @@ function startStatusServer() {
         const bettorRoi = agg.bettorStake > 0 ? -agg.pnl / agg.bettorStake : null;
         const bettorHitRate = (agg.wins + agg.losses) > 0 ? agg.losses / (agg.wins + agg.losses) : null;
         const blockedEntry = blocklist ? blocklist.getEntry(agg.creatorId) : null;
+        // Drift z: mean per-ticket fair drift / its standard error. Positive and
+        // large = this counterparty's parlays reliably move toward them after the
+        // fill. Needs >= 2 reads; a single read has no spread.
+        const dMean = agg.dN > 0 ? agg.dSum / agg.dN : null;
+        const dVar = agg.dN > 1 ? Math.max(0, (agg.dSq - agg.dN * dMean * dMean) / (agg.dN - 1)) : null;
+        const driftZ = agg.dN > 1 && dVar > 0 ? dMean / Math.sqrt(dVar / agg.dN) : null;
+        // WATCH: >= 5 live reads and either the fair reliably moves toward them
+        // (z >= 2) or our EV live on their book is negative.
+        const watch = agg.liveN >= 5 && ((driftZ != null && driftZ >= 2) || agg.evLive < 0);
         creators.push({
           ...agg,
           roi,                    // SP's ROI on this creator (negative = good for us)
           bettorRoi,              // Bettor's ROI (positive = sharp)
           bettorEv: agg.bettorEv, // Bettor's total EV at our fair model ($, negative = our edge)
           ourEv: -agg.bettorEv,   // the same, from our side ($, positive = our edge)
+          evFill: agg.evFill,     // Σ our EV at fill
+          evLive: agg.evLive,     // Σ our EV live (game-time when final)
+          evLeak: agg.evFill - agg.evLive, // > 0 = value lost between fill and game time
+          evLivePct: agg.totalStake > 0 ? agg.evLive / agg.totalStake : null, // per $ of our risk
+          liveN: agg.liveN, liveNeg: agg.liveNeg,
+          driftMean: dMean, driftZ, driftN: agg.dN,
+          luck: agg.setPnl - agg.setEvLive, // settled P&L minus its EV live
+          watch,
           bettorEvRoi: agg.evStake > 0 ? agg.bettorEv / agg.evStake : null, // EV as a fraction of staked
           evCount: agg.evCount,   // parlays with valid EV inputs
           bettorHitRate,          // Fraction of settled parlays the bettor won
@@ -2597,8 +2650,8 @@ function startStatusServer() {
           blockedAt: blockedEntry ? blockedEntry.addedAt : null,
         });
       }
-      // Sort by bettorRoi descending — sharps at top.
-      creators.sort((a, b) => (b.bettorRoi ?? -Infinity) - (a.bettorRoi ?? -Infinity));
+      // Sharps at top: drift z descending (EV live ascending as tie-break).
+      creators.sort((a, b) => ((b.driftZ ?? -Infinity) - (a.driftZ ?? -Infinity)) || (a.evLive - b.evLive));
 
       const totals = {
         creators: creators.length,
@@ -2608,6 +2661,10 @@ function startStatusServer() {
         totalBettorStake: creators.reduce((s, c) => s + (c.bettorStake || 0), 0),
         totalBettorEv: creators.reduce((s, c) => s + (c.bettorEv || 0), 0),
         totalOurEv: -creators.reduce((s, c) => s + (c.bettorEv || 0), 0),
+        totalEvFill: creators.reduce((s, c) => s + (c.evFill || 0), 0),
+        totalEvLive: creators.reduce((s, c) => s + (c.evLive || 0), 0),
+        totalLuck: creators.reduce((s, c) => s + (c.luck || 0), 0),
+        watchCount: creators.filter(c => c.watch).length,
         untagged,
         windowDays: days,
       };

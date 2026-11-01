@@ -966,7 +966,7 @@
             <div id="creators-table"><div class="empty-state"><div class="icon">-</div><div>Expand to load counterparty data</div></div></div>
             <div style="font-size:10px; color:var(--text3); margin-top:10px; line-height:1.5;">
               <b>creator_id</b> is the only counterparty identifier PX exposes (per Alec). Forward-captured on every RFQ since 2026-05-19 (live deploy); backfilled for ~30-45 days of historical rows from PX REST. Older parlay_orders predate PX's retention window and can't be tagged retroactively — they appear as "untagged" in the summary.
-              <br><b>SP P&amp;L</b> = our profit (positive) or loss (negative). <b>Our risk</b> = our max loss on the fill; the bettor's own stake is our risk / (decimal odds − 1). <b>Bettor ROI</b> = -P&amp;L / the bettor's stake; positive means this counterparty is beating us. <b>Bettor hit rate</b> = fraction of their settled parlays the bettor won. Rows sorted by bettor ROI descending — sharps at the top. Cached 60s server-side.
+              <br><b>EV at fill</b> = our expected value when the parlay was confirmed. <b>EV live</b> = the same parlay re-graded at each leg's own start (frozen 90s before it, never in-play) — game-time once every leg has started. EV live is the best short-run read on a counterparty: a sharp's parlays keep moving toward them after we fill, long before P&amp;L shows it. <b>Drift z</b> = mean per-ticket fair drift (fill → live, &gt; 0 toward the bettor) divided by its standard error; 2+ is a sharp signal. <b>WATCH</b> = 5+ live reads and drift z ≥ 2 or negative EV live. <b>Luck</b> = settled P&amp;L minus its EV live. EV live exists for fills since mid-October; older fills count at their fill EV. Rows sorted by drift z — sharps at the top. Cached 60s server-side.
             </div>
           </div>
         </div>
@@ -12968,8 +12968,8 @@
   if (!window._creatorsState) {
     window._creatorsState = {
       days: 30, loading: false, data: null,
-      // Sort: default bettorRoi desc (sharps at top), matching the backend.
-      sortCol: 'bettorRoi', sortDir: -1,
+      // Sort: default drift z desc (sharps at top), matching the backend.
+      sortCol: 'driftZ', sortDir: -1,
       // Client-side filters. search = creator-id prefix; the rest are numeric
       // min/max range filters reusing rangeFilterHtml/passesRangeFilter.
       search: '',
@@ -12978,6 +12978,7 @@
       pnlMin: '', pnlMax: '',
       broiMin: '', broiMax: '',   // bettor ROI entered as PERCENT (e.g. 1 = 1%)
       hitMin: '', hitMax: '',     // bettor hit rate entered as PERCENT
+      watchOnly: false, hideBlocked: false,
       // Per-creator parlay detail fetched on row-expand, cached so re-expand
       // doesn't refetch. Keyed by creatorId.
       detailCache: {},
@@ -13019,6 +13020,34 @@
     loadCreatorStats(true);
   };
 
+  // Filter + sort shared by the table and the CSV export, so they always match.
+  function _creatorsView(st, all) {
+    const q = (st.search || '').toLowerCase().trim();
+    const rows = (all || []).filter(c => {
+      if (q && !(c.creatorId || '').toLowerCase().startsWith(q)) return false;
+      if (!passesRangeFilter(c.fills, st.fillsMin, st.fillsMax)) return false;
+      if (!passesRangeFilter(c.totalStake, st.stakeMin, st.stakeMax)) return false;
+      if (st.watchOnly && !c.watch) return false;
+      if (st.hideBlocked && c.blocked) return false;
+      return true;
+    });
+    const dir = st.sortDir;
+    const num = v => (v == null || !Number.isFinite(Number(v))) ? -Infinity : Number(v);
+    const str = (a, b, k) => dir * String(a[k] || '').localeCompare(String(b[k] || ''));
+    rows.sort((a, b) => {
+      switch (st.sortCol) {
+        case 'creatorId': return str(a, b, 'creatorId');
+        case 'lastSeen':  return str(a, b, 'lastSeen');
+        case 'liveNegPct': {
+          const r = c => c.liveN > 0 ? c.liveNeg / c.liveN : -Infinity;
+          return dir * (r(a) - r(b));
+        }
+        default: return dir * (num(a[st.sortCol]) - num(b[st.sortCol]));
+      }
+    });
+    return rows;
+  }
+
   function renderCreatorStats(data) {
     const headEl = document.getElementById('creators-headline');
     const sumEl  = document.getElementById('creators-summary');
@@ -13031,23 +13060,24 @@
     const t = data.totals || {};
     if (sumEl) {
       sumEl.textContent = (t.creators || 0) + ' creators · '
-        + (t.totalFills || 0).toLocaleString() + ' fills · '
-        + (t.untagged ? (t.untagged.toLocaleString() + ' untagged (pre-2026-05-19)') : 'all tagged');
+        + (t.totalFills || 0).toLocaleString() + ' fills'
+        + (t.watchCount ? ' · ' + t.watchCount + ' on watch' : '');
     }
+    const money0 = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const sign = v => (v || 0) > 0 ? 'var(--green)' : (v || 0) < 0 ? 'var(--red)' : 'var(--text)';
     if (headEl) {
-      const chip = (label, val, color, tooltip) => '<div style="background:var(--surface3); border:1px solid var(--border); border-radius:6px; padding:10px 14px; min-width:140px;"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : '') + '>'
+      const chip = (label, val, color, tooltip) => '<div style="background:var(--surface3); border:1px solid var(--border); border-radius:6px; padding:10px 14px; min-width:130px;"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : '') + '>'
         + '<div style="font-size:10px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px;">' + label + '</div>'
         + '<div style="font-size:18px; font-weight:600; color:' + (color || 'var(--text)') + '; margin-top:2px;">' + val + '</div>'
         + '</div>';
-      const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(0);
       headEl.innerHTML = '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
-        + chip('Creators tracked',  (t.creators || 0).toLocaleString())
-        + chip('Total fills',       (t.totalFills || 0).toLocaleString())
-        + chip('Our risk',          fmtMoney(t.totalStake), null, 'Σ our max loss (payout liability) on these fills.')
-        + chip('Bettor stake',      fmtMoney(t.totalBettorStake), null, 'Σ what the counterparties actually staked = our risk / (decimal odds − 1).')
-        + chip('Net SP P&L',        fmtMoney(t.totalPnl), (t.totalPnl || 0) >= 0 ? 'var(--green)' : 'var(--red)')
-        + chip('Our EV',            fmtMoney(t.totalOurEv), (t.totalOurEv || 0) >= 0 ? 'var(--green)' : 'var(--red)', 'Our expected value at fill on these fills, at our fair model = minus the counterparties EV (Σ bettor stake × (fairProb × decimal − 1)). Positive = our edge; compare to Net SP P&L to gauge luck vs edge.')
-        + chip('Untagged fills',    (t.untagged || 0).toLocaleString(), 'var(--text3)', 'Pre-2026-05-19 rows that could not be backfilled — PX retains only ~30-45 days of orders.')
+        + chip('Fills', (t.totalFills || 0).toLocaleString(), null, (t.creators || 0) + ' counterparties with at least the min fills')
+        + chip('Our risk', money0(t.totalStake), null, 'Our max loss on these fills. The bettors staked ' + money0(t.totalBettorStake) + '.')
+        + chip('EV at fill', money0(t.totalEvFill), sign(t.totalEvFill), 'Our expected value when each parlay was confirmed.')
+        + chip('EV live', money0(t.totalEvLive), sign(t.totalEvLive), 'Our expected value re-graded at each leg\'s own start (frozen 90s before it; never in-play). Tickets with no live read yet count at their fill EV. EV live below EV at fill = the market moved toward the bettors after we filled.')
+        + chip('SP P&L', money0(t.totalPnl), sign(t.totalPnl), 'Realized profit on settled fills.')
+        + chip('Luck', money0(t.totalLuck), sign(t.totalLuck), 'Settled P&L minus the EV live of those same tickets. Short-run noise, not skill.')
+        + chip('On watch', String(t.watchCount || 0), (t.watchCount || 0) > 0 ? 'var(--red)' : 'var(--text3)', 'Counterparties with 5+ live reads whose parlays reliably move toward them after the fill (drift z >= 2), or on whose book our EV live is negative.')
         + '</div>';
     }
 
@@ -13058,55 +13088,11 @@
     }
 
     const st = window._creatorsState;
-    const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
-    const fmtPct   = v => (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(2) + '%';
-
-    // ---- Client-side FILTER ----------------------------------------------
-    // search: creator-id prefix (case-insensitive). Numeric ranges reuse
-    // passesRangeFilter. bettorRoi + hitRate are stored as fractions but the
-    // operator types percents, so scale the filter value /100.
-    const broiMin = st.broiMin === '' ? '' : Number(st.broiMin) / 100;
-    const broiMax = st.broiMax === '' ? '' : Number(st.broiMax) / 100;
-    const hitMin  = st.hitMin === '' ? '' : Number(st.hitMin) / 100;
-    const hitMax  = st.hitMax === '' ? '' : Number(st.hitMax) / 100;
-    const q = (st.search || '').toLowerCase().trim();
-    const creators = allCreators.filter(c => {
-      if (q && !(c.creatorId || '').toLowerCase().startsWith(q)) return false;
-      if (!passesRangeFilter(c.fills, st.fillsMin, st.fillsMax)) return false;
-      if (!passesRangeFilter(c.totalStake, st.stakeMin, st.stakeMax)) return false;
-      if (!passesRangeFilter(c.pnl, st.pnlMin, st.pnlMax)) return false;
-      if (!passesRangeFilter(c.bettorRoi, broiMin, broiMax)) return false;
-      if (!passesRangeFilter(c.bettorHitRate, hitMin, hitMax)) return false;
-      return true;
-    });
-
-    // ---- Client-side SORT ------------------------------------------------
-    const dir = st.sortDir;
-    const num = v => (v == null || !Number.isFinite(Number(v))) ? -Infinity : Number(v);
-    creators.sort((a, b) => {
-      switch (st.sortCol) {
-        case 'creatorId': return dir * String(a.creatorId || '').localeCompare(String(b.creatorId || ''));
-        case 'fills':     return dir * (num(a.fills) - num(b.fills));
-        case 'settled':   return dir * (num(a.settled) - num(b.settled));
-        // SP W/L sorts by SP win-rate (wins / settled-decisive).
-        case 'spwl': {
-          const wr = c => { const d = (c.wins || 0) + (c.losses || 0); return d > 0 ? c.wins / d : -Infinity; };
-          return dir * (wr(a) - wr(b));
-        }
-        case 'bettorHitRate': return dir * (num(a.bettorHitRate) - num(b.bettorHitRate));
-        case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
-        case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
-        case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
-        case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
-        case 'ourEv':         return dir * (num(a.ourEv) - num(b.ourEv));
-        case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
-        default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
-      }
-    });
-
-    // Sortable-header helpers (mirror gSortClick/gSortArrow on Game Exposure).
+    const creators = _creatorsView(st, allCreators);
+    const money = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(0);
+    const pct1 = v => (v == null || !Number.isFinite(v)) ? '—' : (v > 0 ? '+' : '') + (v * 100).toFixed(1) + '%';
     const sArrow = (col) => st.sortCol === col ? (st.sortDir > 0 ? ' &#9650;' : ' &#9660;') : '';
-    const thBase = 'padding:6px 8px; cursor:pointer; user-select:none;';
+    const th = (col, label, align, tip) => '<th style="text-align:' + align + '; padding:6px 8px; cursor:pointer; user-select:none; white-space:nowrap;" onclick="creatorsSort(\'' + col + '\')" title="' + escapeHtml(tip) + '">' + label + sArrow(col) + '</th>';
 
     // ---- FILTER ROW ------------------------------------------------------
     const fSel = 'background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px;';
@@ -13114,77 +13100,64 @@
     filt += '<input type="text" id="creators-filter-search" placeholder="Creator ID…" value="' + escapeHtml(st.search) + '" oninput="creatorsState.search=this.value; rerenderWithFocus(()=>creatorsRerender())" style="' + fSel + ' width:140px; font-family:monospace;" title="Creator ID prefix">';
     filt += '<span>Fills</span>' + rangeFilterHtml('creatorsState', 'fillsMin', 'fillsMax', st, 'creatorsRerender()', fSel, { title: 'Fills', width: '52px', step: '1' });
     filt += '<span>Our risk $</span>' + rangeFilterHtml('creatorsState', 'stakeMin', 'stakeMax', st, 'creatorsRerender()', fSel, { title: 'Our total risk', width: '64px' });
-    filt += '<span>SP P&L $</span>' + rangeFilterHtml('creatorsState', 'pnlMin', 'pnlMax', st, 'creatorsRerender()', fSel, { title: 'SP P&L', width: '64px' });
-    filt += '<span>Bettor ROI %</span>' + rangeFilterHtml('creatorsState', 'broiMin', 'broiMax', st, 'creatorsRerender()', fSel, { title: 'Bettor ROI %', width: '52px' });
-    filt += '<span>Hit %</span>' + rangeFilterHtml('creatorsState', 'hitMin', 'hitMax', st, 'creatorsRerender()', fSel, { title: 'Bettor hit %', width: '52px' });
-    const anyFilter = q || st.fillsMin || st.fillsMax || st.stakeMin || st.stakeMax || st.pnlMin || st.pnlMax || st.broiMin || st.broiMax || st.hitMin || st.hitMax;
+    filt += '<label style="display:inline-flex; gap:4px; align-items:center; margin-left:6px; cursor:pointer;"><input type="checkbox"' + (st.watchOnly ? ' checked' : '') + ' onchange="creatorsState.watchOnly=this.checked; creatorsRerender()">On watch only</label>';
+    filt += '<label style="display:inline-flex; gap:4px; align-items:center; margin-left:6px; cursor:pointer;"><input type="checkbox"' + (st.hideBlocked ? ' checked' : '') + ' onchange="creatorsState.hideBlocked=this.checked; creatorsRerender()">Hide blocked</label>';
+    const anyFilter = (st.search || '').trim() || st.fillsMin || st.fillsMax || st.stakeMin || st.stakeMax || st.watchOnly || st.hideBlocked;
     if (anyFilter) {
       filt += '<button onclick="creatorsClearFilters()" style="' + fSel + ' cursor:pointer; color:var(--text2);" title="Clear all filters">Clear</button>';
-      filt += '<span style="color:var(--text3);">' + creators.length + ' of ' + allCreators.length + '</span>';
+      filt += '<span>' + creators.length + ' of ' + allCreators.length + '</span>';
     }
     filt += '</div>';
 
     let html = filt + '<div style="overflow-x:auto;"><table style="width:100%; font-size:12px; border-collapse:collapse;">';
     html += '<thead><tr style="border-bottom:1px solid var(--border); color:var(--text3); font-size:11px;">'
-      + '<th style="text-align:left; '   + thBase + '" onclick="creatorsSort(\'creatorId\')" title="Sort by creator ID">Creator ID' + sArrow('creatorId') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'fills\')" title="Sort by fills">Fills' + sArrow('fills') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'settled\')" title="Sort by settled count">Settled' + sArrow('settled') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'spwl\')" title="Sort by SP win rate">SP W/L' + sArrow('spwl') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorHitRate\')" title="Sort by bettor hit %">Bettor Hit %' + sArrow('bettorHitRate') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'totalStake\')" title="Our risk (max loss) on this creator\'s fills. Sort by it.">Our risk' + sArrow('totalStake') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'pnl\')" title="Sort by SP P&L">SP P&L' + sArrow('pnl') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'bettorRoi\')" title="Bettor ROI = minus SP P&L / the bettor\'s own stake. Sort by it.">Bettor ROI' + sArrow('bettorRoi') + '</th>'
-      + '<th style="text-align:right; '  + thBase + '" onclick="creatorsSort(\'ourEv\')" title="Our EV at fill on this creator\'s fills, at our fair model = minus their EV. Positive = we hold the edge; near-0 or negative flags a sharp regardless of how their luck landed. Sort by it.">Our EV' + sArrow('ourEv') + '</th>'
-      + '<th style="text-align:left;  '  + thBase + '" onclick="creatorsSort(\'lastSeen\')" title="Sort by last seen">First / Last seen' + sArrow('lastSeen') + '</th>'
+      + th('creatorId', 'Creator', 'left', 'Creator ID — the only counterparty identifier PX exposes')
+      + th('fills', 'Fills', 'right', 'Confirmed fills in the window (live reads in brackets)')
+      + th('totalStake', 'Our risk', 'right', 'Our max loss across their fills')
+      + th('evFill', 'EV at fill', 'right', 'Our EV when each of their parlays was confirmed')
+      + th('evLive', 'EV live', 'right', 'Our EV re-graded at each leg\'s own start (game-time once every leg has started). The best short-run read on whether they beat us.')
+      + th('evLivePct', 'EV live %', 'right', 'EV live per $ of our risk')
+      + th('driftZ', 'Drift z', 'right', 'How reliably their parlays moved toward them between fill and game time: mean per-ticket fair drift / its standard error. 2+ = sharp signal. Mean drift in the tooltip.')
+      + th('liveNegPct', '−EV live', 'right', 'Share of their live-read tickets on which our EV live is negative')
+      + th('pnl', 'SP P&L', 'right', 'Our realized profit on their settled fills')
+      + th('luck', 'Luck', 'right', 'Settled P&L minus the EV live of those tickets')
+      + th('lastSeen', 'Last seen', 'left', 'Last fill')
       + '<th style="text-align:center; padding:6px 8px;">Block</th>'
       + '</tr></thead><tbody>';
     for (const c of creators) {
-      const idShort = (c.creatorId || '').slice(0, 8) + '…';
-      const pnlColor = c.pnl > 0 ? 'var(--green)' : (c.pnl < 0 ? 'var(--red)' : 'var(--text)');
-      // Bettor ROI: positive = sharp winning. Red emphasis when > 1%.
-      const broiColor = c.bettorRoi == null ? 'var(--text3)' : (c.bettorRoi > 0.01 ? 'var(--red)' : (c.bettorRoi < -0.01 ? 'var(--green)' : 'var(--text)'));
-      const hitColor  = c.bettorHitRate == null ? 'var(--text3)' : (c.bettorHitRate > 0.55 ? 'var(--red)' : 'var(--text)');
-      // Our EV: positive = we hold edge (green). Negative = the bettor is +EV
-      // against our fair model (alarming, red). Tooltip carries their EV as % of their stake.
-      const evColor = (c.ourEv == null || !Number.isFinite(c.ourEv)) ? 'var(--text3)' : (c.ourEv < 0 ? 'var(--red)' : (c.ourEv > 0 ? 'var(--green)' : 'var(--text)'));
-      const evTip   = (c.bettorEvRoi != null && Number.isFinite(c.bettorEvRoi)) ? ('Bettor EV ' + (c.bettorEvRoi * 100).toFixed(2) + '% of their $' + Math.round(c.bettorStake || 0).toLocaleString() + ' stake over ' + (c.evCount || 0) + ' parlays') : 'no EV inputs';
-      const firstSeen = c.firstSeen ? c.firstSeen.slice(0, 10) : '';
-      const lastSeen  = c.lastSeen ? c.lastSeen.slice(0, 10)   : '';
-      // Blocked rows get a faint red tint so they're scannable even with
-      // the row collapsed beyond the action column.
-      const rowBg = c.blocked ? 'background: rgba(239, 68, 68, 0.08);' : '';
-      const blockedBadge = c.blocked
-        ? '<span title="' + escapeHtml(c.blockedReason || '') + ' (blocked ' + (c.blockedAt || '').slice(0, 10) + ')" style="color:var(--red); font-size:9px; padding:1px 4px; border:1px solid var(--red); border-radius:3px; margin-left:4px;">BLOCKED</span>'
-        : '';
-      // Button: Block (red) when not currently blocked, Unblock (gray) when
-      // already blocked. event.stopPropagation prevents the Block click from
-      // also toggling the row's expand.
-      const btn = c.blocked
-        ? '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', false)" style="background:transparent; border:1px solid var(--text3); color:var(--text2); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Allow RFQs from this creator again">Unblock</button>'
-        : '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', true)" style="background:transparent; border:1px solid var(--red); color:var(--red); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Auto-decline all future RFQs from this creator">Block</button>';
-      // Expandable row: click anywhere (except Block) to drill into this
-      // creator's parlays. Reuses expandedRows so open state survives
-      // re-render (sort/filter). rowKey namespaced by creatorId.
       const safeId = (c.creatorId || '').replace(/[^a-zA-Z0-9_-]/g, '');
       const rowKey = 'cre-' + safeId;
       const expanded = expandedRows.has(rowKey);
       const caret = expanded ? '&#9662;' : '&#9656;';
+      const rowBg = c.blocked ? 'background: rgba(239, 68, 68, 0.08);' : (c.watch ? 'background: rgba(245, 158, 11, 0.08);' : '');
+      const badge = c.blocked
+        ? '<span title="' + escapeHtml(c.blockedReason || '') + ' (blocked ' + (c.blockedAt || '').slice(0, 10) + ')" style="color:var(--red); font-size:9px; padding:1px 4px; border:1px solid var(--red); border-radius:3px; margin-left:4px;">BLOCKED</span>'
+        : c.watch
+          ? '<span title="5+ live reads, and drift z >= 2 or negative EV live" style="color:var(--amber); font-size:9px; padding:1px 4px; border:1px solid var(--amber); border-radius:3px; margin-left:4px;">WATCH</span>'
+          : '';
+      const btn = c.blocked
+        ? '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', false)" style="background:transparent; border:1px solid var(--text3); color:var(--text2); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Allow RFQs from this creator again">Unblock</button>'
+        : '<button onclick="event.stopPropagation(); toggleCreatorBlock(\'' + escapeHtml(c.creatorId) + '\', true)" style="background:transparent; border:1px solid var(--red); color:var(--red); padding:2px 8px; border-radius:3px; font-size:10px; cursor:pointer;" title="Auto-decline all future RFQs from this creator">Block</button>';
+      const zColor = c.driftZ == null ? 'var(--text3)' : c.driftZ >= 2 ? 'var(--red)' : c.driftZ <= -2 ? 'var(--green)' : 'var(--text)';
+      const negPct = c.liveN > 0 ? c.liveNeg / c.liveN : null;
+      const pnlTip = 'SP ' + c.wins + 'W / ' + c.losses + 'L' + (c.pushes ? ' / ' + c.pushes + ' push' : '') + ' on ' + c.settled + ' settled · bettor hit ' + (c.bettorHitRate == null ? '—' : (c.bettorHitRate * 100).toFixed(1) + '%') + ' · bettor ROI ' + (c.bettorRoi == null ? '—' : (c.bettorRoi * 100).toFixed(1) + '%');
+      const cell = (v, color, tip, extra) => '<td style="padding:5px 8px; text-align:right; white-space:nowrap;' + (color ? ' color:' + color + '; font-weight:600;' : '') + (extra || '') + '"' + (tip ? ' title="' + escapeHtml(tip) + '"' : '') + '>' + v + '</td>';
       html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); cursor:pointer; ' + rowBg + '" onclick="toggleCreatorParlays(\'' + escapeHtml(c.creatorId) + '\', \'' + rowKey + '\')" title="Click to view this creator\'s parlays">';
-      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2);" title="' + escapeHtml(c.creatorId) + '"><span style="color:var(--text3); margin-right:4px;">' + caret + '</span>' + idShort + blockedBadge + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right;">' + c.fills + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right;">' + c.settled + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right;">' + c.wins + '/' + c.losses + (c.pushes ? '·' + c.pushes : '') + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right; color:' + hitColor + '; font-weight:600;">' + fmtPct(c.bettorHitRate) + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right;">' + fmtMoney(c.totalStake) + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(c.pnl) + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right; color:' + broiColor + '; font-weight:600;">' + fmtPct(c.bettorRoi) + '</td>';
-      html += '<td style="padding:5px 8px; text-align:right; color:' + evColor + '; font-weight:600;" title="' + escapeHtml(evTip) + '">' + fmtMoney(c.ourEv) + '</td>';
-      html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px;">' + firstSeen + ' → ' + lastSeen + '</td>';
+      html += '<td style="padding:5px 8px; font-family:monospace; color:var(--text2); white-space:nowrap;" title="' + escapeHtml(c.creatorId) + '"><span style="color:var(--text3); margin-right:4px;">' + caret + '</span>' + escapeHtml((c.creatorId || '').slice(0, 8)) + '…' + badge + '</td>';
+      html += cell(c.fills + ' <span style="color:var(--text3);">(' + (c.liveN || 0) + ')</span>');
+      html += cell(money(c.totalStake), null, 'Bettors staked ' + money(c.bettorStake));
+      html += cell(money(c.evFill), sign(c.evFill));
+      html += cell(money(c.evLive), sign(c.evLive), 'Fill → live: ' + (c.evLeak > 0 ? '−' : '+') + money(Math.abs(c.evLeak || 0)).replace('−', ''));
+      html += cell(pct1(c.evLivePct), sign(c.evLivePct));
+      html += cell(c.driftZ == null ? '—' : c.driftZ.toFixed(1), zColor, c.driftMean == null ? 'no live reads' : 'mean drift ' + pct1(c.driftMean) + ' over ' + c.driftN + ' tickets (> 0 = toward the bettor)');
+      html += cell(negPct == null ? '—' : (negPct * 100).toFixed(0) + '%', negPct != null && negPct >= 0.5 && c.liveN >= 5 ? 'var(--red)' : null, (c.liveNeg || 0) + ' of ' + (c.liveN || 0) + ' live-read tickets');
+      html += cell(money(c.pnl), sign(c.pnl), pnlTip);
+      html += cell(money(c.luck), null, 'Settled P&L minus its EV live', ' color:var(--text2);');
+      html += '<td style="padding:5px 8px; color:var(--text3); font-size:11px; white-space:nowrap;" title="first fill ' + escapeHtml((c.firstSeen || '').slice(0, 10)) + '">' + escapeHtml((c.lastSeen || '').slice(0, 10)) + '</td>';
       html += '<td style="padding:5px 8px; text-align:center;">' + btn + '</td>';
       html += '</tr>';
-      // Hidden detail sub-row, lazily populated by toggleCreatorParlays.
       html += '<tr id="' + rowKey + '" style="display:' + (expanded ? 'table-row' : 'none') + '; background:var(--surface);">';
-      html += '<td colspan="11" id="' + rowKey + '-body" style="padding:8px 14px;">';
+      html += '<td colspan="12" id="' + rowKey + '-body" style="padding:8px 14px;">';
       html += expanded ? renderCreatorParlaysBody(c.creatorId) : '';
       html += '</td></tr>';
     }
@@ -13192,14 +13165,10 @@
     tblEl.innerHTML = html;
 
     // Rehydrate any expanded rows whose detail cache was dropped (e.g. after a
-    // block/unblock force-refresh cleared detailCache). Re-fetch so the open
-    // drill-down repopulates instead of stalling on "Loading…".
+    // block/unblock force-refresh cleared detailCache).
     for (const c of creators) {
-      const safeId = (c.creatorId || '').replace(/[^a-zA-Z0-9_-]/g, '');
-      const rowKey = 'cre-' + safeId;
+      const rowKey = 'cre-' + (c.creatorId || '').replace(/[^a-zA-Z0-9_-]/g, '');
       if (expandedRows.has(rowKey) && !st.detailCache[c.creatorId]) {
-        // Mark open in DOM then fetch (toggleCreatorParlays expects display:none
-        // to mean "opening"; here it's already table-row, so fetch directly).
         const bodyEl = document.getElementById(rowKey + '-body');
         if (bodyEl) {
           bodyEl.innerHTML = '<div style="color:var(--text3); font-size:11px; padding:4px;">Loading parlays…</div>';
@@ -13230,6 +13199,7 @@
     const st = window._creatorsState;
     st.search = ''; st.fillsMin = ''; st.fillsMax = ''; st.stakeMin = ''; st.stakeMax = '';
     st.pnlMin = ''; st.pnlMax = ''; st.broiMin = ''; st.broiMax = ''; st.hitMin = ''; st.hitMax = '';
+    st.watchOnly = false; st.hideBlocked = false;
     creatorsRerender();
   };
 
@@ -13287,17 +13257,13 @@
     const parlays = st.detailCache[creatorId];
     if (!parlays) return '<div style="color:var(--text3); font-size:11px; padding:4px;">Loading…</div>';
     if (!parlays.length) return '<div style="color:var(--text3); font-size:11px; padding:4px;">No parlay detail available for this creator.</div>';
-    const fmtMoney = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
+    const money = v => (v == null || !Number.isFinite(v)) ? '—' : (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
+    const sign = v => v == null ? 'var(--text3)' : v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--text)';
     // SP-perspective status mapping (settled_won = SP kept stake = SP WON).
-    const statusLabel = (s) => s === 'settled_won' ? 'SP WON'
-      : s === 'settled_lost' ? 'SP LOST'
-      : s === 'settled_push' ? 'PUSH'
-      : 'PENDING';
-    const statusColor = (s) => s === 'settled_won' ? 'var(--green)'
-      : s === 'settled_lost' ? 'var(--red)'
-      : s === 'settled_push' ? 'var(--amber)'
-      : 'var(--text3)';
+    const statusLabel = (s) => s === 'settled_won' ? 'SP WON' : s === 'settled_lost' ? 'SP LOST' : s === 'settled_push' ? 'PUSH' : 'PENDING';
+    const statusColor = (s) => s === 'settled_won' ? 'var(--green)' : s === 'settled_lost' ? 'var(--red)' : s === 'settled_push' ? 'var(--amber)' : 'var(--text3)';
     const fmtOdds = (o) => (o == null || !Number.isFinite(o)) ? '—' : (o > 0 ? '+' + o : '' + o);
+    const pct = (v) => v == null ? '—' : (v * 100).toFixed(1) + '%';
     const legLine = (l) => {
       const sport = l.sport ? ' [' + escapeHtml(sportLabel(l.sport)) + ']' : '';
       const who = escapeHtml(l.team || l.selection || '?');
@@ -13305,28 +13271,34 @@
       const line = (l.line != null && l.line !== '') ? ' ' + escapeHtml(String(l.line)) : '';
       return who + mkt + line + sport;
     };
-    let h = '<div style="font-size:11px; font-weight:600; color:var(--text2); margin-bottom:6px;">PARLAYS — ' + parlays.length + (parlays.length >= 500 ? '+ (capped)' : '') + '</div>';
+    // Newest first.
+    const list = parlays.slice().sort((a, b) => String(b.confirmedAt || '').localeCompare(String(a.confirmedAt || '')));
+    let h = '<div style="font-size:11px; font-weight:600; color:var(--text2); margin-bottom:6px;">PARLAYS — ' + list.length + (list.length >= 500 ? '+ (capped)' : '') + '</div>';
     h += '<div style="overflow-x:auto;"><table style="width:100%; font-size:11px; border-collapse:collapse;">';
+    const thr = (label, align, tip) => '<th style="text-align:' + align + '; padding:3px 6px; white-space:nowrap;"' + (tip ? ' title="' + escapeHtml(tip) + '"' : '') + '>' + label + '</th>';
     h += '<tr style="color:var(--text3); border-bottom:1px solid var(--border);">'
-      + '<th style="text-align:left; padding:3px 6px;">Date</th>'
-      + '<th style="text-align:right; padding:3px 6px;">Our risk</th>'
-      + '<th style="text-align:right; padding:3px 6px;">Offered Odds</th>'
-      + '<th style="text-align:center; padding:3px 6px;">Status</th>'
-      + '<th style="text-align:right; padding:3px 6px;">P&L</th>'
-      + '<th style="text-align:left; padding:3px 6px;">Legs</th>'
+      + thr('Date', 'left') + thr('Our risk', 'right') + thr('Odds', 'right', 'The bettor\'s price')
+      + thr('Fair', 'right', 'Our fair P(parlay hits) at fill → at game time / now')
+      + thr('EV at fill', 'right') + thr('EV live', 'right', 'Game-time EV once every leg has started, else the current EV live')
+      + thr('Status', 'center') + thr('P&L', 'right') + thr('Legs', 'left')
       + '</tr>';
-    for (const p of parlays) {
+    for (const p of list) {
       const dt = (p.confirmedAt || p.quotedAt || '').slice(0, 10);
-      const pnlColor = p.pnl == null ? 'var(--text3)' : (p.pnl > 0 ? 'var(--green)' : (p.pnl < 0 ? 'var(--red)' : 'var(--text)'));
       const legs = (p.legs || []).map(legLine).join('<br>');
       const moreLegs = (p.legCount && p.legCount > (p.legs || []).length)
         ? '<div style="color:var(--text3);">+' + (p.legCount - p.legs.length) + ' more leg(s)</div>' : '';
+      const driftColor = p.drift == null ? 'var(--text3)' : p.drift > 0.01 ? 'var(--red)' : p.drift < -0.01 ? 'var(--green)' : 'var(--text2)';
+      const fair = pct(p.fairParlayProb) + (p.fairLive != null ? ' <span style="color:' + driftColor + ';">→ ' + pct(p.fairLive) + '</span>' : '');
+      const liveTag = p.evLiveSrc === 'live' ? ' <span style="color:var(--text3); font-weight:400;" title="Not every leg has started; still moving">·</span>' : '';
       h += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04); vertical-align:top;">';
       h += '<td style="padding:3px 6px; white-space:nowrap; color:var(--text3);" title="' + escapeHtml(p.parlayId || '') + '">' + dt + '</td>';
-      h += '<td style="padding:3px 6px; text-align:right;">' + fmtMoney(p.stake) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right;">' + money(p.stake) + '</td>';
       h += '<td style="padding:3px 6px; text-align:right; font-family:monospace;">' + fmtOdds(p.offeredOdds) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; white-space:nowrap;">' + fair + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; color:' + sign(p.evFill) + ';">' + money(p.evFill) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; color:' + sign(p.evLive) + '; font-weight:600;">' + money(p.evLive) + liveTag + '</td>';
       h += '<td style="padding:3px 6px; text-align:center; color:' + statusColor(p.status) + '; font-weight:600;">' + statusLabel(p.status) + '</td>';
-      h += '<td style="padding:3px 6px; text-align:right; color:' + pnlColor + '; font-weight:600;">' + fmtMoney(p.pnl) + '</td>';
+      h += '<td style="padding:3px 6px; text-align:right; color:' + sign(p.pnl) + '; font-weight:600;">' + money(p.pnl) + '</td>';
       h += '<td style="padding:3px 6px; color:var(--text2); line-height:1.5;">' + (legs || '—') + moreLegs + '</td>';
       h += '</tr>';
     }
@@ -13335,66 +13307,26 @@
   }
 
   // Export the CURRENTLY filtered + sorted creator rows (aggregate columns
-  // only — not the parlay drill-down) to CSV. Reuses csvEscape + the blob
-  // download pattern from the Positions export.
+  // only — not the parlay drill-down) to CSV.
   window.exportCreatorsCSV = function() {
     const st = window._creatorsState;
     const data = st.data;
     if (!data || !(data.creators || []).length) return;
-    // Re-apply the same filter + sort the table uses so the CSV matches what
-    // the operator sees. (Kept in sync with renderCreatorStats.)
-    const broiMin = st.broiMin === '' ? '' : Number(st.broiMin) / 100;
-    const broiMax = st.broiMax === '' ? '' : Number(st.broiMax) / 100;
-    const hitMin  = st.hitMin === '' ? '' : Number(st.hitMin) / 100;
-    const hitMax  = st.hitMax === '' ? '' : Number(st.hitMax) / 100;
-    const q = (st.search || '').toLowerCase().trim();
-    let rows = (data.creators || []).filter(c => {
-      if (q && !(c.creatorId || '').toLowerCase().startsWith(q)) return false;
-      if (!passesRangeFilter(c.fills, st.fillsMin, st.fillsMax)) return false;
-      if (!passesRangeFilter(c.totalStake, st.stakeMin, st.stakeMax)) return false;
-      if (!passesRangeFilter(c.pnl, st.pnlMin, st.pnlMax)) return false;
-      if (!passesRangeFilter(c.bettorRoi, broiMin, broiMax)) return false;
-      if (!passesRangeFilter(c.bettorHitRate, hitMin, hitMax)) return false;
-      return true;
-    });
-    const dir = st.sortDir;
-    const num = v => (v == null || !Number.isFinite(Number(v))) ? -Infinity : Number(v);
-    rows = rows.slice().sort((a, b) => {
-      switch (st.sortCol) {
-        case 'creatorId': return dir * String(a.creatorId || '').localeCompare(String(b.creatorId || ''));
-        case 'fills':     return dir * (num(a.fills) - num(b.fills));
-        case 'settled':   return dir * (num(a.settled) - num(b.settled));
-        case 'spwl': { const wr = c => { const d = (c.wins || 0) + (c.losses || 0); return d > 0 ? c.wins / d : -Infinity; }; return dir * (wr(a) - wr(b)); }
-        case 'bettorHitRate': return dir * (num(a.bettorHitRate) - num(b.bettorHitRate));
-        case 'totalStake':    return dir * (num(a.totalStake) - num(b.totalStake));
-        case 'pnl':           return dir * (num(a.pnl) - num(b.pnl));
-        case 'bettorRoi':     return dir * (num(a.bettorRoi) - num(b.bettorRoi));
-        case 'bettorEv':      return dir * (num(a.bettorEv) - num(b.bettorEv));
-        case 'ourEv':         return dir * (num(a.ourEv) - num(b.ourEv));
-        case 'lastSeen':      return dir * String(a.lastSeen || '').localeCompare(String(b.lastSeen || ''));
-        default:              return dir * (num(a.bettorRoi) - num(b.bettorRoi));
-      }
-    });
-    const headers = ['Creator ID', 'Fills', 'Settled', 'SP Wins', 'SP Losses', 'Pushes',
-      'Bettor Hit %', 'Our Risk', 'Bettor Stake', 'SP P&L', 'SP ROI %', 'Bettor ROI %',
-      'Our EV', 'Bettor EV ROI %',
-      'First Seen', 'Last Seen', 'Blocked', 'Blocked Reason'];
+    const rows = _creatorsView(st, data.creators);
+    const headers = ['Creator ID', 'Watch', 'Fills', 'Live reads', 'Settled', 'SP Wins', 'SP Losses', 'Pushes',
+      'Our Risk', 'Bettor Stake', 'EV at Fill', 'EV Live', 'EV Live % of Risk', 'Mean Drift %', 'Drift z', 'Neg EV Live Tickets',
+      'SP P&L', 'Luck', 'Bettor Hit %', 'Bettor ROI %', 'First Seen', 'Last Seen', 'Blocked', 'Blocked Reason'];
     const csvRows = [headers.join(',')];
+    const f2 = v => (v == null || !Number.isFinite(Number(v))) ? '' : Number(v).toFixed(2);
     const pct = v => (v == null || !Number.isFinite(v)) ? '' : (v * 100).toFixed(2);
     for (const c of rows) {
       csvRows.push([
-        csvEscape(c.creatorId || ''),
-        c.fills, c.settled, c.wins, c.losses, c.pushes || 0,
-        pct(c.bettorHitRate),
-        (c.totalStake != null ? Number(c.totalStake).toFixed(2) : ''),
-        (c.bettorStake != null ? Number(c.bettorStake).toFixed(2) : ''),
-        (c.pnl != null ? Number(c.pnl).toFixed(2) : ''),
-        pct(c.roi), pct(c.bettorRoi),
-        (c.ourEv != null ? Number(c.ourEv).toFixed(2) : ''), pct(c.bettorEvRoi),
-        csvEscape((c.firstSeen || '').slice(0, 10)),
-        csvEscape((c.lastSeen || '').slice(0, 10)),
-        c.blocked ? 'yes' : 'no',
-        csvEscape(c.blockedReason || ''),
+        csvEscape(c.creatorId || ''), c.watch ? 'yes' : 'no',
+        c.fills, c.liveN || 0, c.settled, c.wins, c.losses, c.pushes || 0,
+        f2(c.totalStake), f2(c.bettorStake), f2(c.evFill), f2(c.evLive), pct(c.evLivePct), pct(c.driftMean), f2(c.driftZ), c.liveNeg || 0,
+        f2(c.pnl), f2(c.luck), pct(c.bettorHitRate), pct(c.bettorRoi),
+        csvEscape((c.firstSeen || '').slice(0, 10)), csvEscape((c.lastSeen || '').slice(0, 10)),
+        c.blocked ? 'yes' : 'no', csvEscape(c.blockedReason || ''),
       ].join(','));
     }
     const days = (data.days || st.days || 30);
