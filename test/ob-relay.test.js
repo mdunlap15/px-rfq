@@ -27,21 +27,21 @@ function stub(fair = 0.5) {
   saved.lookup = lineManager.lookupLine; saved.fair = oddsFeed.getFairProb; saved.stale = oddsFeed.isStaleForEvent;
   saved.stalePre = oddsFeed.isEventStalePreGame; saved.cap = config.pricing.maxRiskPerParlay; saved.maxOdds = config.pricing.maxOdds;
   saved.en = config.pricing.obRelayEnabled; saved.gap = config.pricing.obRelayMaxGapPp; saved.age = config.pricing.obRelayMaxAgeSec;
-  saved.adv = config.pricing.confirmAdverseDriftThreshold; saved.cal = config.pricing.propFairCalibration;
+  saved.adv = config.pricing.confirmAdverseDriftThreshold; saved.cal = config.pricing.propFairCalibration; saved.xgf = config.pricing.crossGameFactorPercent;
   lineManager.lookupLine = (id) => LINES[id] || null;
   oddsFeed.getFairProb = () => fair;
   oddsFeed.isStaleForEvent = () => false;
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
   config.pricing.maxRiskPerParlay = 3000; config.pricing.maxOdds = 50000;
   config.pricing.obRelayEnabled = true; config.pricing.obRelayMaxGapPp = 0.06; config.pricing.obRelayMaxAgeSec = 300;
-  config.pricing.confirmAdverseDriftThreshold = 0.015;
+  config.pricing.confirmAdverseDriftThreshold = 0.015; config.pricing.crossGameFactorPercent = 0;
 }
 function restore() {
   lineManager.lookupLine = saved.lookup; oddsFeed.getFairProb = saved.fair; oddsFeed.isStaleForEvent = saved.stale;
   if (saved.stalePre) oddsFeed.isEventStalePreGame = saved.stalePre;
   config.pricing.maxRiskPerParlay = saved.cap; config.pricing.maxOdds = saved.maxOdds;
   config.pricing.obRelayEnabled = saved.en; config.pricing.obRelayMaxGapPp = saved.gap; config.pricing.obRelayMaxAgeSec = saved.age;
-  config.pricing.confirmAdverseDriftThreshold = saved.adv; config.pricing.propFairCalibration = saved.cal;
+  config.pricing.confirmAdverseDriftThreshold = saved.adv; config.pricing.propFairCalibration = saved.cal; config.pricing.crossGameFactorPercent = saved.xgf;
   obRelay.__resetForTest();
 }
 async function price(ids, pid) {

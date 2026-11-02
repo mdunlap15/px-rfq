@@ -3962,6 +3962,49 @@ function priceParlay(legs, opts = {}) {
     }
   }
 
+  // -------------------------------------------------------------------
+  // CROSS-GAME SELECTION FACTOR A/B (2026-11-02) — see
+  // config.pricing.crossGameFactorPercent. Operator: "build the cross-game fair
+  // correction". Measured on 13,785 settled fills (Apr 7 - Nov 1): bettors hit
+  // 1.059x our fair by COUNT book-wide (z 3.6), 1.085x on cross-game (z 4.8),
+  // ~1.00 on parlays with a player prop since 9/15 and 0.905 on same-game. In
+  // this scope — no two legs on one event, no player-prop leg, joint fair >=
+  // minFair, no leg in an excluded sport (NCAAF 0.84 / NBA 0.83 graded in OUR
+  // favour) — they hit 1.167x [1.08, 1.26], z 4.75 (2 legs 1.17, 3 legs 1.12,
+  // 4+ 1.46 on n=80), while our margin there was ~1%. Same mechanics as the
+  // 2-leg factor: fair AND offered x mult[legs], so EV fill / EV live carry the
+  // measured selection and the margin sits on an honest fair. Defers to the
+  // 2-leg factor wherever that block is IN SCOPE (either arm), so the two never
+  // stack and the 2lf control arm stays clean. Arm = md5('xgf:'+parlayId).
+  // -------------------------------------------------------------------
+  const _xgf = { arm: null, applied: false, mult: null, preFair: null, preProb: null };
+  {
+    const _pct = config.pricing.crossGameFactorPercent || 0;
+    const minFair = config.pricing.crossGameFactorMinFair ?? 0.20;
+    const excl = config.pricing.crossGameFactorExcludeSports || [];
+    const _inScope = _pct > 0 && opts.parlayId && !opts.fairOnly && _2lf.arm == null
+      && pricedLegs.length >= 2 && !isSGPParlay && fairParlayProb >= minFair
+      && pricedLegs.every(l => l.lineInfo && !_isPropLikeLeg(l.lineInfo)
+        && !excl.includes(l.lineInfo.sport));
+    if (_inScope) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('xgf:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _xgf.arm = inArm ? 'factor' : 'control';
+      const n = pricedLegs.length;
+      const raw = n >= 4 ? config.pricing.crossGameFactorMult4 : n === 3 ? config.pricing.crossGameFactorMult3 : config.pricing.crossGameFactorMult2;
+      const mult = Math.min(1.25, Math.max(1, raw ?? 1));
+      if (inArm && mult > 1 && offeredImpliedProb > 0) {
+        _xgf.preFair = fairParlayProb; _xgf.preProb = offeredImpliedProb; _xgf.mult = mult; _xgf.applied = true;
+        fairParlayProb = Math.min(0.99, fairParlayProb * mult);
+        offeredImpliedProb = Math.min(0.99, offeredImpliedProb * mult);
+        log.debug('Pricing', `Cross-game factor[${n}L] x${mult}: fair ${(100 * _xgf.preFair).toFixed(3)}% -> ${(100 * fairParlayProb).toFixed(3)}%, offered ${(100 * _xgf.preProb).toFixed(3)}% -> ${(100 * offeredImpliedProb).toFixed(3)}%`);
+      }
+    }
+  }
+
   const _fbCeil = { arm: null, applied: false, preProb: null, pct: null, skip: null };
   {
     const _pct = config.pricing.footballCeilingPercent || 0;
@@ -4125,7 +4168,7 @@ function priceParlay(legs, opts = {}) {
   {
     const lo = config.pricing.twoLegWidenMinFair != null ? config.pricing.twoLegWidenMinFair : 0.30;
     const hi = config.pricing.twoLegWidenMaxFair != null ? config.pricing.twoLegWidenMaxFair : 0.50;
-    const inScope = pricedLegs.length === 2 && fairParlayProb >= lo && fairParlayProb < hi && !_cfbWiden.applied && !_2lf.applied;
+    const inScope = pricedLegs.length === 2 && fairParlayProb >= lo && fairParlayProb < hi && !_cfbWiden.applied && !_2lf.applied && !_xgf.applied;
     const _pct = config.pricing.twoLegWidenPercent || 0;
     if (inScope && opts.parlayId && _pct > 0) {
       let inArm = _pct >= 100;
@@ -4757,6 +4800,12 @@ function priceParlay(legs, opts = {}) {
       twoLegFactorMult: _2lf.mult,
       twoLegFactorPreFair: _2lf.preFair != null ? Math.round(_2lf.preFair * 1e6) / 1e6 : null,
       twoLegFactorPreProb: _2lf.preProb != null ? Math.round(_2lf.preProb * 1e5) / 1e5 : null,
+      // Cross-game selection factor A/B: null out of scope / dark; 'control' | 'factor'.
+      xgFactorArm: _xgf.arm,
+      xgFactorApplied: _xgf.applied,
+      xgFactorMult: _xgf.mult,
+      xgFactorPreFair: _xgf.preFair != null ? Math.round(_xgf.preFair * 1e6) / 1e6 : null,
+      xgFactorPreProb: _xgf.preProb != null ? Math.round(_xgf.preProb * 1e5) / 1e5 : null,
       // Football multi-leg ceiling A/B: null out of scope / dark; 'control' | 'ceiling'.
       fbCeilArm: _fbCeil.arm,
       fbCeilApplied: _fbCeil.applied,
@@ -6974,7 +7023,14 @@ async function validateForConfirmation(parlayId, originalMeta) {
 
   // Check if fair value has moved significantly against us since quote.
   // Threshold configurable via CONFIRMATION_DRIFT_THRESHOLD env var (default 3%).
-  const originalProb = originalMeta.fairParlayProb;
+  // The reprice runs WITHOUT a parlayId, so no A/B arm applies to it. A quote
+  // whose FAIR a selection factor multiplied (2-leg / cross-game) must be
+  // compared on its pre-factor fair, or every factor-arm confirm reads as a
+  // 9-12% drift and is rejected: 2026-10-27..11-01 the 2-leg factor arm got 3
+  // confirms and rejected all 3 ("price drift 9.1% > 4.0%"), 0 fills vs 57.
+  const originalProb = (originalMeta.xgFactorApplied && originalMeta.xgFactorPreFair > 0) ? originalMeta.xgFactorPreFair
+    : (originalMeta.twoLegFactorApplied && originalMeta.twoLegFactorPreFair > 0) ? originalMeta.twoLegFactorPreFair
+    : originalMeta.fairParlayProb;
   const currentProb = currentPricing.meta.fairParlayProb;
   const drift = Math.abs(currentProb - originalProb) / originalProb;
   const driftThreshold = config.pricing.confirmationDriftThreshold;

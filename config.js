@@ -1025,6 +1025,16 @@ const config = {
     twoLegWidenRelPct: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_REL_PCT); return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 7; })(),
     twoLegWidenMinFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.30; })(),
     twoLegWidenMaxFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MAX_FAIR); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.50; })(),
+    // CROSS-GAME SELECTION FACTOR A/B (2026-11-02, pricer.js). Live at 50%.
+    crossGameFactorPercent: (() => { const v = parseFloat(process.env.CROSS_GAME_FACTOR_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 50; })(),
+    crossGameFactorMult2: (() => { const v = parseFloat(process.env.CROSS_GAME_FACTOR_MULT_2); return Number.isFinite(v) && v >= 1 ? Math.min(1.25, v) : 1.10; })(),
+    crossGameFactorMult3: (() => { const v = parseFloat(process.env.CROSS_GAME_FACTOR_MULT_3); return Number.isFinite(v) && v >= 1 ? Math.min(1.25, v) : 1.12; })(),
+    crossGameFactorMult4: (() => { const v = parseFloat(process.env.CROSS_GAME_FACTOR_MULT_4); return Number.isFinite(v) && v >= 1 ? Math.min(1.25, v) : 1.12; })(),
+    crossGameFactorMinFair: (() => { const v = parseFloat(process.env.CROSS_GAME_FACTOR_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.20; })(),
+    crossGameFactorExcludeSports: (process.env.CROSS_GAME_FACTOR_EXCLUDE_SPORTS != null
+      ? process.env.CROSS_GAME_FACTOR_EXCLUDE_SPORTS
+      : 'americanfootball_ncaaf,basketball_nba,politics'
+    ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     // 2-LEG SELECTION FACTOR A/B (2026-10-26, pricer.js). Percent 0 = dark.
     twoLegFactorPercent: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     twoLegFactorMult: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MULT); return Number.isFinite(v) && v >= 1 ? Math.min(1.5, v) : 1.10; })(),
