@@ -15648,9 +15648,18 @@
       // the wrong h2h). It's the only price we have for the bet on this
       // ticket — useful as a reference for the operator, but the per-book
       // columns above are suppressed so it can't be compared against junk.
-      const myOdds = l.bookPriceOverride != null
+      // Prefer the per-leg prob we actually sent PX at confirm (it reconciles
+      // to the parlay price), then the quote-time per-leg offer. The settled
+      // and open tables call this without opts.vig, so the old fallback
+      // showed FAIR in this column on every filled ticket.
+      const legVigUsed = vig || l.legVig || 0;
+      const myOdds = l.legConfirmProb > 0 && l.legConfirmProb < 1 && !_isYesNoMisreg
+        ? decimalToAmerican(1 / l.legConfirmProb)
+        : l.legOfferedProb > 0 && l.legOfferedProb < 1 && !_isYesNoMisreg
+        ? decimalToAmerican(1 / l.legOfferedProb)
+        : l.bookPriceOverride != null
         ? decimalToAmerican(1 / l.bookPriceOverride)
-        : ((l.fairProb && vig) ? decimalToAmerican(1 / applyOddsVig(l.fairProb, vig)) : fairOdds);
+        : ((l.fairProb && legVigUsed) ? decimalToAmerican(1 / applyOddsVig(l.fairProb, legVigUsed)) : fairOdds);
 
       // Highlight legs that blocked us from quoting
       const isUnregBlocker = highlightUnregistered && l.wasUnregistered;
