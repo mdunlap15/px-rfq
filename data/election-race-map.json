@@ -1,0 +1,1791 @@
+{
+ "source": "poster-service/race_map.json (order book election_cycle.py), copied 2026-11-02",
+ "races": [
+  {
+   "eid": 1500013042,
+   "name": "Florida Senate Winner",
+   "rk": "senate:florida",
+   "cands": [
+    {
+     "px_name": "Ashley Moody (R)",
+     "px_market_id": 1500032695,
+     "kalshi": "SENATEFLS-26-R",
+     "poly_id": "631045"
+    },
+    {
+     "px_name": "Angie Nixon (D)",
+     "px_market_id": 1500032696,
+     "kalshi": "SENATEFLS-26-D",
+     "poly_id": "631044"
+    }
+   ]
+  },
+  {
+   "eid": 1500013111,
+   "name": "Idaho Senate Winner",
+   "rk": "senate:idaho",
+   "cands": [
+    {
+     "px_name": "Jim Risch (R)",
+     "px_market_id": 1500032791,
+     "kalshi": "SENATEID-26-R",
+     "poly_id": "630706"
+    },
+    {
+     "px_name": "Todd Achilles (I)",
+     "px_market_id": 1500032792,
+     "kalshi": "SENATEID-26-TACH",
+     "poly_id": "630707"
+    }
+   ]
+  },
+  {
+   "eid": 1500011520,
+   "name": "Georgia Senate Winner",
+   "rk": "senate:georgia",
+   "cands": [
+    {
+     "px_name": "Jon Ossoff (D)",
+     "px_market_id": 1500031235,
+     "kalshi": "SENATEGA-26-D",
+     "poly_id": "630692"
+    },
+    {
+     "px_name": "Mike Collins (R)",
+     "px_market_id": 1500031236,
+     "kalshi": "SENATEGA-26-R",
+     "poly_id": "630693"
+    }
+   ]
+  },
+  {
+   "eid": 1500011510,
+   "name": "Iowa Senate Winner",
+   "rk": "senate:iowa",
+   "cands": [
+    {
+     "px_name": "Josh Turek (D)",
+     "px_market_id": 1500031214,
+     "kalshi": "SENATEIA-26-D",
+     "poly_id": "630733"
+    },
+    {
+     "px_name": "Ashley Hinson (R)",
+     "px_market_id": 1500031215,
+     "kalshi": "SENATEIA-26-R",
+     "poly_id": "630734"
+    }
+   ]
+  },
+  {
+   "eid": 1500011517,
+   "name": "Kansas Senate Winner",
+   "rk": "senate:kansas",
+   "cands": [
+    {
+     "px_name": "Roger Marshall (R)",
+     "px_market_id": 1500031228,
+     "kalshi": "SENATEKS-26-R",
+     "poly_id": "630747"
+    },
+    {
+     "px_name": "Adam Hamilton (D)",
+     "px_market_id": 1500031229,
+     "kalshi": "SENATEKS-26-D",
+     "poly_id": "630746"
+    }
+   ]
+  },
+  {
+   "eid": 1500011507,
+   "name": "Maine Senate Winner",
+   "rk": "senate:maine",
+   "cands": [
+    {
+     "px_name": "Troy Jackson (D)",
+     "px_market_id": 1500031208,
+     "kalshi": "SENATEME-26-D",
+     "poly_id": "630772"
+    },
+    {
+     "px_name": "Susan Collins (R)",
+     "px_market_id": 1500031209,
+     "kalshi": "SENATEME-26-R",
+     "poly_id": "630773"
+    }
+   ]
+  },
+  {
+   "eid": 1500011508,
+   "name": "Michigan Senate Winner",
+   "rk": "senate:michigan",
+   "cands": [
+    {
+     "px_name": "Abdul El-Sayed (D)",
+     "px_market_id": 1500031210,
+     "kalshi": "SENATEMI-26-D",
+     "poly_id": "630805"
+    },
+    {
+     "px_name": "Mike Rogers (R)",
+     "px_market_id": 1500031211,
+     "kalshi": "SENATEMI-26-R",
+     "poly_id": "630806"
+    }
+   ]
+  },
+  {
+   "eid": 1500011519,
+   "name": "Minnesota Senate Winner",
+   "rk": "senate:minnesota",
+   "cands": [
+    {
+     "px_name": "Peggy Flanagan (D)",
+     "px_market_id": 1500031233,
+     "kalshi": "SENATEMN-26-D",
+     "poly_id": "630818"
+    },
+    {
+     "px_name": "Michele Tafoya (R)",
+     "px_market_id": 1500031234,
+     "kalshi": "SENATEMN-26-R",
+     "poly_id": "630819"
+    }
+   ]
+  },
+  {
+   "eid": 1500011521,
+   "name": "Mississippi Senate Winner",
+   "rk": "senate:mississippi",
+   "cands": [
+    {
+     "px_name": "Cindy Hyde-Smith (R)",
+     "px_market_id": 1500031237,
+     "kalshi": "SENATEMS-26-R",
+     "poly_id": "631018"
+    },
+    {
+     "px_name": "Scott Colom (D)",
+     "px_market_id": 1500031238,
+     "kalshi": "SENATEMS-26-D",
+     "poly_id": "631017"
+    }
+   ]
+  },
+  {
+   "eid": 1500011515,
+   "name": "New Hampshire Senate Winner",
+   "rk": "senate:new hampshire",
+   "cands": [
+    {
+     "px_name": "John E. Sununu (R)",
+     "px_market_id": 1500031224,
+     "kalshi": "SENATENH-26-R",
+     "poly_id": "630845"
+    },
+    {
+     "px_name": "Chris Pappas (D)",
+     "px_market_id": 1500032501,
+     "kalshi": "SENATENH-26-D",
+     "poly_id": "630844"
+    }
+   ]
+  },
+  {
+   "eid": 1500011513,
+   "name": "North Carolina Senate Winner",
+   "rk": "senate:north carolina",
+   "cands": [
+    {
+     "px_name": "Roy Cooper (D)",
+     "px_market_id": 1500031219,
+     "kalshi": "SENATENC-26-D",
+     "poly_id": "630883"
+    },
+    {
+     "px_name": "Michael Whatley (R)",
+     "px_market_id": 1500031220,
+     "kalshi": "SENATENC-26-R",
+     "poly_id": "630884"
+    }
+   ]
+  },
+  {
+   "eid": 1500011509,
+   "name": "Ohio Senate Winner",
+   "rk": "senate:ohio",
+   "cands": [
+    {
+     "px_name": "Sherrod Brown (D)",
+     "px_market_id": 1500031212,
+     "kalshi": "SENATEOHS-26-D",
+     "poly_id": "631057"
+    },
+    {
+     "px_name": "Jon Husted (R)",
+     "px_market_id": 1500031213,
+     "kalshi": "SENATEOHS-26-R",
+     "poly_id": "631058"
+    }
+   ]
+  },
+  {
+   "eid": 1500013113,
+   "name": "Tennessee Senate Winner",
+   "rk": "senate:tennessee",
+   "cands": [
+    {
+     "px_name": "Bill Hagerty (R)",
+     "px_market_id": 1500032729,
+     "kalshi": "SENATETN-26-R",
+     "poly_id": "630951"
+    },
+    {
+     "px_name": "Marquita Bradshaw (D)",
+     "px_market_id": 1500032730,
+     "kalshi": "SENATETN-26-D",
+     "poly_id": "630950"
+    }
+   ]
+  },
+  {
+   "eid": 1500011512,
+   "name": "Texas Senate Winner",
+   "rk": "senate:texas",
+   "cands": [
+    {
+     "px_name": "James Talarico (D)",
+     "px_market_id": 1500031217,
+     "kalshi": "SENATETX-26-D",
+     "poly_id": "630963"
+    },
+    {
+     "px_name": "Ken Paxton (R)",
+     "px_market_id": 1500031218,
+     "kalshi": "SENATETX-26-R",
+     "poly_id": "630964"
+    }
+   ]
+  },
+  {
+   "eid": 1500011469,
+   "name": "Arizona Governor Winner",
+   "rk": "governor:arizona",
+   "cands": [
+    {
+     "px_name": "Katie Hobbs (D)",
+     "px_market_id": 1500031111,
+     "kalshi": "GOVPARTYAZ-26-D",
+     "poly_id": "629183"
+    },
+    {
+     "px_name": "Andy Biggs (R)",
+     "px_market_id": 1500031112,
+     "kalshi": "GOVPARTYAZ-26-R",
+     "poly_id": "629184"
+    }
+   ]
+  },
+  {
+   "eid": 1500011474,
+   "name": "Florida Governor Winner",
+   "rk": "governor:florida",
+   "cands": [
+    {
+     "px_name": "Byron Donalds (R)",
+     "px_market_id": 1500031123,
+     "kalshi": "GOVPARTYFL-26-R",
+     "poly_id": "629325"
+    },
+    {
+     "px_name": "David Jolly (D)",
+     "px_market_id": 1500031124,
+     "kalshi": "GOVPARTYFL-26-D",
+     "poly_id": "629324"
+    }
+   ]
+  },
+  {
+   "eid": 1500011468,
+   "name": "Georgia Governor Winner",
+   "rk": "governor:georgia",
+   "cands": [
+    {
+     "px_name": "Rick Jackson (R)",
+     "px_market_id": 1500031109,
+     "kalshi": "GOVPARTYGA-26-R",
+     "poly_id": "629338"
+    },
+    {
+     "px_name": "Keisha Lance Bottoms (D)",
+     "px_market_id": 1500031110,
+     "kalshi": "GOVPARTYGA-26-D",
+     "poly_id": "629337"
+    }
+   ]
+  },
+  {
+   "eid": 1500011478,
+   "name": "Iowa Governor Winner",
+   "rk": "governor:iowa",
+   "cands": [
+    {
+     "px_name": "Zach Lahn (R)",
+     "px_market_id": 1500031131,
+     "kalshi": "GOVPARTYIA-26-R",
+     "poly_id": "629398"
+    },
+    {
+     "px_name": "Rob Sand (D)",
+     "px_market_id": 1500031132,
+     "kalshi": "GOVPARTYIA-26-D",
+     "poly_id": "629397"
+    }
+   ]
+  },
+  {
+   "eid": 1500011486,
+   "name": "Kansas Governor Winner",
+   "rk": "governor:kansas",
+   "cands": [
+    {
+     "px_name": "Ty Masterson (R)",
+     "px_market_id": 1500031149,
+     "kalshi": "GOVPARTYKS-27-R",
+     "poly_id": "629413"
+    },
+    {
+     "px_name": "Cindy Holscher (D)",
+     "px_market_id": 1500031150,
+     "kalshi": "GOVPARTYKS-27-D",
+     "poly_id": "629412"
+    }
+   ]
+  },
+  {
+   "eid": 1500013115,
+   "name": "Minnesota Governor Winner",
+   "rk": "governor:minnesota",
+   "cands": [
+    {
+     "px_name": "Amy Klobuchar (D)",
+     "px_market_id": 1500032774,
+     "kalshi": "GOVPARTYMN-26-D",
+     "poly_id": "629477"
+    },
+    {
+     "px_name": "Lisa Demuth (R)",
+     "px_market_id": 1500032775,
+     "kalshi": "GOVPARTYMN-26-R",
+     "poly_id": "629478"
+    }
+   ]
+  },
+  {
+   "eid": 1500011472,
+   "name": "Nevada Governor Winner",
+   "rk": "governor:nevada",
+   "cands": [
+    {
+     "px_name": "Joe Lombardo (R)",
+     "px_market_id": 1500031117,
+     "kalshi": "GOVPARTYNV-26-R",
+     "poly_id": "629506"
+    },
+    {
+     "px_name": "Aaron Ford (D)",
+     "px_market_id": 1500031118,
+     "kalshi": "GOVPARTYNV-26-D",
+     "poly_id": "629505"
+    }
+   ]
+  },
+  {
+   "eid": 1500013043,
+   "name": "Oklahoma Governor Winner",
+   "rk": "governor:oklahoma",
+   "cands": [
+    {
+     "px_name": "Mike Mazzei (R)",
+     "px_market_id": 1500032697,
+     "kalshi": "GOVPARTYOK-26-R",
+     "poly_id": "629571"
+    },
+    {
+     "px_name": "Cyndi Munson (D)",
+     "px_market_id": 1500032698,
+     "kalshi": "GOVPARTYOK-26-D",
+     "poly_id": "629570"
+    }
+   ]
+  },
+  {
+   "eid": 1500011482,
+   "name": "Ohio Governor Winner",
+   "rk": "governor:ohio",
+   "cands": [
+    {
+     "px_name": "Vivek Ramaswamy (R)",
+     "px_market_id": 1500031141,
+     "kalshi": "GOVPARTYOH-26-R",
+     "poly_id": "629558"
+    },
+    {
+     "px_name": "Amy Acton (D)",
+     "px_market_id": 1500031142,
+     "kalshi": "GOVPARTYOH-26-D",
+     "poly_id": "629557"
+    }
+   ]
+  },
+  {
+   "eid": 1500011475,
+   "name": "New York Governor Winner",
+   "rk": "governor:new york",
+   "cands": [
+    {
+     "px_name": "Kathy Hochul (D)",
+     "px_market_id": 1500031125,
+     "kalshi": "GOVPARTYNY-26-D",
+     "poly_id": "629544"
+    },
+    {
+     "px_name": "Bruce Blakeman (R)",
+     "px_market_id": 1500031126,
+     "kalshi": "GOVPARTYNY-26-R",
+     "poly_id": "629545"
+    }
+   ]
+  },
+  {
+   "eid": 1500011483,
+   "name": "Oregon Governor Winner",
+   "rk": "governor:oregon",
+   "cands": [
+    {
+     "px_name": "Tina Kotek (D)",
+     "px_market_id": 1500031143,
+     "kalshi": "GOVPARTYOR-26-D",
+     "poly_id": "629583"
+    },
+    {
+     "px_name": "Christine Drazan (R)",
+     "px_market_id": 1500031144,
+     "kalshi": "GOVPARTYOR-26-R",
+     "poly_id": "629584"
+    }
+   ]
+  },
+  {
+   "eid": 1500013040,
+   "name": "Pennsylvania Governor Winner",
+   "rk": "governor:pennsylvania",
+   "cands": [
+    {
+     "px_name": "Josh Shapiro (D)",
+     "px_market_id": 1500032690,
+     "kalshi": "GOVPARTYPA-26-D",
+     "poly_id": "629614"
+    },
+    {
+     "px_name": "Stacy Garrity (R)",
+     "px_market_id": 1500032691,
+     "kalshi": "GOVPARTYPA-26-R",
+     "poly_id": "629615"
+    }
+   ]
+  },
+  {
+   "eid": 1500013048,
+   "name": "South Carolina Governor Winner",
+   "rk": "governor:south carolina",
+   "cands": [
+    {
+     "px_name": "Alan Wilson (R)",
+     "px_market_id": 1500032707,
+     "kalshi": "GOVPARTYSC-26-R",
+     "poly_id": "629641"
+    },
+    {
+     "px_name": "Jermaine Johnson (D)",
+     "px_market_id": 1500032708,
+     "kalshi": "GOVPARTYSC-26-D",
+     "poly_id": "629640"
+    }
+   ]
+  },
+  {
+   "eid": 1500013046,
+   "name": "Tennessee Governor Winner",
+   "rk": "governor:tennessee",
+   "cands": [
+    {
+     "px_name": "Marsha Blackburn (R)",
+     "px_market_id": 1500032703,
+     "kalshi": "GOVPARTYTN-26-R",
+     "poly_id": "629667"
+    },
+    {
+     "px_name": "Jerri Green (D)",
+     "px_market_id": 1500032704,
+     "kalshi": "GOVPARTYTN-26-D",
+     "poly_id": "629666"
+    }
+   ]
+  },
+  {
+   "eid": 1500012878,
+   "name": "Vermont Governor Winner",
+   "rk": "governor:vermont",
+   "cands": [
+    {
+     "px_name": "Phil Scott (R)",
+     "px_market_id": 1500032571,
+     "kalshi": "GOVPARTYVT-26-R",
+     "poly_id": "629708"
+    },
+    {
+     "px_name": "Amanda Janoo (D)",
+     "px_market_id": 1500032572,
+     "kalshi": "GOVPARTYVT-26-D",
+     "poly_id": "629707"
+    }
+   ]
+  },
+  {
+   "eid": 1500011477,
+   "name": "Texas Governor Winner",
+   "rk": "governor:texas",
+   "cands": [
+    {
+     "px_name": "Greg Abbott (R)",
+     "px_market_id": 1500031129,
+     "kalshi": "GOVPARTYTX-26-R",
+     "poly_id": "629691"
+    },
+    {
+     "px_name": "Gina Hinojosa (D)",
+     "px_market_id": 1500031130,
+     "kalshi": "GOVPARTYTX-26-D",
+     "poly_id": "629690"
+    }
+   ]
+  },
+  {
+   "eid": 1500011471,
+   "name": "Wisconsin Governor Winner",
+   "rk": "governor:wisconsin",
+   "cands": [
+    {
+     "px_name": "David Crowley (D)",
+     "px_market_id": 1500031115,
+     "kalshi": "GOVPARTYWI-26-D",
+     "poly_id": "629720"
+    },
+    {
+     "px_name": "Tom Tiffany (R)",
+     "px_market_id": 1500031116,
+     "kalshi": "GOVPARTYWI-26-R",
+     "poly_id": "629721"
+    }
+   ]
+  },
+  {
+   "eid": 1500013118,
+   "name": "AL-02 House Winner",
+   "rk": "house:al-2",
+   "cands": [
+    {
+     "px_name": "Rhett Marques (R)",
+     "px_market_id": 1500032829,
+     "kalshi": "KXHOUSERACE-AL02-26-R",
+     "poly_id": "1280800"
+    },
+    {
+     "px_name": "Shomari Figures (D)",
+     "px_market_id": 1500032830,
+     "kalshi": "KXHOUSERACE-AL02-26-D",
+     "poly_id": "1280801"
+    }
+   ]
+  },
+  {
+   "eid": 1500013120,
+   "name": "AZ-01 House Winner",
+   "rk": "house:az-1",
+   "cands": [
+    {
+     "px_name": "Amish Shah (D)",
+     "px_market_id": 1500032823,
+     "kalshi": "HOUSEAZ1-26-D",
+     "poly_id": "942084"
+    },
+    {
+     "px_name": "Jay Feely (R)",
+     "px_market_id": 1500032824,
+     "kalshi": "HOUSEAZ1-26-R",
+     "poly_id": "942082"
+    }
+   ]
+  },
+  {
+   "eid": 1500013121,
+   "name": "AZ-02 House Winner",
+   "rk": "house:az-2",
+   "cands": [
+    {
+     "px_name": "Eli Crane (R)",
+     "px_market_id": 1500032821,
+     "kalshi": "HOUSEAZ2-26-R",
+     "poly_id": "942116"
+    },
+    {
+     "px_name": "Jonathan Nez (D)",
+     "px_market_id": 1500032822,
+     "kalshi": "HOUSEAZ2-26-D",
+     "poly_id": "942117"
+    }
+   ]
+  },
+  {
+   "eid": 1500013172,
+   "name": "Alabama Senate Winner",
+   "rk": "senate:alabama",
+   "cands": [
+    {
+     "px_name": "Barry Moore (R)",
+     "px_market_id": 1500032841,
+     "kalshi": "SENATEAL-26-R",
+     "poly_id": "630628"
+    },
+    {
+     "px_name": "Everett Wess (D)",
+     "px_market_id": 1500032842,
+     "kalshi": "SENATEAL-26-D",
+     "poly_id": "630627"
+    }
+   ]
+  },
+  {
+   "eid": 1500013124,
+   "name": "CO-03 House Winner",
+   "rk": "house:co-3",
+   "cands": [
+    {
+     "px_name": "Jeff Hurd (R)",
+     "px_market_id": 1500032815,
+     "kalshi": "HOUSECO3-26-R",
+     "poly_id": "942301"
+    },
+    {
+     "px_name": "Dwayne Romero (D)",
+     "px_market_id": 1500032816,
+     "kalshi": "HOUSECO3-26-D",
+     "poly_id": "942304"
+    }
+   ]
+  },
+  {
+   "eid": 1500013125,
+   "name": "CO-04 House Winner",
+   "rk": "house:co-4",
+   "cands": [
+    {
+     "px_name": "Lauren Boebert (R)",
+     "px_market_id": 1500032813,
+     "kalshi": "KXHOUSERACE-CO04-26-R",
+     "poly_id": "1282880"
+    },
+    {
+     "px_name": "Eileen Laubacher (D)",
+     "px_market_id": 1500032814,
+     "kalshi": "KXHOUSERACE-CO04-26-D",
+     "poly_id": "1282881"
+    }
+   ]
+  },
+  {
+   "eid": 1500013126,
+   "name": "CO-05 House Winner",
+   "rk": "house:co-5",
+   "cands": [
+    {
+     "px_name": "Jeff Crank (R)",
+     "px_market_id": 1500032811,
+     "kalshi": "KXHOUSERACE-CO05-26-R",
+     "poly_id": "1282888"
+    },
+    {
+     "px_name": "Jessica Killin (D)",
+     "px_market_id": 1500032812,
+     "kalshi": "KXHOUSERACE-CO05-26-D",
+     "poly_id": "1282889"
+    }
+   ]
+  },
+  {
+   "eid": 1500011470,
+   "name": "Michigan Governor Winner",
+   "rk": "governor:michigan",
+   "cands": [
+    {
+     "px_name": "Jocelyn Benson (D)",
+     "px_market_id": 1500031113,
+     "kalshi": "GOVPARTYMI-26-D",
+     "poly_id": "629464"
+    },
+    {
+     "px_name": "John James (R)",
+     "px_market_id": 1500031114,
+     "kalshi": "GOVPARTYMI-26-R",
+     "poly_id": "629465"
+    }
+   ]
+  },
+  {
+   "eid": 1500013127,
+   "name": "CO-08 House Winner",
+   "rk": "house:co-8",
+   "cands": [
+    {
+     "px_name": "Manny Rutinel (D)",
+     "px_market_id": 1500032809,
+     "kalshi": "HOUSECO8-26-D",
+     "poly_id": "942325"
+    },
+    {
+     "px_name": "Gabe Evans (R)",
+     "px_market_id": 1500032810,
+     "kalshi": "HOUSECO8-26-R",
+     "poly_id": "942324"
+    }
+   ]
+  },
+  {
+   "eid": 1500013128,
+   "name": "FL-07 House Winner",
+   "rk": "house:fl-7",
+   "cands": [
+    {
+     "px_name": "Ryan Elijah (R)",
+     "px_market_id": 1500032807,
+     "kalshi": "KXHOUSERACE-FL07-26-R",
+     "poly_id": "1283000"
+    },
+    {
+     "px_name": "Bale Dalton (D)",
+     "px_market_id": 1500032808,
+     "kalshi": "KXHOUSERACE-FL07-26-D",
+     "poly_id": "1283001"
+    }
+   ]
+  },
+  {
+   "eid": 1500013129,
+   "name": "FL-09 House Winner",
+   "rk": "house:fl-9",
+   "cands": [
+    {
+     "px_name": "Dan Green (R)",
+     "px_market_id": 1500032805,
+     "kalshi": "KXHOUSERACE-FL09-26-R",
+     "poly_id": "1283016"
+    },
+    {
+     "px_name": "Darren Soto (D)",
+     "px_market_id": 1500032806,
+     "kalshi": "KXHOUSERACE-FL09-26-D",
+     "poly_id": "1283017"
+    }
+   ]
+  },
+  {
+   "eid": 1500013130,
+   "name": "FL-13 House Winner",
+   "rk": "house:fl-13",
+   "cands": [
+    {
+     "px_name": "Anna Paulina Luna (R)",
+     "px_market_id": 1500032803,
+     "kalshi": "HOUSEFL13-26-R",
+     "poly_id": "942400"
+    },
+    {
+     "px_name": "Leela Gray (D)",
+     "px_market_id": 1500032804,
+     "kalshi": "HOUSEFL13-26-D",
+     "poly_id": "942401"
+    }
+   ]
+  },
+  {
+   "eid": 1500012887,
+   "name": "FL-14 House Winner",
+   "rk": "house:fl-14",
+   "cands": [
+    {
+     "px_name": "Kathy Castor (D)",
+     "px_market_id": 1500032628,
+     "kalshi": "KXHOUSERACE-FL14-26-D",
+     "poly_id": "1283049"
+    },
+    {
+     "px_name": "Mike Beltran (R)",
+     "px_market_id": 1500032629,
+     "kalshi": "KXHOUSERACE-FL14-26-R",
+     "poly_id": "1283048"
+    }
+   ]
+  },
+  {
+   "eid": 1500011490,
+   "name": "Maine Governor Winner",
+   "rk": "governor:maine",
+   "cands": [
+    {
+     "px_name": "Hannah Pingree (D)",
+     "px_market_id": 1500031154,
+     "kalshi": "GOVPARTYME-26-D",
+     "poly_id": "629425"
+    },
+    {
+     "px_name": "Robert Charles (R)",
+     "px_market_id": 1500031155,
+     "kalshi": "GOVPARTYME-26-R",
+     "poly_id": "629426"
+    }
+   ]
+  },
+  {
+   "eid": 1500011484,
+   "name": "Colorado Governor Winner",
+   "rk": "governor:colorado",
+   "cands": [
+    {
+     "px_name": "Phil Weiser (D)",
+     "px_market_id": 1500031145,
+     "kalshi": "GOVPARTYCO-26-D",
+     "poly_id": "629296"
+    },
+    {
+     "px_name": "Victor Marx (R)",
+     "px_market_id": 1500031146,
+     "kalshi": "GOVPARTYCO-26-R",
+     "poly_id": "629297"
+    }
+   ]
+  },
+  {
+   "eid": 1500011502,
+   "name": "CA-22 House Winner",
+   "rk": "house:ca-22",
+   "cands": [
+    {
+     "px_name": "Randy Villegas (D)",
+     "px_market_id": 1500031194,
+     "kalshi": "HOUSECA22-26-D",
+     "poly_id": "703686"
+    },
+    {
+     "px_name": "David Valadao (R)",
+     "px_market_id": 1500031195,
+     "kalshi": "HOUSECA22-26-R",
+     "poly_id": "703685"
+    }
+   ]
+  },
+  {
+   "eid": 1500011497,
+   "name": "MN-01 House Winner",
+   "rk": "house:mn-1",
+   "cands": [
+    {
+     "px_name": "Brad Finstad (R)",
+     "px_market_id": 1500031174,
+     "kalshi": "KXHOUSERACE-MN01-26-R",
+     "poly_id": "1283848"
+    },
+    {
+     "px_name": "Jake Johnson (D)",
+     "px_market_id": 1500031175,
+     "kalshi": "KXHOUSERACE-MN01-26-D",
+     "poly_id": "1283849"
+    }
+   ]
+  },
+  {
+   "eid": 1500011499,
+   "name": "FL-22 House Winner",
+   "rk": "house:fl-22",
+   "cands": [
+    {
+     "px_name": "Casey Askar (R)",
+     "px_market_id": 1500031178,
+     "kalshi": "KXHOUSERACE-FL22-26-R",
+     "poly_id": "1283112"
+    },
+    {
+     "px_name": "Pia Dandiya (D)",
+     "px_market_id": 1500031179,
+     "kalshi": "KXHOUSERACE-FL22-26-D",
+     "poly_id": "1283113"
+    }
+   ]
+  },
+  {
+   "eid": 1500013131,
+   "name": "FL-25 House Winner",
+   "rk": "house:fl-25",
+   "cands": [
+    {
+     "px_name": "Jared Moskowitz (D)",
+     "px_market_id": 1500032801,
+     "kalshi": "KXHOUSERACE-FL25-26-D",
+     "poly_id": "1283129"
+    },
+    {
+     "px_name": "Scott Singer (R)",
+     "px_market_id": 1500032802,
+     "kalshi": "KXHOUSERACE-FL25-26-R",
+     "poly_id": "1283128"
+    }
+   ]
+  },
+  {
+   "eid": 1500011496,
+   "name": "OH-07 House Winner",
+   "rk": "house:oh-7",
+   "cands": [
+    {
+     "px_name": "Brian Poindexter (D)",
+     "px_market_id": 1500031172,
+     "kalshi": "KXHOUSERACE-OH07-26-D",
+     "poly_id": "1284420"
+    },
+    {
+     "px_name": "Max Miller (R)",
+     "px_market_id": 1500031173,
+     "kalshi": "KXHOUSERACE-OH07-26-R",
+     "poly_id": "1284419"
+    }
+   ]
+  },
+  {
+   "eid": 1500013173,
+   "name": "Alaska Governor Winner",
+   "rk": "governor:alaska",
+   "cands": [
+    {
+     "px_name": "Jonathan Kreiss-Tomkins (D)",
+     "px_market_id": 1500032843,
+     "kalshi": "KXGOVAK-26-JKRE",
+     "poly_id": "635016"
+    },
+    {
+     "px_name": "Bernadette Wilson (R)",
+     "px_market_id": 1500032844,
+     "kalshi": "KXGOVAK-26-BWIL",
+     "poly_id": "635012"
+    }
+   ]
+  },
+  {
+   "eid": 1500011500,
+   "name": "WI-03 House Winner",
+   "rk": "house:wi-3",
+   "cands": [
+    {
+     "px_name": "Rebecca Cooke (D)",
+     "px_market_id": 1500031190,
+     "kalshi": "HOUSEWI3-26-D",
+     "poly_id": "944342"
+    },
+    {
+     "px_name": "Derrick Van Orden (R)",
+     "px_market_id": 1500031191,
+     "kalshi": "HOUSEWI3-26-R",
+     "poly_id": "944341"
+    }
+   ]
+  },
+  {
+   "eid": 1500011503,
+   "name": "TX-28 House Winner",
+   "rk": "house:tx-28",
+   "cands": [
+    {
+     "px_name": "Henry Cuellar (D)",
+     "px_market_id": 1500031196,
+     "kalshi": "HOUSETX28-26-D",
+     "poly_id": "944222"
+    },
+    {
+     "px_name": "Tano Tijerina (R)",
+     "px_market_id": 1500031197,
+     "kalshi": "HOUSETX28-26-R",
+     "poly_id": "944221"
+    }
+   ]
+  },
+  {
+   "eid": 1500013133,
+   "name": "IA-01 House Winner",
+   "rk": "house:ia-1",
+   "cands": [
+    {
+     "px_name": "Christina Bohannan (D)",
+     "px_market_id": 1500032797,
+     "kalshi": "HOUSEIA1-26-D",
+     "poly_id": "942433"
+    },
+    {
+     "px_name": "Mariannette Miller-Meeks (R)",
+     "px_market_id": 1500032798,
+     "kalshi": "HOUSEIA1-26-R",
+     "poly_id": "942432"
+    }
+   ]
+  },
+  {
+   "eid": 1500012890,
+   "name": "FL-27 House Winner",
+   "rk": "house:fl-27",
+   "cands": [
+    {
+     "px_name": "María Elvira Salazar (R)",
+     "px_market_id": 1500032634,
+     "kalshi": "KXHOUSERACE-FL27-26-R",
+     "poly_id": "1283144"
+    },
+    {
+     "px_name": "Eliott Rodriguez (D)",
+     "px_market_id": 1500032635,
+     "kalshi": "KXHOUSERACE-FL27-26-D",
+     "poly_id": "1283145"
+    }
+   ]
+  },
+  {
+   "eid": 1500013134,
+   "name": "IA-02 House Winner",
+   "rk": "house:ia-2",
+   "cands": [
+    {
+     "px_name": "Lindsay James (D)",
+     "px_market_id": 1500032795,
+     "kalshi": "KXHOUSERACE-IA02-26-D",
+     "poly_id": "1283289"
+    },
+    {
+     "px_name": "Joe Mitchell (R)",
+     "px_market_id": 1500032796,
+     "kalshi": "KXHOUSERACE-IA02-26-R",
+     "poly_id": "1283288"
+    }
+   ]
+  },
+  {
+   "eid": 1500013135,
+   "name": "IA-03 House Winner",
+   "rk": "house:ia-3",
+   "cands": [
+    {
+     "px_name": "Sarah Trone Garriott (D)",
+     "px_market_id": 1500032793,
+     "kalshi": "HOUSEIA3-26-D",
+     "poly_id": "942445"
+    },
+    {
+     "px_name": "Zach Nunn (R)",
+     "px_market_id": 1500032794,
+     "kalshi": "HOUSEIA3-26-R",
+     "poly_id": "942444"
+    }
+   ]
+  },
+  {
+   "eid": 1500013136,
+   "name": "IN-05 House Winner",
+   "rk": "house:in-5",
+   "cands": [
+    {
+     "px_name": "Victoria Spartz (R)",
+     "px_market_id": 1500032789,
+     "kalshi": "KXHOUSERACE-IN05-26-R",
+     "poly_id": "1283472"
+    },
+    {
+     "px_name": "J.D. Ford (D)",
+     "px_market_id": 1500032790,
+     "kalshi": "KXHOUSERACE-IN05-26-D",
+     "poly_id": "1283473"
+    }
+   ]
+  },
+  {
+   "eid": 1500013110,
+   "name": "Arkansas Senate Winner",
+   "rk": "senate:arkansas",
+   "cands": [
+    {
+     "px_name": "Tom Cotton (R)",
+     "px_market_id": 1500032825,
+     "kalshi": "SENATEAR-26-R",
+     "poly_id": "630654"
+    },
+    {
+     "px_name": "Hallie Shoffner (D)",
+     "px_market_id": 1500032826,
+     "kalshi": "SENATEAR-26-D",
+     "poly_id": "630653"
+    }
+   ]
+  },
+  {
+   "eid": 1500013137,
+   "name": "KS-02 House Winner",
+   "rk": "house:ks-2",
+   "cands": [
+    {
+     "px_name": "Derek Schmidt (R)",
+     "px_market_id": 1500032787,
+     "kalshi": "KXHOUSERACE-KS02-26-R",
+     "poly_id": "1283520"
+    },
+    {
+     "px_name": "Don Coover (D)",
+     "px_market_id": 1500032788,
+     "kalshi": "KXHOUSERACE-KS02-26-D",
+     "poly_id": "1283521"
+    }
+   ]
+  },
+  {
+   "eid": 1500013138,
+   "name": "KY-06 House Winner",
+   "rk": "house:ky-6",
+   "cands": [
+    {
+     "px_name": "Ralph Alvarado (R)",
+     "px_market_id": 1500032785,
+     "kalshi": "KXHOUSERACE-KY06-26-R",
+     "poly_id": "1283584"
+    },
+    {
+     "px_name": "Zach Dembo (D)",
+     "px_market_id": 1500032786,
+     "kalshi": "KXHOUSERACE-KY06-26-D",
+     "poly_id": "1283585"
+    }
+   ]
+  },
+  {
+   "eid": 1500013139,
+   "name": "ME-02 House Winner",
+   "rk": "house:me-2",
+   "cands": [
+    {
+     "px_name": "Paul LePage (R)",
+     "px_market_id": 1500032780,
+     "kalshi": "HOUSEME2-26-R",
+     "poly_id": "3006482"
+    },
+    {
+     "px_name": "Matthew Dunlap (D)",
+     "px_market_id": 1500032781,
+     "kalshi": "HOUSEME2-26-D",
+     "poly_id": "3006483"
+    }
+   ]
+  },
+  {
+   "eid": 1500013140,
+   "name": "MI-04 House Winner",
+   "rk": "house:mi-4",
+   "cands": [
+    {
+     "px_name": "Sean McCann (D)",
+     "px_market_id": 1500032778,
+     "kalshi": "HOUSEMI4-26-D",
+     "poly_id": "942710"
+    },
+    {
+     "px_name": "Bill Huizenga (R)",
+     "px_market_id": 1500032779,
+     "kalshi": "HOUSEMI4-26-R",
+     "poly_id": "942709"
+    }
+   ]
+  },
+  {
+   "eid": 1500013141,
+   "name": "MI-07 House Winner",
+   "rk": "house:mi-7",
+   "cands": [
+    {
+     "px_name": "William Lawrence (D)",
+     "px_market_id": 1500032776,
+     "kalshi": "HOUSEMI7-26-D",
+     "poly_id": "942722"
+    },
+    {
+     "px_name": "Tom Barrett (R)",
+     "px_market_id": 1500032777,
+     "kalshi": "HOUSEMI7-26-R",
+     "poly_id": "942721"
+    }
+   ]
+  },
+  {
+   "eid": 1500011504,
+   "name": "CA-13 House Winner",
+   "rk": "house:ca-13",
+   "cands": [
+    {
+     "px_name": "Adam Gray (D)",
+     "px_market_id": 1500031198,
+     "kalshi": "HOUSECA13-26-D",
+     "poly_id": "942274"
+    },
+    {
+     "px_name": "Kevin Lincoln (R)",
+     "px_market_id": 1500031199,
+     "kalshi": "HOUSECA13-26-R",
+     "poly_id": "942273"
+    }
+   ]
+  },
+  {
+   "eid": 1500011487,
+   "name": "New Hampshire Governor Winner",
+   "rk": "governor:new hampshire",
+   "cands": [
+    {
+     "px_name": "Kelly Ayotte (R)",
+     "px_market_id": 1500031151,
+     "kalshi": "GOVPARTYNH-28-R",
+     "poly_id": "629519"
+    },
+    {
+     "px_name": "Cinde Warmington (D)",
+     "px_market_id": 1500031152,
+     "kalshi": "GOVPARTYNH-28-D",
+     "poly_id": "629518"
+    }
+   ]
+  },
+  {
+   "eid": 1500013144,
+   "name": "MO-02 House Winner",
+   "rk": "house:mo-2",
+   "cands": [
+    {
+     "px_name": "Ann Wagner (R)",
+     "px_market_id": 1500032768,
+     "kalshi": "KXHOUSERACE-MO02-26-R",
+     "poly_id": "1283912"
+    },
+    {
+     "px_name": "Fred Wellman (D)",
+     "px_market_id": 1500032769,
+     "kalshi": "KXHOUSERACE-MO02-26-D",
+     "poly_id": "1283914"
+    }
+   ]
+  },
+  {
+   "eid": 1500013145,
+   "name": "NC-03 House Winner",
+   "rk": "house:nc-3",
+   "cands": [
+    {
+     "px_name": "Greg Murphy (R)",
+     "px_market_id": 1500032766,
+     "kalshi": "KXHOUSERACE-NC03-26-R",
+     "poly_id": "1284009"
+    },
+    {
+     "px_name": "Raymond Smith Jr. (D)",
+     "px_market_id": 1500032767,
+     "kalshi": "KXHOUSERACE-NC03-26-D",
+     "poly_id": "1284010"
+    }
+   ]
+  },
+  {
+   "eid": 1500011501,
+   "name": "NC-01 House Winner",
+   "rk": "house:nc-1",
+   "cands": [
+    {
+     "px_name": "Don Davis (D)",
+     "px_market_id": 1500031192,
+     "kalshi": "HOUSENC1-26-D",
+     "poly_id": "943477"
+    },
+    {
+     "px_name": "Laurie Buckhout (R)",
+     "px_market_id": 1500031193,
+     "kalshi": "HOUSENC1-26-R",
+     "poly_id": "943476"
+    }
+   ]
+  },
+  {
+   "eid": 1500013174,
+   "name": "MN-06 House Winner",
+   "rk": "house:mn-6",
+   "cands": [
+    {
+     "px_name": "Tom Emmer (R)",
+     "px_market_id": 1500032845,
+     "kalshi": "KXHOUSERACE-MN06-26-R",
+     "poly_id": "1283880"
+    },
+    {
+     "px_name": "Doug Chapin (D)",
+     "px_market_id": 1500032846,
+     "kalshi": "KXHOUSERACE-MN06-26-D",
+     "poly_id": "1283881"
+    }
+   ]
+  },
+  {
+   "eid": 1500013146,
+   "name": "NC-11 House Winner",
+   "rk": "house:nc-11",
+   "cands": [
+    {
+     "px_name": "Jamie Ager (D)",
+     "px_market_id": 1500032764,
+     "kalshi": "KXHOUSENC11-26-DEM",
+     "poly_id": "943542"
+    },
+    {
+     "px_name": "Jennifer Balkcom (R)",
+     "px_market_id": 1500032765,
+     "kalshi": "KXHOUSENC11-26-GOP",
+     "poly_id": "943539"
+    }
+   ]
+  },
+  {
+   "eid": 1500013045,
+   "name": "NC-09 House Winner",
+   "rk": "house:nc-9",
+   "cands": [
+    {
+     "px_name": "Richard Hudson (R)",
+     "px_market_id": 1500032701,
+     "kalshi": "KXHOUSERACE-NC09-26-R",
+     "poly_id": "1284057"
+    },
+    {
+     "px_name": "Richard Ojeda (D)",
+     "px_market_id": 1500032702,
+     "kalshi": "KXHOUSERACE-NC09-26-D",
+     "poly_id": "1284058"
+    }
+   ]
+  },
+  {
+   "eid": 1500013047,
+   "name": "Alabama Governor Winner",
+   "rk": "governor:alabama",
+   "cands": [
+    {
+     "px_name": "Tommy Tuberville (R)",
+     "px_market_id": 1500032705,
+     "kalshi": "GOVPARTYAL-26-R",
+     "poly_id": "629271"
+    },
+    {
+     "px_name": "Doug Jones (D)",
+     "px_market_id": 1500032706,
+     "kalshi": "GOVPARTYAL-26-D",
+     "poly_id": "629270"
+    }
+   ]
+  },
+  {
+   "eid": 1500013147,
+   "name": "NC-13 House Winner",
+   "rk": "house:nc-13",
+   "cands": [
+    {
+     "px_name": "Brad Knott (R)",
+     "px_market_id": 1500032762,
+     "kalshi": "KXHOUSERACE-NC13-26-R",
+     "poly_id": "1284081"
+    },
+    {
+     "px_name": "Paul Barringer (D)",
+     "px_market_id": 1500032763,
+     "kalshi": "KXHOUSERACE-NC13-26-D",
+     "poly_id": "1284082"
+    }
+   ]
+  },
+  {
+   "eid": 1500012880,
+   "name": "MT-01 House Winner",
+   "rk": "house:mt-1",
+   "cands": [
+    {
+     "px_name": "Aaron Flint (R)",
+     "px_market_id": 1500032575,
+     "kalshi": "HOUSEMT1-26-R",
+     "poly_id": "942841"
+    },
+    {
+     "px_name": "Sam Forstag (D)",
+     "px_market_id": 1500032576,
+     "kalshi": "HOUSEMT1-26-D",
+     "poly_id": "942843"
+    }
+   ]
+  },
+  {
+   "eid": 1500013150,
+   "name": "NJ-02 House Winner",
+   "rk": "house:nj-2",
+   "cands": [
+    {
+     "px_name": "Jeff Van Drew (R)",
+     "px_market_id": 1500032754,
+     "kalshi": "KXHOUSERACE-NJ02-26-R",
+     "poly_id": "1284129"
+    },
+    {
+     "px_name": "Zack Mullock (D)",
+     "px_market_id": 1500032755,
+     "kalshi": "KXHOUSERACE-NJ02-26-D",
+     "poly_id": "1284130"
+    }
+   ]
+  },
+  {
+   "eid": 1500013152,
+   "name": "NY-01 House Winner",
+   "rk": "house:ny-1",
+   "cands": [
+    {
+     "px_name": "Nick LaLota (R)",
+     "px_market_id": 1500032750,
+     "kalshi": "KXHOUSERACE-NY01-26-R",
+     "poly_id": "1284218"
+    },
+    {
+     "px_name": "Chris Gallant (D)",
+     "px_market_id": 1500032751,
+     "kalshi": "KXHOUSERACE-NY01-26-D",
+     "poly_id": "1284219"
+    }
+   ]
+  },
+  {
+   "eid": 1500012884,
+   "name": "NY-17 House Winner",
+   "rk": "house:ny-17",
+   "cands": [
+    {
+     "px_name": "Mike Lawler (R)",
+     "px_market_id": 1500032622,
+     "kalshi": "HOUSENY17-26-R",
+     "poly_id": "943440"
+    },
+    {
+     "px_name": "Cait Conley (D)",
+     "px_market_id": 1500032623,
+     "kalshi": "HOUSENY17-26-D",
+     "poly_id": "943441"
+    }
+   ]
+  },
+  {
+   "eid": 1500012889,
+   "name": "NY-21 House Winner",
+   "rk": "house:ny-21",
+   "cands": [
+    {
+     "px_name": "Blake Gendebien (D)",
+     "px_market_id": 1500032632,
+     "kalshi": "KXHOUSERACE-NY21-26-D",
+     "poly_id": "1284339"
+    },
+    {
+     "px_name": "Anthony Constantino (R)",
+     "px_market_id": 1500032633,
+     "kalshi": "KXHOUSERACE-NY21-26-R",
+     "poly_id": "1284338"
+    }
+   ]
+  },
+  {
+   "eid": 1500013155,
+   "name": "OH-09 House Winner",
+   "rk": "house:oh-9",
+   "cands": [
+    {
+     "px_name": "Marcy Kaptur (D)",
+     "px_market_id": 1500032744,
+     "kalshi": "HOUSEOH9-26-D",
+     "poly_id": "943571"
+    },
+    {
+     "px_name": "Derek Merrin (R)",
+     "px_market_id": 1500032745,
+     "kalshi": "HOUSEOH9-26-R",
+     "poly_id": "943570"
+    }
+   ]
+  },
+  {
+   "eid": 1500013156,
+   "name": "OH-10 House Winner",
+   "rk": "house:oh-10",
+   "cands": [
+    {
+     "px_name": "Mike Turner (R)",
+     "px_market_id": 1500032742,
+     "kalshi": "KXHOUSERACE-OH10-26-R",
+     "poly_id": "1284435"
+    },
+    {
+     "px_name": "Kristina Knickerbocker (D)",
+     "px_market_id": 1500032743,
+     "kalshi": "KXHOUSERACE-OH10-26-D",
+     "poly_id": "1284436"
+    }
+   ]
+  },
+  {
+   "eid": 1500013157,
+   "name": "OH-15 House Winner",
+   "rk": "house:oh-15",
+   "cands": [
+    {
+     "px_name": "Mike Carey (R)",
+     "px_market_id": 1500032740,
+     "kalshi": "KXHOUSERACE-OH15-26-R",
+     "poly_id": "1284467"
+    },
+    {
+     "px_name": "Don Leonard (D)",
+     "px_market_id": 1500032741,
+     "kalshi": "KXHOUSERACE-OH15-26-D",
+     "poly_id": "1284468"
+    }
+   ]
+  },
+  {
+   "eid": 1500013158,
+   "name": "PA-07 House Winner",
+   "rk": "house:pa-7",
+   "cands": [
+    {
+     "px_name": "Bob Brooks (D)",
+     "px_market_id": 1500032738,
+     "kalshi": "HOUSEPA7-26-D",
+     "poly_id": "943797"
+    },
+    {
+     "px_name": "Ryan Mackenzie (R)",
+     "px_market_id": 1500032739,
+     "kalshi": "HOUSEPA7-26-R",
+     "poly_id": "943796"
+    }
+   ]
+  },
+  {
+   "eid": 1500012879,
+   "name": "PA-01 House Winner",
+   "rk": "house:pa-1",
+   "cands": [
+    {
+     "px_name": "Brian Fitzpatrick (R)",
+     "px_market_id": 1500032573,
+     "kalshi": "HOUSEPA1-26-R",
+     "poly_id": "943748"
+    },
+    {
+     "px_name": "Bob Harvie (D)",
+     "px_market_id": 1500032574,
+     "kalshi": "HOUSEPA1-26-D",
+     "poly_id": "943749"
+    }
+   ]
+  },
+  {
+   "eid": 1500013159,
+   "name": "PA-10 House Winner",
+   "rk": "house:pa-10",
+   "cands": [
+    {
+     "px_name": "Janelle Stelson (D)",
+     "px_market_id": 1500032736,
+     "kalshi": "HOUSEPA10-26-D",
+     "poly_id": "943955"
+    },
+    {
+     "px_name": "Scott Perry (R)",
+     "px_market_id": 1500032737,
+     "kalshi": "HOUSEPA10-26-R",
+     "poly_id": "943954"
+    }
+   ]
+  },
+  {
+   "eid": 1500013162,
+   "name": "TX-09 House Winner",
+   "rk": "house:tx-9",
+   "cands": [
+    {
+     "px_name": "Alex Mealer (R)",
+     "px_market_id": 1500032725,
+     "kalshi": "KXHOUSETX9-26-R",
+     "poly_id": "944152"
+    },
+    {
+     "px_name": "Leticia Gutierrez (D)",
+     "px_market_id": 1500032726,
+     "kalshi": "KXHOUSETX9-26-D",
+     "poly_id": "944153"
+    }
+   ]
+  },
+  {
+   "eid": 1500013163,
+   "name": "TX-15 House Winner",
+   "rk": "house:tx-15",
+   "cands": [
+    {
+     "px_name": "Bobby Pulido (D)",
+     "px_market_id": 1500032723,
+     "kalshi": "HOUSETX15-26-D",
+     "poly_id": "944201"
+    },
+    {
+     "px_name": "Monica De La Cruz (R)",
+     "px_market_id": 1500032724,
+     "kalshi": "HOUSETX15-26-R",
+     "poly_id": "944199"
+    }
+   ]
+  },
+  {
+   "eid": 1500012881,
+   "name": "TX-23 House Winner",
+   "rk": "house:tx-23",
+   "cands": [
+    {
+     "px_name": "Brandon Herrera (R)",
+     "px_market_id": 1500032577,
+     "kalshi": "KXHOUSERACE-TX23-26-R",
+     "poly_id": "1284959"
+    },
+    {
+     "px_name": "Katy Padilla Stout (D)",
+     "px_market_id": 1500032578,
+     "kalshi": "KXHOUSERACE-TX23-26-D",
+     "poly_id": "1284960"
+    }
+   ]
+  },
+  {
+   "eid": 1500013165,
+   "name": "VA-01 House Winner",
+   "rk": "house:va-1",
+   "cands": [
+    {
+     "px_name": "Shannon Taylor (D)",
+     "px_market_id": 1500032719,
+     "kalshi": "HOUSEVA1-26-D",
+     "poly_id": "944282"
+    },
+    {
+     "px_name": "Rob Wittman (R)",
+     "px_market_id": 1500032720,
+     "kalshi": "HOUSEVA1-26-R",
+     "poly_id": "944281"
+    }
+   ]
+  },
+  {
+   "eid": 1500012886,
+   "name": "TX-35 House Winner",
+   "rk": "house:tx-35",
+   "cands": [
+    {
+     "px_name": "Johnny Garcia (D)",
+     "px_market_id": 1500032626,
+     "kalshi": "KXHOUSETX35-26-D",
+     "poly_id": "944250"
+    },
+    {
+     "px_name": "Carlos De La Cruz (R)",
+     "px_market_id": 1500032627,
+     "kalshi": "KXHOUSETX35-26-R",
+     "poly_id": "944249"
+    }
+   ]
+  },
+  {
+   "eid": 1500013167,
+   "name": "VA-05 House Winner",
+   "rk": "house:va-5",
+   "cands": [
+    {
+     "px_name": "John McGuire (R)",
+     "px_market_id": 1500032715,
+     "kalshi": "KXHOUSERACE-VA05-26-R",
+     "poly_id": "1285079"
+    },
+    {
+     "px_name": "Tom Perriello (D)",
+     "px_market_id": 1500032716,
+     "kalshi": "KXHOUSERACE-VA05-26-D",
+     "poly_id": "1285080"
+    }
+   ]
+  },
+  {
+   "eid": 1500012867,
+   "name": "U.S. House Winner",
+   "rk": "control:house",
+   "cands": [
+    {
+     "px_name": "Democratic Party",
+     "px_market_id": 1500032561,
+     "kalshi": "CONTROLH-2026-D",
+     "poly_id": "562802"
+    },
+    {
+     "px_name": "Republican Party",
+     "px_market_id": 1500032562,
+     "kalshi": "CONTROLH-2026-R",
+     "poly_id": "562803"
+    }
+   ]
+  },
+  {
+   "eid": 1500012875,
+   "name": "U.S. Senate Winner",
+   "rk": "control:senate",
+   "cands": [
+    {
+     "px_name": "Democratic Party",
+     "px_market_id": 1500032569,
+     "kalshi": "CONTROLS-2026-D",
+     "poly_id": "562793"
+    },
+    {
+     "px_name": "Republican Party",
+     "px_market_id": 1500032570,
+     "kalshi": "CONTROLS-2026-R",
+     "poly_id": "562794"
+    }
+   ]
+  }
+ ]
+}

@@ -4,6 +4,7 @@ const { legLineId } = require('./leg-id');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const obRelay = require('./ob-relay');
+const election = require('./election');
 const rfqWatch = require('./rfq-watch');
 const orderTracker = require('./order-tracker');
 const dkScraper = require('./dk-scraper');
@@ -1090,6 +1091,8 @@ function priceParlay(legs, opts = {}) {
     //   win/make_cut → datagolf TTL + GOLF_OUTRIGHT_MAX_AGE_MIN board-age guard
     //   top_5/top_10 → golf-topn board age (GOLF_TOPN_MAX_AGE_MIN)
     if (sport === 'golf_outrights') return false;
+    // Election legs: no odds-feed cache; election.js enforces its own max read age.
+    if (sport === 'politics') return false;
     const key = sport + '|' + (startTime || '');
     if (staleCache[key] === undefined) staleCache[key] = oddsFeed.isStaleForEvent(sport, startTime);
     return staleCache[key];
@@ -1284,7 +1287,7 @@ function priceParlay(legs, opts = {}) {
     // odds-feed cache entry ⇒ getCacheAge is Infinity ⇒ this would decline every
     // outright leg once the tournament is within 30 min of tee-off. Their own
     // board-age guards cover freshness and fail closed.
-    if (!opts.fairOnly && lineInfo.sport !== 'golf_outrights' && oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
+    if (!opts.fairOnly && lineInfo.sport !== 'golf_outrights' && lineInfo.sport !== 'politics' && oddsFeed.isEventStalePreGame(lineInfo.sport, lineInfo.startTime)) {
       const ageMin = Math.round(oddsFeed.getCacheAge(lineInfo.sport) * 10) / 10;
       log.info('Pricing', `Declined pre-game: ${legLabel} starts soon, cache ${ageMin}m old (limit 2m)`);
       priceParlay._lastFailure = {
@@ -1381,6 +1384,24 @@ function priceParlay(legs, opts = {}) {
     if (s.lineInfo && s.lineInfo.bookPriceOverride != null) {
       s.bookPriceOverride = s.lineInfo.bookPriceOverride;
       fairProbs[i] = (s.lineInfo.fairProb != null) ? s.lineInfo.fairProb : s.lineInfo.bookPriceOverride;
+      continue;
+    }
+    // ELECTION races (services/election.js) — the order book's Kalshi +
+    // Polymarket mid fair, its decline rules, steam + fill holds and takedown.
+    // One price source; never falls through. Offered = (fair + e)/(1 + e).
+    if (election.isElectionLine(s.lineInfo)) {
+      const q = election.getElectionQuote(s.lineInfo);
+      if (!q.ok) {
+        priceParlay._lastFailure = {
+          reason: 'no_fair_value',
+          detail: `${s.lineInfo.playerName || '?'} ${s.lineInfo.selection} — ${q.reason}${q.detail ? ' (' + q.detail + ')' : ''}`,
+          blockerLeg: { team: s.lineInfo.playerName, market: s.lineInfo.marketType, sport: s.lineInfo.sport },
+        };
+        return null;
+      }
+      fairProbs[i] = q.fairProb;
+      s.bookPriceOverride = q.bookPriceOverride;
+      s.fairBasis = q.basis;
       continue;
     }
     // Sync-resolvable fair paths
@@ -4252,6 +4273,13 @@ function priceParlay(legs, opts = {}) {
   const candidateCaps = [config.pricing.maxRiskPerParlay];
   if (parlayHasSeries) candidateCaps.push(config.pricing.maxSeriesRiskPerParlay || 500);
   if (parlayHasProp) candidateCaps.push(config.pricing.maxRiskPerParlayWithProp || 50);
+  // Election legs: the order book's net caps — $1,000 per side, $500 when the
+  // side we hold is asked longer than +300 (the bettor's leg is >= 75% fair).
+  if (pricedLegs.some(l => election.isElectionLine(l.lineInfo))) {
+    const _ec = election.cfg();
+    const _long = pricedLegs.some(l => election.isElectionLine(l.lineInfo) && l.fairProb >= 0.75);
+    candidateCaps.push(_long ? Math.min(_ec.maxRiskPerParlay, _ec.longRisk) : _ec.maxRiskPerParlay);
+  }
   // RFI gets its own (tighter) launch cap, independent of the prop cap.
   if (parlayHasRfi) candidateCaps.push(config.pricing.maxRiskPerParlayWithRfi || 25);
   // Experimental-SGP tier (SGP roadmap): combos under small-test rollout get
@@ -5946,6 +5974,33 @@ function shouldDecline(legs, parlayId) {
   // (2) YES-SIDE ONLY for win/top_5/top_10/top_20 (operator directive): the
   // counterparty takes YES. line-manager doesn't register those NO lines at
   // all, so this is belt-and-braces if PX ever quotes an unregistered side.
+  // ELECTION pre-pass (services/election.js). Raw RFQ legs here, so resolve.
+  //  - at most ONE election leg per parlay: races move together on the national
+  //    environment, and two legs on one race are the same bet (or its inverse);
+  //  - per-race cap on our confirmed risk (ELEC_RFQ_MAX_RACE_RISK).
+  {
+    const elecLegs = [];
+    for (const l of (legs || [])) {
+      if (!l) continue;
+      let li = l.lineInfo;
+      if (!li) { try { li = lineManager.lookupLine(legLineId(l)); } catch (_) { li = null; } }
+      if (li && election.isElectionLine(li)) elecLegs.push(li);
+    }
+    if (elecLegs.length > 1) {
+      return { declined: true, reason: 'election_multi_leg', detail: `${elecLegs.length} election legs — one per parlay (races are correlated)` };
+    }
+    if (elecLegs.length === 1) {
+      const li = elecLegs[0];
+      if (election.isStopped()) return { declined: true, reason: 'election_stopped', detail: 'past ELEC_STOP_UTC' };
+      const _ec = election.cfg();
+      if (_ec.maxRaceRisk > 0) {
+        const cur = (orderTracker.getElectionRiskByRace() || {})[String(li.pxEventId)] || 0;
+        if (cur + _ec.maxRiskPerParlay > _ec.maxRaceRisk) {
+          return { declined: true, reason: 'election_race_cap', detail: `${li.pxEventName || li.pxEventId}: confirmed $${Math.round(cur)} + ticket $${Math.round(_ec.maxRiskPerParlay)} > cap $${Math.round(_ec.maxRaceRisk)}` };
+        }
+      }
+    }
+  }
   {
     // Resolve lineInfo HERE. This guard runs long before shouldDecline builds
     // `resolvedLegs`, so at this point `legs` are RAW RFQ entries ({line_id})

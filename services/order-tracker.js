@@ -5110,6 +5110,28 @@ function getSeriesEventRisk(pxEventId) {
 }
 
 /**
+ * Confirmed OUR risk per election race (PX event id -> $), one pass over the
+ * book. Drives the election per-race cap and the fill hold (services/election.js).
+ */
+function getElectionRiskByRace() {
+  const out = {};
+  for (const o of Object.values(orders)) {
+    if (o.status !== 'confirmed') continue;
+    if (o.meta && o.meta.phantom) continue;
+    const legs = o.legs || (o.meta && o.meta.legs) || [];
+    const seen = new Set();
+    for (const l of legs) {
+      if ((l.market || l.marketType) !== 'election_winner' || l.pxEventId == null) continue;
+      const k = String(l.pxEventId);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out[k] = (out[k] || 0) + (o.confirmedStake || 0);
+    }
+  }
+  return out;
+}
+
+/**
  * Check whether adding a new parlay would exceed the per-series-event
  * SP risk cap. Only fires for parlays containing ≥1 series_* leg.
  * Enforces at quote-time with worstCaseRisk (typically the max_risk
@@ -8601,6 +8623,7 @@ module.exports = {
   getPendingLegRisk,
   getSeriesEventRisk,
   checkSeriesExposure,
+  getElectionRiskByRace,
   checkPitcherExposure,
   getPitcherExposureSnapshot,
   checkPlayerExposure,

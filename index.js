@@ -337,6 +337,7 @@ async function startup() {
   // lines the order book prices use the order book's fair. First read is
   // awaited (bounded by the DB breaker) so the first RFQs see it.
   try { const gsRelay = require('./services/gs-relay'); await gsRelay.poll(); gsRelay.start(); log.info('Startup', `    ✓ Goalscorer relay (px_gs_fairs): ${gsRelay.getStatus().entries} line(s), age ${gsRelay.getStatus().ageSec}s`); } catch (err) { log.warn('Startup', `    ✗ Goalscorer relay start failed: ${err.message}`); }
+  try { const election = require('./services/election'); election.start(); } catch (err) { log.warn('Startup', `    ✗ Election poller start failed: ${err.message}`); }
   try { const obRelay = require('./services/ob-relay'); await obRelay.poll(); obRelay.start(); log.info('Startup', `    ✓ Order-book relay: ${obRelay.getStatus().fresh} fresh fair(s)`); } catch (err) { log.warn('Startup', `    ✗ Order-book relay start failed: ${err.message}`); }
   try { require('./services/rfq-watch').start(); } catch (err) { log.warn('Startup', `    ✗ RFQ watch publisher start failed: ${err.message}`); }
   // Near-start refresh: keep inputs inside the freshness-gate window <= ~60s old.
@@ -1271,6 +1272,7 @@ function startStatusServer() {
       // Order-book fair relay + fill-drift measurement (2026-10-06).
       gsRelay: (() => { try { return require('./services/gs-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
       obRelay: (() => { try { return require('./services/ob-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      election: (() => { try { const st = require('./services/election').getStatus(); return { ...st, detail: undefined }; } catch (e) { return { error: e.message }; } })(),
       fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
       nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
@@ -6955,7 +6957,11 @@ function startStatusServer() {
   //   ageMs > maxAgeMs                -> board stale, legs fail closed
   // ?force=1 kicks a fresh fetch in the background and returns the CURRENT
   // board immediately rather than waiting on it.
-  app.get('/ufc-mov', (req, res) => {
+  app.get('/election', (req, res) => {
+  try { res.json(require('./services/election').getStatus()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/ufc-mov', (req, res) => {
     try {
       const mov = require('./services/ufc-mov');
       if (req.query.force) {

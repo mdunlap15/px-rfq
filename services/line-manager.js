@@ -496,6 +496,7 @@ function _sportMarketAllowed(sport, marketType, eventId) {
 // sending the RFQ within one seed of the close — the pricer declines anything
 // that races in. The kill-switch (mlbSeriesEnabled) takes the whole family off.
 const seriesWindow = require('./series-window');
+const election = require('./election');
 const SERIES_GAME_LOOKBACK_MS = 12 * 3600 * 1000;
 // Every NON-series MLB game on this matchup still in the index (live + the
 // seed's staging target) that starts in the future or started at most
@@ -630,6 +631,12 @@ function _setSeedLine(lineId, info, opts) {
   // times in production and an $8.7K same-line stack (Shelton/Swiatek
   // doubles, 2026-08-12) sailed through a $1,500 cap.
   info.lineId = lineId;
+  // Election legs (services/election.js): unmapped race, unknown side, kill-switch
+  // or past ELEC_STOP_UTC never enter the index — seed AND line-cache restore.
+  if (info.sport === 'politics') {
+    const why = election.registrationRefusal(info);
+    if (why) { info._marketDenied = true; return info; }
+  }
   // Per-sport market allowlist: a disallowed market is NOT inserted. The info
   // is still returned (callers chain on it) but flagged, and
   // _trackPrimaryForIndex refuses flagged infos so no primary is tracked for
@@ -1672,6 +1679,58 @@ async function _registerGolfOutrightEvent(event) {
   return n;
 }
 
+// US election races (services/election.js, operator 2026-11-02). PX models each
+// race as sport_name "Politics", sub_type "outrights", competitors [], one
+// market per candidate with YES/NO — the golf-outright shape. Only races in the
+// order book's race map register; both candidates' markets register, since B's
+// market is the same bet as A's and prices off the same fair.
+async function _registerElectionEvent(event) {
+  if (!election.enabled() || election.isStopped()) return 0;
+  if (!election.isMappedRace(event.event_id)) return 0;   // no PX read for an unmapped race
+  let markets;
+  try { markets = await px.fetchMarkets(event.event_id); }
+  catch (err) { log.warn('Lines', `Election get_markets ${event.event_id} failed: ${err.message}`); return 0; }
+  if (!Array.isArray(markets)) return 0;
+  let n = 0;
+  for (const market of markets) {
+    const cand = String(market.name || '').trim();
+    if (!election.candidateFor(event.event_id, cand)) continue;
+    const ids = { yes: new Set(), no: new Set() };
+    for (const g of (market.selections || [])) {
+      for (const sel of (Array.isArray(g) ? g : [g])) {
+        if (!sel || !sel.line_id) continue;
+        const nm = String(sel.name || '').trim().toLowerCase();
+        if (nm === 'yes' || nm === 'no') ids[nm].add(sel.line_id);
+      }
+    }
+    // One line_id per side, and distinct — the poster's lines_for rule.
+    if (ids.yes.size !== 1 || ids.no.size !== 1) continue;
+    const yes = [...ids.yes][0], no = [...ids.no][0];
+    if (yes === no) continue;
+    for (const [side, lid] of [['yes', yes], ['no', no]]) {
+      const info = _setSeedLine(lid, {
+        lineId: lid,
+        sport: 'politics',
+        pxEventId: event.event_id,
+        pxEventName: event.name,
+        marketType: 'election_winner',
+        marketName: cand,
+        selection: side,
+        playerName: cand,
+        teamName: cand,
+        homeTeam: null,
+        awayTeam: null,
+        line: null,
+        startTime: event.scheduled || null,
+        election: true,
+      });
+      if (!info._marketDenied) n++;
+    }
+  }
+  log.info('Lines', `Election registered: ${event.name} → ${n} lines`);
+  return n;
+}
+
 // Pitcher strikeouts prop detection.
 //
 // PX uses market.type='total' for these — same as game totals — and
@@ -2608,6 +2667,20 @@ async function seedAllLines(gen) {
     return true;
   });
   log.info('Lines', `Found ${events.length} supported sport events (of ${allEvents.length} total; dropped ${droppedAsStale} past per-sport stale cutoff, ${droppedAsTooFar} beyond ${MAX_DAYS_AHEAD}d ahead, ${droppedFootballFar} football beyond ${FOOTBALL_TMINUS_HOURS}h)`);
+
+  // Election races register on their own path: sport_name "Politics" is not a
+  // supported sport, the events carry competitors [], and PX schedules them
+  // 11/10 — past MAX_DAYS_AHEAD — so the filter above drops every one.
+  if (election.enabled() && !election.isStopped()) {
+    let _elecLines = 0;
+    for (const e of allEvents) {
+      if (e.sport_name !== 'Politics' || e.sub_type !== 'outrights') continue;
+      if (e.status === 'settled') continue;
+      try { _elecLines += await _registerElectionEvent(e); }
+      catch (err) { log.warn('Lines', `Election registration failed for ${e.name}: ${err.message}`); }
+    }
+    if (_elecLines) log.info('Lines', `Election: ${_elecLines} lines registered`);
+  }
 
   // Get all Odds API cached events for matching
   const oddsApiEvents = oddsFeed.getAllCachedEvents();
@@ -6062,6 +6135,7 @@ module.exports = {
   _footballMainRefusal,
   _footballPxPointsByFamily,
   _setSeedLine,
+  _registerElectionEvent,
   _footballPropCtx,
   _footballPropWindowMinutes,
   _footballPropWindowOpen,
