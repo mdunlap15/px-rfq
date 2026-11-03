@@ -28,7 +28,7 @@ function stub(extra = {}) {
   lineManager.lookupLine = (id) => L[id] || null;
   oddsFeed.isStaleForEvent = () => false;
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
-  Object.assign(config.pricing, { maxRiskPerParlay: 6000, maxRiskPerParlayWithProp: 6000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
+  Object.assign(config.pricing, { maxRiskPerParlay: 6000, maxRiskPerParlayWithProp: 6000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false, nbaPropTMinusMinutes: 0,
     mlbPropMaxHoursBeforeStart: 0, propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, legDriftCorrectionPercent: 0,
     nhlPropEarlyGatePercent: 0, nhlPropEarlyGateHours: 8 }, extra);
 }

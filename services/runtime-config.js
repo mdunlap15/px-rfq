@@ -190,6 +190,7 @@ const REGISTRY = [
   { key: 'legDriftCorrectionZ', path: 'legDriftCorrectionZ', type: 'number', min: 0.5, max: 10, group: 'pricing', env: 'LEG_DRIFT_CORRECTION_Z', label: 'Leg-drift correction: min z of the adverse drift' },
   { key: 'legDriftCorrectionMaxPct', path: 'legDriftCorrectionMaxPct', type: 'number', min: 0, max: 10, group: 'pricing', env: 'LEG_DRIFT_CORRECTION_MAX_PCT', label: 'Leg-drift correction: cap (% of fair)' },
   { key: 'legDriftCorrectionOverrides', path: 'legDriftCorrectionOverrides', type: 'numMap', min: 0, max: 1.1, group: 'pricing', env: 'LEG_DRIFT_CORRECTION_OVERRIDES', label: 'Leg-drift correction overrides {family key: multiplier | 0}' },
+  { key: 'nbaPropTMinusMinutes', path: 'nbaPropTMinusMinutes', type: 'number', min: 0, max: 2880, group: 'pricing', env: 'NBA_PROP_TMINUS_MINUTES', label: 'NBA props listed only inside T-minus (minutes, 0 = off)' },
   { key: 'nbaPropEarlyGatePercent', path: 'nbaPropEarlyGatePercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'NBA_PROP_EARLY_GATE_PERCENT', label: 'NBA early-prop timing A/B % (0 = dark)' },
   { key: 'nbaPropEarlyGateHours', path: 'nbaPropEarlyGateHours', type: 'number', min: 0.5, max: 48, group: 'pricing', env: 'NBA_PROP_EARLY_GATE_HOURS', label: 'NBA early-prop gate: hours before tip' },
   { key: 'nhlPropEarlyGatePercent', path: 'nhlPropEarlyGatePercent', type: 'number', min: 0, max: 100, group: 'pricing', env: 'NHL_PROP_EARLY_GATE_PERCENT', label: 'NHL early-prop timing A/B % (0 = dark)' },

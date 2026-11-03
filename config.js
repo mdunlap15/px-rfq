@@ -1013,6 +1013,11 @@ const config = {
     legDriftCorrectionPrior: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PRIOR); return Number.isFinite(v) && v >= 0 ? v : 30; })(),
     legDriftCorrectionDays: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_DAYS); return Number.isFinite(v) && v >= 1 ? v : 21; })(),
     legDriftCorrectionOverrides: (() => { try { const v = JSON.parse(process.env.LEG_DRIFT_CORRECTION_OVERRIDES || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch (_) { return {}; } })(),
+    // NBA prop LISTING WINDOW (2026-11-02, operator: "set our NBA props to T-25
+    // like we do with the PX order book"). An NBA player prop registers (and
+    // prices) only inside this many minutes of tip — the order book's
+    // nba_props --tminus. 0 = off. Runtime key nbaPropTMinusMinutes.
+    nbaPropTMinusMinutes: (() => { const v = parseFloat(process.env.NBA_PROP_TMINUS_MINUTES); return Number.isFinite(v) && v >= 0 ? v : 25; })(),
     nbaPropEarlyGatePercent: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     nbaPropEarlyGateHours: (() => { const v = parseFloat(process.env.NBA_PROP_EARLY_GATE_HOURS); return Number.isFinite(v) && v > 0 ? v : 8; })(),
     // NHL early-prop timing A/B (2026-11-01, pricer.js) — the NBA gate for NHL.

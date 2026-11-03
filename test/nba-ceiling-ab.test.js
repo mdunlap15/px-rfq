@@ -50,7 +50,7 @@ function stub(extra = {}) {
   // past the 4pp guard, inside the 5pp moneyline anomaly decline).
   const book = (sport, home) => String(home).startsWith('FLIP') ? -120 : -110;
   oddsFeed.getPinnacleOdds = book; oddsFeed.getFanDuelOdds = book; oddsFeed.getDraftKingsOdds = book;
-  Object.assign(config.pricing, { maxRiskPerParlay: 3000, maxRiskPerParlayWithProp: 3000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
+  Object.assign(config.pricing, { maxRiskPerParlay: 3000, maxRiskPerParlayWithProp: 3000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false, nbaPropTMinusMinutes: 0,
     cfbWidenPercent: 0, twoLegWidenPercent: 0, twoLegFactorPercent: 0, propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, legDriftCorrectionPercent: 0,
     footballCeilingPercent: 0,
     nbaCeilingPercent: 0, nbaCeilingMinLegs: 4, nbaCeiling3LegPct: 3, nbaCeiling45LegPct: 4, nbaCeiling6LegPct: 8,

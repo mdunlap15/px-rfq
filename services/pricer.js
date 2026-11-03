@@ -1177,6 +1177,24 @@ function priceParlay(legs, opts = {}) {
       }
     }
 
+    // NBA PROP LISTING WINDOW (2026-11-02, the order book's T-25). Registration
+    // already refuses NBA props outside nbaPropTMinusMinutes; this declines a leg
+    // that is registered anyway (cache restore, a line seeded before a window
+    // change). fairOnly reads (EV live / game-time) are never blocked.
+    {
+      const _win = Number(config.pricing.nbaPropTMinusMinutes);
+      if (_win > 0 && !opts.fairOnly && lineInfo.sport === 'basketball_nba'
+          && /^player_/.test(lineInfo.marketType || '')
+          && (startMs == null || isNaN(startMs) || (startMs - nowMs) / 60000 > _win)) {
+        priceParlay._lastFailure = {
+          reason: 'nba_prop_window',
+          detail: `${legLabel} NBA prop ${startMs != null && !isNaN(startMs) ? ((startMs - nowMs) / 60000).toFixed(0) + 'm' : 'unknown tip'} pre-tip (> T-${_win})`,
+          blockerLeg: legDescriptor,
+        };
+        return null;
+      }
+    }
+
     // NBA EARLY-PROP TIMING A/B (2026-10-21 perf review). 83% of the NBA prop
     // legs we filled were filled 8h+ before tip, none priced off the order book,
     // median input age 604 s — while the order book lists NBA props only inside

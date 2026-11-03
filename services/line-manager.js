@@ -285,6 +285,21 @@ function _footballPropWindowOpen(sportKey, scheduled, propType) {
   return (ms - Date.now()) / 60000 <= _footballPropWindowMinutes(sportKey, scheduled, propType);
 }
 
+// ---- ORDER-BOOK MIRROR: NBA prop LISTING WINDOW (2026-11-02) ----
+// NBA player props register only inside config.pricing.nbaPropTMinusMinutes
+// (25) of tip — the order book's nba_props --tminus. Gates REGISTRATION, so
+// outside the window PX never sends the RFQ; pricer.js declines a leg outside
+// it too (cache restore / a line registered before the window moved). Unknown
+// tip fails closed. 0 = off.
+function _nbaPropWindowOpen(sportKey, scheduled) {
+  if (sportKey !== 'basketball_nba') return true;
+  const win = Number(config.pricing && config.pricing.nbaPropTMinusMinutes);
+  if (!Number.isFinite(win) || win <= 0) return true;
+  const ms = Date.parse(scheduled || '');
+  if (!Number.isFinite(ms)) return false;
+  return (ms - Date.now()) / 60000 <= win;
+}
+
 // ---- ORDER-BOOK MIRROR: "one line per (player, market)" ----
 // The posters list the BEST-BOOKED point only (most books quoting both sides,
 // ties to the middle of the ladder). Shared by the seed pre-pass and the
@@ -1972,6 +1987,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
         if (propType === 'pitcher_strikeouts' && !(config.pricing && config.pricing.pitcherKPropsEnabled)) continue;
         if (sportKey.startsWith('americanfootball')
             && !_footballPropWindowOpen(sportKey, event.scheduled, propType)) continue;
+        if (!_nbaPropWindowOpen(sportKey, event.scheduled)) continue;
         // Registration-safety assertion: a football prop line may never
         // carry a full-game marketType (fails closed, logged — see
         // _footballPropRegistrationSafe).
@@ -5027,6 +5043,9 @@ async function resolveUnknownLine(rfqLeg) {
                 if (isFb && !_footballPropWindowOpen(sportKey, event.scheduled, propType)) {
                   fbRefuse = 'outside the football prop window';
                 }
+                if (!fbRefuse && !_nbaPropWindowOpen(sportKey, event.scheduled)) {
+                  fbRefuse = 'outside the NBA prop window';
+                }
                 if (isFb && !fbRefuse && config.pricing && config.pricing.footballPropInjuryGate) {
                   try {
                     const fi = require('./football-injuries');
@@ -6139,6 +6158,7 @@ module.exports = {
   _footballPropCtx,
   _footballPropWindowMinutes,
   _footballPropWindowOpen,
+  _nbaPropWindowOpen,
   _footballBestPropPoint,
   _etWeekday,
   _FOOTBALL_PROP_TWO_SIDED,
