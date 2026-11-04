@@ -4231,6 +4231,58 @@ function priceParlay(legs, opts = {}) {
   }
 
   // -------------------------------------------------------------------
+  // CROSS-GAME WIDEN A/B (2026-11-04) — see config.pricing.crossGameWidenPercent.
+  // Operator: "set up the cross-game widen A/B at 50%" — the test of "widen our
+  // spreads, win fewer fills, but win at profitable numbers". Measured before
+  // building (14,662 graded fills, void-corrected fair): EV per $ risked sat at
+  // ~1.0-1.6% at every markup level from 1% to 20%+, while bettors beat our fair
+  // ~6% by count (~1.5% of risk on a typical +386 ticket), and the CFB +2% widen
+  // cost 42% of its fills. This arm measures what the extra margin keeps.
+  // Scope: 2+ legs, no two legs on one event, every leg priced, no leg in
+  // crossGameWidenExcludeSports. Widen arm = offered implied prob x (1 +
+  // crossGameWidenRelPct/100), same mechanics and guarantees as the widens above
+  // (after every floor/trim/factor, before the theo-edge gate, fair untouched,
+  // arm a pure function of parlayId so the confirm reprice keys on the same
+  // fair). Independent of the cross-game FACTOR arm (separate salt, both live):
+  // the two cross as a 2x2, so read each by its own arm. Defers by SCOPE (either
+  // arm — the cross-game factor's idiom) to the football / NBA ceilings and the
+  // CFB / 2-leg widens: a ticket any of those has assigned an arm is out of scope
+  // here, so nothing is widened twice, no ceiling is undone, and those
+  // experiments' control arms stay clean. (Deferring only when they FIRED would
+  // have widened half of the live NBA ceiling's control arm and none of its
+  // ceiling arm.) Read fills / risk / EV / P&L per arm as intent-to-treat: a
+  // widen-arm quote pushed past 50% implied declines and never becomes a row.
+  // -------------------------------------------------------------------
+  const _xgWiden = { arm: null, applied: false, preProb: null, relPct: null };
+  {
+    const _pct = config.pricing.crossGameWidenPercent || 0;
+    const excl = config.pricing.crossGameWidenExcludeSports || [];
+    const _inScope = _pct > 0 && opts.parlayId && !opts.fairOnly
+      && pricedLegs.length >= 2 && !isSGPParlay
+      && _fbCeil.arm == null && _nbaCeil.arm == null && _cfbWiden.arm == null && _twoLegWiden.arm == null
+      && pricedLegs.every(l => l.lineInfo && !excl.includes(l.lineInfo.sport));
+    if (_inScope) {
+      let inArm = _pct >= 100;
+      if (!inArm) {
+        const h = crypto.createHash('md5').update('xgw:' + String(opts.parlayId)).digest();
+        inArm = (h.readUInt32BE(0) % 100) < _pct;
+      }
+      _xgWiden.arm = inArm ? 'widen' : 'control';
+      if (inArm && offeredImpliedProb > 0 && offeredImpliedProb < 0.99) {
+        const rel = config.pricing.crossGameWidenRelPct || 6;
+        const widened = Math.min(0.99, offeredImpliedProb * (1 + rel / 100));
+        if (widened > offeredImpliedProb) {
+          _xgWiden.preProb = offeredImpliedProb;
+          _xgWiden.applied = true;
+          _xgWiden.relPct = rel;
+          log.debug('Pricing', `Cross-game widen[${pricedLegs.length}L]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(widened * 100).toFixed(3)}% (+${rel}% rel, fair ${(fairParlayProb * 100).toFixed(3)}%)`);
+          offeredImpliedProb = widened;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
   // MINIMUM THEO EDGE GATE — decline if final edge is below the floor.
   //
   // After all pricing adjustments, edge = (offered − fair) / fair × 100.
@@ -4888,6 +4940,12 @@ function priceParlay(legs, opts = {}) {
       twoLegWidenApplied: _twoLegWiden.applied,
       twoLegWidenPreProb: _twoLegWiden.preProb != null ? Math.round(_twoLegWiden.preProb * 100000) / 100000 : null,
       twoLegWidenRelPct: _twoLegWiden.relPct,
+      // Cross-game widen A/B: arm null = out of scope / dark; 'control' /
+      // 'widen' in scope. PreProb = the control price.
+      xgWidenArm: _xgWiden.arm,
+      xgWidenApplied: _xgWiden.applied,
+      xgWidenPreProb: _xgWiden.preProb != null ? Math.round(_xgWiden.preProb * 100000) / 100000 : null,
+      xgWidenRelPct: _xgWiden.relPct,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.

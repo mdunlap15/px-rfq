@@ -6265,6 +6265,30 @@ function startStatusServer() {
       res.status(500).json({ ok: false, error: err.message });
     }
   });
+  // Per-arm read-out for any pricer A/B stamping meta.<name>Arm (2026-11-04,
+  // cross-game widen: ?arm=xgWidenArm). ?days=14 (by quoted_at, max 90).
+  // services/ab-arm-metrics.js documents every field.
+  app.get('/ab-arm-metrics', async (req, res) => {
+    try {
+      const abm = require('./services/ab-arm-metrics');
+      const arm = String(req.query.arm || 'xgWidenArm');
+      if (!abm.ARM_KEY_RE.test(arm)) return res.status(400).json({ ok: false, error: 'arm must look like <name>Arm' });
+      const days = Math.min(90, Math.max(0.1, Number(req.query.days) || 14));
+      const to = new Date().toISOString();
+      const from = new Date(Date.now() - days * 864e5).toISOString();
+      const rows = await db.loadOrdersInDateRange(from, to, { groupBy: 'quoted_at', maxRows: 50000 });
+      // The read pages OLDEST-first, so a capped read drops the newest rows.
+      // fillRatePct is per QUOTE: a widen-arm quote the price pushes past a
+      // decline gate never becomes a row — compare arms on fills / risk / EV /
+      // P&L (intent-to-treat; assignment is a 50/50 hash of parlayId).
+      res.json({ ok: true, arm, window: { from, to, days }, rowsRead: rows.length, truncated: rows.length >= 50000,
+        note: 'fillRatePct is conditional on quoting; compare arms on fills, risk, evFill, evLive, pnl',
+        arms: abm.summarizeArms(rows, arm, db.quoteRowWeight) });
+    } catch (err) {
+      log.error('API', `/ab-arm-metrics failed: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
   app.post('/warm-alt-lines', async (req, res) => {
     const sport = req.query.sport || req.body?.sport;
     try {

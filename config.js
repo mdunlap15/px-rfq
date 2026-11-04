@@ -1040,6 +1040,15 @@ const config = {
       ? process.env.CROSS_GAME_FACTOR_EXCLUDE_SPORTS
       : 'americanfootball_ncaaf,basketball_nba,politics'
     ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    // CROSS-GAME WIDEN A/B (2026-11-04, pricer.js). LIVE at 50% (operator: "set
+    // up the cross-game widen A/B at 50%"); 0 = dark. Widen arm offered prob x
+    // (1 + relPct/100) on every cross-game parlay. Runtime keys.
+    crossGameWidenPercent: (() => { const v = parseFloat(process.env.CROSS_GAME_WIDEN_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 50; })(),
+    crossGameWidenRelPct: (() => { const v = parseFloat(process.env.CROSS_GAME_WIDEN_REL_PCT); return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 6; })(),
+    crossGameWidenExcludeSports: (process.env.CROSS_GAME_WIDEN_EXCLUDE_SPORTS != null
+      ? process.env.CROSS_GAME_WIDEN_EXCLUDE_SPORTS
+      : 'politics'
+    ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     // 2-LEG SELECTION FACTOR A/B (2026-10-26, pricer.js). Percent 0 = dark.
     twoLegFactorPercent: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     twoLegFactorMult: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MULT); return Number.isFinite(v) && v >= 1 ? Math.min(1.5, v) : 1.10; })(),

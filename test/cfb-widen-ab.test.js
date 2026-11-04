@@ -50,6 +50,7 @@ function stub() {
   saved.stalePre = oddsFeed.isEventStalePreGame;
   saved.cap = config.pricing.maxRiskPerParlay;
   saved.maxOdds = config.pricing.maxOdds;
+  saved.xgw = config.pricing.crossGameWidenPercent;
   saved.pct = config.pricing.cfbWidenPercent;
   saved.rel = config.pricing.cfbWidenRelPct;
   saved.fsgp = config.pricing.footballSgpEnabled;
@@ -60,6 +61,7 @@ function stub() {
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
   config.pricing.maxRiskPerParlay = 3000;
   config.pricing.maxOdds = 50000;
+  config.pricing.crossGameWidenPercent = 0;   // the cross-game widen A/B (live 50%) would move these prices
   config.pricing.footballSgpEnabled = true;
   config.pricing.sgpAllowedCombos = ['spread_total', 'ml_total'];
 }
@@ -70,6 +72,7 @@ function restore() {
   if (saved.stalePre) oddsFeed.isEventStalePreGame = saved.stalePre;
   config.pricing.maxRiskPerParlay = saved.cap;
   config.pricing.maxOdds = saved.maxOdds;
+  config.pricing.crossGameWidenPercent = saved.xgw;
   config.pricing.cfbWidenPercent = saved.pct;
   config.pricing.cfbWidenRelPct = saved.rel;
   config.pricing.footballSgpEnabled = saved.fsgp;

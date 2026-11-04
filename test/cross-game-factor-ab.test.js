@@ -37,7 +37,7 @@ function stub(extra = {}) {
   Object.assign(config.pricing, { maxRiskPerParlay: 3000, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
     twoLegWidenPercent: 0, mlPairTrimPercent: 0, propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, nhlPropEarlyGatePercent: 0,
     legDriftCorrectionPercent: 0, footballCeilingPercent: 0, nbaCeilingPercent: 0, twoLegFactorPercent: 0,
-    crossGameFactorPercent: 0, crossGameFactorMult2: 1.10, crossGameFactorMult3: 1.12, crossGameFactorMult4: 1.12,
+    crossGameFactorPercent: 0, crossGameWidenPercent: 0, crossGameFactorMult2: 1.10, crossGameFactorMult3: 1.12, crossGameFactorMult4: 1.12,
     crossGameFactorMinFair: 0.20, crossGameFactorExcludeSports: ['americanfootball_ncaaf', 'basketball_nba'] }, extra);
 }
 function restore() {

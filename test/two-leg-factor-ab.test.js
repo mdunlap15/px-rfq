@@ -35,7 +35,7 @@ function stub(extra = {}) {
   oddsFeed.getFairProb = () => FAIR;
   oddsFeed.isStaleForEvent = () => false;
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
-  Object.assign(config.pricing, { maxRiskPerParlay: 3000, crossGameFactorPercent: 0, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
+  Object.assign(config.pricing, { maxRiskPerParlay: 3000, crossGameFactorPercent: 0, crossGameWidenPercent: 0, maxOdds: 50000, obRelayEnabled: false, freshGateEnabled: false,
     twoLegWidenPercent: 0, mlPairTrimPercent: 0, propBookCapPercent: 0, nbaPropEarlyGatePercent: 0, legDriftCorrectionPercent: 0, footballCeilingPercent: 0,
     twoLegFactorPercent: 0, twoLegFactorMult: 1.10, twoLegFactorMinFair: 0.30, twoLegFactorMaxFair: 0.50 }, extra);
 }

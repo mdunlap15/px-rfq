@@ -58,6 +58,7 @@ function stub() {
   saved.propCap = config.pricing.maxRiskPerParlayWithProp;
   saved.parlayCap = config.pricing.maxRiskPerParlay;   // local .env sets $10 → trips the unfillable gate
   saved.maxOdds = config.pricing.maxOdds;
+  saved.xgw = config.pricing.crossGameWidenPercent;
   saved.pct = config.pricing.hrPairTrimPercent;
   saved.frac = config.pricing.hrPairTrimFraction;
   saved.floor = config.pricing.hrPairMinRelEdgePct;
@@ -68,6 +69,7 @@ function stub() {
   config.pricing.maxRiskPerParlayWithProp = 3000;
   config.pricing.maxRiskPerParlay = 3000;
   config.pricing.maxOdds = 50000;
+  config.pricing.crossGameWidenPercent = 0;   // the cross-game widen A/B (live 50%) would move these prices
 }
 function restore() {
   lineManager.lookupLine = saved.lookup;
@@ -77,6 +79,7 @@ function restore() {
   config.pricing.maxRiskPerParlayWithProp = saved.propCap;
   config.pricing.maxRiskPerParlay = saved.parlayCap;
   config.pricing.maxOdds = saved.maxOdds;
+  config.pricing.crossGameWidenPercent = saved.xgw;
   config.pricing.hrPairTrimPercent = saved.pct;
   config.pricing.hrPairTrimFraction = saved.frac;
   config.pricing.hrPairMinRelEdgePct = saved.floor;

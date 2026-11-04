@@ -12,6 +12,10 @@
 // Run: node --test test/election-rfq.test.js
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+// The production default ELEC_STOP_UTC (2026-11-03T22:00Z) is in the past once
+// election day ends, which put every pricing test past the takedown and turned
+// the suite red. Pin it a week ahead of NOW; the takedown test sets its own.
+if (!process.env.ELEC_STOP_UTC) process.env.ELEC_STOP_UTC = new Date(Date.now() + 7 * 864e5).toISOString();
 
 const { test } = require('node:test');
 const assert = require('node:assert');

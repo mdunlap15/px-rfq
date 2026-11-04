@@ -57,6 +57,7 @@ function stub() {
   saved.stalePre = oddsFeed.isEventStalePreGame;
   saved.parlayCap = config.pricing.maxRiskPerParlay;
   saved.maxOdds = config.pricing.maxOdds;
+  saved.xgw = config.pricing.crossGameWidenPercent;
   saved.pct = config.pricing.mlPairTrimPercent;
   saved.frac = config.pricing.mlPairTrimFraction;
   saved.floor = config.pricing.mlPairMinRelEdgePct;
@@ -66,6 +67,7 @@ function stub() {
   if (oddsFeed.isEventStalePreGame) oddsFeed.isEventStalePreGame = () => false;
   config.pricing.maxRiskPerParlay = 3000;
   config.pricing.maxOdds = 50000;
+  config.pricing.crossGameWidenPercent = 0;   // the cross-game widen A/B (live 50%) would move these prices
 }
 function restore() {
   lineManager.lookupLine = saved.lookup;
@@ -74,6 +76,7 @@ function restore() {
   if (saved.stalePre) oddsFeed.isEventStalePreGame = saved.stalePre;
   config.pricing.maxRiskPerParlay = saved.parlayCap;
   config.pricing.maxOdds = saved.maxOdds;
+  config.pricing.crossGameWidenPercent = saved.xgw;
   config.pricing.mlPairTrimPercent = saved.pct;
   config.pricing.mlPairTrimFraction = saved.frac;
   config.pricing.mlPairMinRelEdgePct = saved.floor;
