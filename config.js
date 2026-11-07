@@ -1005,6 +1005,16 @@ const config = {
     nearStartActivePropHours: (() => { const v = parseFloat(process.env.NEAR_START_ACTIVE_PROP_HOURS); return Number.isFinite(v) && v >= 0 ? v : 24; })(),
     nearStartActivePropTargetAgeSec: (() => { const v = parseFloat(process.env.NEAR_START_ACTIVE_PROP_TARGET_AGE_SEC); return Number.isFinite(v) && v >= 30 ? v : 120; })(),
     nearStartActivePropMaxEvents: (() => { const v = parseInt(process.env.NEAR_START_ACTIVE_PROP_MAX_EVENTS, 10); return Number.isFinite(v) && v >= 0 ? v : 8; })(),
+    // CREATOR SIZE TIERS (2026-11-07, services/creator-tier.js; runtime keys). New / unknown
+    // creators (< TRUST_MIN_SETTLED settled tickets) and sharp ones (z >= SHARP_Z over
+    // >= SHARP_MIN_N) get a per-ticket risk cap; trusted creators keep the normal caps.
+    creatorTierEnabled: process.env.CREATOR_TIER_ENABLED !== 'false',
+    creatorTierNewMaxRisk: (() => { const v = parseFloat(process.env.CREATOR_TIER_NEW_MAX_RISK); return Number.isFinite(v) && v > 0 ? v : 500; })(),
+    creatorTierSharpMaxRisk: (() => { const v = parseFloat(process.env.CREATOR_TIER_SHARP_MAX_RISK); return Number.isFinite(v) && v > 0 ? v : 100; })(),
+    creatorTierTrustMinSettled: (() => { const v = parseInt(process.env.CREATOR_TIER_TRUST_MIN_SETTLED, 10); return Number.isFinite(v) && v >= 0 ? v : 10; })(),
+    creatorTierSharpMinN: (() => { const v = parseInt(process.env.CREATOR_TIER_SHARP_MIN_N, 10); return Number.isFinite(v) && v >= 3 ? v : 10; })(),
+    creatorTierSharpZ: (() => { const v = parseFloat(process.env.CREATOR_TIER_SHARP_Z); return Number.isFinite(v) && v > 0 ? v : 1.5; })(),
+    creatorTierDays: (() => { const v = parseFloat(process.env.CREATOR_TIER_DAYS); return Number.isFinite(v) && v >= 7 ? v : 365; })(),
     // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js; runtime keys). Percent 0 = dark.
     legDriftCorrectionPercent: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     legDriftCorrectionMinN: (() => { const v = parseInt(process.env.LEG_DRIFT_CORRECTION_MIN_N, 10); return Number.isFinite(v) && v >= 5 ? v : 30; })(),

@@ -346,6 +346,7 @@ async function startup() {
   try { require('./services/gametime-ev').start(); } catch (err) { log.warn('Startup', `    ✗ game-time EV start failed: ${err.message}`); }
   // Per-leg drift table + adverse-only family corrections (services/leg-drift.js).
   try { require('./services/leg-drift').start(); } catch (err) { log.warn('Startup', `    ✗ leg-drift start failed: ${err.message}`); }
+  try { require('./services/creator-tier').start(); } catch (err) { log.warn('Startup', `    ✗ creator-tier start failed: ${err.message}`); }
 
   // Step 4: Connect WebSocket
   log.info('Startup', '4/5 Connecting to ProphetX WebSocket...');
@@ -1277,6 +1278,7 @@ function startStatusServer() {
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
       nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
       gameTimeEv: (() => { try { return require('./services/gametime-ev').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      creatorTier: (() => { try { return require('./services/creator-tier').summary(); } catch (e) { return { error: e.message }; } })(),
       legDrift: (() => { try { const t = require('./services/leg-drift').getTable(); return { builtAt: t.builtAt, days: t.days, rows: t.rows, families: Object.keys(t.families || {}).length, activeCorrections: t.corrections }; } catch (e) { return { error: e.message }; } })(),
       matchedRowUpdates: (() => { try { return db.getMatchedUpdateStats(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {

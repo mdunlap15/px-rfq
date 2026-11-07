@@ -4435,6 +4435,18 @@ function priceParlay(legs, opts = {}) {
       log.warn('Pricing', `exposure headroom failed (${err.message}) — using configured caps only`);
     }
   }
+  // CREATOR SIZE TIER (2026-11-07, services/creator-tier.js): a new or sharp
+  // creator gets a smaller ticket. Only when PX sent creator_id on the RFQ; an
+  // unknown creator is sized at confirm, where it is resolved (or fails closed).
+  let creatorTier = null;
+  if (!opts.skipTemplateRamp && opts.creatorId) {
+    try {
+      creatorTier = require('./creator-tier').tierFor(opts.creatorId);
+      if (Number.isFinite(creatorTier.cap)) candidateCaps.push(creatorTier.cap);
+    } catch (err) {
+      log.warn('Pricing', `creator tier failed (${err.message}) — using configured caps only`);
+    }
+  }
   const maxRisk = Math.min(...candidateCaps);
 
   const americanOdds = decimalToAmerican(decimalOdds);
@@ -4820,6 +4832,7 @@ function priceParlay(legs, opts = {}) {
       vigRateUsed: Math.round((vigRateUsed || 0) * 10000) / 10000,
       exposureHeadroom: exposureHeadroom ? Math.round(exposureHeadroom.maxRisk * 100) / 100 : null,
       exposureHeadroomBinding: exposureHeadroom ? exposureHeadroom.binding : null,
+      creatorTier: creatorTier ? { tier: creatorTier.tier, cap: Number.isFinite(creatorTier.cap) ? creatorTier.cap : null, n: creatorTier.n, z: creatorTier.z != null ? Math.round(creatorTier.z * 100) / 100 : null } : null,
       // Additional vig added by longshot ramp (parlay-level, applied when
       // parlay fair prob < vigLongshotThreshold). 0 when not triggered.
       // Exposed so dashboard can flag which quotes used the ramp and we

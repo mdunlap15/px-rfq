@@ -1710,6 +1710,7 @@ async function handleRFQ(data) {
       resolvedLineInfos: declineCheck.resolvedLineInfos,
       sgpCombo: declineCheck.sgpCombo || null,
       parlayId,
+      creatorId,
     });
     const result = (resultMaybe && typeof resultMaybe.then === 'function')
       ? await resultMaybe
@@ -2090,9 +2091,19 @@ async function handleConfirm(data) {
       ((originalOrder.meta && originalOrder.meta.xteamPairs > 0) && _exp.has('prop_prop_xteam'))
     );
     if (isExperimentalCombo) confirmCaps.push(config.pricing.maxRiskSgpExperimental || 15);
+    // Creator size tier (services/creator-tier.js). The blocklist step above
+    // resolved the creator into meta when PX omitted it on the RFQ; still
+    // unknown here = sized as new (fail closed).
+    let _creatorTier = null;
+    try {
+      const _cid = originalOrder.meta && (originalOrder.meta.creatorId || originalOrder.meta.creator_id);
+      _creatorTier = require('./creator-tier').tierFor(_cid || null);
+      if (Number.isFinite(_creatorTier.cap)) confirmCaps.push(_creatorTier.cap);
+    } catch (_) { /* tier module unavailable — configured caps only */ }
     const maxRisk = Math.min(...confirmCaps.filter(c => c > 0));
     if (maxRisk > 0 && ourRisk > maxRisk) {
-      const capLabel = isExperimentalCombo ? 'experimental SGP cap'
+      const capLabel = (_creatorTier && Number.isFinite(_creatorTier.cap) && maxRisk === _creatorTier.cap) ? `creator tier cap (${_creatorTier.tier})`
+        : isExperimentalCombo ? 'experimental SGP cap'
         : parlayHasPropLeg ? 'prop per-parlay cap'
         : parlayHasSeries ? 'series per-parlay cap'
         : 'per-parlay risk limit';
