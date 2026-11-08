@@ -4771,6 +4771,20 @@ function startStatusServer() {
       // matchup placed the previous night vanished from the dashboard). PX honours
       // `page` and reports has_next/total_page; only this passthrough dropped it.
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      // ?v=2 -> PX's v2 cursor feed: the same wager rows, windowed by from/to (unix
+      // seconds) and paged by next_cursor, one page per call. On 2026-11-07 at 8:23 PM
+      // ET ProphetX's CDN began answering the unversioned /partner/mm/get_wager_histories
+      // with a 403 "request blocked" page while v2 kept working, which cut the tracker
+      // off from every straight wager. Without v=2 nothing about this route changes.
+      if (String(req.query.v || '') === '2') {
+        const now = Math.floor(Date.now() / 1000);
+        const to = Math.min(parseInt(req.query.to, 10) || now, now + 86400);
+        const from = Math.max(0, parseInt(req.query.from, 10) || (to - 7 * 86400));
+        const cursor = String(req.query.cursor || '').replace(/[^A-Za-z0-9+/=_:.-]/g, '');
+        const q2 = `/partner/v2/mm/get_wager_histories?from=${from}&to=${to}${status ? `&status=${status}` : ''}&limit=${limit}`
+          + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+        return res.json(await px.pxFetch(q2));
+      }
       const q = `/partner/mm/get_wager_histories?limit=${limit}${status ? `&status=${status}` : ''}${page > 1 ? `&page=${page}` : ''}`;
       res.json(await px.pxFetch(q));
     } catch (e) { res.status(502).json({ error: String(e.message).slice(0, 300) }); }
