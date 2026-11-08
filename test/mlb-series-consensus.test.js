@@ -30,6 +30,7 @@ const lineManager = require('../services/line-manager');
 const oddsFeed = require('../services/odds-feed');
 const pricer = require('../services/pricer');
 const { config } = require('../config');
+config.pricing.calibEnabled = false; // isolate this mechanism from the calibration floor (test/fair-calibration.test.js)
 
 const FIX = path.join(__dirname, 'fixtures');
 const DK_XHR = JSON.parse(fs.readFileSync(path.join(FIX, 'dk-mlb-series-xhr-2026-10-04.json'), 'utf8'));

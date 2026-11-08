@@ -4293,6 +4293,33 @@ function priceParlay(legs, opts = {}) {
   // moves with volatility — tight-odds parlays need less pp to clear 1%
   // edge than long-shot parlays.
   // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // MEASURED FAIR CALIBRATION FLOOR (2026-11-08) — services/fair-calibration.js.
+  // Bettors hit 1.075x our raw joint fair over 7/19-11/8 (z 3.3), so a margin
+  // over the raw fair is not a margin. calFair = raw (pre-factor) fair x the
+  // segment's shrunk hit ratio (>= 1); the offer is floored at calFair x (1 +
+  // calibMinMarginPct). Only ever LESS generous; fairParlayProb untouched (the
+  // confirm drift checks key on it). Last price step before the edge gate.
+  // -------------------------------------------------------------------
+  let _calib = null;
+  if (!opts.fairOnly && fairParlayProb > 0) {
+    try {
+      const raw = _xgf.applied && _xgf.preFair > 0 ? _xgf.preFair : _2lf.applied && _2lf.preFair > 0 ? _2lf.preFair : fairParlayProb;
+      const c = require('./fair-calibration').forQuote(pricedLegs, raw);
+      if (c) {
+        _calib = { key: c.key, mult: Math.round(c.mult * 10000) / 10000, rawMult: Math.round(c.rawMult * 10000) / 10000,
+          rawFair: Math.round(raw * 1e6) / 1e6, calFair: Math.round(c.calFair * 1e6) / 1e6, minMarginPct: c.minMarginPct,
+          applied: false, preProb: null };
+        if (c.floorProb > offeredImpliedProb) {
+          _calib.applied = true;
+          _calib.preProb = Math.round(offeredImpliedProb * 1e5) / 1e5;
+          log.debug('Pricing', `Calibration floor[${c.key} x${c.mult.toFixed(3)}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(c.floorProb * 100).toFixed(3)}%`);
+          offeredImpliedProb = c.floorProb;
+        }
+      }
+    } catch (e) { log.warn('Pricing', `calibration floor skipped: ${e.message}`); }
+  }
+
   const minTheoEdgePct = config.pricing.minTheoEdgePct || 0;
   if (minTheoEdgePct > 0 && fairParlayProb > 0) {
     const theoEdge = (offeredImpliedProb - fairParlayProb) / fairParlayProb * 100;
@@ -4912,6 +4939,7 @@ function priceParlay(legs, opts = {}) {
       twoLegFactorPreFair: _2lf.preFair != null ? Math.round(_2lf.preFair * 1e6) / 1e6 : null,
       twoLegFactorPreProb: _2lf.preProb != null ? Math.round(_2lf.preProb * 1e5) / 1e5 : null,
       // Cross-game selection factor A/B: null out of scope / dark; 'control' | 'factor'.
+      calib: _calib,
       xgFactorArm: _xgf.arm,
       xgFactorApplied: _xgf.applied,
       xgFactorMult: _xgf.mult,

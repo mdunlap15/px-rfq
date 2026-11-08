@@ -1279,6 +1279,7 @@ function startStatusServer() {
       nearStartRefresh: (() => { try { return require('./services/near-start-refresh').getStatus(); } catch (e) { return { error: e.message }; } })(),
       gameTimeEv: (() => { try { return require('./services/gametime-ev').getStatus(); } catch (e) { return { error: e.message }; } })(),
       creatorTier: (() => { try { return require('./services/creator-tier').summary(); } catch (e) { return { error: e.message }; } })(),
+      fairCalibration: (() => { try { const x = require('./services/fair-calibration').summary(); return Object.assign({}, x, { segments: x.segments.slice(0, 12) }); } catch (e) { return { error: e.message }; } })(),
       legDrift: (() => { try { const t = require('./services/leg-drift').getTable(); return { builtAt: t.builtAt, days: t.days, rows: t.rows, families: Object.keys(t.families || {}).length, activeCorrections: t.corrections }; } catch (e) { return { error: e.message }; } })(),
       matchedRowUpdates: (() => { try { return db.getMatchedUpdateStats(); } catch (e) { return { error: e.message }; } })(),
       killSwitches: {
@@ -4637,6 +4638,13 @@ function startStatusServer() {
   });
 
   // EV fill vs EV live, cumulative by confirm time over every fill (open + settled).
+  // Measured fair calibration table (services/fair-calibration.js): per segment
+  // bettor hits vs raw fair, z, and the shrunk multiplier used for EV + the floor.
+  app.get('/fair-calibration', (req, res) => {
+    try { res.json(require('./services/fair-calibration').summary()); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get('/ev-fill-live', (req, res) => {
     try {
       const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));

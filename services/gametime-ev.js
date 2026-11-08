@@ -58,6 +58,13 @@ const graceMs = () => envNum('GAMETIME_EV_GRACE_SEC', 90, 30) * 1000;
 
 function _round(x, d = 5) { return x == null || !Number.isFinite(x) ? null : Math.round(x * 10 ** d) / 10 ** d; }
 
+/** Fill fair for EV: the measured (calibrated) fair when stamped, else the model fair. */
+function fillFairOf(order) {
+  const m = order.meta || {};
+  if (m.evFair > 0 && m.evFair < 1) return Number(m.evFair);
+  return Number(order.fairParlayProb != null ? order.fairParlayProb : m.fairParlayProb);
+}
+
 /** EV on our side for bettor-win prob p, same convention as meta.expectedValue. */
 function evAt(order, p) {
   const risk = Number(order.confirmedStake) || 0;
@@ -70,7 +77,7 @@ function evAt(order, p) {
 /** Combine leg reads into the ticket's fair / EV (see header). */
 function combine(order, legReads) {
   const legs = (order.meta && order.meta.legs) || [];
-  const fill = Number(order.fairParlayProb != null ? order.fairParlayProb : order.meta && order.meta.fairParlayProb);
+  const fill = fillFairOf(order);
   if (!(fill > 0 && fill < 1) || !legs.length) return null;
   let ratio = 1, captured = 0;
   for (const l of legs) {
@@ -78,7 +85,7 @@ function combine(order, legReads) {
     if (g && g.fair > 0 && g.fair < 1 && l.fairProb > 0 && l.fairProb < 1) { ratio *= g.fair / l.fairProb; captured++; }
   }
   const p = Math.min(0.999, Math.max(0.000001, fill * ratio));
-  return { fairProb: _round(p, 6), ev: _round(evAt(order, p), 2), coverage: _round(captured / legs.length, 3) };
+  return { fairProb: _round(p, 6), ev: _round(evAt(order, p), 2), coverage: _round(captured / legs.length, 3), fillBasis: _round(fill, 6) };
 }
 
 async function _readLeg(leg) {
@@ -173,7 +180,7 @@ async function tick(nowMs = Date.now()) {
       if (allFrozen && !(order.meta.gameTime && order.meta.gameTime.finalizedAt)) {
         // GAME TIME = the frozen EV live.
         const gtLegs = {};
-        const fillP = Number(order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb);
+        const fillP = fillFairOf(order);
         const evFill = evAt(order, fillP);
         const confMs = Date.parse(order.confirmedAt || '');
         for (const l of legs) {
@@ -259,7 +266,7 @@ function gameTimeEvFor(order, fillEv) {
   const gt = order.meta && order.meta.gameTime;
   if (gt && gt.finalizedAt && gt.ev != null && Number.isFinite(gt.ev)) return { ev: gt.ev, source: 'gametime', coverage: gt.coverage };
   const legs = (order.legs || (order.meta && order.meta.legs) || []);
-  const fill = Number(order.fairParlayProb != null ? order.fairParlayProb : order.meta && order.meta.fairParlayProb);
+  const fill = fillFairOf(order);
   if (legs.length && fill > 0 && legs.every(l => l.closingImpliedProb > 0 && l.fairProb > 0)) {
     let ratio = 1;
     for (const l of legs) ratio *= l.closingImpliedProb / l.fairProb;

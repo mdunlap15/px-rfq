@@ -1100,6 +1100,8 @@ function recordConfirmation(parlayId, orderUuid, confirmedOdds, confirmedStake) 
       const fair = order.fairParlayProb;
       order.expectedValue = (1 - fair) * bettorWager - fair * confirmedStake;
       if (order.meta) order.meta.expectedValue = order.expectedValue;
+      // 2026-11-08: EV fill off the MEASURED fair (fair-calibration.js).
+      applyEvCalibration(order);
     }
 
     if (orderUuid) {
@@ -1549,6 +1551,53 @@ function recordLegSettlement(orderUuid, legPayload, opts = {}) {
  * Positive (+500): profit = stake * odds / 100
  * Negative (-200): profit = stake * 100 / |odds|
  */
+/**
+ * EV fill off the measured (calibrated) fair — services/fair-calibration.js.
+ * meta.evFair = raw pre-factor fair x the segment's shrunk bettor hit ratio
+ * (incl. our risk size); meta.expectedValue is recomputed from it, and the
+ * model-fair EV is kept as meta.expectedValueModel. EV live (gametime-ev)
+ * scales meta.evFair by the legs' moves. Never throws.
+ */
+function applyEvCalibration(order, opts = {}) {
+  try {
+    if (!order || !order.meta || !(order.confirmedStake > 0) || order.confirmedOdds == null) return false;
+    const calib = require('./fair-calibration');
+    const raw = calib.rawFairOf(order);
+    const legs = order.legs || order.meta.legs || [];
+    const r = raw ? calib.forEv(legs, raw, order.confirmedStake) : null;
+    if (!r) return false;
+    const bettorWager = americanOddsToProfit(order.confirmedOdds, order.confirmedStake);
+    if (!(bettorWager > 0)) return false;
+    if (order.meta.expectedValueModel == null && order.meta.expectedValue != null) order.meta.expectedValueModel = order.meta.expectedValue;
+    order.meta.evFair = Math.round(r.evFair * 1e6) / 1e6;
+    order.meta.evCalib = { key: r.key, mult: Math.round(r.mult * 10000) / 10000, rawFair: Math.round(raw * 1e6) / 1e6, at: new Date().toISOString(), backfilled: !!opts.backfill };
+    order.expectedValue = (1 - r.evFair) * bettorWager - r.evFair * order.confirmedStake;
+    order.meta.expectedValue = order.expectedValue;
+    // Rebase EV live / game-time EV already computed on the old fill fair:
+    // both are fill fair x PRODUCT(leg moves), so scale by new / old basis.
+    const q = Number(order.meta.offeredImpliedProb);
+    const risk = Number(order.confirmedStake);
+    for (const k of ['evLive', 'gameTime']) {
+      const g = order.meta[k];
+      if (!g || !(g.fairProb > 0)) continue;
+      const basis = g.fillBasis > 0 ? g.fillBasis : Number(order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb);
+      if (!(basis > 0)) continue;
+      const p = Math.min(0.999, g.fairProb * r.evFair / basis);
+      g.fairProb = Math.round(p * 1e6) / 1e6;
+      g.fillBasis = order.meta.evFair;
+      if (q > 0 && q < 1) g.ev = Math.round(((1 - p) * risk * q / (1 - q) - p * risk) * 100) / 100;
+    }
+    return true;
+  } catch (_) { return false; }
+}
+
+/** Re-apply the current calibration to every fill in the window (in memory). */
+function recalibrateEv(sinceMs) {
+  let n = 0;
+  for (const o of getConfirmedOrdersSince(sinceMs)) if (applyEvCalibration(o, { backfill: !(o.meta && o.meta.evCalib && !o.meta.evCalib.backfilled) })) n++;
+  return n;
+}
+
 function americanOddsToProfit(americanOdds, stake) {
   const odds = Number(americanOdds);
   if (!odds || !stake) return 0;
@@ -8524,6 +8573,8 @@ async function cleanFalseConfirms(opts = {}) {
 }
 
 module.exports = {
+  applyEvCalibration,
+  recalibrateEv,
   _isPxFill,
   _shouldImportPxOrder,
   recordQuote,

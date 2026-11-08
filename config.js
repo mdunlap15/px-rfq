@@ -1018,6 +1018,14 @@ const config = {
     // small-stake sharp accounts the operator exempted 2026-11-08 (#9-16 of the sharp list).
     creatorTierExempt: (process.env.CREATOR_TIER_EXEMPT != null ? process.env.CREATOR_TIER_EXEMPT
       : '83e5482e-72ee-4af4-9b1b-9d8dc7e235f8,24c5b93e-f008-4ce7-bd2e-25077d05093f,4239dd35-d068-4260-a6f4-690ae242db37,4f3cf4ef-96a6-462f-bccc-cb5a757e55c9,816f30a0-0cdd-417e-abde-ac03a928349b,6ca38c60-ddf8-4654-a246-59ae26dbf044,fe39edbe-75fe-4144-9ee5-9ccf5502b4c8,deef5f21-3265-4460-a8ac-1e1a8b22612f').split(',').map(s => s.trim()).filter(Boolean),
+    // Measured fair calibration (services/fair-calibration.js, 2026-11-08).
+    calibEnabled: process.env.CALIB_ENABLED !== 'false',
+    calibMinMarginPct: (() => { const v = parseFloat(process.env.CALIB_MIN_MARGIN_PCT); return Number.isFinite(v) && v >= 0 ? v : 8; })(),
+    calibPriorHits: (() => { const v = parseFloat(process.env.CALIB_PRIOR_HITS); return Number.isFinite(v) && v >= 1 ? v : 40; })(),
+    calibDays: (() => { const v = parseFloat(process.env.CALIB_DAYS); return Number.isFinite(v) && v >= 14 ? v : 120; })(),
+    calibFloorMult: (() => { const v = parseFloat(process.env.CALIB_FLOOR_MULT); return Number.isFinite(v) && v > 0 ? v : 1.10; })(),
+    calibMinMult: (() => { const v = parseFloat(process.env.CALIB_MIN_MULT); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.8; })(),
+    calibMaxMult: (() => { const v = parseFloat(process.env.CALIB_MAX_MULT); return Number.isFinite(v) && v >= 1 ? v : 1.5; })(),
     creatorTierDays: (() => { const v = parseFloat(process.env.CREATOR_TIER_DAYS); return Number.isFinite(v) && v >= 7 ? v : 365; })(),
     // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js; runtime keys). Percent 0 = dark.
     legDriftCorrectionPercent: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
