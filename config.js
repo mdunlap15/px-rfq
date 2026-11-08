@@ -1014,8 +1014,10 @@ const config = {
     creatorTierTrustMinSettled: (() => { const v = parseInt(process.env.CREATOR_TIER_TRUST_MIN_SETTLED, 10); return Number.isFinite(v) && v >= 0 ? v : 10; })(),
     creatorTierSharpMinN: (() => { const v = parseInt(process.env.CREATOR_TIER_SHARP_MIN_N, 10); return Number.isFinite(v) && v >= 3 ? v : 10; })(),
     creatorTierSharpZ: (() => { const v = parseFloat(process.env.CREATOR_TIER_SHARP_Z); return Number.isFinite(v) && v > 0 ? v : 1.5; })(),
-    // Creator ids (full or prefix) exempt from the tier caps (operator 2026-11-08).
-    creatorTierExempt: (process.env.CREATOR_TIER_EXEMPT || '').split(',').map(s => s.trim()).filter(Boolean),
+    // Creator ids (full or prefix) exempt from the tier caps. Default = the eight
+    // small-stake sharp accounts the operator exempted 2026-11-08 (#9-16 of the sharp list).
+    creatorTierExempt: (process.env.CREATOR_TIER_EXEMPT != null ? process.env.CREATOR_TIER_EXEMPT
+      : '83e5482e-72ee-4af4-9b1b-9d8dc7e235f8,24c5b93e-f008-4ce7-bd2e-25077d05093f,4239dd35-d068-4260-a6f4-690ae242db37,4f3cf4ef-96a6-462f-bccc-cb5a757e55c9,816f30a0-0cdd-417e-abde-ac03a928349b,6ca38c60-ddf8-4654-a246-59ae26dbf044,fe39edbe-75fe-4144-9ee5-9ccf5502b4c8,deef5f21-3265-4460-a8ac-1e1a8b22612f').split(',').map(s => s.trim()).filter(Boolean),
     creatorTierDays: (() => { const v = parseFloat(process.env.CREATOR_TIER_DAYS); return Number.isFinite(v) && v >= 7 ? v : 365; })(),
     // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js; runtime keys). Percent 0 = dark.
     legDriftCorrectionPercent: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
