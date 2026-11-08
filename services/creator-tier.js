@@ -87,6 +87,8 @@ function tierFor(creatorId, stats) {
   const s = creatorId ? stats.get(String(creatorId)) : null;
   const n = s ? s.n : 0;
   const z = s && s.var > 0 ? (s.hits - s.exp) / Math.sqrt(s.var) : 0;
+  const ex = Array.isArray(p.creatorTierExempt) ? p.creatorTierExempt : [];
+  if (creatorId && ex.some(e => e && String(creatorId).startsWith(String(e)))) return { tier: 'exempt', cap: Infinity, n, z };
   const sharpMinN = Number(p.creatorTierSharpMinN) || 10;
   const sharpZ = Number.isFinite(Number(p.creatorTierSharpZ)) ? Number(p.creatorTierSharpZ) : 1.5;
   if (n >= sharpMinN && z >= sharpZ) return { tier: 'sharp', cap: Number(p.creatorTierSharpMaxRisk) || 100, n, z };
@@ -102,12 +104,12 @@ function start() {
 }
 
 function summary() {
-  const counts = { sharp: 0, trusted: 0, new: 0 };
+  const counts = { sharp: 0, trusted: 0, new: 0, exempt: 0 };
   for (const c of _stats.keys()) counts[tierFor(c).tier] = (counts[tierFor(c).tier] || 0) + 1;
   const p = config.pricing || {};
   return { enabled: p.creatorTierEnabled !== false, builtAt: _builtAt, creators: _stats.size, counts,
     newMaxRisk: p.creatorTierNewMaxRisk, sharpMaxRisk: p.creatorTierSharpMaxRisk,
-    trustMinSettled: p.creatorTierTrustMinSettled, sharpMinN: p.creatorTierSharpMinN, sharpZ: p.creatorTierSharpZ };
+    exempt: p.creatorTierExempt || [], trustMinSettled: p.creatorTierTrustMinSettled, sharpMinN: p.creatorTierSharpMinN, sharpZ: p.creatorTierSharpZ };
 }
 
 function __setStatsForTest(m) { _stats = m; _builtAt = 'test'; }

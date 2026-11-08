@@ -9,13 +9,13 @@ const oddsFeed = require('../services/odds-feed');
 const pricer = require('../services/pricer');
 
 const KEYS = ['creatorTierEnabled', 'creatorTierNewMaxRisk', 'creatorTierSharpMaxRisk', 'creatorTierTrustMinSettled',
-  'creatorTierSharpMinN', 'creatorTierSharpZ', 'maxRiskPerParlay', 'maxOdds', 'maxExposurePerTeam', 'maxExposurePerGame',
+  'creatorTierSharpMinN', 'creatorTierSharpZ', 'creatorTierExempt', 'maxRiskPerParlay', 'maxOdds', 'maxExposurePerTeam', 'maxExposurePerGame',
   'maxRawExposurePerTeam'];
 const saved = {};
 function setCfg() {
   for (const k of KEYS) saved[k] = config.pricing[k];
   Object.assign(config.pricing, { creatorTierEnabled: true, creatorTierNewMaxRisk: 500, creatorTierSharpMaxRisk: 100,
-    creatorTierTrustMinSettled: 10, creatorTierSharpMinN: 10, creatorTierSharpZ: 1.5 });
+    creatorTierTrustMinSettled: 10, creatorTierSharpMinN: 10, creatorTierSharpZ: 1.5, creatorTierExempt: [] });
 }
 function restore() { for (const k of KEYS) config.pricing[k] = saved[k]; }
 
@@ -56,6 +56,10 @@ test('tierFor: unknown/new capped, sharp capped harder, trusted uncapped, switch
     assert.deepStrictEqual([tier.tierFor('lucky', st).tier, tier.tierFor('lucky', st).cap], ['new', 500]);
     assert.deepStrictEqual([tier.tierFor('fair', st).tier, tier.tierFor('fair', st).cap], ['trusted', Infinity]);
     assert.deepStrictEqual([tier.tierFor('sharp', st).tier, tier.tierFor('sharp', st).cap], ['sharp', 100]);
+    config.pricing.creatorTierExempt = ['shar'];
+    assert.deepStrictEqual([tier.tierFor('sharp', st).tier, tier.tierFor('sharp', st).cap], ['exempt', Infinity], 'exempt prefix lifts the sharp cap');
+    assert.strictEqual(tier.tierFor('new', st).tier, 'new', 'exemption is per creator');
+    config.pricing.creatorTierExempt = [];
     config.pricing.creatorTierSharpZ = 5;
     assert.strictEqual(tier.tierFor('sharp', st).tier, 'trusted', 'z threshold is read live');
     config.pricing.creatorTierEnabled = false;

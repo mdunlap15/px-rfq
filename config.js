@@ -1014,6 +1014,8 @@ const config = {
     creatorTierTrustMinSettled: (() => { const v = parseInt(process.env.CREATOR_TIER_TRUST_MIN_SETTLED, 10); return Number.isFinite(v) && v >= 0 ? v : 10; })(),
     creatorTierSharpMinN: (() => { const v = parseInt(process.env.CREATOR_TIER_SHARP_MIN_N, 10); return Number.isFinite(v) && v >= 3 ? v : 10; })(),
     creatorTierSharpZ: (() => { const v = parseFloat(process.env.CREATOR_TIER_SHARP_Z); return Number.isFinite(v) && v > 0 ? v : 1.5; })(),
+    // Creator ids (full or prefix) exempt from the tier caps (operator 2026-11-08).
+    creatorTierExempt: (process.env.CREATOR_TIER_EXEMPT || '').split(',').map(s => s.trim()).filter(Boolean),
     creatorTierDays: (() => { const v = parseFloat(process.env.CREATOR_TIER_DAYS); return Number.isFinite(v) && v >= 7 ? v : 365; })(),
     // LEG-DRIFT CORRECTION A/B (2026-10-21, services/leg-drift.js; runtime keys). Percent 0 = dark.
     legDriftCorrectionPercent: (() => { const v = parseFloat(process.env.LEG_DRIFT_CORRECTION_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
