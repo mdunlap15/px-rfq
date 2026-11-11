@@ -4320,9 +4320,70 @@ function priceParlay(legs, opts = {}) {
     } catch (e) { log.warn('Pricing', `calibration floor skipped: ${e.message}`); }
   }
 
+  // -------------------------------------------------------------------
+  // 2-LEG BOOK-MATCH A/B (2026-11-10) — see config.pricing.twoLegBookMatchPercent.
+  // Operator: "We need to at least be close to or equal with the sportsbooks.
+  // If we are correctly pricing where they are then we should be profitable."
+  // Measured first (1,125 quotes, 11/10): 3+ leg cross-game offers sat 2-4% from
+  // the better of FD/DK, 2-leg 14% worse (books ~7% over raw fair on 2 legs vs
+  // ours ~25%), while 2-leg cross-game bettors have hit ~1.15x raw fair. This
+  // tests it. Scope: exactly 2 priced legs, different events, at least one of
+  // FD / DK prices both legs. Match arm: offered = the MORE generous of the FD /
+  // DK parlay (product of the book's raw leg implied, DNB-adjusted like the
+  // dashboard columns) — in either direction, so it is a true match — floored at
+  // raw (pre-factor) fair x (1 + twoLegBookMatchMinEdgePct). It REPLACES every
+  // earlier step (vig, floors, factors, widens, calibration floor), and the
+  // theo-edge gate (which would read the factored fair) is judged against the
+  // raw fair instead. fairParlayProb is untouched, so the confirm drift checks
+  // and EV (meta.evFair, calibrated at confirm) read this arm honestly.
+  // Arm = md5('bm2:'+parlayId); meta.twoLegBookMatchArm null/'control'/'match'.
+  // -------------------------------------------------------------------
+  const _bm2 = { arm: null, applied: false, preProb: null, bookProb: null, book: null, rawFair: null, floorBound: false };
+  {
+    const _pct = config.pricing.twoLegBookMatchPercent || 0;
+    if (_pct > 0 && opts.parlayId && !opts.fairOnly && !isSGPParlay && pricedLegs.length === 2) {
+      const bookProb = (oddsField, dnbField) => {
+        let p = 1;
+        for (const l of pricedLegs) {
+          if (l[oddsField] == null) return null;
+          const v = bookImpliedForLeg(l, oddsField, dnbField);
+          if (!(v > 0 && v < 1)) return null;
+          p *= v;
+        }
+        return p;
+      };
+      const cands = [['fanduel', bookProb('fanduelOdds', 'fanduelDNBProb')], ['draftkings', bookProb('draftkingsOdds', 'draftkingsDNBProb')]]
+        .filter(([, p]) => p > 0 && p < 1)
+        .sort((a, b) => a[1] - b[1]);
+      if (cands.length) {
+        let inArm = _pct >= 100;
+        if (!inArm) {
+          const h = crypto.createHash('md5').update('bm2:' + String(opts.parlayId)).digest();
+          inArm = (h.readUInt32BE(0) % 100) < _pct;
+        }
+        _bm2.arm = inArm ? 'match' : 'control';
+        _bm2.book = cands[0][0];
+        _bm2.bookProb = Math.round(cands[0][1] * 1e6) / 1e6;
+        if (inArm) {
+          const raw = _xgf.applied && _xgf.preFair > 0 ? _xgf.preFair : _2lf.applied && _2lf.preFair > 0 ? _2lf.preFair : fairParlayProb;
+          const me = config.pricing.twoLegBookMatchMinEdgePct != null ? config.pricing.twoLegBookMatchMinEdgePct : 1;
+          const floor = raw * (1 + me / 100);
+          const target = Math.min(0.99, Math.max(cands[0][1], floor));
+          _bm2.floorBound = floor > cands[0][1];
+          _bm2.preProb = Math.round(offeredImpliedProb * 1e5) / 1e5;
+          _bm2.rawFair = Math.round(raw * 1e6) / 1e6;
+          _bm2.applied = true;
+          log.debug('Pricing', `2-leg book-match[${_bm2.book}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(target * 100).toFixed(3)}% (raw fair ${(raw * 100).toFixed(3)}%)`);
+          offeredImpliedProb = target;
+        }
+      }
+    }
+  }
+
   const minTheoEdgePct = config.pricing.minTheoEdgePct || 0;
   if (minTheoEdgePct > 0 && fairParlayProb > 0) {
-    const theoEdge = (offeredImpliedProb - fairParlayProb) / fairParlayProb * 100;
+    const _edgeBase = _bm2.applied && _bm2.rawFair > 0 ? _bm2.rawFair : fairParlayProb;
+    const theoEdge = (offeredImpliedProb - _edgeBase) / _edgeBase * 100;
     if (theoEdge < minTheoEdgePct) {
       priceParlay._lastFailure = {
         reason: 'below-min-edge',
@@ -4418,7 +4479,12 @@ function priceParlay(legs, opts = {}) {
   const _negOddsAllowed = config.pricing.allowNegativeBettorOdds;
   const _allOutrightNeg = pricedLegs.length > 0 && pricedLegs.every(l => l.lineInfo && l.lineInfo.sport === 'golf_outrights');
   const _isNegativeBettorOdds = decimalOdds < 2.0;
-  if (_isNegativeBettorOdds) {
+  // The confirm reprice (skipTemplateRamp, no parlayId) reads only the FAIR for
+  // its drift checks. It must not fail closed on its own PRICE: it runs no A/B
+  // arm, so a 2-leg book-match quote (offered at the books, < 50%) reprices at
+  // the control price, which the calibration floor often pushes past 50% —
+  // declining here would reject every such confirm (2026-11-10).
+  if (_isNegativeBettorOdds && !opts.skipTemplateRamp) {
     if (!(_negOddsAllowed && _allOutrightNeg)) {
       log.debug('Pricing', `Declined: negative bettor odds (decimal ${decimalOdds.toFixed(3)}, prob ${(cappedProb*100).toFixed(1)}%) — not enabled for this parlay shape`);
       priceParlay._lastFailure = {
@@ -4983,6 +5049,8 @@ function priceParlay(legs, opts = {}) {
       twoLegWidenRelPct: _twoLegWiden.relPct,
       // Cross-game widen A/B: arm null = out of scope / dark; 'control' /
       // 'widen' in scope. PreProb = the control price.
+      twoLegBookMatchArm: _bm2.arm,
+      twoLegBookMatch: _bm2.arm ? _bm2 : null,
       xgWidenArm: _xgWiden.arm,
       xgWidenApplied: _xgWiden.applied,
       xgWidenPreProb: _xgWiden.preProb != null ? Math.round(_xgWiden.preProb * 100000) / 100000 : null,

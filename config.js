@@ -1048,6 +1048,11 @@ const config = {
     nhlPropEarlyGateHours: (() => { const v = parseFloat(process.env.NHL_PROP_EARLY_GATE_HOURS); return Number.isFinite(v) && v > 0 ? v : 8; })(),
     propBookCapPercent: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     propBookCapRelPct: (() => { const v = parseFloat(process.env.PROP_BOOK_CAP_REL_PCT); return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 2; })(),
+    // 2-LEG BOOK-MATCH A/B (2026-11-10, operator: "build the 2-leg 50/50 test" — "We need to at least be close
+    // to or equal with the sportsbooks"). Match arm: a 2-leg cross-game parlay is offered at the more generous of
+    // the FanDuel / DraftKings parlay price (product of their raw leg prices), never below raw fair x (1 + MIN_EDGE).
+    twoLegBookMatchPercent: (() => { const v = parseFloat(process.env.TWO_LEG_BOOK_MATCH_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 50; })(),
+    twoLegBookMatchMinEdgePct: (() => { const v = parseFloat(process.env.TWO_LEG_BOOK_MATCH_MIN_EDGE_PCT); return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 1; })(),
     twoLegWidenPercent: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     twoLegWidenRelPct: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_REL_PCT); return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 7; })(),
     twoLegWidenMinFair: (() => { const v = parseFloat(process.env.TWO_LEG_WIDEN_MIN_FAIR); return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.30; })(),
