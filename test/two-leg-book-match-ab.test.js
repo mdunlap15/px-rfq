@@ -9,14 +9,14 @@ const oddsFeed = require('../services/odds-feed');
 const pricer = require('../services/pricer');
 const calib = require('../services/fair-calibration');
 
-const KEYS = ['twoLegBookMatchPercent', 'twoLegBookMatchMinEdgePct', 'crossGameFactorPercent', 'crossGameWidenPercent', 'twoLegFactorPercent',
+const KEYS = ['twoLegBookMatchPercent', 'xgBookMatchPercent', 'twoLegBookMatchMinEdgePct', 'crossGameFactorPercent', 'crossGameWidenPercent', 'twoLegFactorPercent',
   'twoLegWidenPercent', 'calibEnabled', 'calibFloorMult', 'calibMinMarginPct', 'minTheoEdgePct', 'maxRiskPerParlay', 'maxOdds',
   'maxExposurePerTeam', 'maxExposurePerGame', 'maxRawExposurePerTeam'];
 const saved = {};
 const stubs = {};
 function setup(o = {}) {
   for (const k of KEYS) saved[k] = config.pricing[k];
-  Object.assign(config.pricing, { twoLegBookMatchPercent: 50, twoLegBookMatchMinEdgePct: 1, crossGameFactorPercent: 0, crossGameWidenPercent: 0,
+  Object.assign(config.pricing, { twoLegBookMatchPercent: 50, xgBookMatchPercent: 0, twoLegBookMatchMinEdgePct: 1, crossGameFactorPercent: 0, crossGameWidenPercent: 0,
     twoLegFactorPercent: 0, twoLegWidenPercent: 0, calibEnabled: true, calibFloorMult: 1.1, calibMinMarginPct: 8, minTheoEdgePct: 0,
     maxRiskPerParlay: 3000, maxOdds: 50000, maxExposurePerTeam: 1e9, maxExposurePerGame: 1e9, maxRawExposurePerTeam: 1e9 }, o);
   calib.__setCellsForTest(new Map());
@@ -47,8 +47,8 @@ function mkLine(ev) {
     oddsApiMarket: 'h2h', oddsApiSport: 'icehockey_nhl', homeTeam: 'Home ' + ev, awayTeam: 'Away ' + ev, pxEventId: ev, startTime: START, startTimeMs: Date.parse(START) };
   return id;
 }
-const armOf = (pid) => (crypto.createHash('md5').update('bm2:' + pid).digest().readUInt32BE(0) % 100) < 50 ? 'match' : 'control';
-function pid(arm, tag) { for (let i = 0; ; i++) { const p = `bm-${tag}-${i}`; if (armOf(p) === arm) return p; } }
+const armOf = (pid, salt = 'bm2:') => (crypto.createHash('md5').update(salt + pid).digest().readUInt32BE(0) % 100) < 50 ? 'match' : 'control';
+function pid(arm, tag, salt) { for (let i = 0; ; i++) { const p = `bm-${tag}-${i}`; if (armOf(p, salt) === arm) return p; } }
 const imp = (a) => a > 0 ? 100 / (a + 100) : -a / (-a + 100);
 async function quote(ids, parlayId) {
   const r = await pricer.priceParlay(ids, { parlayId });
@@ -116,3 +116,28 @@ test('confirm reprice accepts a match-arm fill whose control price is past 50%',
     assert.strictEqual(v.valid, true, 'confirm accepted: ' + v.reason);
   } finally { teardown(); }
 });
+
+test('3+ legs: own arm (bm3), matches the better book parlay, 2-leg arm untouched', async () => {
+  setup({ xgBookMatchPercent: 50 });
+  try {
+    market(0.6, -160, -165);
+    const ids = [mkLine('E1'), mkLine('E2'), mkLine('E3')];
+    let mp; for (let i = 0; ; i++) { mp = `bm-e3-${i}`; if (armOf(mp, 'bm3:') === 'match' && armOf(mp) === 'control') break; }
+    const m = await quote(ids, mp);
+    assert.strictEqual(m.xgBookMatchArm, 'match', 'arm hashed on bm3:, not bm2:');
+    assert.strictEqual(m.twoLegBookMatchArm, null, '3-leg never in the 2-leg arm');
+    assert.ok(Math.abs(m.offeredImpliedProb - imp(-160) ** 3) < 1e-4, `offered ${m.offeredImpliedProb} vs FD ${imp(-160) ** 3}`);
+    assert.ok(m.xgBookMatch.preProb > m.offeredImpliedProb);
+    let cp; for (let i = 0; ; i++) { cp = `bm-e3c-${i}`; if (armOf(cp, 'bm3:') === 'control' && armOf(cp) === 'match') break; }
+    const c = await quote(ids, cp);
+    assert.strictEqual(c.xgBookMatchArm, 'control');
+    assert.ok(Math.abs(c.offeredImpliedProb - m.xgBookMatch.preProb) < 1e-4);
+    const two = await quote([mkLine('E4'), mkLine('E5')], pid('match', 'e2'));
+    assert.strictEqual(two.xgBookMatchArm, null, '2-leg never in the 3+ arm');
+    assert.strictEqual(two.twoLegBookMatchArm, 'match');
+    config.pricing.xgBookMatchPercent = 0;
+    const off = await quote(ids, pid('match', 'e', 'bm3:'));
+    assert.strictEqual(off.xgBookMatchArm, null, '3+ dark at 0 while 2-leg stays on');
+  } finally { teardown(); }
+});
+

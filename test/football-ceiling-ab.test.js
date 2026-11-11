@@ -19,6 +19,7 @@ const orderTracker = require('../services/order-tracker');
 const pricer = require('../services/pricer');
 const { config } = require('../config');
 config.pricing.calibEnabled = false; // isolate this mechanism from the calibration floor (test/fair-calibration.test.js)
+config.pricing.xgBookMatchPercent = 0; // and from the 3+ leg book-match A/B (test/two-leg-book-match-ab.test.js)
 
 const FUTURE = new Date(Date.now() + 20 * 3600e3).toISOString();
 const NCAAF = 'americanfootball_ncaaf', NFL = 'americanfootball_nfl';

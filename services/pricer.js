@@ -4338,10 +4338,17 @@ function priceParlay(legs, opts = {}) {
   // and EV (meta.evFair, calibrated at confirm) read this arm honestly.
   // Arm = md5('bm2:'+parlayId); meta.twoLegBookMatchArm null/'control'/'match'.
   // -------------------------------------------------------------------
-  const _bm2 = { arm: null, applied: false, preProb: null, bookProb: null, book: null, rawFair: null, floorBound: false };
+  // 3+ LEG extension (2026-11-11, operator on a second All Quotes snapshot: "We need
+  // to at least be close to them."): the same mechanism on 3+ leg cross-game parlays,
+  // its OWN arm (md5('bm3:'+parlayId), config.pricing.xgBookMatchPercent,
+  // meta.xgBookMatchArm / meta.xgBookMatch) so the 2-leg read stays clean. Books sit
+  // ~1.18-1.20x raw fair there vs bettors' measured ~1.075x, so unlike 2 legs the
+  // book price still clears the measured break-even. Same floor and min edge.
+  const _bm2 = { arm: null, applied: false, preProb: null, bookProb: null, book: null, rawFair: null, floorBound: false, legs: pricedLegs.length };
   {
-    const _pct = config.pricing.twoLegBookMatchPercent || 0;
-    if (_pct > 0 && opts.parlayId && !opts.fairOnly && !isSGPParlay && pricedLegs.length === 2) {
+    const _three = pricedLegs.length >= 3;
+    const _pct = (_three ? config.pricing.xgBookMatchPercent : config.pricing.twoLegBookMatchPercent) || 0;
+    if (_pct > 0 && opts.parlayId && !opts.fairOnly && !isSGPParlay && pricedLegs.length >= 2 && pricedLegs.length === legs.length) {
       const bookProb = (oddsField, dnbField) => {
         let p = 1;
         for (const l of pricedLegs) {
@@ -4358,7 +4365,7 @@ function priceParlay(legs, opts = {}) {
       if (cands.length) {
         let inArm = _pct >= 100;
         if (!inArm) {
-          const h = crypto.createHash('md5').update('bm2:' + String(opts.parlayId)).digest();
+          const h = crypto.createHash('md5').update((_three ? 'bm3:' : 'bm2:') + String(opts.parlayId)).digest();
           inArm = (h.readUInt32BE(0) % 100) < _pct;
         }
         _bm2.arm = inArm ? 'match' : 'control';
@@ -4373,7 +4380,7 @@ function priceParlay(legs, opts = {}) {
           _bm2.preProb = Math.round(offeredImpliedProb * 1e5) / 1e5;
           _bm2.rawFair = Math.round(raw * 1e6) / 1e6;
           _bm2.applied = true;
-          log.debug('Pricing', `2-leg book-match[${_bm2.book}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(target * 100).toFixed(3)}% (raw fair ${(raw * 100).toFixed(3)}%)`);
+          log.debug('Pricing', `${pricedLegs.length}-leg book-match[${_bm2.book}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(target * 100).toFixed(3)}% (raw fair ${(raw * 100).toFixed(3)}%)`);
           offeredImpliedProb = target;
         }
       }
@@ -5049,8 +5056,10 @@ function priceParlay(legs, opts = {}) {
       twoLegWidenRelPct: _twoLegWiden.relPct,
       // Cross-game widen A/B: arm null = out of scope / dark; 'control' /
       // 'widen' in scope. PreProb = the control price.
-      twoLegBookMatchArm: _bm2.arm,
-      twoLegBookMatch: _bm2.arm ? _bm2 : null,
+      twoLegBookMatchArm: _bm2.legs === 2 ? _bm2.arm : null,
+      twoLegBookMatch: _bm2.legs === 2 && _bm2.arm ? _bm2 : null,
+      xgBookMatchArm: _bm2.legs >= 3 ? _bm2.arm : null,
+      xgBookMatch: _bm2.legs >= 3 && _bm2.arm ? _bm2 : null,
       xgWidenArm: _xgWiden.arm,
       xgWidenApplied: _xgWiden.applied,
       xgWidenPreProb: _xgWiden.preProb != null ? Math.round(_xgWiden.preProb * 100000) / 100000 : null,
