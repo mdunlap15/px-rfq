@@ -386,6 +386,71 @@ test('relay ask / hold (poster-service extension, read back-compatibly): ask pri
   } finally { obRelay.__resetForTest(); teardown(); }
 });
 
+test('order-book resting-offer asks (kv px_rfq_asks): a taker on B pays 1 - m of our offer on A; stale ignored', async () => {
+  const obRelay = require('../services/ob-relay');
+  setup();
+  try {
+    oddsFeed.getFairProb = () => 0.5;
+    oddsFeed.getFanDuelOdds = () => -110;
+    oddsFeed.getDraftKingsOdds = () => -110;
+    const a = mk('A1', 'basketball_nba', 300), b = mk('A2', 'basketball_nba', 300);
+    const sibA = 'obp-A1-away';
+    const now = Date.now() / 1000;
+    // our resting offer on the AWAY line at +115 (m = 100/215) -> a taker on HOME pays 1 - m = 0.5349
+    obRelay.__setForTest({}, { asks: { [sibA]: [100 / 215, now - 20, 'nba_cycle'] }, siblings: [[a, sibA], [sibA, a]], size: Object.keys(lineManager.__debugGetLineIndex() || {}).length });
+    assert.ok(near(obRelay.getAsk(a), 1 - 100 / 215, 1e-12));
+    assert.strictEqual(obRelay.getAsk(sibA), null, 'no offer on the home side -> no ask for an away taker');
+    const r = await pricer.priceParlay([a, b], { parlayId: 'obp-ask' });
+    assert.ok(r && r.meta, JSON.stringify(pricer.priceParlay._lastFailure));
+    assert.strictEqual(r.meta.legs[0].obAsk.rule, 'ob_relay_ask');
+    assert.ok(near(r.meta.legs[0].obAsk.q, 1 - 100 / 215, 1e-5));
+    // an ask below fair is floored at fair
+    obRelay.__setForTest({}, { asks: { [sibA]: [0.6, now, 'x'] }, siblings: [[a, sibA], [sibA, a]], size: Object.keys(lineManager.__debugGetLineIndex() || {}).length });
+    const f = await pricer.priceParlay([a, b], { parlayId: 'obp-ask2' });
+    assert.ok(near(f.meta.legs[0].obAsk.q, 0.5, 1e-9), 'never below fair');
+    // stale ask -> ported rule
+    obRelay.__setForTest({}, { asks: { [sibA]: [100 / 215, now - 10000, 'x'] }, siblings: [[a, sibA], [sibA, a]], size: Object.keys(lineManager.__debugGetLineIndex() || {}).length });
+    const st = await pricer.priceParlay([a, b], { parlayId: 'obp-ask3' });
+    assert.strictEqual(st.meta.legs[0].obAsk.rule, 'nba_ev4');
+  } finally { obRelay.__resetForTest(); teardown(); }
+});
+
+test('order-book holds (kv px_rfq_holds): line, sibling, event, player (+rush scope); stale snapshot ignored', async () => {
+  const obRelay = require('../services/ob-relay');
+  setup();
+  try {
+    oddsFeed.getFairProb = () => 0.5;
+    oddsFeed.getFanDuelOdds = () => -110;
+    oddsFeed.getDraftKingsOdds = () => -110;
+    const a = mk('H1', 'basketball_nba', 300), b = mk('H2', 'basketball_nba', 300);
+    const sib = 'obp-H1-away';
+    const now = Date.now() / 1000;
+    const idxSize = () => Object.keys(lineManager.__debugGetLineIndex() || {}).length;
+    const S = { siblings: [[a, sib], [sib, a]], size: 0 };
+    const run = async (holds, holdsTs) => {
+      obRelay.__setForTest({}, Object.assign({ holds, holdsTs }, S, { size: idxSize() }));
+      return pricer.priceParlay([a, b], { parlayId: 'obp-h' + Math.random() });
+    };
+    for (const k of [a, sib, 'e:H1']) {
+      assert.strictEqual(await run({ [k]: [now + 120, 'g'] }), null, k);
+      assert.strictEqual(pricer.priceParlay._lastFailure.reason, 'ob_hold', k);
+    }
+    assert.ok(await run({ [a]: [now - 1, 'g'] }), 'expired hold');
+    assert.ok(await run({ 'e:H9': [now + 120, 'g'] }), 'other event');
+    assert.ok(await run({ [a]: [now + 120, 'g'] }, now - 1000), 'stale snapshot is not trusted');
+    // player holds
+    const li = { pxEventId: 'E7', playerName: "Ja'Marr Chase Jr.", marketType: 'player_reception_yds' };
+    obRelay.__setForTest({}, { holds: { 'p:E7|jamarrchase': [now + 60, 'nfl'] } });
+    assert.ok(obRelay.getHold('zz', li), 'player key normalised like nfl_player_hold.norm');
+    obRelay.__setForTest({}, { holds: { 'p:E7|jamarrchase|rush': [now + 60, 'nfl'] } });
+    assert.strictEqual(obRelay.getHold('zz', li), null, 'rush-only hold skips receiving yards');
+    assert.ok(obRelay.getHold('zz', Object.assign({}, li, { marketType: 'player_rush_yds' })), 'rush-only hold blocks rushing');
+    // fairOnly reads are never held
+    obRelay.__setForTest({}, Object.assign({ holds: { [a]: [now + 120, 'g'] } }, S));
+    assert.ok(await pricer.priceParlay([a], { fairOnly: true }), 'fairOnly not gated');
+  } finally { obRelay.__resetForTest(); teardown(); }
+});
+
 test('cross-game widen is retired on tickets priced at the order book asks (stays on legacy-priced tickets)', async () => {
   setup({ crossGameWidenPercent: 100 });
   const rel = config.pricing.crossGameWidenRelPct;

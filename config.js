@@ -1348,6 +1348,15 @@ const config = {
       const v = parseFloat(process.env.OB_RELAY_MAX_GAP_PP);
       return Number.isFinite(v) && v > 0 ? v : 0.06;
     })(),
+    // Order-book asks / holds relay (2026-11-12, kv px_rfq_asks / px_rfq_holds).
+    obRelayAskMaxAgeSec: (() => {
+      const v = parseInt(process.env.OB_RELAY_ASK_MAX_AGE_SEC, 10);
+      return Number.isFinite(v) && v > 0 ? v : 300;
+    })(),
+    obRelayHoldsMaxAgeSec: (() => {
+      const v = parseInt(process.env.OB_RELAY_HOLDS_MAX_AGE_SEC, 10);
+      return Number.isFinite(v) && v > 0 ? v : 180;
+    })(),
     // Identical re-sends allowed per leg-set inside the 5s dedup window
     // (2026-09-26). Default 1 = preview + place; 0 restores decline-every-repeat.
     dedupMaxRequotes: (() => {

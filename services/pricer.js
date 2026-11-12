@@ -2096,9 +2096,12 @@ function priceParlay(legs, opts = {}) {
     // book's start cutoffs, listing windows (props / soccer / tennis), market
     // scope, odds limits (on ITS side), prop book minimums and the large-fill
     // hold. Never on fairOnly reads (EV live / game-time EV measure them).
-    if (!opts.fairOnly && relayHit && relayHit.holdUntil && config.pricing.obParityEnabled !== false) {
-      priceParlay._lastFailure = { reason: 'ob_hold', detail: `${legLabel}: held by the order book's guards for ${Math.round(relayHit.holdUntil - nowMs / 1000)}s more`, blockerLeg: legDescriptor };
-      return null;
+    if (!opts.fairOnly && config.pricing.obParityEnabled !== false) {
+      const _obHold = obRelay.getHold(lineId, lineInfo);
+      if (_obHold) {
+        priceParlay._lastFailure = { reason: 'ob_hold', detail: `${legLabel}: held by the order book's guards for ${Math.round(_obHold - nowMs / 1000)}s more`, blockerLeg: legDescriptor };
+        return null;
+      }
     }
     if (!opts.fairOnly) {
       const _obg = obParity.legGate(lineInfo, { fairProb, nowMs });
@@ -3126,8 +3129,9 @@ function priceParlay(legs, opts = {}) {
       ].filter(p => p != null && p > 0 && p < 1);
       const raw = raws.length ? raws.reduce((a, b) => a + b, 0) / raws.length : null;
       // The order book's own posted price for this side (relay ask) wins when fresh.
-      if (l.relayHit && l.relayHit.ask > 0 && l.relayHit.ask < 0.99) {
-        const q = Math.max(l.relayHit.ask, l.fairProb);
+      const _rAsk = l.relayHit && l.relayHit.ask != null ? l.relayHit.ask : obRelay.getAsk(l.lineId);
+      if (_rAsk > 0 && _rAsk < 0.99) {
+        const q = Math.max(_rAsk, l.fairProb);
         l.obAsk = { q, rule: 'ob_relay_ask', raw }; l.bookPriceOverride = q; obAskLegs++;
         continue;
       }
