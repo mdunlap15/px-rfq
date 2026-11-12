@@ -35,6 +35,8 @@ const px = require('../services/prophetx');
 const oddsFeed = require('../services/odds-feed');
 const db = require('../services/db');
 const { config } = require('../config');
+// Pins another mechanism's price / registration; order-book parity has its own tests (test/ob-parity.test.js).
+config.pricing.obParityEnabled = false;
 
 const SPORT = 'soccer_usa_mls';
 const SCHED = new Date(Date.now() + 30 * 3600e3).toISOString();

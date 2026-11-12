@@ -2864,26 +2864,26 @@ async function supplementH1Markets(parsedEvents, sport = 'basketball_nba', opts 
         }
 
         if (mlPairs.length > 0) {
-          const mk = buildConsensusMoneyline(mlPairs);
+          const mk = buildConsensusMoneyline(mlPairs, sport);
           if (mk) { ev.markets.h2h_h1 = _mergeSupplementedMarket(ev.markets.h2h_h1, mk); h2hCount++; }
         }
         if (spreadPairs.length > 0) {
-          const sp = buildConsensusSpread(spreadPairs);
+          const sp = buildConsensusSpread(spreadPairs, sport);
           if (sp) { ev.markets.spreads_h1 = _mergeSupplementedMarket(ev.markets.spreads_h1, sp); spreadCount++; }
         }
         if (q1MlPairs.length > 0) {
-          const mk = buildConsensusMoneyline(q1MlPairs);
+          const mk = buildConsensusMoneyline(q1MlPairs, sport);
           if (mk) ev.markets.h2h_q1 = _mergeSupplementedMarket(ev.markets.h2h_q1, mk);
         }
         if (q1SpreadPairs.length > 0) {
-          const sp = buildConsensusSpread(q1SpreadPairs);
+          const sp = buildConsensusSpread(q1SpreadPairs, sport);
           if (sp) ev.markets.spreads_q1 = _mergeSupplementedMarket(ev.markets.spreads_q1, sp);
         }
         if (q1TotalPairs.length > 0) {
-          ev.markets.totals_q1 = _mergeSupplementedMarket(ev.markets.totals_q1, buildConsensusTotals(q1TotalPairs));
+          ev.markets.totals_q1 = _mergeSupplementedMarket(ev.markets.totals_q1, buildConsensusTotals(q1TotalPairs, sport));
         }
         if (totalPairs.length > 0) {
-          ev.markets.totals_h1 = _mergeSupplementedMarket(ev.markets.totals_h1, buildConsensusTotals(totalPairs));
+          ev.markets.totals_h1 = _mergeSupplementedMarket(ev.markets.totals_h1, buildConsensusTotals(totalPairs, sport));
           totalCount++;
         }
       } catch (err) {
@@ -3184,7 +3184,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
       }
     }
     if (mlPairs.length > 0) {
-      markets.h2h = buildConsensusMoneyline(mlPairs);
+      markets.h2h = buildConsensusMoneyline(mlPairs, sport);
     }
 
     // Spreads (game handicaps for tennis)
@@ -3203,7 +3203,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
       }
     }
     if (spreadPairs.length > 0) {
-      markets.spreads = buildConsensusSpread(spreadPairs);
+      markets.spreads = buildConsensusSpread(spreadPairs, sport);
     }
 
     // Totals (total games for tennis)
@@ -3222,7 +3222,7 @@ async function fetchDynamicSports(sport, fallback, apiKey) {
       }
     }
     if (totalPairs.length > 0) {
-      markets.totals = buildConsensusTotals(totalPairs);
+      markets.totals = buildConsensusTotals(totalPairs, sport);
     }
 
     if (Object.keys(markets).length > 0) {
@@ -3465,6 +3465,7 @@ async function fetchFromTheOddsApi(sport) {
         draftkings: dkBook ? { home: dkBook.home.odds_american, away: dkBook.away.odds_american } : null,
         kalshi: klBook ? { home: klBook.home.odds_american, away: klBook.away.odds_american } : null,
       };
+      _obApplySides(markets.h2h.home, markets.h2h.away, _obFairPair(avgPairs, bp => bp.home.odds_probability, bp => bp.away.odds_probability, sport));
     }
 
     // --- 3-WAY moneyline (home / draw / away) ---
@@ -3542,7 +3543,7 @@ async function fetchFromTheOddsApi(sport) {
       }
     }
     if (spreadPairs.length > 0) {
-      markets.spreads = buildConsensusSpread(spreadPairs);
+      markets.spreads = buildConsensusSpread(spreadPairs, sport);
     }
 
     // Totals — line-aware consensus. Tag each book's pair with its posted
@@ -3567,7 +3568,7 @@ async function fetchFromTheOddsApi(sport) {
       }
     }
     if (totalPairs.length > 0) {
-      markets.totals = buildConsensusTotals(totalPairs);
+      markets.totals = buildConsensusTotals(totalPairs, sport);
     }
 
     // BTTS (Both Teams To Score) — simple 2-way Yes/No
@@ -3916,7 +3917,7 @@ function excludeKalshiFromConsensus(bookPairs) {
   return filtered.length > 0 ? filtered : bookPairs;
 }
 
-function buildConsensusMoneyline(bookPairs) {
+function buildConsensusMoneyline(bookPairs, sport) {
   // Preserve ALL books for display attribution (pinnacle/fd/dk/kalshi fields
   // are always populated from the full list so the dashboard can show every
   // book's raw odds regardless of its vig).
@@ -3974,7 +3975,7 @@ function buildConsensusMoneyline(bookPairs) {
     home: klBook.home.odds_american,
     away: klBook.away.odds_american,
   } : null;
-  return {
+  const _mlOut = {
     home: {
       rawOdds: bookPairs[0].home.odds_american,
       impliedProb: bookPairs[0].home.odds_probability,
@@ -3996,9 +3997,11 @@ function buildConsensusMoneyline(bookPairs) {
       return dkBook ? { home: dkBook.home.odds_american, away: dkBook.away.odds_american } : null;
     })(),
   };
+  _obApplySides(_mlOut.home, _mlOut.away, _obFairPair(sharpBooks, bp => bp.home.odds_probability, bp => bp.away.odds_probability, sport));
+  return _mlOut;
 }
 
-function buildConsensusSpread(bookPairs) {
+function buildConsensusSpread(bookPairs, sport) {
   // Use the most common line across books
   const lineCounts = {};
   for (const { home } of bookPairs) {
@@ -4109,9 +4112,11 @@ function buildConsensusSpread(bookPairs) {
       displayFairProb: altDvAway,
       books: altMatching.length,
     };
+    _obApplySides(byLineEntries['home|' + altLine], byLineEntries['away|' + (-altLine)],
+      _obFairPair(altSharp, bp => bp.home.odds_probability, bp => bp.away.odds_probability, sport));
   }
 
-  return {
+  const _spOut = {
     home: {
       rawOdds: matching[0].home.odds_american,
       point: pLine,
@@ -4134,12 +4139,14 @@ function buildConsensusSpread(bookPairs) {
     draftkings,
     byLine: byLineEntries,
   };
+  _obApplySides(_spOut.home, _spOut.away, _obFairPair(sharpMatching, bp => bp.home.odds_probability, bp => bp.away.odds_probability, sport));
+  return _spOut;
 }
 
 // Compute the de-vigged consensus + book-level details for ONE specific
 // totals line. Shared between primary and byLine computation. Returns null
 // if no books posted this line.
-function buildTotalsForLine(bookPairs, pLine) {
+function buildTotalsForLine(bookPairs, pLine, sport) {
   const matching = bookPairs.filter(bp => bp.over.line === pLine);
   if (matching.length === 0) return null;
 
@@ -4172,7 +4179,7 @@ function buildTotalsForLine(bookPairs, pLine) {
   const fdBook = matching.find(bp => bp.book === 'fanduel');
   const dkBook = matching.find(bp => bp.book === 'draftkings');
 
-  return {
+  const _toOut = {
     over: {
       rawOdds: matching[0].over.odds_american,
       point: pLine,
@@ -4194,9 +4201,11 @@ function buildTotalsForLine(bookPairs, pLine) {
     kalshi: klBookT ? { over: klBookT.over.odds_american, under: klBookT.under.odds_american } : null,
     draftkings: dkBook ? { over: dkBook.over.odds_american, under: dkBook.under.odds_american } : null,
   };
+  _obApplySides(_toOut.over, _toOut.under, _obFairPair(sharpMatching, bp => bp.over.odds_probability, bp => bp.under.odds_probability, sport));
+  return _toOut;
 }
 
-function buildConsensusTotals(bookPairs) {
+function buildConsensusTotals(bookPairs, sport) {
   // Tally distinct lines. The "primary" is the most-common line across
   // books; but we also preserve consensus for every OTHER line in `byLine`
   // so RFQs that reference a minority line (e.g., Pinnacle's integer 8
@@ -4210,17 +4219,109 @@ function buildConsensusTotals(bookPairs) {
   if (entries.length === 0) return null;
 
   const primaryLine = parseFloat(entries[0][0]);
-  const primary = buildTotalsForLine(bookPairs, primaryLine);
+  const primary = buildTotalsForLine(bookPairs, primaryLine, sport);
   if (!primary) return null;
 
   const byLine = {};
   for (const [lineStr] of entries) {
     const ln = parseFloat(lineStr);
-    const entry = buildTotalsForLine(bookPairs, ln);
+    const entry = buildTotalsForLine(bookPairs, ln, sport);
     if (entry) byLine[String(ln)] = entry;
   }
 
   return { ...primary, byLine };
+}
+
+// ---------------------------------------------------------------------------
+// ORDER-BOOK FAIR METHOD (2026-11-11, services/ob-parity.js): the PX order
+// book's consensus rules, for NFL / CFB / NBA / NHL / tennis / soccer.
+//   - per-book de-vig (Shin when one side is >= 75% of the pair, else
+//     proportional), then the MEDIAN across books (never the mean);
+//   - a book counts once per DISTINCT price pair (copied feeds = one vote);
+//   - >= 3 distinct prices -> consensus (tennis: 2); below that, Pinnacle;
+//     neither -> no fair (decline beats misprice);
+//   - NHL: Pinnacle-anchored, and a > 2pp gap to a >= 3-book consensus declines;
+//   - CFB: sharp composite (median of Pinnacle / BetOnline / LowVig / DK / FD,
+//     >= 2 distinct) unless Pinnacle sits > 4pp off the broad consensus;
+//   - soccer: >= 3 books; Pinnacle vs consensus > 2pp -> each side takes the
+//     LESS generous (higher) of the two.
+// `pairs` = the builder's books at this exact point after the Kalshi and
+// high-vig filters. Returns null when out of scope / switched off (legacy fair
+// stands), {decline:true} or {a, b, method, n}. The legacy fair is kept on the
+// side as fairProbPreOb; displayFairProb stays the legacy mean de-vig.
+// ---------------------------------------------------------------------------
+function _obDevig(a, b) {
+  const s = a + b;
+  if (!(s > 0)) return null;
+  if (Math.max(a, b) / s >= 0.75) {
+    const sh = _shinDeVig2(a, b);
+    if (sh) return sh;
+  }
+  return [a / s, b / s];
+}
+function _obMedian(xs) {
+  const v = xs.filter(x => Number.isFinite(x)).sort((x, y) => x - y);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+const _OB_CFB_SHARP = new Set(['pinnacle', 'betonlineag', 'lowvig', 'draftkings', 'fanduel']);
+function _obFairPair(pairs, getA, getB, sport) {
+  if (!sport || !config.pricing || config.pricing.obFairMethod === false || config.pricing.obParityEnabled === false) return null;
+  let fam = null;
+  try { fam = require('./ob-parity').family({ sport }); } catch (_) { fam = null; }
+  if (!fam || !Array.isArray(pairs)) return null;
+  const seen = new Set();
+  const votes = [];
+  let pin = null;
+  for (const bp of pairs) {
+    const a = getA(bp), b = getB(bp);
+    if (!(a > 0 && a < 1 && b > 0 && b < 1)) continue;
+    const dv = _obDevig(a, b);
+    if (!dv) continue;
+    if (bp.book === 'pinnacle') pin = dv[0];
+    const key = a.toFixed(4) + '|' + b.toFixed(4);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    votes.push({ book: bp.book, a: dv[0] });
+  }
+  const n = votes.length;
+  const cons = n ? _obMedian(votes.map(v => v.a)) : null;
+  let A = null, method = null;
+  if (fam === 'nhl') {
+    if (pin != null) {
+      if (n >= 3 && Math.abs(pin - cons) > 0.02) return { decline: true, n, method: 'nhl_pin_gap' };
+      A = pin; method = 'nhl_pin_anchor';
+    } else if (n >= 3) { A = cons; method = 'consensus'; }
+  } else if (fam === 'cfb') {
+    const sv = votes.filter(v => _OB_CFB_SHARP.has(v.book));
+    if (pin != null && n >= 3 && Math.abs(pin - cons) > 0.04) { A = cons; method = 'consensus_pin_stale'; }
+    else if (sv.length >= 2) { A = _obMedian(sv.map(v => v.a)); method = 'cfb_sharp_composite'; }
+    else if (n >= 3) { A = cons; method = 'consensus'; }
+    else if (pin != null) { A = pin; method = 'pinnacle'; }
+  } else if (fam === 'soccer') {
+    if (n >= 3) {
+      if (pin != null && Math.abs(pin - cons) > 0.02) {
+        return { a: Math.max(pin, cons), b: Math.max(1 - pin, 1 - cons), n, method: 'soccer_less_generous' };
+      }
+      A = cons; method = 'consensus';
+    }
+  } else {
+    const minN = fam === 'tennis' ? 2 : 3;
+    if (n >= minN) { A = cons; method = 'consensus'; }
+    else if (pin != null) { A = pin; method = 'pinnacle'; }
+  }
+  if (A == null) return { decline: true, n, method: 'too_few_books' };
+  return { a: A, b: 1 - A, n, method };
+}
+function _obApplySides(sideA, sideB, ob) {
+  if (!ob || !sideA || !sideB) return;
+  for (const [side, v] of [[sideA, ob.decline ? null : ob.a], [sideB, ob.decline ? null : ob.b]]) {
+    side.fairProbPreOb = side.fairProb;
+    side.fairProb = v;
+    side.obFairMethod = ob.method;
+    side.obFairBooks = ob.n;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -12238,6 +12339,8 @@ module.exports = {
   // Internal consensus builders exposed for unit testing / debug (pure fns).
   buildConsensusTotals,
   buildConsensusSpread,
+  buildConsensusMoneyline,
+  _obFairPair,   // order-book fair method (test/ob-parity.test.js)
   fetchScores,
   getGameResult,
   // Test seam for the score-orientation logic (see game-result-orientation.test.js).

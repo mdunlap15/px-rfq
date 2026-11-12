@@ -4,6 +4,7 @@ const { legLineId } = require('./leg-id');
 const lineManager = require('./line-manager');
 const oddsFeed = require('./odds-feed');
 const obRelay = require('./ob-relay');
+const obParity = require('./ob-parity');
 const election = require('./election');
 const rfqWatch = require('./rfq-watch');
 const orderTracker = require('./order-tracker');
@@ -2091,6 +2092,22 @@ function priceParlay(legs, opts = {}) {
       if (q > 0 && q < 0.99) effectiveBookPriceOverride = q;
     }
 
+    // ORDER-BOOK PARITY GATES (2026-11-11) — services/ob-parity.js: the order
+    // book's start cutoffs, listing windows (props / soccer / tennis), market
+    // scope, odds limits (on ITS side), prop book minimums and the large-fill
+    // hold. Never on fairOnly reads (EV live / game-time EV measure them).
+    if (!opts.fairOnly && relayHit && relayHit.holdUntil && config.pricing.obParityEnabled !== false) {
+      priceParlay._lastFailure = { reason: 'ob_hold', detail: `${legLabel}: held by the order book's guards for ${Math.round(relayHit.holdUntil - nowMs / 1000)}s more`, blockerLeg: legDescriptor };
+      return null;
+    }
+    if (!opts.fairOnly) {
+      const _obg = obParity.legGate(lineInfo, { fairProb, nowMs });
+      if (_obg) {
+        priceParlay._lastFailure = { reason: _obg.reason, detail: `${legLabel}: ${_obg.detail}`, blockerLeg: legDescriptor };
+        return null;
+      }
+    }
+
     // NEAR-START FRESHNESS GATE (2026-10-06, operator: "we simply cannot have
     // delays of more than a minute or two" near the start). Inside
     // freshGateWindowMin of start the odds this leg prices from must be at most
@@ -2166,7 +2183,7 @@ function priceParlay(legs, opts = {}) {
       legDriftCorr,
       fairBasis: legStates[legIdx].fairBasis || null,
       calib: legStates[legIdx]._calib || null,
-      relayHit: relayHit ? { fair: relayHit.fair, own: relayHit.own, ageSec: relayHit.ageSec, via: relayHit.via, source: relayHit.source } : null,
+      relayHit: relayHit ? { fair: relayHit.fair, own: relayHit.own, ageSec: relayHit.ageSec, via: relayHit.via, source: relayHit.source, ask: relayHit.ask || null } : null,
       bookPriceOverride: effectiveBookPriceOverride,
       manualOddsApplied,
       vigBump: legVigBumps[legIdx] || 0,
@@ -3082,6 +3099,43 @@ function priceParlay(legs, opts = {}) {
   // Legs flagged with bookPriceOverride (e.g. NBA series heavy favorites
   // past -500 FV) bypass vig entirely — we quote DK's offered number for
   // those legs. Vig logic below applies only to the remaining legs.
+  // ORDER-BOOK PARITY: PER-LEG ASK (2026-11-11, operator decision: "the order
+  // book's per-leg prices become the base"). Each in-scope leg (NFL/CFB/NBA/
+  // NHL/tennis/soccer, not same-game, no manual override) is priced at what our
+  // order book would charge a taker for that single bet — obParity.legAsk —
+  // and becomes a book-mirror leg, so the parlay-level vig ladder (longshot /
+  // leg-count / near-lock / cross-sport ramps) no longer stacks a second
+  // margin on it. TD / NHL goal-scorer YES mirrors take the order book's
+  // lengthened-NO price. Same-game parlays keep RFQ pricing (the order book
+  // has no SGPs, and the SGP offered multipliers above were computed against
+  // the current leg prices).
+  let obAskLegs = 0;
+  if (!isSGPParlay && !opts.fairOnly) {
+    for (const l of pricedLegs) {
+      if (l.manualOddsApplied != null || !obParity.family(l.lineInfo)) continue;
+      if (l.bookPriceOverride != null) {
+        const raw = l.lineInfo.propMirrorRaw;
+        const q = raw > 0 ? obParity.scorerYesAsk(l.lineInfo, raw, l.fairProb) : null;
+        if (q != null) { l.obAsk = { q, rule: 'scorer_yes_lengthened', pre: l.bookPriceOverride }; l.bookPriceOverride = q; obAskLegs++; }
+        continue;
+      }
+      const raws = [
+        bookImpliedForLeg(l, 'pinnacleOdds', 'pinnacleDNBProb'),
+        bookImpliedForLeg(l, 'fanduelOdds', 'fanduelDNBProb'),
+        bookImpliedForLeg(l, 'draftkingsOdds', 'draftkingsDNBProb'),
+      ].filter(p => p != null && p > 0 && p < 1);
+      const raw = raws.length ? raws.reduce((a, b) => a + b, 0) / raws.length : null;
+      // The order book's own posted price for this side (relay ask) wins when fresh.
+      if (l.relayHit && l.relayHit.ask > 0 && l.relayHit.ask < 0.99) {
+        const q = Math.max(l.relayHit.ask, l.fairProb);
+        l.obAsk = { q, rule: 'ob_relay_ask', raw }; l.bookPriceOverride = q; obAskLegs++;
+        continue;
+      }
+      const vigged = applyOddsVig(l.fairProb, l.lineInfo.sport, l.lineInfo.marketType, l.vigBump || 0);
+      const a = obParity.legAsk({ li: l.lineInfo, f: l.fairProb, raw, vigged });
+      if (a) { l.obAsk = { q: a.q, rule: a.rule, raw }; l.bookPriceOverride = a.q; obAskLegs++; }
+    }
+  }
   const overrideLegs = pricedLegs.filter(l => l.bookPriceOverride != null);
   const vigLegs = pricedLegs.filter(l => l.bookPriceOverride == null);
   const overrideProduct = overrideLegs.reduce((p, l) => p * l.bookPriceOverride, 1);
@@ -4260,7 +4314,11 @@ function priceParlay(legs, opts = {}) {
     const _inScope = _pct > 0 && opts.parlayId && !opts.fairOnly
       && pricedLegs.length >= 2 && !isSGPParlay
       && _fbCeil.arm == null && _nbaCeil.arm == null && _cfbWiden.arm == null && _twoLegWiden.arm == null
-      && pricedLegs.every(l => l.lineInfo && !excl.includes(l.lineInfo.sport));
+      && pricedLegs.every(l => l.lineInfo && !excl.includes(l.lineInfo.sport))
+      // ORDER-BOOK PARITY (2026-11-11, operator decision "retire the cross-game
+      // widen"): a ticket priced at the order book's per-leg asks on any leg is
+      // out of scope — the widen would stack a second margin on that price.
+      && !(obAskLegs > 0);
     if (_inScope) {
       let inArm = _pct >= 100;
       if (!inArm) {
@@ -4310,7 +4368,15 @@ function priceParlay(legs, opts = {}) {
         _calib = { key: c.key, mult: Math.round(c.mult * 10000) / 10000, rawMult: Math.round(c.rawMult * 10000) / 10000,
           rawFair: Math.round(raw * 1e6) / 1e6, calFair: Math.round(c.calFair * 1e6) / 1e6, minMarginPct: c.minMarginPct,
           applied: false, preProb: null };
-        if (c.floorProb > offeredImpliedProb) {
+        // ORDER-BOOK PARITY (2026-11-11, operator decision): on a 3+ leg parlay
+        // priced entirely at the order book's per-leg asks the calibration stays
+        // for honest EV (meta.evFair at confirm) but no longer sets a margin
+        // floor — the per-leg order-book margins already compound (NBA 4% EV per
+        // leg ~1.125x fair at 3 legs) past the bettors' measured ~1.075x.
+        const _obNoFloor = obAskLegs > 0 && obAskLegs === pricedLegs.length
+          && pricedLegs.length > (config.pricing.obCalibFloorMaxLegs != null ? config.pricing.obCalibFloorMaxLegs : 2);
+        if (_obNoFloor) _calib.skipped = 'ob_parity';
+        if (!_obNoFloor && c.floorProb > offeredImpliedProb) {
           _calib.applied = true;
           _calib.preProb = Math.round(offeredImpliedProb * 1e5) / 1e5;
           log.debug('Pricing', `Calibration floor[${c.key} x${c.mult.toFixed(3)}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(c.floorProb * 100).toFixed(3)}%`);
@@ -4547,6 +4613,10 @@ function priceParlay(legs, opts = {}) {
       log.warn('Pricing', `creator tier failed (${err.message}) — using configured caps only`);
     }
   }
+  // ORDER-BOOK PARITY ticket caps (RFQ's own caps at the order book's numbers):
+  // a football leg whose order-book side is past +300 (bettor side >= 75%) → $500.
+  const obTicketCaps = obParity.ticketCaps(pricedLegs);
+  for (const c of obTicketCaps) candidateCaps.push(c.cap);
   const maxRisk = Math.min(...candidateCaps);
 
   const americanOdds = decimalToAmerican(decimalOdds);
@@ -4889,6 +4959,8 @@ function priceParlay(legs, opts = {}) {
           // 'rfq' = our own fair; 'ob_direct' / 'ob_complement' = the order
           // book's (relay); 'rfq_adverse_over_ob' = ours, more adverse by > gap.
           fairSource: l.fairSource || 'rfq',
+          // Order-book parity per-leg ask ({q, rule, raw}) when it priced this leg.
+          obAsk: l.obAsk ? { q: Math.round(l.obAsk.q * 1e6) / 1e6, rule: l.obAsk.rule, raw: l.obAsk.raw != null ? Math.round(l.obAsk.raw * 1e6) / 1e6 : null, pre: l.obAsk.pre != null ? Math.round(l.obAsk.pre * 1e6) / 1e6 : null } : null,
           obRelay: l.relayHit || null,
           // FAIR PROVENANCE (2026-10-14 EV audit): how this leg's fair was built,
           // so a family's calibration can be split by method instead of guessed.
@@ -4988,6 +5060,7 @@ function priceParlay(legs, opts = {}) {
       pinRawCompound: pinRawCompound != null ? Math.round(pinRawCompound * 100000) / 100000 : null,
       pinMatchTarget: pinMatchTarget != null ? Math.round(pinMatchTarget * 100000) / 100000 : null,
       offeredImpliedProb: Math.round(cappedProb * 100000) / 100000,
+      obAskLegs,
       // HR-pair margin-trim A/B. hrTrimArm is null when the parlay is out of
       // scope or the experiment is dark, 'control'/'trim' when in scope.
       // hrTrimPreProb is the UNtrimmed offered prob, so the trim arm's
@@ -7303,6 +7376,23 @@ async function validateForConfirmation(parlayId, originalMeta) {
     }).map(l => `${l.team || l.lineId} ${l.fairSource || 'rfq'}`).join(', ');
     log.warn('Pricing', `Fair moved ${(adverse * 100).toFixed(1)}% against us since quote (threshold ${(adverseThreshold * 100).toFixed(1)}%) — rejecting confirmation${moved ? ' [' + moved + ']' : ''}`);
     return { valid: false, reason: `adverse move ${(adverse * 100).toFixed(1)}% > ${(adverseThreshold * 100).toFixed(1)}%`, currentPricing };
+  }
+
+  // ORDER-BOOK PARITY EV FLOOR (2026-11-11): the order book's line guards cancel
+  // any offer whose EV against a fresh fair falls below +0.5%. Our side's EV per
+  // $ risked on the ticket = (q − f) / (1 − q), q = the quoted implied prob, f =
+  // the re-priced (raw) fair. Reject when it is below the floor AND lower than
+  // it was at the quote — a quote deliberately priced under the floor (book-
+  // match arm at raw fair +1%) is not rejected unless the fair moved against us.
+  const _obMinEv = config.pricing.obConfirmMinEvPct != null ? config.pricing.obConfirmMinEvPct : 0.5;
+  const _q = Number(originalMeta.offeredImpliedProb);
+  if (config.pricing.obParityEnabled !== false && _obMinEv > 0 && _q > 0 && _q < 1 && currentProb > 0) {
+    const evNow = (_q - currentProb) / (1 - _q);
+    const evQuote = (_q - originalProb) / (1 - _q);
+    if (evNow < _obMinEv / 100 && evNow < evQuote - 1e-9) {
+      log.warn('Pricing', `EV vs fresh fair ${(evNow * 100).toFixed(2)}% < ${_obMinEv}% (was ${(evQuote * 100).toFixed(2)}% at quote) — rejecting confirmation`);
+      return { valid: false, reason: `ob ev floor ${(evNow * 100).toFixed(2)}% < ${_obMinEv}%`, currentPricing };
+    }
   }
 
   return { valid: true, currentPricing };

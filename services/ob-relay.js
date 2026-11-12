@@ -87,6 +87,14 @@ function _rebuildSiblings() {
 // same "more adverse decides" rule, applied from our side, is fair_hi for this
 // line and 1 − fair_lo for the other side. Posters write one fair (lo == hi);
 // a 3-element entry predates the split and reads as lo == hi.
+// ORDER-BOOK PARITY extension (2026-11-11, read back-compatibly; the posters
+// write it once poster-service rfq_relay.py is updated):
+//   entry[4] = ask — the implied prob a taker pays on the order book to hold
+//              THIS line_id's side (the order book's posted offer on the other
+//              side, seen from the taker). RFQ prices a leg on this line at it.
+//   entry[5] = holdUntil — epoch s until which a guard holds this line (player
+//              hold, book-move, churn, stability wait, cumulative move, large
+//              fill). Applies to both sides of the market; RFQ declines.
 function _fresh(entry, nowS) {
   if (!Array.isArray(entry) || entry.length < 2) return null;
   const lo = Number(entry[0]), ts = Number(entry[1]);
@@ -95,7 +103,10 @@ function _fresh(entry, nowS) {
   if (!(hi > 0 && hi < 1) || hi < lo) hi = lo;
   const age = nowS - ts;
   if (age < -60 || age > maxAgeSec()) return null;
-  return { lo, hi, ageSec: Math.max(0, Math.round(age)), source: entry[2] || null };
+  const ask = entry.length >= 5 ? Number(entry[4]) : NaN;
+  const holdUntil = entry.length >= 6 ? Number(entry[5]) : NaN;
+  return { lo, hi, ageSec: Math.max(0, Math.round(age)), source: entry[2] || null,
+    ask: ask > 0 && ask < 1 ? ask : null, holdUntil: Number.isFinite(holdUntil) && holdUntil > nowS ? holdUntil : null };
 }
 
 /**
@@ -106,12 +117,12 @@ function getFair(lineId) {
   if (!enabled() || !lineId) return null;
   const nowS = Date.now() / 1000;
   const d = _fresh(_map[lineId], nowS);
-  if (d) return { fair: d.hi, lo: d.lo, hi: d.hi, ageSec: d.ageSec, source: d.source, via: 'direct' };
+  if (d) return { fair: d.hi, lo: d.lo, hi: d.hi, ageSec: d.ageSec, source: d.source, via: 'direct', ask: d.ask, holdUntil: d.holdUntil };
   _rebuildSiblings();
   const sib = _siblings.get(lineId);
   if (sib) {
     const s = _fresh(_map[sib], nowS);
-    if (s) return { fair: 1 - s.lo, lo: 1 - s.hi, hi: 1 - s.lo, ageSec: s.ageSec, source: s.source, via: 'complement', sibling: sib };
+    if (s) return { fair: 1 - s.lo, lo: 1 - s.hi, hi: 1 - s.lo, ageSec: s.ageSec, source: s.source, via: 'complement', sibling: sib, ask: null, holdUntil: s.holdUntil };
   }
   return null;
 }

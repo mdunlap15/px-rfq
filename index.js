@@ -1273,6 +1273,7 @@ function startStatusServer() {
       // Order-book fair relay + fill-drift measurement (2026-10-06).
       gsRelay: (() => { try { return require('./services/gs-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
       obRelay: (() => { try { return require('./services/ob-relay').getStatus(); } catch (e) { return { error: e.message }; } })(),
+      obParity: (() => { try { return require('./services/ob-parity').status(); } catch (e) { return { error: e.message }; } })(),
       election: (() => { try { const st = require('./services/election').getStatus(); return { ...st, detail: undefined }; } catch (e) { return { error: e.message }; } })(),
       fillDrift: (() => { try { return require('./services/fill-drift').getStats(); } catch (e) { return { error: e.message }; } })(),
       rfqWatch: (() => { try { return require('./services/rfq-watch').getStatus(); } catch (e) { return { error: e.message }; } })(),
@@ -4626,6 +4627,14 @@ function startStatusServer() {
     try {
       const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
       res.json({ ok: true, ...orderTracker.getEvLeakSummary(days) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // Closing value by sport, the order book's yardstick (order-book parity 2026-11-11).
+  app.get('/clv-by-sport', (req, res) => {
+    try {
+      const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
+      res.json({ ok: true, ...orderTracker.getClvBySport(days) });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 

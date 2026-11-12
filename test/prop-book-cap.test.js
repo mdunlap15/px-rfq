@@ -11,6 +11,8 @@ const oddsFeed = require('../services/odds-feed');
 const orderTracker = require('../services/order-tracker');
 const pricer = require('../services/pricer');
 const { config } = require('../config');
+// Pins another mechanism's price / registration; order-book parity has its own tests (test/ob-parity.test.js).
+config.pricing.obParityEnabled = false;
 config.pricing.calibEnabled = false; // isolate this mechanism from the calibration floor (test/fair-calibration.test.js)
 
 const FUT = new Date(Date.now() + 20 * 3600e3).toISOString();

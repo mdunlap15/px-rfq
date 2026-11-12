@@ -12,6 +12,8 @@ const oddsFeed = require('../services/odds-feed');
 const orderTracker = require('../services/order-tracker');
 const pricer = require('../services/pricer');
 const { config } = require('../config');
+// Pins another mechanism's price / registration; order-book parity has its own tests (test/ob-parity.test.js).
+config.pricing.obParityEnabled = false;
 
 const L = {};
 let seq = 0;

@@ -4009,6 +4009,42 @@ function getEvLeakSummary(days = 7) {
   };
 }
 
+// CLOSING VALUE BY SPORT (2026-11-11, order-book parity): the order book judges
+// itself by stake-weighted closing-line value per sport (EV against the closing
+// fair / stake). Same view for RFQ: per sport (every leg one sport, else
+// 'multi'), confirmed fills in the window whose game-time EV is frozen —
+// EV at fill, EV at game time, both as % of our risk — split by whether the
+// ticket was priced at the order book's per-leg asks (meta.obAskLegs > 0).
+function getClvBySport(days = 7) {
+  const cutoff = Date.now() - days * 864e5;
+  const r2 = v => Math.round(v * 100) / 100;
+  const buckets = {};
+  const add = (key, risk, evFill, evGame, cov) => {
+    const b = buckets[key] || (buckets[key] = { tickets: 0, risk: 0, evFill: 0, evGame: 0, covRisk: 0 });
+    b.tickets++; b.risk += risk; b.evFill += evFill; b.evGame += evGame; b.covRisk += risk * cov;
+  };
+  let skipped = 0;
+  for (const o of getConfirmedOrdersSince(cutoff)) {
+    const m = o.meta || {};
+    const gt = m.gameTime && m.gameTime.finalizedAt && Number.isFinite(m.gameTime.ev) ? m.gameTime : null;
+    const evFill = Number(o.expectedValue != null ? o.expectedValue : m.expectedValue);
+    const risk = Number(o.confirmedStake) || 0;
+    if (!gt || !Number.isFinite(evFill) || !(risk > 0)) { skipped++; continue; }
+    const sports = [...new Set((m.legs || []).map(l => l.sport).filter(Boolean))];
+    const sport = sports.length === 1 ? sports[0] : 'multi';
+    const arm = (m.obAskLegs || 0) > 0 ? 'ob' : 'legacy';
+    add(sport, risk, evFill, gt.ev, gt.coverage || 0);
+    add(sport + '|' + arm, risk, evFill, gt.ev, gt.coverage || 0);
+  }
+  const rows = Object.entries(buckets).map(([key, b]) => {
+    const [sport, arm] = key.split('|');
+    return { sport, pricing: arm || 'all', tickets: b.tickets, risk: r2(b.risk),
+      evFillPctOfRisk: r2(100 * b.evFill / b.risk), clvPctOfRisk: r2(100 * b.evGame / b.risk),
+      leakPctOfRisk: r2(100 * (b.evFill - b.evGame) / b.risk), coverage: r2(b.covRisk / b.risk) };
+  }).sort((a, b) => b.risk - a.risk);
+  return { days, rows, skipped };
+}
+
 function getEvCurve(days = 30, maxPoints = 1200, opts = {}) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const rows = [];
@@ -8707,6 +8743,7 @@ module.exports = {
   _rollupDailyVolume,
   getEvCurve,
   getEvLeakSummary,
+  getClvBySport,
   closedHoleOf,
   getVoidAdjustedCalibration,
   getStats,

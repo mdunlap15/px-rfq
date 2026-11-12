@@ -19,6 +19,8 @@ const path = require('path');
 
 const lm = require('../services/line-manager');
 const { config } = require('../config');
+// Pins another mechanism's price / registration; order-book parity has its own tests (test/ob-parity.test.js).
+config.pricing.obParityEnabled = false;
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'services', 'line-manager.js'), 'utf8');
 
 const UCL = 'soccer_uefa_champs_league';

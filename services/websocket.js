@@ -2409,6 +2409,14 @@ async function handleConfirm(data) {
       // only — nothing on the confirm path waits on it).
       try { require('./fill-drift').track(parlayId); } catch (_) { /* best effort */ }
 
+      // Order-book parity large-fill hold (services/ob-parity.js): >= $1,000 of
+      // our leg risk on one line / player inside 120 s holds it for 5 min.
+      try {
+        const _obLegs = (origLegs || []).map(l => ({ lineInfo: require('./line-manager').lookupLine(l.lineId) || l, fairProb: l.fairProb }));
+        const _held = require('./ob-parity').recordFill(_obLegs, ourRisk);
+        if (_held.length) log.info('Confirm', `OB-parity fill hold: ${_held.join(', ')}`);
+      } catch (e) { log.debug('Confirm', `ob-parity recordFill skipped: ${e.message}`); }
+
       // Feed the SGP guard ledgers (prop game-script risk + experimental
       // combo daily budget). Best-effort — never blocks the fill.
       try {

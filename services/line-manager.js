@@ -675,6 +675,13 @@ function _setSeedLine(lineId, info, opts) {
     info._marketDenied = true;
     return info;
   }
+  // Order-book parity (services/ob-parity.js): the order book's listing windows
+  // (props / soccer / tennis) and market scope (tennis total games, NHL puck
+  // line + team totals, soccer 3-way NO). Re-evaluated every seed.
+  if (require('./ob-parity').registrationRefusal(info)) {
+    info._marketDenied = true;
+    return info;
+  }
   (_seedIndexTarget || lineIndex)[lineId] = info;
   return info;
 }
@@ -2287,6 +2294,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
             // real DK number (scraper) as the basis; fall back to the raw
             // posted consensus the one-sided source already returned. HR only.
             let overBookPriceOverride = null;
+            let overMirrorRaw = null;   // raw YES consensus (order-book parity: scorer YES ask)
             // Soccer + football-anytime-TD one-sided props use the same
             // operator-approved book-mirror as MLB hitter binaries: quote
             // the books' RAW posted consensus minus the sweetener,
@@ -2313,6 +2321,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                 ? config.pricing.propBookMirrorSweetener : 0.005;
               if (mirrorRawOver != null && mirrorRawOver > 0 && mirrorRawOver < 1) {
                 overBookPriceOverride = Math.max(0.005, Math.min(0.98, mirrorRawOver * (1 - sweet)));
+                overMirrorRaw = mirrorRawOver;
                 // NEVER SHORTER THAN FAIR (order-book mirror, 2026-10-01): the
                 // TD posters lengthen their NO ask until it is never shorter
                 // than the field fair, i.e. the YES the counterparty buys is
@@ -2360,6 +2369,7 @@ async function _seedPropsForEvent(ctx, setLine = _setSeedLine) {
                 fairProbUnder: fairUnder,
                 booksWithBothSides: 0,
                 bookPriceOverride: overBookPriceOverride,
+                propMirrorRaw: overMirrorRaw,
                 propBooks: oneSidedHit.books,
                 propBestRaw: _propBestRaw(oneSidedHit.bestRawOver, null),
                 propMethod: oneSidedHit.source === 'dk-scraper-one-sided' ? 'dk_one_sided' : 'one_sided_assumed_overround',
@@ -2440,7 +2450,7 @@ const _propSeedCtx = new Map();
 // The pricing fields a prop line carries from its TOA fetch. Everything else
 // (ids, routing, market, line, side) is registration and never touched here.
 const _PROP_PRICE_FIELDS = ['fairProb', 'fairProbOver', 'fairProbUnder', 'booksWithBothSides',
-  'bookPriceOverride', 'propBooks', 'propBestRaw', 'propSource', 'propFetchedAt',
+  'bookPriceOverride', 'propMirrorRaw', 'propBooks', 'propBestRaw', 'propSource', 'propFetchedAt',
   'propMethod', 'propExactLineFair', 'propImpliedMean'];
 // How a two-sided prop fair was built (fair provenance, 2026-10-14 EV audit):
 // the lookup's method, the exact-line de-vig fair for THIS side (differs from
