@@ -4401,7 +4401,8 @@ function priceParlay(legs, opts = {}) {
   // FD / DK prices both legs. Match arm: offered = the MORE generous of the FD /
   // DK parlay (product of the book's raw leg implied, DNB-adjusted like the
   // dashboard columns) — in either direction, so it is a true match — floored at
-  // raw (pre-factor) fair x (1 + twoLegBookMatchMinEdgePct). It REPLACES every
+  // max(raw, factored, CALIBRATED fair) x (1 + twoLegBookMatchMinEdgePct) (calibrated
+  // since 2026-11-15; was raw, which let 2-leg matches quote below calFair). It REPLACES every
   // earlier step (vig, floors, factors, widens, calibration floor), and the
   // theo-edge gate (which would read the factored fair) is judged against the
   // raw fair instead. fairParlayProb is untouched, so the confirm drift checks
@@ -4444,7 +4445,16 @@ function priceParlay(legs, opts = {}) {
         if (inArm) {
           const raw = _xgf.applied && _xgf.preFair > 0 ? _xgf.preFair : _2lf.applied && _2lf.preFair > 0 ? _2lf.preFair : fairParlayProb;
           const me = config.pricing.twoLegBookMatchMinEdgePct != null ? config.pricing.twoLegBookMatchMinEdgePct : 1;
-          const floor = raw * (1 + me / 100);
+          // FLOOR AT THE CALIBRATED FAIR (2026-11-15, operator: "floor at calibrated fair"):
+          // the floor was raw fair x (1 + me), so a match could quote BELOW the fair we
+          // book EV against (2-leg calFair = raw x 1.10 vs FD/DK ~1.07x raw) — every
+          // 2-leg match fill was negative EV at fill (ND State / Utah 11/14: offer 48.3%
+          // vs calFair 49.5%). Base = the largest of raw, the factored fair and the
+          // calibrated fair; the match still takes a book price that clears it.
+          const _calFair = _calib && _calib.calFair > 0 ? _calib.calFair : 0;
+          const base = Math.max(raw, fairParlayProb, _calFair);
+          _bm2.calFair = _calFair ? Math.round(_calFair * 1e6) / 1e6 : null;
+          const floor = base * (1 + me / 100);
           const target = Math.min(0.99, Math.max(cands[0][1], floor));
           _bm2.floorBound = floor > cands[0][1];
           _bm2.preProb = Math.round(offeredImpliedProb * 1e5) / 1e5;

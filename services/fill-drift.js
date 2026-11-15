@@ -29,6 +29,19 @@ const _stats = { tracked: 0, completed: 0, snapshotFailures: 0, saved: 0 };
 
 function _round(x, d = 5) { return x == null || !Number.isFinite(x) ? null : Math.round(x * 10 ** d) / 10 ** d; }
 
+// RAW (pre-factor) joint fair (2026-11-15). The fill's fairParlayProb carries the
+// 2-leg / cross-game selection factor (x1.10-1.12) when its A/B arm applied it, but
+// the checkpoint reprice runs without a parlayId, so no arm applies and it returns
+// the RAW fair — comparing the two read a fake -9..-11% drift on every factored
+// fill (ND State / Utah 11/14: +5 min "-10.4%" while both legs moved < 1.5%).
+// Both sides of the drift are now the raw fair.
+function _rawFair(meta, fallback) {
+  const m = meta || {};
+  if (m.xgFactorApplied && m.xgFactorPreFair > 0) return m.xgFactorPreFair;
+  if (m.twoLegFactorApplied && m.twoLegFactorPreFair > 0) return m.twoLegFactorPreFair;
+  return fallback != null ? fallback : m.fairParlayProb;
+}
+
 async function _snapshot(order) {
   const pricer = require('./pricer');
   const legIds = (order.meta && order.meta.legs || []).map(l => l.lineId).filter(Boolean);
@@ -40,8 +53,8 @@ async function _snapshot(order) {
     _stats.snapshotFailures++;
     return { at: new Date().toISOString(), reason: (f && f.reason) || 'reprice failed' };
   }
-  const now = res.meta.fairParlayProb;
-  const was = order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb;
+  const now = _rawFair(res.meta, res.meta.fairParlayProb);
+  const was = _rawFair(order.meta, order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb);
   const legs = (res.meta.legs || []).map(l => {
     const q = (order.meta.legs || []).find(x => x.lineId === l.lineId) || {};
     return {
@@ -66,7 +79,7 @@ function track(parlayId) {
     const order = orderTracker.findByParlayId(parlayId);
     if (!order || !order.meta || !Array.isArray(order.meta.legs)) return;
     order.meta.fillDrift = {
-      quotedFair: _round(order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb),
+      quotedFair: _round(_rawFair(order.meta, order.fairParlayProb != null ? order.fairParlayProb : order.meta.fairParlayProb)),
       inputAgeSec: order.meta.legs.map(l => ({ lineId: l.lineId, market: l.market, ageSec: l.inputAgeSec != null ? l.inputAgeSec : null })),
       confirmedAt: order.confirmedAt || new Date().toISOString(),
     };
@@ -141,4 +154,4 @@ function summarize(orders) {
   return { fills: out.fills, withM5: out.withM5, withM30: out.withM30, rows };
 }
 
-module.exports = { track, getStats, summarize, _snapshot, CHECKPOINTS };
+module.exports = { track, getStats, summarize, _snapshot, _rawFair, CHECKPOINTS };

@@ -59,12 +59,12 @@ async function quote(ids, parlayId) {
 test('match arm: offered = the more generous of FD / DK parlay; control keeps its (wider) price', async () => {
   setup();
   try {
-    market(0.6, -160, -165);
+    market(0.6, -175, -180);                       // FD 0.405 clears calFair 0.396 x 1.01
     const ids = [mkLine('A1'), mkLine('A2')];
     const m = await quote(ids, pid('match', 'a'));
     assert.strictEqual(m.twoLegBookMatchArm, 'match');
     assert.strictEqual(m.twoLegBookMatch.book, 'fanduel');
-    assert.ok(Math.abs(m.offeredImpliedProb - imp(-160) ** 2) < 1e-4, `offered ${m.offeredImpliedProb} vs FD ${imp(-160) ** 2}`);
+    assert.ok(Math.abs(m.offeredImpliedProb - imp(-175) ** 2) < 1e-4, `offered ${m.offeredImpliedProb} vs FD ${imp(-175) ** 2}`);
     assert.ok(m.twoLegBookMatch.preProb > m.offeredImpliedProb, 'control price was wider than the books');
     assert.ok(Math.abs(m.fairParlayProb - 0.36) < 1e-6, 'fair untouched');
     const c = await quote(ids, pid('control', 'a'));
@@ -74,13 +74,18 @@ test('match arm: offered = the more generous of FD / DK parlay; control keeps it
   } finally { teardown(); }
 });
 
-test('match arm never quotes below raw fair x (1 + min edge)', async () => {
+test('match arm never quotes below the CALIBRATED fair x (1 + min edge); raw fair when calibration is off', async () => {
   setup();
   try {
-    market(0.6, -140, -145);                       // books 0.340 / 0.350 < fair 0.36
+    market(0.6, -160, -165);                       // books 0.379 / 0.387: above raw fair 0.36, below calFair 0.396
     const m = await quote([mkLine('B1'), mkLine('B2')], pid('match', 'b'));
-    assert.ok(Math.abs(m.offeredImpliedProb - 0.36 * 1.01) < 1e-4, 'floored at fair + 1%: ' + m.offeredImpliedProb);
+    assert.ok(Math.abs(m.offeredImpliedProb - 0.36 * 1.1 * 1.01) < 1e-4, 'floored at calFair + 1%: ' + m.offeredImpliedProb);
     assert.strictEqual(m.twoLegBookMatch.floorBound, true);
+    assert.ok(Math.abs(m.twoLegBookMatch.calFair - 0.396) < 1e-5, 'calFair recorded');
+    config.pricing.calibEnabled = false;
+    market(0.6, -140, -145);                       // books 0.340 / 0.350 < fair 0.36
+    const r = await quote([mkLine('B3'), mkLine('B4')], pid('match', 'b3'));
+    assert.ok(Math.abs(r.offeredImpliedProb - 0.36 * 1.01) < 1e-4, 'calibration off -> raw fair + 1%: ' + r.offeredImpliedProb);
   } finally { teardown(); }
 });
 
@@ -106,7 +111,7 @@ test('scope: same-game, 3 legs, no book price, or percent 0 -> no arm', async ()
 test('confirm reprice accepts a match-arm fill whose control price is past 50%', async () => {
   setup();
   try {
-    market(0.68, -220, -230);                      // raw 0.4624; control floor 0.549 (> 50%); books 0.4727
+    market(0.66, -230, -235);                      // raw 0.4356; calFair x1.01 0.484; control floor 0.517 (> 50%); books 0.486
     const ids = [mkLine('D1'), mkLine('D2')];
     const m = await quote(ids, pid('match', 'd'));
     assert.ok(m.offeredImpliedProb < 0.5, 'match arm quotes under 50%');
@@ -120,13 +125,13 @@ test('confirm reprice accepts a match-arm fill whose control price is past 50%',
 test('3+ legs: own arm (bm3), matches the better book parlay, 2-leg arm untouched', async () => {
   setup({ xgBookMatchPercent: 50 });
   try {
-    market(0.6, -160, -165);
+    market(0.6, -170, -175);                       // FD 0.2496: clears calFair 0.2376 x 1.01, under the control floor
     const ids = [mkLine('E1'), mkLine('E2'), mkLine('E3')];
     let mp; for (let i = 0; ; i++) { mp = `bm-e3-${i}`; if (armOf(mp, 'bm3:') === 'match' && armOf(mp) === 'control') break; }
     const m = await quote(ids, mp);
     assert.strictEqual(m.xgBookMatchArm, 'match', 'arm hashed on bm3:, not bm2:');
     assert.strictEqual(m.twoLegBookMatchArm, null, '3-leg never in the 2-leg arm');
-    assert.ok(Math.abs(m.offeredImpliedProb - imp(-160) ** 3) < 1e-4, `offered ${m.offeredImpliedProb} vs FD ${imp(-160) ** 3}`);
+    assert.ok(Math.abs(m.offeredImpliedProb - imp(-170) ** 3) < 1e-4, `offered ${m.offeredImpliedProb} vs FD ${imp(-170) ** 3}`);
     assert.ok(m.xgBookMatch.preProb > m.offeredImpliedProb);
     let cp; for (let i = 0; ; i++) { cp = `bm-e3c-${i}`; if (armOf(cp, 'bm3:') === 'control' && armOf(cp) === 'match') break; }
     const c = await quote(ids, cp);

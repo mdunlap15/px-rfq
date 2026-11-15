@@ -85,3 +85,26 @@ test('summarize buckets legs by sport, prop vs game, input age; drift > 2% count
   assert.strictEqual(game.inputAge, '<=2m');
   assert.strictEqual(game.shareAgainst2pct5, 0);
 });
+
+test('factored fill: drift compares the RAW fair on both sides (the reprice has no parlayId, so no factor arm)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const o = order('fd-4');
+  o.fairParlayProb = 0.275; o.meta.fairParlayProb = 0.275;            // 0.25 raw x 1.10 2-leg factor
+  Object.assign(o.meta, { twoLegFactorApplied: true, twoLegFactorPreFair: 0.25 });
+  const origFind = orderTracker.findByParlayId, origPrice = pricer.priceParlay;
+  const db = require('../services/db'); const origSave = db.saveOrder;
+  orderTracker.findByParlayId = () => o;
+  db.saveOrder = async () => 'ok';
+  pricer.priceParlay = async () => ({ meta: { fairParlayProb: 0.25, legs: [{ lineId: 'A', fairProb: 0.5 }, { lineId: 'B', fairProb: 0.5 }] } });
+  try {
+    fillDrift.track('fd-4');
+    assert.strictEqual(o.meta.fillDrift.quotedFair, 0.25, 'quoted fair recorded raw');
+    t.mock.timers.tick(5 * 60e3); await new Promise(setImmediate);
+    assert.strictEqual(o.meta.fillDrift.m5.drift, 0, 'no market move -> no drift (was -9.1%): ' + JSON.stringify(o.meta.fillDrift.m5));
+    assert.strictEqual(fillDrift._rawFair({ xgFactorApplied: true, xgFactorPreFair: 0.2, fairParlayProb: 0.224 }), 0.2);
+    assert.strictEqual(fillDrift._rawFair({ twoLegFactorApplied: false, twoLegFactorPreFair: 0.2 }, 0.3), 0.3, 'unapplied factor ignored');
+  } finally {
+    orderTracker.findByParlayId = origFind; pricer.priceParlay = origPrice; db.saveOrder = origSave;
+    t.mock.timers.tick(30 * 60e3);
+  }
+});
