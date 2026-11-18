@@ -5,11 +5,11 @@ const assert = require('node:assert');
 const { config } = require('../config');
 const calib = require('../services/fair-calibration');
 
-const KEYS = ['calibFloorMult', 'calibEnabled', 'calibMinMarginPct', 'calibPriorHits', 'calibMinMult', 'calibMaxMult'];
+const KEYS = ['calibFloorMult', 'calibFloorMultProp', 'calibEnabled', 'calibMinMarginPct', 'calibPriorHits', 'calibMinMult', 'calibMaxMult'];
 const saved = {};
 function setCfg(o = {}) {
   for (const k of KEYS) saved[k] = config.pricing[k];
-  Object.assign(config.pricing, { calibFloorMult: 0.5, calibEnabled: true, calibMinMarginPct: 8, calibPriorHits: 40, calibMinMult: 0.8, calibMaxMult: 1.5 }, o);
+  Object.assign(config.pricing, { calibFloorMult: 0.5, calibFloorMultProp: 0.5, calibEnabled: true, calibMinMarginPct: 8, calibPriorHits: 40, calibMinMult: 0.8, calibMaxMult: 1.5 }, o);
 }
 function restore() { for (const k of KEYS) config.pricing[k] = saved[k]; }
 
@@ -54,6 +54,26 @@ test('multiplierFor: shrinks to parent; big beaten segment > 1, thin segment sta
     assert.ok(ten.mult > 0.99 && ten.mult < 1.05, 'tennis calibrated: ' + ten.mult);
     const golf = calib.multiplierFor(calib.segmentPath(GOLF), cells);
     assert.ok(golf.mult < 1.2, 'n=4 cannot move far from its parent: ' + golf.mult);
+  } finally { restore(); }
+});
+
+test('prop floor: prop parlays floor at calibFloorMultProp, game parlays at calibFloorMult; own segment wins when higher', () => {
+  setCfg({ calibFloorMult: 1.10, calibFloorMultProp: 1.04 });
+  try {
+    const NFL = [leg('americanfootball_nfl', 'a'), leg('americanfootball_nfl', 'b')];
+    const PROP = [leg('baseball_mlb', 'p', { playerName: 'A B', marketType: 'player_hitter_hr' }), leg('baseball_mlb', 'q', { playerName: 'C D', marketType: 'player_hitter_hr' })];
+    const BEATEN = [leg('basketball_nba', 'r', { playerName: 'E F', marketType: 'player_points' }), leg('basketball_nba', 's'), leg('basketball_nba', 't')];
+    calib.__setCellsForTest(calib.buildCells([
+      ...tickets(2000, 500, 0.25, NFL),       // calibrated 1.00
+      ...tickets(2000, 500, 0.25, PROP),      // calibrated 1.00
+      ...tickets(2000, 650, 0.25, BEATEN),    // beaten 1.30
+    ]).cells);
+    const g = calib.forQuote(NFL, 0.25), pr = calib.forQuote(PROP, 0.25), b = calib.forQuote(BEATEN, 0.25);
+    assert.ok(Math.abs(g.mult - 1.10) < 1e-12, 'game parlay at the book-wide floor: ' + g.mult);
+    assert.ok(Math.abs(pr.mult - 1.04) < 1e-12, 'prop parlay at the prop floor: ' + pr.mult);
+    assert.ok(b.mult > 1.2, 'a beaten prop segment keeps its own higher multiplier: ' + b.mult);
+    assert.ok(Math.abs(calib.forEv(PROP, 0.25, 100).mult - 1.04) < 1e-12, 'EV uses the same prop floor');
+    assert.ok(Math.abs(calib.forEv(NFL, 0.25, 100).mult - 1.10) < 1e-12, 'EV game floor unchanged');
   } finally { restore(); }
 });
 

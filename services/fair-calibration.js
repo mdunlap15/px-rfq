@@ -155,7 +155,21 @@ function _clamp(m, lo, hi) { return Math.min(hi, Math.max(lo, m)); }
  * (z 0.19; 1 SD of pure noise = $29.8K). Segments that graded in our favour did
  * not hold out of sample; the bias is book-wide selection.
  */
-function floorMult() { const v = Number((config.pricing || {}).calibFloorMult); return Number.isFinite(v) && v > 0 ? v : 1.10; }
+function floorMult(path) {
+  const p = config.pricing || {};
+  // PROP FLOOR (2026-11-17, operator "do 2 and 3"): player-prop parlays measured 1.04x
+  // (prop-xg z 0.87) vs game cross-game 1.10x (z 3.25), but the book-wide 1.10 floor priced
+  // every prop parlay as if it were a game-line parlay. A prop segment now floors at
+  // calibFloorMultProp (default 1.04) and still takes its own measured multiplier when
+  // that is higher (prop-xg|2 ~1.085). Applies to pricing AND EV, so EV fill stays
+  // consistent with the price. ⚠ The 11/8 walk-forward found the book-wide floor
+  // tracked P&L better than segments; read prop EV fill vs P&L after this.
+  if (path && path.length > 1 && /^prop-/.test(path[1])) {
+    const vp = Number(p.calibFloorMultProp);
+    return Number.isFinite(vp) && vp > 0 ? vp : 1.04;
+  }
+  const v = Number(p.calibFloorMult); return Number.isFinite(v) && v > 0 ? v : 1.10;
+}
 
 /**
  * Quote-time calibration. Returns null when disabled. raw = pre-factor joint fair.
@@ -164,8 +178,9 @@ function floorMult() { const v = Number((config.pricing || {}).calibFloorMult); 
 function forQuote(legs, rawFair) {
   const p = config.pricing || {};
   if (p.calibEnabled === false || !(rawFair > 0 && rawFair < 1)) return null;
-  const { mult, key } = multiplierFor(segmentPath(legs));
-  const m = _clamp(Math.max(mult, floorMult()), 1, Number(p.calibMaxMult) || 1.5);
+  const path = segmentPath(legs);
+  const { mult, key } = multiplierFor(path);
+  const m = _clamp(Math.max(mult, floorMult(path)), 1, Number(p.calibMaxMult) || 1.5);
   const calFair = Math.min(0.99, rawFair * m);
   const margin = Number.isFinite(Number(p.calibMinMarginPct)) ? Number(p.calibMinMarginPct) : 8;
   return { mult: m, rawMult: mult, key, rawFair, calFair, floorProb: Math.min(0.99, calFair * (1 + margin / 100)), minMarginPct: margin };
@@ -178,8 +193,9 @@ function forQuote(legs, rawFair) {
 function forEv(legs, rawFair, stake) {
   const p = config.pricing || {};
   if (p.calibEnabled === false || !(rawFair > 0 && rawFair < 1)) return null;
-  const { mult, key } = multiplierFor(segmentPath(legs, stake));
-  const m = _clamp(Math.max(mult, floorMult()), Number(p.calibMinMult) || 0.8, Number(p.calibMaxMult) || 1.5);
+  const path = segmentPath(legs, stake);
+  const { mult, key } = multiplierFor(path);
+  const m = _clamp(Math.max(mult, floorMult(path)), Number(p.calibMinMult) || 0.8, Number(p.calibMaxMult) || 1.5);
   return { mult: m, key, evFair: Math.min(0.99, rawFair * m) };
 }
 
@@ -198,7 +214,7 @@ function summary() {
   rows.sort((a, b) => b.n - a.n);
   const p = config.pricing || {};
   return { enabled: p.calibEnabled !== false, builtAt: _builtAt, tickets: _nOrders, days: p.calibDays, priorHits: p.calibPriorHits,
-    minMarginPct: p.calibMinMarginPct, floorMult: floorMult(), minMult: p.calibMinMult, maxMult: p.calibMaxMult, segments: rows.slice(0, 80) };
+    minMarginPct: p.calibMinMarginPct, floorMult: floorMult(), floorMultProp: floorMult(['all', 'prop-xg']), minMult: p.calibMinMult, maxMult: p.calibMaxMult, segments: rows.slice(0, 80) };
 }
 
 function __setCellsForTest(cells) { _cells = cells; _builtAt = 'test'; }

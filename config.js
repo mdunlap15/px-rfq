@@ -1024,6 +1024,8 @@ const config = {
     calibPriorHits: (() => { const v = parseFloat(process.env.CALIB_PRIOR_HITS); return Number.isFinite(v) && v >= 1 ? v : 40; })(),
     calibDays: (() => { const v = parseFloat(process.env.CALIB_DAYS); return Number.isFinite(v) && v >= 14 ? v : 120; })(),
     calibFloorMult: (() => { const v = parseFloat(process.env.CALIB_FLOOR_MULT); return Number.isFinite(v) && v > 0 ? v : 1.10; })(),
+    // Floor for player-prop segments (2026-11-17): props measured ~1.04x, games ~1.10x.
+    calibFloorMultProp: (() => { const v = parseFloat(process.env.CALIB_FLOOR_MULT_PROP); return Number.isFinite(v) && v > 0 ? v : 1.04; })(),
     calibMinMult: (() => { const v = parseFloat(process.env.CALIB_MIN_MULT); return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.8; })(),
     calibMaxMult: (() => { const v = parseFloat(process.env.CALIB_MAX_MULT); return Number.isFinite(v) && v >= 1 ? v : 1.5; })(),
     creatorTierDays: (() => { const v = parseFloat(process.env.CREATOR_TIER_DAYS); return Number.isFinite(v) && v >= 7 ? v : 365; })(),

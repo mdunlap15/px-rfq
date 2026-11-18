@@ -192,6 +192,7 @@ const REGISTRY = [
   { key: 'calibPriorHits', path: 'calibPriorHits', type: 'number', min: 1, max: 1000, group: 'pricing', env: 'CALIB_PRIOR_HITS', label: 'Calibration: shrinkage prior (expected hits per level)' },
   { key: 'calibDays', path: 'calibDays', type: 'number', min: 14, max: 365, group: 'pricing', env: 'CALIB_DAYS', label: 'Calibration: lookback (days of settled fills)' },
   { key: 'calibFloorMult', path: 'calibFloorMult', type: 'number', min: 0.8, max: 1.5, group: 'pricing', env: 'CALIB_FLOOR_MULT', label: 'Calibration: book-wide floor on the bettor-hit multiplier (EV + pricing)' },
+  { key: 'calibFloorMultProp', path: 'calibFloorMultProp', type: 'number', min: 0.8, max: 1.5, group: 'pricing', env: 'CALIB_FLOOR_MULT_PROP', label: 'Calibration: floor on the multiplier for player-prop parlays (EV + pricing)' },
   { key: 'calibMinMult', path: 'calibMinMult', type: 'number', min: 0.5, max: 1, group: 'pricing', env: 'CALIB_MIN_MULT', label: 'Calibration: lowest EV multiplier (segments in our favour)' },
   { key: 'calibMaxMult', path: 'calibMaxMult', type: 'number', min: 1, max: 2, group: 'pricing', env: 'CALIB_MAX_MULT', label: 'Calibration: highest multiplier' },
   { key: 'creatorTierEnabled', path: 'creatorTierEnabled', type: 'bool', group: 'pricing', env: 'CREATOR_TIER_ENABLED', label: 'Creator size tiers: cap new/unknown and sharp creators' },
