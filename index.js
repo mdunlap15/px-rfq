@@ -6764,143 +6764,24 @@ function startStatusServer() {
   // Basic auth (global middleware) already protects every /admin/* path.
   // px-single is lazy-required so a missing dep can't crash boot. (2026-06-16)
   // -----------------------------------------------------------------------
-  let _manualPxs = null;
-  function _manualPxsGuard(res) {
-    if (!_manualPxs) {
-      try { _manualPxs = require('./services/px-single'); }
-      catch (e) { res.status(500).json({ ok: false, error: 'px-single unavailable: ' + e.message }); return null; }
-    }
-    return _manualPxs;
-  }
-  const MANUAL_OFFER_MAX_STAKE = Number(process.env.MANUAL_OFFER_MAX_STAKE || 25000);
-  const MANUAL_OFFERS_MAX_PER_REQ = 1000;
-  const MANUAL_PACE_MS = Number(process.env.MANUAL_PACE_MS || 700); // PX order endpoints cap ~2 req/s
-  const _msleep = (ms) => new Promise(r => setTimeout(r, ms));
-
+  // The route bodies live in services/manual-offers.js (2026-11-19) so the
+  // isolated placement front (place-front.js, PLACE_FRONT=1) and this process
+  // run ONE copy of the validation / headroom / placement code. With the front
+  // on, these routes are not reached (the front answers /admin/offers/place
+  // and /admin/offers/cancel itself); they serve when the front is off or in
+  // fallback.
+  //
   // POST /admin/offers/place
   //   body: { offers: [{ line_id, odds, stake, external_id }, ...], dryRun?: bool }
   // Guards (fat-finger + shared-cap protection for the live money account):
   //   shape/type validation, per-offer stake cap, odds must be a real ladder
   //   rung, and a balance pre-flight that refuses to post more unmatched stake
   //   than the account's 50x-cash headroom (PX resting-volume cap; shared with the parlay quoter).
-  app.post('/admin/offers/place', async (req, res) => {
-    const pxs = _manualPxsGuard(res); if (!pxs) return;
-    const offers = (req.body && Array.isArray(req.body.offers)) ? req.body.offers : null;
-    const dryRun = !!(req.body && req.body.dryRun);
-    if (!offers || offers.length === 0) return res.status(400).json({ ok: false, error: 'body.offers must be a non-empty array' });
-    if (offers.length > MANUAL_OFFERS_MAX_PER_REQ) return res.status(400).json({ ok: false, error: `too many offers (${offers.length} > ${MANUAL_OFFERS_MAX_PER_REQ})` });
-    const errs = []; const seen = new Set();
-    offers.forEach((o, i) => {
-      if (!o || typeof o.line_id !== 'string' || !o.line_id) errs.push(`offer[${i}]: missing line_id`);
-      if (!Number.isInteger(o && o.odds)) errs.push(`offer[${i}]: odds must be an integer`);
-      if (!(Number.isFinite(o && o.stake) && o.stake > 0)) errs.push(`offer[${i}]: stake must be > 0`);
-      else if (o.stake > MANUAL_OFFER_MAX_STAKE) errs.push(`offer[${i}]: stake ${o.stake} > cap ${MANUAL_OFFER_MAX_STAKE}`);
-      if (o && o.order_strategy != null && !['ALO', 'fillOrKill'].includes(o.order_strategy)) errs.push(`offer[${i}]: order_strategy must be ALO or fillOrKill`);
-      if (!o || typeof o.external_id !== 'string' || !o.external_id) errs.push(`offer[${i}]: missing external_id`);
-      else if (seen.has(o.external_id)) errs.push(`offer[${i}]: duplicate external_id`);
-      else seen.add(o.external_id);
-    });
-    if (errs.length) return res.status(400).json({ ok: false, error: 'validation failed', details: errs.slice(0, 25) });
-    try {
-      const ladder = await pxs.fetchOddsLadder();
-      const lset = new Set(ladder);
-      const off = offers.filter(o => !lset.has(o.odds)).map(o => ({ external_id: o.external_id, odds: o.odds }));
-      if (off.length) return res.status(400).json({ ok: false, error: 'off-ladder odds', details: off.slice(0, 25) });
-      const bal = await pxs.fetchBalance();
-      const cash = Number(bal.balance || 0);
-      // CFTC rename tolerance: wager -> order. Reading only the legacy key
-      // would silently yield 0 unmatched under the new vocabulary, which makes
-      // headroom look MAXIMAL and breaks this cap OPEN.
-      const unmatched = Number(bal.unmatched_wager_balance ?? bal.unmatched_order_balance ?? 0);
-      const totalStake = offers.reduce((s, o) => s + o.stake, 0);
-      // Resting-volume cap multiplier. Default 50 (legacy). The CFTC merge
-      // introduced an account-wide ~10x unmatched-stake cap — set
-      // PX_RESTING_CAP_MULT=10 (confirm the exact value with PX/Alec) to enforce
-      // it; kept at 50 here so this change is behavior-neutral until confirmed.
-      const restingMult = Number(process.env.PX_RESTING_CAP_MULT) || 50;
-      const headroom = cash * restingMult - unmatched;
-      if (cash <= 0) return res.status(409).json({ ok: false, error: 'account balance is 0 — offers would be invalidated', balance: bal });
-      // Staleness guard: the post-merge balance shape flags when the unmatched
-      // figure isn't freshly synced. A stale (lower) unmatched makes headroom
-      // look too generous → an over-post PX would then cap/invalidate. Refuse
-      // unless the unmatched balance is freshly synced.
-      // Same rename, and FAIL CLOSED on absence. Previously a missing status
-      // key skipped the freshness guard entirely: under the CFTC vocabulary
-      // (or any shape change) `unmatched` reads 0, headroom reads maximal, and
-      // the one check that would have caught it is itself skipped.
-      const unmatchedStatus = bal.unmatched_wager_balance_status ?? bal.unmatched_order_balance_status;
-      if (unmatchedStatus == null) {
-        return res.status(409).json({ ok: false, error: 'unmatched balance status absent under BOTH legacy and CFTC keys — refusing to compute headroom', balance: bal });
-      }
-      if (unmatchedStatus !== 'succeed') {
-        return res.status(409).json({ ok: false, error: `unmatched balance not fresh (status=${unmatchedStatus}) — refusing to compute headroom`, balance: bal });
-      }
-      if (totalStake > headroom) return res.status(409).json({ ok: false, error: `total stake ${totalStake} exceeds headroom ${headroom}`, balance: { cash, unmatched, headroom } });
-      if (dryRun) return res.json({ ok: true, dryRun: true, offers: offers.length, totalStake, balance: { cash, unmatched, headroom } });
-      const succeed = []; const failed = [];
-      for (let i = 0; i < offers.length; i += 20) {
-        await _msleep(MANUAL_PACE_MS); // stay under PX's ~2 req/s order limit (and space from the balance read)
-        const batch = offers.slice(i, i + 20).map(o => ({ line_id: o.line_id, odds: o.odds, stake: o.stake, external_id: o.external_id,
-          ...(o.order_strategy ? { order_strategy: o.order_strategy } : {}) }));
-        let r = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try { r = await pxs.placeMultipleWagers(batch); break; }
-          catch (e) {
-            if (/429|rate.?limit/i.test(e.message) && attempt < 2) { await _msleep(1500); continue; }
-            failed.push(...batch.map(o => ({ external_id: o.external_id, error: e.message })));
-            break;
-          }
-        }
-        if (r) { succeed.push(...(r.succeed_wagers || [])); failed.push(...(r.failed_wagers || [])); }
-      }
-      log.info('ManualOffers', `place ${succeed.length} ok / ${failed.length} failed, totalStake $${totalStake} (${offers.length} requested)`);
-      res.json({ ok: true, placed: succeed.length, failed: failed.length, totalStake, succeed_wagers: succeed, failed_wagers: failed });
-    } catch (e) {
-      log.error('ManualOffers', 'place failed: ' + e.message);
-      res.status(500).json({ ok: false, error: e.message });
-    }
-  });
-
   // POST /admin/offers/cancel
   //   body: ONE of { wager_ids: [...] } | { markets: [{event_id, market_id}] } | { event_id: <num> }
-  app.post('/admin/offers/cancel', async (req, res) => {
-    const pxs = _manualPxsGuard(res); if (!pxs) return;
-    const b = req.body || {};
-    try {
-      const out = {};
-      if (Array.isArray(b.wager_ids) && b.wager_ids.length) {
-        out.wagers = [];
-        for (const wid of b.wager_ids) {
-          await _msleep(MANUAL_PACE_MS);
-          try { await pxs.cancelWager(wid); out.wagers.push({ wager_id: wid, ok: true }); }
-          catch (e) { out.wagers.push({ wager_id: wid, ok: false, error: e.message }); }
-        }
-      } else if (Array.isArray(b.markets) && b.markets.length) {
-        out.markets = [];
-        for (const m of b.markets) {
-          await _msleep(MANUAL_PACE_MS);
-          let done = false;
-          for (let attempt = 0; attempt < 3 && !done; attempt++) {
-            try { await pxs.cancelWagersByMarket(m.event_id, m.market_id); out.markets.push({ ...m, ok: true }); done = true; }
-            catch (e) {
-              if (/429|rate.?limit/i.test(e.message) && attempt < 2) { await _msleep(1500); continue; }
-              out.markets.push({ ...m, ok: false, error: e.message }); done = true;
-            }
-          }
-        }
-      } else if (b.event_id != null) {
-        await pxs.cancelWagersByEvent(b.event_id);
-        out.event_id = b.event_id; out.cancelled_event = true;
-      } else {
-        return res.status(400).json({ ok: false, error: 'provide wager_ids[], markets[], or event_id' });
-      }
-      log.info('ManualOffers', `cancel ${JSON.stringify(b).slice(0, 160)}`);
-      res.json({ ok: true, ...out });
-    } catch (e) {
-      log.error('ManualOffers', 'cancel failed: ' + e.message);
-      res.status(500).json({ ok: false, error: e.message });
-    }
-  });
+  const _manualOffers = require('./services/manual-offers').createManualOffers({ log });
+  app.post('/admin/offers/place', (req, res) => _manualOffers.place(req, res));
+  app.post('/admin/offers/cancel', (req, res) => _manualOffers.cancel(req, res));
 
   // Golf top-N (Top 5/10/20 INCLUDING TIES) board state. Read-only.
   // Answers "why isn't top-N quoting?": no `bySlug` entry = no DK slug for that
@@ -12846,11 +12727,48 @@ app.get('/ufc-mov', (req, res) => {
     res.sendFile(path.join(__dirname, 'client', 'index.html'));
   });
 
+  _statusApp = app;
+  if (_placeFront && _placeFront.active()) {
+    // PLACE_FRONT=1: place-front.js owns the public PORT and proxies every
+    // non-placement request here. If the front later falls back, the
+    // supervisor calls _placeFrontFallback() to listen on PORT as well.
+    const mainPort = _placeFront.mainPort;
+    const server = app.listen(mainPort, '127.0.0.1', () => {
+      log.info('Startup', `    ✓ Status server on 127.0.0.1:${mainPort} (behind placement front on port ${config.server.port})`);
+    });
+    server.on('error', (err) => {
+      log.error('Startup', `Status server (internal ${mainPort}) failed: ${err.message}`);
+    });
+    return;
+  }
   const server = app.listen(config.server.port, () => {
     log.info('Startup', `    ✓ Status server on port ${config.server.port}`);
   });
   server.on('error', (err) => {
     log.error('Startup', `Status server failed: ${err.message}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// PLACEMENT FRONT (PLACE_FRONT=1, 2026-11-19) — see place-front.js and
+// services/place-front-supervisor.js. Off by default: with PLACE_FRONT unset,
+// _placeFront stays null and the status server listens on PORT exactly as before.
+// ---------------------------------------------------------------------------
+let _placeFront = null;
+let _statusApp = null;
+let _publicListening = false;
+function _placeFrontFallback(attempt = 0) {
+  // The front is dead for good: take the public port in this process. If the
+  // status app does not exist yet, startStatusServer() will see the supervisor
+  // in 'fallback' mode and listen on PORT itself.
+  if (!_statusApp || _publicListening) return;
+  const server = _statusApp.listen(config.server.port, () => {
+    _publicListening = true;
+    log.error('Startup', `    ✓ FALLBACK: status server now listening on public port ${config.server.port} (placement front disabled)`);
+  });
+  server.on('error', (err) => {
+    log.error('Startup', `FALLBACK listen on ${config.server.port} failed (attempt ${attempt + 1}): ${err.message}`);
+    if (attempt < 60) setTimeout(() => _placeFrontFallback(attempt + 1), 2000);
   });
 }
 
@@ -12903,6 +12821,17 @@ process.on('unhandledRejection', (reason) => {
 // ---------------------------------------------------------------------------
 
 console.log(`[Boot] PORT=${process.env.PORT}, PX_ACCESS_KEY=${process.env.PX_ACCESS_KEY ? 'set' : 'MISSING'}, ODDS_API_KEY=${process.env.ODDS_API_KEY ? 'set' : 'MISSING'}`);
+
+// Placement front first, so /admin/offers/place is served before the heavy
+// startup below begins. A failure here must never stop boot: run as before.
+try {
+  _placeFront = require('./services/place-front-supervisor').maybeStart({
+    port: config.server.port, log, onFallback: () => _placeFrontFallback(),
+  });
+} catch (err) {
+  _placeFront = null;
+  log.error('Startup', `placement front not started: ${err.message}`);
+}
 
 startup().catch(err => {
   log.error('Startup', `Fatal startup error: ${err.message}`);

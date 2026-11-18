@@ -195,7 +195,13 @@ test('the balance headroom cap fails CLOSED when the status key is absent', () =
   // Reading only the legacy key under CFTC vocabulary yields unmatched=0,
   // which makes headroom look MAXIMAL — and the one guard that would catch it
   // was itself skipped when the status key was missing.
-  const IDX = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  // The /admin/offers/place body moved verbatim to services/manual-offers.js
+  // (2026-11-19, shared by index.js and the placement front). Check it there,
+  // and check index.js actually mounts that module for the route.
+  const INDEX = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  assert.ok(/require\('\.\/services\/manual-offers'\)/.test(INDEX) && /app\.post\('\/admin\/offers\/place'/.test(INDEX),
+    'index.js must route /admin/offers/place through services/manual-offers.js');
+  const IDX = fs.readFileSync(path.join(__dirname, '..', 'services', 'manual-offers.js'), 'utf8');
   assert.ok(/unmatched_wager_balance \?\? bal\.unmatched_order_balance/.test(IDX),
     'unmatched balance must read both vocabularies');
   assert.ok(/unmatchedStatus == null/.test(IDX),
