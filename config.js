@@ -1103,6 +1103,16 @@ const config = {
       ? process.env.CROSS_GAME_WIDEN_EXCLUDE_SPORTS
       : 'politics'
     ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    // SEGMENT NARROW A/B (2026-11-20, pricer.js). LIVE at 50% (operator "Yes" to
+    // narrowing CFB 2-3 leg cross-game, 3+ leg same-game ex-NFL and basketball
+    // 2-3 leg cross-game to raw fair +8%); 0 = dark. Runtime keys.
+    segNarrowPercent: (() => { const v = parseFloat(process.env.SEG_NARROW_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 50; })(),
+    segNarrowRelPct: (() => { const v = parseFloat(process.env.SEG_NARROW_REL_PCT); return Number.isFinite(v) && v >= 2 ? Math.min(20, v) : 8; })(),
+    segNarrowScopes: (process.env.SEG_NARROW_SCOPES != null
+      ? process.env.SEG_NARROW_SCOPES
+      : 'cfb_xg,sgp3,bball_xg'
+    ).split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    segNarrowMaxLegGapPp: (() => { const v = parseFloat(process.env.SEG_NARROW_MAX_LEG_GAP_PP); return Number.isFinite(v) && v > 0 ? Math.min(10, v) : 4; })(),
     // 2-LEG SELECTION FACTOR A/B (2026-10-26, pricer.js). Percent 0 = dark.
     twoLegFactorPercent: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_PERCENT); return Number.isFinite(v) && v >= 0 ? Math.min(100, v) : 0; })(),
     twoLegFactorMult: (() => { const v = parseFloat(process.env.TWO_LEG_FACTOR_MULT); return Number.isFinite(v) && v >= 1 ? Math.min(1.5, v) : 1.10; })(),

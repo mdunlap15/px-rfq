@@ -224,14 +224,14 @@ test('fair method in the builder: legacy fair kept as fairProbPreOb; switch off 
 // ---- priceParlay integration --------------------------------------------------
 const KEYS = ['twoLegBookMatchPercent', 'xgBookMatchPercent', 'crossGameFactorPercent', 'crossGameWidenPercent', 'twoLegFactorPercent', 'twoLegWidenPercent',
   'calibEnabled', 'minTheoEdgePct', 'maxRiskPerParlay', 'maxOdds', 'maxExposurePerTeam', 'maxExposurePerGame', 'maxRawExposurePerTeam', 'nbaCeilingPercent',
-  'vigByLegCount', 'freshGateEnabled'];
+  'vigByLegCount', 'freshGateEnabled', 'segNarrowPercent'];
 const saved = {}, stubs = {};
 const LINES = {};
 function setup(o = {}) {
   for (const k of KEYS) saved[k] = config.pricing[k];
   Object.assign(config.pricing, { twoLegBookMatchPercent: 0, xgBookMatchPercent: 0, crossGameFactorPercent: 0, crossGameWidenPercent: 0, twoLegFactorPercent: 0,
     twoLegWidenPercent: 0, calibEnabled: false, minTheoEdgePct: 0, maxRiskPerParlay: 3000, maxOdds: 50000, maxExposurePerTeam: 1e9,
-    maxExposurePerGame: 1e9, maxRawExposurePerTeam: 1e9, nbaCeilingPercent: 0, vigByLegCount: { 3: 1.5, 4: 2 }, freshGateEnabled: false }, o);
+    maxExposurePerGame: 1e9, maxRawExposurePerTeam: 1e9, nbaCeilingPercent: 0, vigByLegCount: { 3: 1.5, 4: 2 }, freshGateEnabled: false, segNarrowPercent: 0 }, o);
   calib.__setCellsForTest(new Map());
   for (const k of ['getFairProb', 'isStaleForEvent', 'isEventStalePreGame', 'getFanDuelOdds', 'getDraftKingsOdds', 'getPinnacleOdds']) stubs[k] = oddsFeed[k];
   stubs.lookup = lineManager.lookupLine;
@@ -449,6 +449,23 @@ test('order-book holds (kv px_rfq_holds): line, sibling, event, player (+rush sc
     obRelay.__setForTest({}, Object.assign({ holds: { [a]: [now + 120, 'g'] } }, S));
     assert.ok(await pricer.priceParlay([a], { fairOnly: true }), 'fairOnly not gated');
   } finally { obRelay.__resetForTest(); teardown(); }
+});
+
+// SEGMENT NARROW A/B (2026-11-20): its cap never undercuts the order book's per-leg asks.
+test('segment narrow: the cap is floored at the product of the order-book per-leg asks', async () => {
+  setup({ segNarrowPercent: 100 });
+  try {
+    oddsFeed.getFairProb = () => 0.5;
+    oddsFeed.getFanDuelOdds = () => -110;
+    oddsFeed.getDraftKingsOdds = () => -110;
+    oddsFeed.getPinnacleOdds = () => -110;
+    const q = (0.5 + 0.04) / 1.04;   // NBA ask, ~fair +3.8% per leg -> ~+12% at 3 legs, past the +8% cap
+    const r = await pricer.priceParlay(['N1', 'N2', 'N3'].map(e => mk(e, 'basketball_nba', 300)), { parlayId: 'obp-sgn' });
+    assert.strictEqual(r.meta.segNarrowArm, 'narrow');
+    assert.strictEqual(r.meta.segNarrowScope, 'bball_xg');
+    assert.strictEqual(r.meta.segNarrowObFloorBound, true);
+    assert.ok(near(r.meta.offeredImpliedProb, q ** 3, 2e-5), 'stays at the order-book ask product, not raw x 1.08');
+  } finally { teardown(); }
 });
 
 test('cross-game widen is retired on tickets priced at the order book asks (stays on legacy-priced tickets)', async () => {

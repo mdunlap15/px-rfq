@@ -4467,9 +4467,99 @@ function priceParlay(legs, opts = {}) {
     }
   }
 
+  // -------------------------------------------------------------------
+  // SEGMENT NARROW A/B (2026-11-20) — config.pricing.segNarrowPercent.
+  // Operator: "we can safely narrow some of our margins in places to pick up a
+  // little more volume incrementally while still at good margins" -> "Yes" to the
+  // three scopes where our own settled fills AND a replay of a month of graded
+  // network contests both held up at raw fair +8% (PERF_REVIEW_2026-11-20.md):
+  //   cfb_xg   2-3 leg cross-game, every leg CFB, game lines. Own 431 fills hit
+  //            0.97x raw fair, +$10.7K on $177K; replay at +8%: 1.04x, ROI +7.8%.
+  //   sgp3     same-game parlay of 3+ legs, game lines, no NFL leg. Own ~280 fills
+  //            0.6-0.85x, ~+8%; replay at +8%: 1.10x, ROI +2.2%.
+  //   bball_xg 2-3 leg cross-game, every leg NBA or NCAAB, game lines. Lowest
+  //            confidence (own 45 fills, +$2.7K) — drop it from segNarrowScopes
+  //            without a restart.
+  // NOT in scope on purpose: NFL, 4+ leg cross-game, 2-leg same-game, props
+  // (each graded against us or is too fresh to read — see the review).
+  // Narrow arm: offered capped at RAW (pre-factor) fair x (1 + segNarrowRelPct).
+  // Only ever MORE generous. Runs AFTER the calibration floor and the book-match
+  // arms, which would otherwise re-raise it (a runtime-only cap could not work).
+  // fairParlayProb untouched, so the confirm reprice (no parlayId, no arm) checks
+  // drift on the same fair. Consensus guard (the football ceiling idiom): the cap
+  // overrides the per-leg consensus floors, so it applies only when every leg has
+  // a Pin/FD/DK consensus within segNarrowMaxLegGapPp of its fair.
+  // ⚠ EV fill (meta.evFair) still uses the book-wide calibration floor (x1.10),
+  // so a narrow-arm fill reads ~-2% EV at fill BY CONSTRUCTION. Judge the test on
+  // hits / raw fair, fills and P&L by arm: /ab-arm-metrics?arm=segNarrowArm.
+  // Arm = md5('sgn:'+parlayId), recorded whether or not the cap binds.
+  // -------------------------------------------------------------------
+  const _segNarrow = { arm: null, scope: null, applied: false, preProb: null, relPct: null, rawFair: null, skip: null, obFloorBound: false };
+  {
+    const _pct = config.pricing.segNarrowPercent || 0;
+    const _scopes = config.pricing.segNarrowScopes || [];
+    if (_pct > 0 && opts.parlayId && !opts.fairOnly && pricedLegs.length >= 2 && pricedLegs.length === legs.length) {
+      const _sp = l => (l.lineInfo && l.lineInfo.sport) || '';
+      const _isGame = l => !!l.lineInfo && !l.lineInfo.playerName
+        && !(typeof l.lineInfo.marketType === 'string' && /^player_/.test(l.lineInfo.marketType));
+      const _n = pricedLegs.length;
+      let scope = null;
+      if (pricedLegs.every(_isGame)) {
+        if (!isSGPParlay && _n <= 3 && pricedLegs.every(l => _sp(l) === 'americanfootball_ncaaf')) scope = 'cfb_xg';
+        else if (!isSGPParlay && _n <= 3 && pricedLegs.every(l => _sp(l) === 'basketball_nba' || _sp(l) === 'basketball_ncaab')) scope = 'bball_xg';
+        else if (isSGPParlay && _n >= 3 && !pricedLegs.some(l => _sp(l).startsWith('americanfootball_nfl'))) scope = 'sgp3';
+      }
+      if (scope && _scopes.includes(scope)) {
+        let inArm = _pct >= 100;
+        if (!inArm) {
+          const h = crypto.createHash('md5').update('sgn:' + String(opts.parlayId)).digest();
+          inArm = (h.readUInt32BE(0) % 100) < _pct;
+        }
+        _segNarrow.arm = inArm ? 'narrow' : 'control';
+        _segNarrow.scope = scope;
+        const raw = _xgf.applied && _xgf.preFair > 0 ? _xgf.preFair : _2lf.applied && _2lf.preFair > 0 ? _2lf.preFair : fairParlayProb;
+        _segNarrow.rawFair = Math.round(raw * 1e6) / 1e6;
+        if (inArm && raw > 0 && offeredImpliedProb > 0) {
+          const rel = config.pricing.segNarrowRelPct != null ? config.pricing.segNarrowRelPct : 8;
+          const gapPp = config.pricing.segNarrowMaxLegGapPp != null ? config.pricing.segNarrowMaxLegGapPp : 4;
+          let guardOk = true;
+          for (const l of pricedLegs) {
+            const ci = getConsensusImplied(l.lineInfo);
+            if (ci == null || !(l.fairProb > 0) || ci - l.fairProb > gapPp / 100) { guardOk = false; break; }
+          }
+          if (!guardOk) {
+            _segNarrow.skip = 'consensus_guard';
+          } else {
+            // ORDER-BOOK PARITY: the order book's per-leg asks are the base
+            // (operator 2026-11-11), so never narrow below them — on 3-leg NBA
+            // they compound to ~fair +12% ((f+.04)/1.04 per leg), above the cap.
+            let obFloor = 0;
+            if (obAskLegs > 0) {
+              obFloor = raw;
+              for (const l of pricedLegs) if (l.obAsk && l.obAsk.q > 0 && l.fairProb > 0) obFloor *= Math.max(1, l.obAsk.q / l.fairProb);
+            }
+            let cap = Math.min(0.99, raw * (1 + rel / 100));
+            if (obFloor > cap) { cap = Math.min(0.99, obFloor); _segNarrow.obFloorBound = true; }
+            if (cap < offeredImpliedProb) {
+              _segNarrow.preProb = offeredImpliedProb;
+              _segNarrow.applied = true;
+              _segNarrow.relPct = rel;
+              log.debug('Pricing', `Segment narrow[${scope}]: ${(offeredImpliedProb * 100).toFixed(3)}% -> ${(cap * 100).toFixed(3)}% (raw fair ${(raw * 100).toFixed(3)}% +${rel}%)`);
+              offeredImpliedProb = cap;
+            }
+          }
+        }
+      }
+    }
+  }
+
   const minTheoEdgePct = config.pricing.minTheoEdgePct || 0;
   if (minTheoEdgePct > 0 && fairParlayProb > 0) {
-    const _edgeBase = _bm2.applied && _bm2.rawFair > 0 ? _bm2.rawFair : fairParlayProb;
+    // A narrow-arm or book-match quote is priced off the RAW fair; a selection
+    // factor (xgf / 2lf) would read it as below fair and decline every one.
+    const _edgeBase = _bm2.applied && _bm2.rawFair > 0 ? _bm2.rawFair
+      : _segNarrow.applied && _segNarrow.rawFair > 0 ? _segNarrow.rawFair
+      : fairParlayProb;
     const theoEdge = (offeredImpliedProb - _edgeBase) / _edgeBase * 100;
     if (theoEdge < minTheoEdgePct) {
       priceParlay._lastFailure = {
@@ -5151,6 +5241,15 @@ function priceParlay(legs, opts = {}) {
       xgWidenApplied: _xgWiden.applied,
       xgWidenPreProb: _xgWiden.preProb != null ? Math.round(_xgWiden.preProb * 100000) / 100000 : null,
       xgWidenRelPct: _xgWiden.relPct,
+      // Segment narrow A/B: arm null = out of scope / dark; 'control' / 'narrow'.
+      // PreProb = the control price; rawFair = the base of the cap.
+      segNarrowArm: _segNarrow.arm,
+      segNarrowScope: _segNarrow.scope,
+      segNarrowApplied: _segNarrow.applied,
+      segNarrowPreProb: _segNarrow.preProb != null ? Math.round(_segNarrow.preProb * 100000) / 100000 : null,
+      segNarrowRelPct: _segNarrow.relPct,
+      segNarrowSkip: _segNarrow.skip,
+      segNarrowObFloorBound: _segNarrow.obFloorBound,
       decimalOdds: Math.round(decimalOdds * 100) / 100,
       americanOdds,
       // Compute competitor book parlay odds from per-leg book implied probs.
